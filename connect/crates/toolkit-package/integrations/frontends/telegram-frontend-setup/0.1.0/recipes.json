@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "maintainer": "meerkat-toolkit",
+  "reviewed_at_unix_ms": 1790773047120,
+  "sources": [
+    {
+      "id": "telegram",
+      "url": "https://core.telegram.org/bots/api",
+      "observed_sha256": "4771d0186e63ec7b03571bf02c840ba5a3defc9b4d5dcc4f42a407f8d784eb6d",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Provider documentation and hosted service retain their own terms. No implementation is copied."
+    }
+  ],
+  "recipes": [
+    {
+      "strategy": "setup",
+      "export": "telegram-frontend-setup.frontend",
+      "role": "agent_frontend",
+      "prerequisites": [
+        {
+          "kind": "account",
+          "instruction": "A Telegram account and a bot credential supplied only through the credential owner."
+        },
+        {
+          "kind": "host_deployment",
+          "instruction": "One active polling or authenticated webhook deployment with durable ingress and delivery."
+        },
+        {
+          "kind": "application_binding",
+          "instruction": "Explicit person, conversation, audience and existing-agent bindings."
+        }
+      ],
+      "plan": {
+        "kind": "guidance_only",
+        "blockers": [
+          "No retained Toolkit frontend adapter artifact supplies admission and delivery contracts yet.",
+          "Bot API access alone does not establish caller isolation or durable interaction conformance."
+        ]
+      }
+    }
+  ]
+}

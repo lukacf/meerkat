@@ -1,0 +1,115 @@
+---
+title: "Install and use Connect"
+description: "Set up a service in a native realm or through your application's integrated Console."
+icon: "rocket"
+---
+
+<Note>
+Download the complete CLI archive from the
+[Connect 0.9.0 release](https://github.com/lukacf/meerkat-connect/releases/tag/v0.9.0).
+Platforms: Apple Silicon macOS 13.5 or later and Linux x86_64
+with glibc 2.39. Verify the accompanying checksum before running it.
+See [platforms and installation options](/availability) for application integration.
+</Note>
+
+## Standalone CLI
+
+Install [Meerkat Core 0.9.0](https://github.com/lukacf/meerkat/releases/tag/v0.9.0)
+for ordinary `rkat` agent work after setup. The Connect archive supplies its own Python, Node/npm, integration
+library and setup resources; you do not need to install those separately.
+
+<Steps>
+  <Step title="Download and extract the complete CLI archive">
+    Download the CLI archive and its `.sha256` companion:
+
+    ```sh
+    platform=macos-arm64 # Use linux-x86_64 on Linux.
+    archive="meerkat-connect-0.9.0-$platform.tar.gz"
+    release=https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0
+    curl -fLO "$release/$archive"
+    curl -fLO "$release/$archive.sha256"
+    ```
+
+    On macOS, verify it with `shasum -a 256 -c "$archive.sha256"`; on Linux,
+    use `sha256sum -c "$archive.sha256"`. Continue only when it reports success:
+
+    ```sh
+    tar -xpf "$archive"
+    ```
+
+    Keep the complete extracted directory together, including its executable permissions and `libexec` resources.
+  </Step>
+  <Step title="Open Connect and choose the realm">
+    Run the supplied binary for your platform from the extracted location:
+
+    <Tabs>
+      <Tab title="Linux x86_64">
+        ```sh
+        ./meerkat-connect-linux-x86_64/bin/meerkat-connect
+        ```
+      </Tab>
+      <Tab title="Apple Silicon macOS">
+        ```sh
+        ./meerkat-connect-macos-arm64/bin/meerkat-connect
+        ```
+      </Tab>
+    </Tabs>
+
+    Choose a stored realm or name a new one. You can instead pass `--realm work`
+    to select it explicitly. Review the setup helper's access, complete model
+    setup if prompted, and review the assistant's model and tools. These startup
+    reviews are separate from each integration's installation and access.
+  </Step>
+  <Step title="Describe and approve the integration">
+    For example: "Add an integration that reads Hacker News and give the normal
+    agent read-only access." The agent can choose a catalog entry or investigate
+    a supported package outside the catalog.
+
+    Review the software, service account, agent, exact operations and access
+    duration. Complete sign-in or key entry only in the protected controls.
+    Model credentials and service credentials are separate; neither belongs in chat.
+  </Step>
+  <Step title="Use it from an ordinary agent">
+    Read the final configuration, credential and grant outcomes. After successful
+    finalization and return to the prompt, enter `/quit` and wait for normal exit.
+    From the same working directory, start `rkat` in that realm:
+
+    ```sh
+    rkat --realm work run --wait-for-mcp --mcp-auth stored "Read the three leading Hacker News stories and summarize them."
+    ```
+
+    Replace `work` with your selected realm and the quoted request with your
+    actual task. This starts a fresh agent session using the realm's saved integration configuration and current permissions.
+  </Step>
+</Steps>
+
+If you deliberately used custom roots or a different model binding, follow the
+[matching realm and model instructions](/guides/request-an-integration).
+Ordinary use does not require custom directories or a separate Connect server.
+
+## Integrated Console
+
+Open your Connect-enabled application through its normal entrypoint and sign in. The application supplies the Console, native runtime and setup panel.
+
+1. Send the complete task to the original agent, including the service, resources
+   and intended result.
+2. When the setup panel offers **Start service setup**, open it. Review the
+   selected software and access, and answer any setup questions.
+3. Approve only the reviewed installation and operations. Use **Approve & Save**
+   and its protected credential fields when the panel requests service keys;
+   never send credentials as a chat message.
+4. Read the setup result and the original agent's continuation. Follow the agent as it uses the integration to complete your request.
+
+The application retains the original conversation and setup progress, so you can return to the task after completing the required account and access steps.
+
+## If setup stops or access changes
+
+Accepted configuration, credentials or grants can remain saved after a later
+failure or cancellation. Do not infer rollback or repeat an uncertain action.
+Read the reported outcome and return to Connect in the same realm or application
+for its supported management flow. See [request and manage access](/guides/request-an-integration)
+and [connection management](/guides/manage-connections).
+
+## Advanced host integration
+
+For application development, see [host composition](/guides/host-composition), [library installation](/library/local-install) and the [SDK guides](/sdks/python).

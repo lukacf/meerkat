@@ -1,0 +1,36 @@
+[package]
+workspace = "../../native-candidate"
+name = "meerkat-toolkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+toolkit-package.workspace = true
+toolkit-store.workspace = true
+toolkit-catalog.workspace = true
+meerkat-workgraph.workspace = true
+meerkat-core.workspace = true
+meerkat-authorization-contracts.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+meerkat-authorization.workspace = true
+meerkat-runtime.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+chrono = "0.4"
+tempfile.workspace = true
+rusqlite.workspace = true

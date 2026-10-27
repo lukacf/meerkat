@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "kind": "connect-candidate-inputs",
+  "target": "linux-x86_64",
+  "scope": "installed_gateway_schema4_resource_startup_and_shutdown_preview",
+  "connect_version": null,
+  "rust_toolchain": "1.97.0",
+  "native_release": {
+    "core": {
+      "repository": "lukacf/meerkat",
+      "version": "0.9.4",
+      "tag": "v0.9.4",
+      "source_sha": null
+    },
+    "meta": {
+      "repository": "lukacf/meerkat-meta",
+      "version": "0.9.4",
+      "tag": "v0.9.4",
+      "source_sha": null
+    }
+  },
+  "source_pins": {
+    "native-candidate/Cargo.toml": null,
+    "native-candidate/Cargo.lock": null
+  },
+  "expected_package_ids": null,
+  "expected_features": null,
+  "native_family_packages": null,
+  "files": null,
+  "resources": {
+    "upstream": null,
+    "library": null,
+    "acquisition_node": null,
+    "npm": null,
+    "node_prebuilt_policy": null,
+    "node_build_profile": ""
+  },
+  "sdks": {
+    "meta": {
+      "distribution": "meerkat-meta",
+      "version": "0.9.4",
+      "wheel": null,
+      "source_files": null
+    },
+    "toolkit": {
+      "distribution": null,
+      "version": null,
+      "source_files": null
+    }
+  },
+  "dependencies": {
+    "requirements": null,
+    "wheels": null
+  },
+  "expected_resolve": null,
+  "sdk_build": {
+    "requirements": null,
+    "wheels": null
+  },
+  "forge_reader_source_pins": {
+    "installer/launchkit/runtime_selection.py": null,
+    "installer/launchkit/runtime_candidates.py": null,
+    "installer/launchkit/sdk_wheel_integrity.py": null,
+    "installer/launchkit/templates/install_candidate.py": null
+  }
+}

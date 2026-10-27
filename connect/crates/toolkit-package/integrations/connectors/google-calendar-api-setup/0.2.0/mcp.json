@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "calendar-hosted-preview": {
+      "type": "streamable-http",
+      "url": "https://calendarmcp.googleapis.com/mcp/v1"
+    }
+  }
+}

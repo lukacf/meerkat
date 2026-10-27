@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "maintainer": "meerkat-toolkit",
+  "reviewed_at_unix_ms": 1790773042473,
+  "sources": [
+    {
+      "id": "playwright",
+      "url": "https://raw.githubusercontent.com/microsoft/playwright-mcp/f183dad4a52965583e3cc1d59b88cdc279e2e57d/README.md",
+      "observed_sha256": "b33aa71a13d655e96e6b736d0c9de1e5ddea52f205916ca20b876387ff830e87",
+      "upstream": {
+        "kind": "source_revision",
+        "commit": "f183dad4a52965583e3cc1d59b88cdc279e2e57d",
+        "release": "v0.0.83"
+      },
+      "license": "Apache-2.0 for the inspected repository; dependency and distribution licenses need separate review before packaging. No source is copied."
+    },
+    {
+      "id": "playwright-package",
+      "url": "https://raw.githubusercontent.com/microsoft/playwright-mcp/f183dad4a52965583e3cc1d59b88cdc279e2e57d/package.json",
+      "observed_sha256": "624f0ba4d387028bbc734520142fbebb7075a88da8b623f4760adf76aa212f8b",
+      "upstream": {
+        "kind": "source_revision",
+        "commit": "f183dad4a52965583e3cc1d59b88cdc279e2e57d",
+        "release": "v0.0.83"
+      },
+      "license": "Apache-2.0 for the inspected repository; dependency and distribution licenses need separate review before packaging. No source is copied."
+    },
+    {
+      "id": "playwright-license",
+      "url": "https://raw.githubusercontent.com/microsoft/playwright-mcp/f183dad4a52965583e3cc1d59b88cdc279e2e57d/LICENSE",
+      "observed_sha256": "9a7110fc2d2f964038e5dc49128f908f29f47a574c961cba16085914e879cbda",
+      "upstream": {
+        "kind": "source_revision",
+        "commit": "f183dad4a52965583e3cc1d59b88cdc279e2e57d",
+        "release": "v0.0.83"
+      },
+      "license": "Apache-2.0 for the inspected repository; dependency and distribution licenses need separate review before packaging. No source is copied."
+    }
+  ],
+  "recipes": [
+    {
+      "strategy": "setup",
+      "export": "playwright-mcp-setup.service",
+      "role": "service_connector",
+      "prerequisites": [
+        {
+          "kind": "artifact_preparation",
+          "instruction": "Capture immutable npm artifact and dependency closure plus browser binaries and applicable notices."
+        },
+        {
+          "kind": "host_deployment",
+          "instruction": "A compatible Node/browser host with bounded process cleanup and isolated profile storage."
+        }
+      ],
+      "plan": {
+        "kind": "guidance_only",
+        "blockers": [
+          "The retained source revision is not a prepared executable artifact or complete dependency closure.",
+          "Browser placement, credentials, network/file boundaries and cleanup owner are host-specific."
+        ]
+      }
+    }
+  ]
+}

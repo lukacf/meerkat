@@ -1,0 +1,42 @@
+---
+title: "Platforms and installation options"
+description: "Choose the CLI, application components or SDK for your environment."
+icon: "circle-info"
+---
+
+Connect 0.9.0 works with Meerkat Core and Meta 0.9.0. Download archives, SDKs and checksums from the [release page](https://github.com/lukacf/meerkat-connect/releases/tag/v0.9.0).
+
+## Platforms
+
+| Platform | Requirements |
+| --- | --- |
+| macOS | Apple Silicon, macOS 13.5 or later |
+| Linux | x86_64, glibc 2.39 |
+
+The CLI archives include Python, Node/npm, the integration library and setup resources. Extract and retain the complete directory, including executable permissions and `libexec` contents.
+
+## Choose an installation
+
+| Use | Install | Next step |
+| --- | --- | --- |
+| Set up services from a terminal | Complete Connect CLI archive and Meerkat Core | [Quickstart](/quickstart) |
+| Add setup to your application | Connect gateway, matching Meta SDK and Connect host components | [Host composition](/guides/host-composition) |
+| Call service operations from Python | `meerkat-toolkit` wheel and selected extras | [Python SDK](/sdks/python) |
+| Call service operations from TypeScript | `@rkat/toolkit` package | [TypeScript SDK](/sdks/typescript) |
+| Render connection management | `@rkat/toolkit/ui` browser entrypoint | [Management UI](/sdks/ui) |
+
+SDK packages are distributed as GitHub release assets. The SDK guides include direct installation commands.
+
+## Integration profiles
+
+Each profile identifies its operations, account inputs and configuration. The library contains 101 integrations on macOS and 100 on Linux. The browser automation profile is available on macOS.
+
+Use the [integration library](/library/adoption) to explore services. For a package beyond the library, follow [agent-led discovery and installation](/concepts/acquisition).
+
+## Application integration
+
+An integrated Console uses your application's login, original conversation and runtime lifecycle. Frontends such as Slack or Telegram additionally use the application's participant, routing and delivery policies. See [frontend setup](/guides/setup-a-frontend).
+
+## Distribution
+
+Keep the bundled licenses and notices with redistributed software. Package metadata records the source and license information for each integration.

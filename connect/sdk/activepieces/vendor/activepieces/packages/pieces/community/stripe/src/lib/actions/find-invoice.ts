@@ -1,0 +1,41 @@
+import { createAction } from '@activepieces/pieces-framework';
+import {
+  httpClient,
+  HttpMethod,
+  AuthenticationType,
+} from '@activepieces/pieces-common';
+import { stripeAuth } from '../..';
+import { stripeCommon } from '../common';
+
+import { invoiceOutputSchema } from '../output-schemas';
+export const stripeFindInvoice = createAction({
+  name: 'find_invoice',
+  classification: 'READ',
+  auth: stripeAuth,
+  displayName: 'Find Invoice',
+  description: 'Finds an invoice by its unique ID.',
+  audience: 'human',
+  aiMetadata: {
+    description:
+      'Fetches a single Stripe invoice by its unique invoice ID (e.g., in_...). Use when you already have the exact invoice ID and need its current details. Read-only and idempotent.',
+    idempotent: true,
+  },
+  props: {
+    invoice_id: stripeCommon.invoice,
+  },
+  outputSchema: invoiceOutputSchema,
+  async run(context) {
+    const { invoice_id } = context.propsValue;
+
+    const response = await httpClient.sendRequest({
+      method: HttpMethod.GET,
+      url: `${stripeCommon.baseUrl}/invoices/${invoice_id}`,
+      authentication: {
+        type: AuthenticationType.BEARER_TOKEN,
+        token: context.auth.secret_text,
+      },
+    });
+
+    return response.body;
+  },
+});

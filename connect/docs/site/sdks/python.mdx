@@ -1,0 +1,136 @@
+---
+title: "Python SDK"
+description: "Call service operations and embed native setup in a Python application."
+icon: "python"
+---
+
+The distribution is `meerkat-toolkit` version `0.9.0`, requiring Python 3.11
+or newer. Import concrete `meerkat_toolkit` submodules; the root package exports
+no operation classes.
+
+## Install
+
+Install the release wheel with the optional service profile you need:
+
+```sh
+python3 -m venv .venv-toolkit
+.venv-toolkit/bin/python -m pip install \
+  'meerkat-toolkit[slack] @ https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0/meerkat_toolkit-0.9.0-py3-none-any.whl'
+```
+
+For source development, use `.venv-toolkit/bin/python -m pip install './sdk/python[slack]'` from the checkout root.
+
+| Extra | Purpose |
+| --- | --- |
+| `home-assistant`, `gmail`, `google-calendar`, `google-drive`, `slack` | Selected HTTPX/AnyIO service operations |
+| `paired-host-live` | Existing example-host live image transport |
+| `telegram` | Telegram provider normalization dependency |
+| `native-host` | Application composition with `meerkat-meta==0.9.0`; requires the matching SDK and Connect gateway |
+
+Service extras currently require HTTPX `>=0.28.1,<0.29` and AnyIO `>=4.13,<5`. The stdlib-only Gmail formatting and base Telegram wire transport do not require those extras.
+
+## Native application composition
+
+The native classes use `meerkat_meta.runtime.MetaRuntime` configuration, callbacks and lifecycle. Supply the matching Meta SDK and a local Connect gateway on POSIX.
+
+| Startup path | Class and module |
+| --- | --- |
+| Original-owner Restore | `host_control.ToolkitMobKitRuntime(config, selection)` |
+| Fresh application | `application_runtime.ToolkitApplicationRuntime(config, preparation, finalize)` |
+| Admitted replacement | `application_update.ToolkitApplicationUpdateRuntime(config, startup)` |
+
+Import these modules under `meerkat_toolkit`. The selected input types
+`HostBootstrapSelection`, `ApplicationPreparation`, `ApplicationUpdateStartup`
+and `SelectedHostArtifact` live in `meerkat_toolkit.host_control`. Use the dedicated
+fresh and replacement classes; passing their input types to the base runtime
+does not supply their native initialization and attempt-custody behavior.
+
+The application provides its actual gateway, persistence and source callbacks
+through the existing native configuration. Fresh and replacement startup carry
+the exact selected bytes; they reject a second mob definition or tool-policy
+input. The async fresh finalizer accepts a `SelectedHostArtifact`, validates and
+publishes through the application's existing transaction, and returns its exact
+`HostBootstrapSelection`. Replacement retains the transaction's prior policy and
+native expected-revision decision. The legacy `initialize_native_owner` flag is
+not a fresh application path and is refused by the current ordinary-app gateway.
+
+Await `runtime.connect()` and keep the same runtime through
+`await runtime.shutdown()`. Its `host_control` property exposes that current
+process's retained private client. Fresh preparation keeps the actual outcomes
+on `runtime.preparation_attempt.settlement` once an attempt exists and settles.
+Cancellation joins native initialization and an entered finalizer; a published
+selection must survive later failure. Fresh and replacement instances cannot
+start another attempt after startup has entered.
+
+Preserve native exceptions and any retained cleanup capability. For
+`GatewayStartupCleanupError`, await its `cleanup.shutdown()`; interrupted native
+startup can retain the same capability as `gateway_cleanup` on the original
+exception. Retain the startup outcome separately from the cleanup result.
+
+See [host composition](/guides/host-composition#native-application-lifecycle) for startup, reconnect and lifecycle management.
+
+## Supply the MCP browser callback
+
+`meerkat_toolkit.mcp_auth` is a host-only adapter for the existing Python
+MeerkatClient MCP login methods. It binds a local callback before starting
+authentication, forwards completion to native auth, and closes its socket work
+on settlement. Native auth retains PKCE, state, account verification, persistence
+and cancellation. Rust embedding hosts use the native loopback helper instead.
+
+Supply an already connected Meerkat client and a protected sign-in presenter. Keep the callback adapter in host code, outside the agent tool surface.
+
+For cancellable request handlers, retain `McpLoginCustodian(client, target)`
+under the existing host-owned step before awaiting `begin()`. It keeps one
+start task and result so a later admitted request can retrieve the same handle
+after the first request is cancelled. It never retries an uncertain start.
+The host still authenticates and admits every invocation, including replay.
+
+Use the returned `StartedMcpLogin.wait` for credential observation. Explicit
+host shutdown calls the custodian's `close()` and joins any pending start before
+cleanup. Closing a panel must not call it. A Joined result leaves cancellation
+and presentation with the original custodian. Low-level `begin_mcp_login` and
+explicit `observe_mcp_auth` remain available. This is in-memory transport custody,
+not recovery across process loss. The full contract is in `sdk/python/MCP-AUTH.md`.
+
+## Prepare the client once
+
+The host selects authentication, endpoint, hooks and network policy, then prepares the client **before sharing it**:
+
+```python
+import httpx
+from meerkat_toolkit.httpx_client import prepare_httpx_client
+from meerkat_toolkit.connectors.slack import SlackOperations
+
+async def read_selected_page(host_auth, selected_channel):
+    # The application has authorized this exact account and conversation.
+    async with prepare_httpx_client(httpx.AsyncClient(
+        base_url="https://slack.com/",
+        auth=host_auth,
+        trust_env=False,
+    )) as client:
+        slack = SlackOperations(client)
+        return await slack.history_page(selected_channel, limit=15)
+```
+
+`host_auth` is supplied by the application credential owner. The example implements no OAuth or policy check. Its endpoint and network settings are explicit host choices.
+
+`prepare_httpx_client` returns the same client and installs the retained response-cleanup hook first. Repeated preparation is idempotent. Keep hook order and auth/transport behavior stable while operations borrow the client. `require_prepared_httpx_client` validates preparation without mutating it.
+
+Missing or reordered preparation refuses before provider entry. Most connectors raise `HttpxClientNotPrepared`, a `ValueError` with `request_attempted=False`; Drive projects this into its typed local-failure contract.
+
+## Transport lifetime and authority
+
+The host owns authentication, account correspondence, grants, credential refresh/revocation and eventual client closure. Library operations neither close the borrowed client nor retry automatically. Host auth, hooks and transport must preserve the selected request and must not silently replay or retarget it.
+
+One operation deadline covers sending and reading. Deadline expiry begins cancellation and joined cleanup; arbitrary host cleanup can exceed that deadline. Cancellation after an entered write does not prove no effect.
+
+<CardGroup cols={2}>
+  <Card title="Service reference" href="/sdks/python-connectors" icon="plug">
+    Exact operation families, selection inputs and result boundaries.
+  </Card>
+  <Card title="Frontend reference" href="/sdks/python-frontends" icon="comments">
+    Telegram, Slack, durable output and example-host live image transport.
+  </Card>
+</CardGroup>
+
+Source metadata is in `sdk/python/pyproject.toml`; module contracts and examples are maintained under `sdk/python/`.

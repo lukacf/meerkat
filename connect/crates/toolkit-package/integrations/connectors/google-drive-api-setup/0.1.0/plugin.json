@@ -1,0 +1,115 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "google-drive-api-setup",
+  "version": "0.1.0",
+  "description": "Explicit host-authenticated Python Drive transport guidance with prepared-client cleanup, one-attempt writes and separate host activation prerequisites.",
+  "author": {
+    "name": "Meerkat Toolkit"
+  },
+  "license": "MIT OR Apache-2.0",
+  "extensions": {
+    "ai.rkat.toolkit": {
+      "schema_version": 1,
+      "identity": {
+        "publisher": "meerkat-toolkit",
+        "name": "google-drive-api-setup",
+        "version": "0.1.0"
+      },
+      "display_name": "Google Drive: Toolkit Python REST operations",
+      "description": "Explicit host-authenticated Python Drive transport guidance with prepared-client cleanup, one-attempt writes and separate host activation prerequisites.",
+      "provenance": {
+        "source": "https://developers.google.com/workspace/drive/api/reference/rest/v3/files/list",
+        "source_revision": "sha256:ed65f7996431e772abe324ce45a2ae13377207443965fce2c8650efae55e7998",
+        "license": "MIT OR Apache-2.0 for Toolkit-authored metadata and original Drive transport code. Google documentation and service terms are separate; the complete SDK artifact retains its existing mixed-source license declaration.",
+        "notices": [
+          "Authored by Meerkat Toolkit, not Google. Documentation hashes identify observed public bytes, not a hosted implementation or live conformance.",
+          "This is the first retained Drive library entry. Existing package versions are unchanged. Select the exact package version, package digest, library digest and strategy; no heuristic selection, automatic upgrade or fallback.",
+          "No Google CLI implementation or quickstart code was copied. The inspected gws executor was a behavioral reference for existing multipart and MIME behavior, not the selected transport or a credential owner.",
+          "The catalog license does not grant rights over other private SDK modules or PairedHost code. Select an authorized source or artifact with its actual license files.",
+          "No MCP endpoint, agent frontend, public package availability, authenticated account, native authority or live support is declared by this recipe."
+        ],
+        "local_patches": []
+      },
+      "strategies": [
+        {
+          "id": "toolkit-rest",
+          "kind": "configuration_recipe",
+          "instructions": "Explicitly select Python GoogleDriveOperations from meerkat_toolkit.connectors.google_drive with the google-drive optional profile. Select a verified local artifact or exact repository source using SUPPORT.md, GOOGLE-DRIVE.md and HTTPX-CLIENT.md; do not assume a public package release. The eight entrypoints are list_files_page (one metadata page), get_file (selected metadata), download_file (raw media to a selected local path), export_file (selected export to a local path), create_file (metadata or streamed multipart create), update_file (metadata or streamed multipart update), create_permission (selected permission mutation) and delete_file (selected deletion). These descriptions are informational; use the selected SDK signatures and existing host policy for binding.\n\nSupported authentication is a host-owned OAuth bearer credential supplied through the selected HTTPX client or per-request httpx.Auth. The existing credential owner must issue and resolve an opaque, non-secret connection/credential reference for the selected account, client/project and consent/scopes. Retain only that owner-issued reference and safe status in setup context, never access or refresh tokens, client secrets, authorization codes or sensitive callback material. If authorization is missing, use that owner's supported secure human-facing authorization handoff outside model context. Resume only after the same owner reports authorization for the selected connection and confirms its account/scope binding; do not invent a reference, authorization URL, ceremony or resume API. Missing owner support, cancellation or refusal leaves setup incomplete, with no account substitution, automatic scope expansion or auth fallback. Prepare the client with prepare_httpx_client before sharing it and retain host ownership of its stable auth, hooks, transport and lifetime.\n\nAfter host policy permits the read, a concrete readiness observation is get_file(host_selected_file_id, fields=\"id,mimeType\") on a known readable selected resource, using that same credential context. Require an object with the exact selected id and nonempty string mimeType; independently confirm the account binding through the credential owner, not the file response. If listing itself is explicitly authorized instead, make one narrow list_files_page(query=host_authorized_query, page_size=1, fields=\"files(id),nextPageToken\") call and validate its page shape. An empty list observes only acceptance of that query. Record safe selected connection/resource/operation context and observation time with the existing host owner. Missing preparation or credentials leaves setup incomplete; auth refusal returns to the credential owner; 403/404 needs owner diagnosis without inferring resource absence; timeout, cancellation, transport or invalid response leaves the check inconclusive. A successful check proves only that read at that time, never account identity, all-file access, write/upload/export authority, activation or complete readiness. Catalog loading, token resolution and client preparation are not read checks. Do not probe with a mutation, local download/export, automatic traversal, retry or stronger credential.\n\nPreserve exact query, field masks, IDs, opaque tokens and selected local paths; the agent or host explicitly chooses each next page. The transport makes no automatic retry, redirect, backend switch or authentication fallback. A failed entered write has unknown outcome and requires the existing host reconciliation owner, never automatic resend. Host grants, approval, resource ACLs, path permissions and result audience remain authoritative. This recipe supplies setup inputs and one service role, not usable-account readiness, a runnable generic wizard ceremony or an activated tool surface.",
+          "sources": [
+            "https://developers.google.com/workspace/drive/api/reference/rest/v3/files/list",
+            "https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get",
+            "https://developers.google.com/workspace/drive/api/reference/rest/v3/files/export",
+            "https://developers.google.com/workspace/drive/api/reference/rest/v3/files/create",
+            "https://developers.google.com/workspace/drive/api/reference/rest/v3/files/update",
+            "https://developers.google.com/workspace/drive/api/reference/rest/v3/files/delete",
+            "https://developers.google.com/workspace/drive/api/reference/rest/v3/permissions/create",
+            "https://developers.google.com/workspace/drive/api/guides/manage-uploads"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "The library selection API cannot activate this guidance-only recipe. Existing host owners must bind the selected SDK artifact, current operation schemas, policy, grants and lifetime to the service export; the PairedHost adapter is bounded composition evidence, not generic activation or authority.",
+            "The existing credential owner must establish the selected account, project, OAuth client/consent, operation scopes and resource permissions. A local account label or file ID is not verified credential binding; no credential store, OAuth fallback, refresh policy or scope expansion is supplied.",
+            "The accepted private artifacts establish the bounded local composition recorded in SUPPORT.md. They do not establish public package availability, live Google conformance, native admission, deployment or complete PairedHost adoption; verify a different artifact before use."
+          ]
+        }
+      ],
+      "known_exports": [
+        {
+          "id": "google-drive-api-setup.service",
+          "role": "service_connector",
+          "description": "One selected Drive service: list_files_page/get_file read metadata; download_file/export_file read media and publish a local file; create_file/update_file/create_permission/delete_file perform selected provider mutations. The host publishes only operations authorized for the current account, resources and requester; this descriptive hint supplies neither grants nor executable operation schemas."
+        }
+      ],
+      "assessments": [
+        {
+          "status": "experimental",
+          "scope": "Retained official documentation and original SDK source inspection, with accepted bounded private-artifact and PairedHost composition evidence linked in SUPPORT.md. No live Google readiness, native admission, public release or deployment support is claimed.",
+          "source_revision": "sha256:ed65f7996431e772abe324ce45a2ae13377207443965fce2c8650efae55e7998",
+          "assessed_at_unix_ms": 1790887993587,
+          "evidence": [
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "drive-files-list",
+              "revision": "sha256:ed65f7996431e772abe324ce45a2ae13377207443965fce2c8650efae55e7998"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "drive-files-get",
+              "revision": "sha256:9862f152929eb1542d77d255f54cab3e1b6ca3b5888461f6a229cdb5b92d4bc6"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "drive-files-export",
+              "revision": "sha256:970fa5a626a71d65ee767d4bed56c1fd152a6d730f6fedde510cdfd316f01793"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "drive-files-create",
+              "revision": "sha256:5ebcaeb3b111006e4ddecb90e7abbe3e35e71d133c40b69eee94313ddbb04e07"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "drive-files-update",
+              "revision": "sha256:60e74786b2b455f8ecc92ab80b39a4a518a1e632f8ae80a16d5b5e20d152dca9"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "drive-files-delete",
+              "revision": "sha256:b6b750032639e0125f54fd5b21e2a2ec035ad4d5011a96f9b457c3913d6bc190"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "drive-permissions-create",
+              "revision": "sha256:a702f5f3fa0aa923a81f1111a364538ab8e22260382f13a86ea181a6e527c639"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "drive-uploads",
+              "revision": "sha256:fe35ca4d9321efc3eaa9081c5cde00e185b292ba0f6fc20551a3b98a4db5e656"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

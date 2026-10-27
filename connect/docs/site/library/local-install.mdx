@@ -1,0 +1,47 @@
+---
+title: "Install the integration library"
+description: "Use the bundled library through Connect or integrate its components into your host."
+icon: "download"
+---
+
+The [Connect CLI archive](/quickstart) includes the integration library, setup tools and required runtimes. Use that archive for terminal setup.
+
+## Choose a supported host
+
+Use Apple Silicon macOS 13.5 or later, or Linux x86_64 with glibc 2.39. Keep the complete extracted archive together. See [platforms and installation options](/availability).
+
+## Prepare the setup host with one command
+
+Start the installed CLI and select your realm:
+
+```sh
+meerkat-connect --realm work
+```
+
+Describe the service and task. Connect reads the catalog, selects a profile and prepares the configuration. Review the software and access, then complete any protected credential prompts.
+
+After setup finishes, exit Connect and start an ordinary agent in the same realm:
+
+```sh
+rkat --realm work run --wait-for-mcp --mcp-auth stored "Use the connected service to complete my task."
+```
+
+Use the same working directory and any explicit root settings. See [request an integration](/guides/request-an-integration) for model and realm selection.
+
+## Select an account through the host
+
+For a directly embedded profile, read its `config-help` output before supplying credentials. It identifies configuration fields, operations and prerequisites. Store secret values with the host's credential owner and supply named references in configuration.
+
+The [Slack and Gmail guide](/library/slack-gmail) includes a complete configuration example and the commands to validate and launch it.
+
+## Enable additional routes deliberately
+
+Application authors can use [native host composition](/guides/host-composition), [Python service operations](/sdks/python) or [TypeScript service operations](/sdks/typescript). For a selected package outside the library, see [package preparation](/acquisition/local-install).
+
+The source distribution also includes `sdk/consumer-setup` for custom setup hosts. Its `bootstrap_host.py` prepares an offline client and host configuration; `prepare_host.py` uses an existing client. Follow that component's `HOST-PREPARATION.md` with your selected resource bundle and explicit runtime paths.
+
+## Save and reuse setup
+
+The CLI saves service configuration and access in the selected realm. Return to the same realm to [manage credentials and agent access](/guides/manage-connections).
+
+Custom setup hosts can retain exact request references and local recipes. Preserve their selected artifacts and original workspace for [saved-work readback](/guides/manage-connections#read-saved-work-after-process-loss).

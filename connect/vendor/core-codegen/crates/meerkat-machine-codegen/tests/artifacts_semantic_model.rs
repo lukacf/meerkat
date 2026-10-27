@@ -1,0 +1,729 @@
+#![allow(clippy::expect_used)]
+
+use meerkat_core::ops_lifecycle::{
+    OperationCompletionWakeClass, OperationKind, OperationLifecycleAction,
+    OperationPublicResultClass,
+};
+use meerkat_core::turn_execution_authority::ContentShape;
+use meerkat_machine_codegen::{
+    render_composition_semantic_model, render_machine_ci_cfg, render_machine_semantic_model,
+};
+use meerkat_machine_schema::catalog::dsl::{
+    dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
+    dsl_session_document_machine as session_document_machine,
+    dsl_work_attention_lifecycle_machine as work_attention_machine,
+};
+use meerkat_machine_schema::catalog::{
+    meerkat_mob_seam_composition, workgraph_attention_bundle_composition,
+};
+use meerkat_machine_schema::{NamedTypeBinding, RustTypeAtom};
+
+fn numeric_revision_witness_fixture() -> meerkat_machine_schema::CompositionSchema {
+    use meerkat_machine_schema::identity::{
+        CompositionId, CompositionWitnessId, FieldId, InputVariantId, MachineInstanceId, PhaseId,
+        TransitionId,
+    };
+    use meerkat_machine_schema::{
+        CompositionStateLimits, CompositionWitness, CompositionWitnessField,
+        CompositionWitnessInput, CompositionWitnessState, CompositionWitnessTransition, Expr,
+    };
+    // Exercise the existing occurrence owner; the test defines no new lifecycle.
+    let mut schema = meerkat_machine_schema::catalog::schedule_bundle_composition();
+    schema.name = CompositionId::parse("numeric_revision_witness").expect("composition");
+    schema
+        .machines
+        .retain(|machine| machine.instance_id.as_str() == "occurrence");
+    schema
+        .actors
+        .retain(|actor| actor.name.as_str() == "occurrence_authority");
+    schema.routes.clear();
+    schema.transaction_plans.clear();
+    schema.invariants.clear();
+    let instance = MachineInstanceId::parse("occurrence").expect("instance");
+    let field = |name: &str, expr| CompositionWitnessField {
+        field: FieldId::parse(name).expect("field"),
+        expr,
+    };
+    schema.witnesses = vec![CompositionWitness {
+        name: CompositionWitnessId::parse("revision_three_then_four").expect("witness"),
+        preload_inputs: [3, 4]
+            .into_iter()
+            .map(|revision| CompositionWitnessInput {
+                machine: instance.clone(),
+                input_variant: InputVariantId::parse("Supersede").expect("input"),
+                fields: vec![
+                    field("superseded_by_revision", Expr::U64(revision)),
+                    field("at_utc_ms", Expr::U64(0)),
+                ],
+            })
+            .collect(),
+        expected_routes: vec![],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![CompositionWitnessState {
+            machine: instance.clone(),
+            phase: Some(PhaseId::parse("Superseded").expect("phase")),
+            fields: vec![field(
+                "superseded_by_revision",
+                Expr::Some(Box::new(Expr::U64(3))),
+            )],
+        }],
+        expected_transitions: ["SupersedePendingOrLive", "SupersedeAlreadySuperseded"]
+            .into_iter()
+            .map(|name| CompositionWitnessTransition {
+                machine: instance.clone(),
+                transition: TransitionId::parse(name).expect("transition"),
+            })
+            .collect(),
+        expected_transition_order: vec![],
+        state_limits: CompositionStateLimits {
+            step_limit: 8,
+            pending_input_limit: 2,
+            pending_route_limit: 0,
+            delivered_route_limit: 0,
+            emitted_effect_limit: 4,
+            seq_limit: 2,
+            set_limit: 2,
+            map_limit: 2,
+        },
+    }];
+    schema
+}
+
+#[test]
+fn scripted_witnesses_consume_exact_queued_revisions_beyond_sample_domain() {
+    let schema = numeric_revision_witness_fixture();
+    let rendered = render_composition_semantic_model(&schema).expect("render numeric witness");
+    let config =
+        meerkat_machine_codegen::render_composition_witness_cfg(&schema, &schema.witnesses[0]);
+    // Optional artifact output lets the explicit TLC lane run this exact
+    // fixture before and after a generator change without a handwritten model.
+    if let Some(directory) = std::env::var_os("MEERKAT_NUMERIC_WITNESS_ARTIFACTS") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("fixture directory");
+        std::fs::write(directory.join("model.tla"), &rendered).expect("model artifact");
+        std::fs::write(directory.join("witness.cfg"), config).expect("config artifact");
+    }
+    assert!(rendered.contains("superseded_by_revision |-> 3"));
+    assert!(rendered.contains("superseded_by_revision |-> 4"));
+    let witness_next = rendered
+        .split("WitnessNext_revision_three_then_four ==")
+        .nth(1)
+        .and_then(|tail| tail.split("CiStateConstraint ==").next())
+        .expect("witness transition relation");
+    assert!(witness_next.contains("SeqElements(pending_inputs)"));
+    assert!(witness_next.contains("witness_packet.machine = \"occurrence\""));
+    assert!(witness_next.contains("witness_packet.variant = \"Supersede\""));
+    assert!(witness_next.contains("occurrence_SupersedePendingOrLive(witness_packet.payload.superseded_by_revision, witness_packet.payload.at_utc_ms)"));
+    assert!(witness_next.contains("occurrence_SupersedeAlreadySuperseded(witness_packet.payload.superseded_by_revision, witness_packet.payload.at_utc_ms)"));
+    assert!(!witness_next.contains(r"arg_superseded_by_revision \in 0..2"));
+    // Ordinary exploration keeps its original sample bound. The scripted
+    // path calls the same guarded actions, using the queued 3 and 4 instead.
+    let core_next = rendered
+        .split("CoreNext ==")
+        .nth(1)
+        .and_then(|tail| tail.split("InjectNext ==").next())
+        .expect("core next");
+    assert!(core_next.contains(r"arg_superseded_by_revision \in 0..2"));
+    assert!(rendered.contains("/\\ occurrence_phase = \"Superseded\""));
+}
+
+fn tool_filter_override_line(rendered: &str) -> &str {
+    rendered
+        .lines()
+        .find(|line| line.trim_start().starts_with("ToolFilterValues <- "))
+        .map(str::trim)
+        .expect("ToolFilterValues override")
+}
+
+fn tool_filter_operator_line<'a>(rendered: &'a str, operator: &str) -> &'a str {
+    let prefix = format!("{operator} == ");
+    rendered
+        .lines()
+        .find(|line| line.starts_with(&prefix))
+        .expect("ToolFilterValues operator")
+}
+
+fn tool_filter_domain(operator: &str, name_sets: &[&str]) -> String {
+    let structural_samples = ["Allow", "Deny"]
+        .into_iter()
+        .flat_map(|variant| {
+            name_sets
+                .iter()
+                .map(move |names| format!("[tag |-> \"{variant}\", names |-> {names}]"))
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "{operator} == {{[tag |-> \"All\"], {}}}",
+        structural_samples.join(", ")
+    )
+}
+
+fn tool_filter_unit_domain(operator: &str) -> String {
+    format!("{operator} == {{[tag |-> \"All\"]}}")
+}
+
+#[test]
+fn meerkat_semantic_model_keeps_internal_session_transport_domain() {
+    let rendered =
+        render_machine_semantic_model(&meerkat_machine()).expect("render machine semantic model");
+
+    assert!(rendered.contains("SessionIdValues"));
+    assert!(rendered.contains(
+        "PrepareBindingsInitializing(agent_runtime_id, fence_token, generation, runtime_epoch_id, arg_session_id) =="
+    ));
+    assert!(rendered.contains("MapIncrement(map, key, amount) == [x \\in DOMAIN map \\cup {key}"));
+    assert!(
+        !rendered
+            .contains("IF \"value\" \\in DOMAIN (IF surface_id \\in DOMAIN surface_base_state"),
+        "enum map value projections should not render DOMAIN checks against scalar enum values"
+    );
+    assert!(
+        !rendered.contains(
+            "IF \"value\" \\in DOMAIN (IF surface_id \\in DOMAIN surface_staged_intent_sequence"
+        ),
+        "integer map value projections should not render DOMAIN checks against scalar values"
+    );
+    assert!(!rendered.contains("MeerkatIdValues"));
+}
+
+#[test]
+fn meerkat_ci_cfg_uses_closed_string_enum_binding_domains() {
+    let rendered = render_machine_ci_cfg(&meerkat_machine(), false).expect("valid CI CFG");
+
+    let content_shape_values = ContentShape::ALL
+        .into_iter()
+        .map(|shape| format!("\"{}\"", shape.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        rendered.contains(&format!("ContentShapeValues = {{{content_shape_values}}}")),
+        "ContentShapeValues must come from the closed core content-shape contract:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("ContentShapeValues = {\"contentshape_1\""),
+        "ContentShapeValues must not fall back to open placeholder strings:\n{rendered}"
+    );
+    let operation_kind_values = OperationKind::ALL
+        .into_iter()
+        .map(|value| format!("\"{}\"", value.generated_variant()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        rendered.contains(&format!(
+            "OperationKindValues = {{{operation_kind_values}}}"
+        )),
+        "OperationKindValues must come from the closed generated/core contract:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("OperationCompletionFeedClassValues = {\"Emit\", \"Suppress\"}"),
+        "OperationCompletionFeedClassValues must come from the closed generated contract:\n{rendered}"
+    );
+    let completion_wake_values = OperationCompletionWakeClass::ALL
+        .into_iter()
+        .map(|value| format!("\"{}\"", value.generated_variant()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        rendered.contains(&format!(
+            "OperationCompletionWakeClassValues = {{{completion_wake_values}}}"
+        )),
+        "OperationCompletionWakeClassValues must come from the closed generated/core contract:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "OperationStatusValues = {\"Absent\", \"Provisioning\", \"Running\", \"Retiring\", \"Completed\", \"Failed\", \"Aborted\", \"Cancelled\", \"Retired\", \"Terminated\"}"
+        ),
+        "OperationStatusValues must come from the closed StringEnum binding:\n{rendered}"
+    );
+    let public_result_values = OperationPublicResultClass::ALL
+        .into_iter()
+        .map(|value| format!("\"{}\"", value.generated_variant()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        rendered.contains(&format!(
+            "OperationPublicResultClassValues = {{{public_result_values}}}"
+        )),
+        "OperationPublicResultClassValues must come from the closed generated/core contract:\n{rendered}"
+    );
+    let lifecycle_action_values = OperationLifecycleAction::ALL
+        .into_iter()
+        .map(|value| format!("\"{}\"", value.generated_variant()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        rendered.contains(&format!(
+            "OpLifecycleActionKindValues = {{{lifecycle_action_values}}}"
+        )),
+        "OpLifecycleActionKindValues must come from the closed generated/core contract:\n{rendered}"
+    );
+    assert_eq!(
+        tool_filter_override_line(&rendered),
+        "ToolFilterValues <- ToolFilterValuesCi"
+    );
+    let model =
+        render_machine_semantic_model(&meerkat_machine()).expect("render machine semantic model");
+    assert_eq!(
+        tool_filter_operator_line(&model, "ToolFilterValuesCi"),
+        tool_filter_unit_domain("ToolFilterValuesCi"),
+        "CI ToolFilterValues must stay on the canonical unit variant; deep covers structural payloads"
+    );
+    assert!(
+        !rendered.contains("toolfilter_2"),
+        "ToolFilterValues must not fall back to generated placeholder strings:\n{rendered}"
+    );
+}
+
+#[test]
+fn meerkat_deep_cfg_uses_closed_tool_filter_domain() {
+    let rendered = render_machine_ci_cfg(&meerkat_machine(), true).expect("valid deep CFG");
+
+    assert_eq!(
+        tool_filter_override_line(&rendered),
+        "ToolFilterValues <- ToolFilterValuesDeep"
+    );
+    let model =
+        render_machine_semantic_model(&meerkat_machine()).expect("render machine semantic model");
+    assert_eq!(
+        tool_filter_operator_line(&model, "ToolFilterValuesDeep"),
+        tool_filter_domain(
+            "ToolFilterValuesDeep",
+            &[
+                r"{}",
+                r#"{"view_image"}"#,
+                r#"{"view_image", "toolname_1"}"#
+            ]
+        ),
+        "deep ToolFilterValues must cover differing same-variant structural payloads"
+    );
+    assert!(
+        !rendered.contains("toolfilter_2"),
+        "deep ToolFilterValues must not fall back to generated placeholder strings:\n{rendered}"
+    );
+}
+
+#[test]
+fn meerkat_cfg_uses_model_operators_for_record_valued_domains() {
+    let rendered = render_machine_ci_cfg(&meerkat_machine(), false).expect("valid CI CFG");
+    let model =
+        render_machine_semantic_model(&meerkat_machine()).expect("render machine semantic model");
+
+    assert!(
+        rendered.contains("PeerEndpointValues <- PeerEndpointValuesCi"),
+        "record-valued PeerEndpointValues must be supplied through a model operator:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("SetOfPeerEndpointValues <- SetOfPeerEndpointValuesCi"),
+        "record-valued SetOfPeerEndpointValues must be supplied through a model operator:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("PeerEndpointValues = {["),
+        "cfg CONSTANTS must not contain TLC record literals:\n{rendered}"
+    );
+    assert!(
+        model.contains("PeerEndpointValuesCi == {}"),
+        "CI PeerEndpointValues must stay bounded while still using model operator substitution:\n{model}"
+    );
+    assert!(
+        model.contains("SetOfPeerEndpointValuesCi == {{}}"),
+        "CI SetOfPeerEndpointValues must stay bounded while still using model operator substitution:\n{model}"
+    );
+    assert!(
+        model.contains(
+            "PeerEndpointValuesDeep == {[name |-> \"peername_1\", peer_id |-> \"peerid_1\", address |-> \"peeraddress_1\", signing_key |-> \"peersigningkey_1\"]"
+        ),
+        "deep model operator must preserve typed PeerEndpoint record shape:\n{model}"
+    );
+    assert!(
+        model.contains("SetOfPeerEndpointValuesDeep == {{}, {[name |-> \"peername_1\""),
+        "deep model operator must preserve bounded set samples for PeerEndpoint records:\n{model}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "missing NamedTypeBinding for generated domain `FlowNodeKind`")]
+fn mob_ci_cfg_fails_closed_when_closed_enum_binding_is_missing() {
+    let mut schema = mob_machine();
+    schema
+        .named_types
+        .retain(|binding| binding.name.as_str() != "FlowNodeKind");
+
+    let _ = render_machine_ci_cfg(&schema, false);
+}
+
+#[test]
+#[should_panic(
+    expected = "generated machine `MobMachine` named-type `FlowNodeKind` binding must match canonical domain shape"
+)]
+fn mob_ci_cfg_fails_closed_when_closed_enum_binding_changes_shape() {
+    let mut schema = mob_machine();
+    let binding = schema
+        .named_types
+        .iter_mut()
+        .find(|binding| binding.name.as_str() == "FlowNodeKind")
+        .expect("FlowNodeKind binding");
+    binding.rust = RustTypeAtom::String;
+
+    let _ = render_machine_ci_cfg(&schema, false);
+}
+
+#[test]
+#[should_panic(
+    expected = "missing NamedTypeBinding for generated domain `ExternalToolSurfaceFailureCause`"
+)]
+fn meerkat_ci_cfg_fails_closed_when_external_tool_failure_binding_is_missing() {
+    let mut schema = meerkat_machine();
+    schema
+        .named_types
+        .retain(|binding| binding.name.as_str() != "ExternalToolSurfaceFailureCause");
+
+    let _ = render_machine_ci_cfg(&schema, false);
+}
+
+#[test]
+#[should_panic(expected = "missing NamedTypeBinding for generated domain `ToolVisibilityWitness`")]
+fn meerkat_ci_cfg_fails_closed_when_structural_named_binding_is_missing() {
+    let mut schema = meerkat_machine();
+    schema
+        .named_types
+        .retain(|binding| binding.name.as_str() != "ToolVisibilityWitness");
+
+    let _ = render_machine_ci_cfg(&schema, false);
+}
+
+#[test]
+#[should_panic(
+    expected = "generated machine `MeerkatMachine` named-type `ToolVisibilityWitness` binding must match canonical domain shape"
+)]
+fn meerkat_ci_cfg_fails_closed_when_structural_named_binding_changes_shape() {
+    let mut schema = meerkat_machine();
+    let binding = schema
+        .named_types
+        .iter_mut()
+        .find(|binding| binding.name.as_str() == "ToolVisibilityWitness")
+        .expect("ToolVisibilityWitness binding");
+    *binding = NamedTypeBinding {
+        name: binding.name.clone(),
+        rust: RustTypeAtom::String,
+    };
+
+    let _ = render_machine_ci_cfg(&schema, false);
+}
+
+#[test]
+#[should_panic(
+    expected = "generated machine `MeerkatMachine` missing canonical named-type `ToolProvenance` binding"
+)]
+fn meerkat_ci_cfg_fails_closed_when_tool_provenance_binding_is_missing() {
+    let mut schema = meerkat_machine();
+    schema
+        .named_types
+        .retain(|binding| binding.name.as_str() != "ToolProvenance");
+
+    let _ = render_machine_ci_cfg(&schema, false);
+}
+
+#[test]
+#[should_panic(
+    expected = "generated machine `MeerkatMachine` named-type `ToolProvenance` binding must match canonical domain shape"
+)]
+fn meerkat_ci_cfg_fails_closed_when_tool_provenance_binding_changes_shape() {
+    let mut schema = meerkat_machine();
+    let binding = schema
+        .named_types
+        .iter_mut()
+        .find(|binding| binding.name.as_str() == "ToolProvenance")
+        .expect("ToolProvenance binding");
+    *binding = NamedTypeBinding {
+        name: binding.name.clone(),
+        rust: RustTypeAtom::String,
+    };
+
+    let _ = render_machine_ci_cfg(&schema, false);
+}
+
+#[test]
+fn meerkat_semantic_model_renders_content_shape_wire_labels() {
+    let rendered =
+        render_machine_semantic_model(&meerkat_machine()).expect("render machine semantic model");
+
+    assert!(
+        rendered.contains("admitted_content_shape' = Some(\"immediate_append\")"),
+        "derived immediate content-shape assignments must use stable wire labels:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("arg_admitted_content_shape = \"conversation\""),
+        "content-shape guards must compare against stable wire labels:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("admitted_content_shape' = Some(\"ImmediateAppend\")"),
+        "semantic model must not mix schema variant names with wire-label domains:\n{rendered}"
+    );
+}
+
+#[test]
+fn mob_semantic_model_is_identity_and_runtime_native() {
+    let rendered =
+        render_machine_semantic_model(&mob_machine()).expect("render machine semantic model");
+
+    assert!(rendered.contains("AgentIdentityValues"));
+    assert!(rendered.contains("AgentRuntimeIdValues"));
+    assert!(rendered.contains("FenceTokenValues"));
+    // W3-H-1: SessionIdValues is now present in the MobMachine semantic
+    // model because `member_session_bindings: Map<AgentIdentity, SessionId>`
+    // makes the bridge session id a first-class MobMachine-owned value.
+    // This is the intentional expansion that issue #264 calls for — the
+    // binding map is the canonical join between identity continuity
+    // (MobMachine) and realtime attachment (MeerkatMachine).
+    assert!(rendered.contains("SessionIdValues"));
+    assert!(!rendered.contains("MeerkatIdValues"));
+}
+
+#[test]
+fn machine_semantic_model_binds_expected_revision_to_current_revision() {
+    let rendered = render_machine_semantic_model(&work_attention_machine())
+        .expect("render machine semantic model");
+
+    assert!(
+        rendered.contains(r"\E expected_revision \in {revision} : \E until_utc_ms"),
+        "CAS revision witnesses must be sampled from the current machine revision, not a stale finite Nat range:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains(r"\E expected_revision \in 0..2"),
+        "expected_revision must not use the generic numeric sample domain:\n{rendered}"
+    );
+}
+
+#[test]
+fn session_document_restore_next_specializes_guard_forced_validation_facts() {
+    let rendered = render_machine_semantic_model(&session_document_machine())
+        .expect("render SessionDocument semantic model");
+    let restore_next = rendered
+        .lines()
+        .find(|line| {
+            line.contains("AuthorizeRestoreRealtimeTranscriptState(")
+                && line.contains(r"\E item_count")
+        })
+        .expect("SessionDocument restore transition in Next");
+
+    assert_eq!(
+        restore_next.matches(r"\E ").count(),
+        3,
+        "only the three numeric count facts should remain existential; guard-forced booleans must not create a 2^N TLC cross-product:\n{restore_next}"
+    );
+    assert_eq!(
+        restore_next.matches("TRUE").count(),
+        24,
+        "every restore-validation boolean is a positive guard conjunct and should lower to its forced literal:\n{restore_next}"
+    );
+    assert!(
+        !restore_next.contains(r"\in BOOLEAN"),
+        "guard-forced restore facts must not retain full boolean domains:\n{restore_next}"
+    );
+}
+
+#[test]
+fn composition_next_specializes_forced_literals_and_keeps_unproven_booleans() {
+    let rendered = render_composition_semantic_model(&meerkat_mob_seam_composition())
+        .expect("render Meerkat/Mob composition semantic model");
+    let forced = rendered
+        .lines()
+        .find(|line| {
+            line.contains("meerkat_RequestFiniteSwitchTurnApprovalUnavailableIdle(")
+                && line.contains(r"\E arg_request_id")
+        })
+        .expect("composition transition with forced true/false facts");
+    assert!(
+        forced.contains(", TRUE, FALSE, arg_approval_denied,"),
+        "composition lowering must substitute both guard-forced literals:\n{forced}"
+    );
+    assert!(
+        !forced.contains(r"\E arg_requires_approval \in BOOLEAN")
+            && !forced.contains(r"\E arg_approval_available \in BOOLEAN"),
+        "forced composition facts must not retain existential boolean domains:\n{forced}"
+    );
+
+    let unproven = rendered
+        .lines()
+        .find(|line| {
+            line.contains("meerkat_RequestFiniteSwitchTurnScopedConflictIdle(")
+                && line.contains(r"\E arg_request_id")
+        })
+        .expect("composition transition with non-literal approval logic");
+    for binding in [
+        "arg_requires_approval",
+        "arg_approval_available",
+        "arg_approval_denied",
+    ] {
+        assert!(
+            unproven.contains(&format!(r"\E {binding} \in BOOLEAN")),
+            "unproven composition fact `{binding}` must retain its complete domain:\n{unproven}"
+        );
+    }
+}
+
+#[test]
+fn composition_route_owner_expected_revision_uses_target_revision() {
+    let rendered = render_composition_semantic_model(&workgraph_attention_bundle_composition())
+        .expect("render composition semantic model");
+
+    assert!(
+        rendered.contains(
+            r"\E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :"
+        ),
+        "route-provided CAS revision witnesses must be sampled from the target machine revision:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains(
+            r"\E route_owner_ctx_work_item_close_stops_attention_expected_revision \in NatValues"
+        ),
+        "route-provided expected_revision must not use the generic numeric domain:\n{rendered}"
+    );
+}
+
+// These assertions use the canonical owner, not a handwritten model fixture.
+#[test]
+fn grant_ci_keeps_linked_record_inputs_and_two_retained_rows() {
+    let schema = meerkat_machine_schema::catalog::dsl::dsl_grant_authority_machine();
+    let model = render_machine_semantic_model(&schema).expect("grant model");
+    assert!(!model.contains("GrantRecordValuesCi == {}"));
+    assert!(!model.contains("DerivedChildRestrictionsValuesCi == {}"));
+    let bound = model
+        .lines()
+        .find(|line| line.starts_with("CiStateConstraint =="))
+        .expect("CI bound");
+    assert!(bound.contains("model_step_count <= 6"));
+    assert!(bound.contains("Cardinality(DOMAIN records) <= 2"));
+    assert!(bound.contains("Cardinality(revoked) <= 2"));
+}
+
+#[test]
+fn grant_both_profiles_include_resolved_window_and_empty_uncertainty() {
+    let schema = meerkat_machine_schema::catalog::dsl::dsl_grant_authority_machine();
+    let model = render_machine_semantic_model(&schema).expect("grant model");
+    for profile in ["Ci", "Deep"] {
+        let prefix = format!("GrantRecordValues{profile} ==");
+        let records = model
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .expect("record domain");
+        assert!(records.contains("unresolved |-> {}"));
+        assert!(records.contains("tag |-> \"Window\""));
+        assert!(records.contains("issued_revision |-> 2"));
+        assert!(records.contains("parent |-> Some(\"grant_root\")"));
+        assert!(
+            records.contains("issuer |-> \"principal_a\", grantee |-> \"principal_b\"")
+                || (records.contains("issuer |-> \"principal_a\"")
+                    && records.contains("grantee |-> \"principal_b\""))
+        );
+        let cfg = render_machine_ci_cfg(&schema, profile == "Deep").expect("valid grant CFG");
+        assert!(cfg.contains("EvidenceIdValues <- EvidenceIdValues"));
+        assert!(cfg.contains("GrantPrincipalValues <- GrantPrincipalValues"));
+    }
+}
+
+#[test]
+fn explicit_model_rejects_unconsumed_sample_domain() {
+    let mut schema = meerkat_machine_schema::catalog::dsl::dsl_grant_authority_machine();
+    schema
+        .tlc_model
+        .as_mut()
+        .expect("model")
+        .ci
+        .named_values
+        .insert(
+            meerkat_machine_schema::identity::NamedTypeId::parse("GrantNumber").expect("name"),
+            vec![meerkat_machine_schema::TlcValue::U64(1)],
+        );
+    assert!(matches!(
+        render_machine_semantic_model(&schema),
+        Err(meerkat_machine_codegen::CompositionTlaError::InvalidTlcModel { .. })
+    ));
+    let did_not_unwind = [false, true]
+        .map(|deep| std::panic::catch_unwind(|| render_machine_ci_cfg(&schema, deep)).is_ok());
+    assert_eq!(
+        did_not_unwind,
+        [true, true],
+        "invalid explicit model must return without unwinding in CI and Deep"
+    );
+    for deep in [false, true] {
+        let result = render_machine_ci_cfg(&schema, deep);
+        assert!(
+            matches!(
+                &result,
+                Err(meerkat_machine_codegen::CompositionTlaError::InvalidTlcModel {
+                    machine,
+                    reason,
+                }) if machine.as_str() == schema.machine.as_str() && reason.contains("GrantNumber")
+            ),
+            "invalid explicit model must return a typed CFG error: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn nested_explicit_max_uses_existing_tlc_constant_without_expression_max() {
+    let mut schema = meerkat_machine_schema::catalog::dsl::dsl_grant_authority_machine();
+    // This rendering-only control removes every runtime expression that could
+    // otherwise account for the constant. The nested explicit sample remains.
+    schema.helpers.clear();
+    schema.derived.clear();
+    schema.invariants.clear();
+    for transition in &mut schema.transitions {
+        transition.guards.clear();
+    }
+    let model = render_machine_semantic_model(&schema).expect("fixture model");
+    let constants = model
+        .lines()
+        .find(|line| line.starts_with("CONSTANTS "))
+        .expect("constants");
+    assert!(constants.contains("RustU64Max"));
+    assert!(model.contains("expires_at_ms |-> RustU64Max"));
+    assert!(!model.contains("18446744073709551615"));
+    for deep in [false, true] {
+        assert!(
+            render_machine_ci_cfg(&schema, deep)
+                .expect("valid explicit-max CFG")
+                .contains("RustU64Max = 2147483647")
+        );
+    }
+}
+
+#[test]
+fn obligation_member_feedback_ranges_over_the_obligation_and_discharges_only_that_member() {
+    let model = render_composition_semantic_model(
+        &meerkat_machine_schema::catalog::auth_lease_bundle_composition(),
+    )
+    .expect("render auth_lease_bundle");
+    let action = model
+        .lines()
+        .skip_while(|line| {
+            !line.starts_with(
+                "OwnerFeedback_auth_machine_auth_release_oauth_flow_drain_ExpireOAuthBrowserFlow ==",
+            )
+        })
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The owner can only name a flow the drain obligation carries.
+    assert!(
+        action.contains("\\E member_browser_flow_ids \\in token.browser_flow_ids"),
+        "{action}"
+    );
+    assert!(!action.contains("\\in StringValues"), "{action}");
+    // It discharges only that member; the token stays open while flows remain.
+    assert!(
+        action.contains("[token EXCEPT !.browser_flow_ids = @ \\ {member_browser_flow_ids}]"),
+        "{action}"
+    );
+    assert!(action.contains("= (IF "), "{action}");
+    // Terminal obligation closure applies to the AckRequired drain protocol,
+    // not to the PublicationOnly lifecycle publication (no feedback can close it).
+    assert!(
+        model.contains("NoOpenObligationsOnTerminal_auth_machine_auth_release_oauth_flow_drain ==")
+    );
+    assert!(
+        !model
+            .contains("NoOpenObligationsOnTerminal_auth_machine_auth_lease_lifecycle_publication")
+    );
+}

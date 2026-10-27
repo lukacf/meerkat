@@ -1,0 +1,74 @@
+---
+title: "Read-only discovery tools"
+description: "Inspect bundled recipes and public setup documents before choosing an integration."
+icon: "magnifying-glass"
+---
+
+The CLI exposes recipe discovery and public document reading before service resources are prepared. `toolkit_package::RecipeInventory` reads the combined recipe catalog.
+
+For embedding, use `toolkit_mobkit::discovery::DiscoveryTools::new` with a public catalog or `from_library` with a versioned library. Register the dispatcher through the native host and select the agents that can use it.
+
+## list_integration_recipes
+
+<ParamField body="limit" type="integer" required>
+  Page size from 1 through 20.
+</ParamField>
+<ParamField body="name" type="string">
+  Optional exact package name chosen by the agent. Case-sensitive literal equality across all publishers and versions; no fuzzy matching, ranking or intent inference.
+</ParamField>
+<ParamField body="snapshot" type="string">
+  Exact 64-character lowercase hexadecimal snapshot returned by the earlier page. Required when `after` is supplied.
+</ParamField>
+<ParamField body="after" type="object">
+  Exact `publisher`, `name`, `version` identity returned as `next_after` by the earlier page.
+</ParamField>
+
+First-page arguments:
+
+```json
+{ "limit": 10 }
+```
+
+If the agent knows a package name, it may request it directly:
+
+```json
+{ "limit": 20, "name": "wikipedia" }
+```
+
+The result has `snapshot`, `entries` and `next_after`. Compact entries contain exact identity, package `digest`, display/description, roles and an optional `library_digest`. Read the exact recipe for provenance, assessments and requirements before assessing it. An empty exact-name result does not establish that no suitable integration exists; unfiltered browsing and outside-catalog investigation remain available.
+
+Results are in stable identity order, including every matching publisher and version. To continue, preserve the name filter and pass both the returned snapshot and `next_after`. A changed inventory or name filter invalidates the snapshot; restart listing. `next_after` is an identity tuple, not an invented opaque cursor string. Unfiltered inventory snapshots retain their previous digest; filtered snapshots additionally bind the exact name.
+
+## read_integration_recipe
+
+<ParamField body="identity" type="object" required>
+  Exact publisher/name/version from a listed entry.
+</ParamField>
+<ParamField body="digest" type="string" required>
+  Exact listed package digest.
+</ParamField>
+<ParamField body="library_digest" type="string">
+  Supply the exact value when the listed entry includes one. It pins the joined recipe bundle, including retained prerequisites and endpoint configuration.
+</ParamField>
+
+The result includes the full catalog entry and, for library-backed discovery, its joined `library` bundle. Read provenance, assessments, prerequisites and unresolved details before selecting a strategy.
+
+Both argument objects reject unknown fields. Use actual returned digests; fabricated placeholders do not identify current content.
+
+## read_public_document
+
+The standalone setup agent can inspect an exact public setup guide or README for either a service connector or a frontend package, including projects outside the catalog. The agent chooses the URL through reasoning and evidence.
+
+<ParamField body="url" type="string" required>
+  Public HTTPS document URL, up to 4,096 bytes. Do not include credentials or private account data.
+</ParamField>
+
+The result contains `requested_url`, `document_url`, `media_type`, `byte_count`, `sha256` and `text`. The text is the complete accepted UTF-8 response, bounded to 128 KiB. HTML is returned as source text. A fragment remains in `requested_url`, while `document_url` identifies the whole document fetched without that fragment. Queries and valid HTTPS ports are preserved.
+
+Each call uses a credential-free client and must resolve exclusively to public addresses. It retains normal TLS validation and has a 30-second overall deadline. Redirects, compressed or unsupported documents, responses other than HTTP 200 and oversized bodies produce an explicit error. A redirect may provide an unverified `suggested_url` for the agent to assess and read separately. No partial document is presented as complete.
+
+## Trust boundary
+
+The recipe adapter snapshots a deliberately public catalog and bounds metadata without network access. The document reader makes at most one public HTTPS GET per invocation, without cookies, authentication, proxies, automatic redirects or retries. Neither installs anything or decides semantic fit. Recipe prose, support labels and document content remain untrusted investigation evidence.
+
+Do not include private connection records or restricted inventories in this adapter. Agents can research outside the inventory and choose concrete integrations. See [catalog reference](/reference/catalog) for the current registered set.

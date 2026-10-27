@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "identity": {
+    "publisher": "fixture",
+    "name": "node-server",
+    "version": "0.0.0-fixture"
+  },
+  "display_name": "Inert Node installation fixture",
+  "description": "Typed example only; placeholder artifacts and declarations are not an installation or runtime claim.",
+  "provenance": {
+    "source": "https://example.invalid/node-server/source",
+    "source_revision": "fixture-only",
+    "license": "fixture-only",
+    "notices": [],
+    "local_patches": []
+  },
+  "strategies": [
+    {
+      "id": "node-local",
+      "kind": "local_mcp",
+      "instructions": "Fixture only. Select, retain and approve exact package and dependency artifacts before installation.",
+      "sources": ["https://example.invalid/node-server/source"],
+      "known_requirements": [],
+      "unresolved_details": []
+    }
+  ],
+  "known_exports": [
+    {
+      "id": "service",
+      "role": "service_connector",
+      "description": "Whole MCP server, not an operation-filtered proxy."
+    }
+  ],
+  "assessments": []
+}

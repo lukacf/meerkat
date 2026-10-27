@@ -1,0 +1,29 @@
+{
+  "tag": "@linear/sdk@7.0.1",
+  "tag_object": {
+    "node_id": "TA_kwDOCsgqONoAKGY5OTMyMjU2NjdlZjBkNTZmNzI4MzBkMzM3ZjYxYTE4NWQ1MDE1OTA",
+    "sha": "f993225667ef0d56f72830d337f61a185d501590",
+    "url": "https://api.github.com/repos/linear/linear/git/tags/f993225667ef0d56f72830d337f61a185d501590",
+    "tagger": {
+      "name": "github-actions[bot]",
+      "email": "github-actions[bot]@users.noreply.github.com",
+      "date": "2023-07-31T20:29:51Z"
+    },
+    "object": {
+      "sha": "3452ce144ee6dae8e8c6dccbdcc312e6dde95b72",
+      "type": "commit",
+      "url": "https://api.github.com/repos/linear/linear/git/commits/3452ce144ee6dae8e8c6dccbdcc312e6dde95b72"
+    },
+    "tag": "@linear/sdk@7.0.1",
+    "message": "@linear/sdk@7.0.1\n",
+    "verification": {
+      "verified": false,
+      "reason": "unsigned",
+      "signature": null,
+      "payload": null,
+      "verified_at": null
+    }
+  },
+  "url": "https://raw.githubusercontent.com/linear/linear/3452ce144ee6dae8e8c6dccbdcc312e6dde95b72/LICENSE",
+  "sha256": "6d01159ad48e1c4a2c053ec32a97afc658786aa69362ead7d3adc912f9a10ce2"
+}

@@ -1,0 +1,82 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "playwright-mcp-setup",
+  "version": "0.1.0",
+  "description": "Guidance-only setup recipe with explicit source observations and newcomer prerequisites.",
+  "author": {
+    "name": "Meerkat Toolkit"
+  },
+  "license": "MIT OR Apache-2.0",
+  "extensions": {
+    "ai.rkat.toolkit": {
+      "schema_version": 1,
+      "identity": {
+        "publisher": "meerkat-toolkit",
+        "name": "playwright-mcp-setup",
+        "version": "0.1.0"
+      },
+      "display_name": "Playwright MCP local preparation",
+      "description": "Guidance-only setup recipe with explicit source observations and newcomer prerequisites.",
+      "provenance": {
+        "source": "https://raw.githubusercontent.com/microsoft/playwright-mcp/f183dad4a52965583e3cc1d59b88cdc279e2e57d/README.md",
+        "source_revision": "sha256:b33aa71a13d655e96e6b736d0c9de1e5ddea52f205916ca20b876387ff830e87",
+        "license": "MIT OR Apache-2.0 for Toolkit-authored recipe metadata only. Apache-2.0 for the inspected repository; dependency and distribution licenses need separate review before packaging. No source is copied.",
+        "notices": [
+          "This package is authored by Meerkat Toolkit, not by the provider.",
+          "No upstream implementation is vendored. Hosted endpoints are mutable services, not pinned executable artifacts.",
+          "Offline recipe validation does not establish installation, authentication, readiness or supported live operations."
+        ],
+        "local_patches": []
+      },
+      "strategies": [
+        {
+          "id": "setup",
+          "kind": "local_mcp",
+          "instructions": "Prepare @playwright/mcp 0.0.83 from source revision f183dad4a52965583e3cc1d59b88cdc279e2e57d. Its package requires Node >=18 and playwright/playwright-core 1.64.0-alpha-1790635538000. Resolve package bytes, full dependencies and browser binaries into a verified artifact before selecting an entrypoint. Use an explicitly isolated browser profile and host network/file authority.",
+          "sources": [
+            "https://raw.githubusercontent.com/microsoft/playwright-mcp/f183dad4a52965583e3cc1d59b88cdc279e2e57d/README.md",
+            "https://raw.githubusercontent.com/microsoft/playwright-mcp/f183dad4a52965583e3cc1d59b88cdc279e2e57d/package.json",
+            "https://raw.githubusercontent.com/microsoft/playwright-mcp/f183dad4a52965583e3cc1d59b88cdc279e2e57d/LICENSE"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "The retained source revision is not a prepared executable artifact or complete dependency closure.",
+            "Browser placement, credentials, network/file boundaries and cleanup owner are host-specific."
+          ]
+        }
+      ],
+      "known_exports": [
+        {
+          "id": "playwright-mcp-setup.service",
+          "role": "service_connector",
+          "description": "Playwright MCP local preparation; only individually selected and owner-verified capabilities may be bound."
+        }
+      ],
+      "assessments": [
+        {
+          "status": "experimental",
+          "scope": "Retained recipe and source inspection only. Live operation and deployment conformance are unverified.",
+          "source_revision": "sha256:b33aa71a13d655e96e6b736d0c9de1e5ddea52f205916ca20b876387ff830e87",
+          "assessed_at_unix_ms": 1790773042473,
+          "evidence": [
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "playwright",
+              "revision": "sha256:b33aa71a13d655e96e6b736d0c9de1e5ddea52f205916ca20b876387ff830e87"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "playwright-package",
+              "revision": "sha256:624f0ba4d387028bbc734520142fbebb7075a88da8b623f4760adf76aa212f8b"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "playwright-license",
+              "revision": "sha256:9a7110fc2d2f964038e5dc49128f908f29f47a574c961cba16085914e879cbda"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

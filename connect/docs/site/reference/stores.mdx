@@ -1,0 +1,50 @@
+---
+title: "Persistence and store contracts"
+description: "Inject durable feature storage with atomic admission, revisions, effects and fenced recovery."
+icon: "database"
+---
+
+`ToolkitStore` stores feature-owned records. It is not a policy owner, credential vault, scheduler or another setup state machine. Hosts authenticate and authorize every namespace; typed adapters validate record schema/version and permitted transitions.
+
+## Required capabilities
+
+The durable contract requires durable storage, revision CAS, unique admission, atomic record/events/effects, cross-process fencing and store time. `StoreCapabilities::require_durable_contract` checks declarations; actual backend conformance must establish their behavior.
+
+| API family | Atomic meaning |
+| --- | --- |
+| `admit` | Unique key, initial record, events and effect intents commit together |
+| `compare_and_swap` | Expected revision and optional payload digest guard the complete replacement |
+| Record claim/renew/recover/release | Worker, store, record, fence and expiry identify the current executor claim |
+| `claim_effect` | Admission checks the owner revision authorized by the caller |
+| Effect acknowledgment/reconciliation | Outcome evidence and replayable events persist together |
+| Scoped record/event/effect reads | Bounded observation within explicit namespace |
+
+Exact admission replay returns the current canonical record. Changed initial content under the same key conflicts. A lost result does not prove rollback.
+
+## SQLite backend
+
+`SqliteStore` uses an on-disk database with WAL, FULL synchronous commits, immediate write transactions and database-issued timestamps. Independent processes sharing the same supported database file share claims and fences. Copied databases and unsupported network filesystems are outside that claim.
+
+Lease expiry uses the host wall clock. Monotonically increasing fences order worker generations, but clock stability remains a deployment assumption. Store claims cannot undo a provider effect that already escaped.
+
+After an ambiguous renewal result, `recover_record_claim` can recover the same still-live worker/fence with its current expiry. It does not reacquire an expired, released or superseded claim. Mutations continue to require the current exact token and current application permission.
+
+## Conditional admission
+
+`ConditionalAdmissionStore` adds an actual atomic conditional publication boundary. SQLite checks exact revisions/digests for up to 64 participating records in the same realm and physical database, with supported live claims, before committing ordinary admission records/events/effects.
+
+The conditions must name the real participating owners. Copies of another owner's policy cannot fence its updates. A recovered existing admission does not prove that newly supplied predicates held at its original creation. A backend without an equivalent atomic boundary must refuse this contract rather than emulate it with a preflight read followed by a write.
+
+## External uncertainty
+
+An expired dispatched effect is retryable only where its adapter established idempotent replay. Otherwise claim reconciliation and obtain the domain's evidence before returning it to pending. Exceptions and error prose cannot prove non-application.
+
+Effect acknowledgment does not automatically establish setup readiness. The original task, runtime and provider remain separate authorities.
+
+## Other stores and schema compatibility
+
+A custom backend must implement atomic transactions, concurrent claims, compare-and-swap, commit recovery and fencing. Run the store conformance checks against that backend.
+
+A database schema version number alone is not compatibility evidence across development and released graphs. Preserve existing state and establish the actual schema/owner contract before migration; an owned fresh fixture is different from silently resetting a user's store.
+
+Store redaction reduces accidental debug exposure but cannot detect every secret in arbitrary payloads. Persist credential handles and scoped observations, not tokens or unrestricted authentication pages. Source details are in `crates/toolkit-store/src/lib.rs` and its README.

@@ -1,0 +1,37 @@
+---
+title: "Connection lifecycle"
+description: "Understand installation, account connection and agent access."
+icon: "circle-check"
+---
+
+A usable integration combines installed software, a selected account, agent permissions and an active runtime connection. Each has its own lifecycle.
+
+| Layer | What to check |
+| --- | --- |
+| Software | The selected package and dependencies are installed |
+| Account | The connection uses the intended account and credentials |
+| Access | The acting agent has the required operations, resources and lifetime |
+| Runtime | The intended agent can discover and invoke the operation |
+| Frontend | Participants are admitted, messages reach the agent and replies reach the permitted destination |
+
+## Configuration changes
+
+Bindings identify the package, configuration, connection, grant and runtime target. When one changes, reconcile the binding against the new selection. Apply results only to the revision they describe.
+
+Live MCP additions take effect at a runtime turn boundary. The agent can then discover and load the selected operations. See [native MCP integration](/guides/native-mcp).
+
+## Combined requests
+
+Track service access and frontend setup separately. For example, a document connection can be ready while a Slack frontend waits for an administrator to install the app.
+
+## Stop, revoke or disconnect
+
+- **Stop setup** ends the setup request.
+- **Revoke access** removes an agent's permission to use selected operations.
+- **Disconnect an account** changes the credential connection.
+- **Pause a frontend** controls new incoming interactions under the host's policy.
+- **Remove an integration** retires its selected binding and handles its shared dependencies.
+
+Let entered operations settle through their owners before replacing processes or connections. Saved configuration and external actions retain their own outcomes after a cancellation.
+
+See [connection management](/guides/manage-connections) and [operations](/operations/runbook).

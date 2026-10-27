@@ -1,0 +1,156 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "Meerkat Connect",
+  "description": "Discover, configure and use service integrations with Meerkat Connect.",
+  "theme": "maple",
+  "colors": {
+    "primary": "#607F51",
+    "light": "#8AB576",
+    "dark": "#4F6B43"
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting started",
+            "pages": [
+              "introduction",
+              "availability",
+              "quickstart",
+              "roadmap"
+            ]
+          },
+          {
+            "group": "Integration library",
+            "pages": [
+              "library/adoption",
+              "library/slack-gmail",
+              "library/candidates",
+              "library/playwright",
+              "library/github"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/ownership",
+              "concepts/roles",
+              "concepts/acquisition",
+              "concepts/authentication",
+              "concepts/readiness"
+            ]
+          },
+          {
+            "group": "Using integrations",
+            "pages": [
+              "guides/request-an-integration",
+              "guides/manage-connections"
+            ]
+          },
+          {
+            "group": "Host integration",
+            "pages": [
+              "library/local-install",
+              "acquisition/local-install",
+              "guides/native-mcp",
+              "guides/host-composition",
+              "guides/setup-a-frontend"
+            ]
+          },
+          {
+            "group": "Building integrations",
+            "pages": [
+              "guides/service-connectors",
+              "guides/agent-frontends",
+              "guides/port-an-integration"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/remembered-tool",
+              "examples/slack-summary",
+              "examples/robot-extension",
+              "examples/organizational-host"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "SDKs and APIs",
+        "groups": [
+          {
+            "group": "Rust",
+            "pages": [
+              "sdks/rust"
+            ]
+          },
+          {
+            "group": "Python",
+            "pages": [
+              "sdks/python",
+              "sdks/python-connectors",
+              "sdks/python-frontends"
+            ]
+          },
+          {
+            "group": "TypeScript",
+            "pages": [
+              "sdks/typescript",
+              "sdks/typescript-connectors",
+              "sdks/service-profiles",
+              "sdks/ui"
+            ]
+          },
+          {
+            "group": "Tool surfaces",
+            "pages": [
+              "api/discovery",
+              "api/acquisition"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Integration contracts",
+            "pages": [
+              "reference/packages",
+              "reference/catalog",
+              "reference/configuration",
+              "reference/continuation",
+              "reference/deployment",
+              "reference/stores"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "reference/architecture",
+              "reference/portability",
+              "reference/access-control"
+            ]
+          },
+          {
+            "group": "Operations and contribution",
+            "pages": [
+              "operations/runbook",
+              "operations/troubleshooting",
+              "contributing/validation"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "redirects": [
+    {
+      "source": "/sdks/activepieces",
+      "destination": "/sdks/service-profiles"
+    }
+  ]
+}

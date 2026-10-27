@@ -1,0 +1,60 @@
+# Pending native integration. See README.md before selecting this workspace.
+[workspace]
+members = ["../crates/meerkat-connect", "../crates/toolkit-catalog", "../crates/meerkat-toolkit", "../crates/toolkit-mobkit", "../crates/toolkit-store"]
+resolver = "2"
+
+[workspace.package]
+version = "0.9.4"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+sha2 = "0.10"
+hex = "0.4"
+url = { version = "2", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+async-trait = "0.1"
+futures = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+tempfile = "3"
+toolkit-package = { path = "../crates/toolkit-package" }
+toolkit-store = { path = "../crates/toolkit-store" }
+toolkit-catalog = { path = "../crates/toolkit-catalog" }
+meerkat-toolkit = { path = "../crates/meerkat-toolkit" }
+indexmap = "2"
+# Published Core and Meta 0.9.4.
+meerkat = { version = "=0.9.4", default-features = false }
+meerkat-machine-dsl = { version = "=0.9.4" }
+meerkat-machine-schema = { version = "=0.9.4" }
+meerkat-machine-codegen = { version = "=0.9.4", git = "https://github.com/lukacf/meerkat.git", rev = "e91835c5fea0170d0dfc1d297d70269234fd4a16" }
+meerkat-core = { version = "=0.9.4" }
+meerkat-llm-core = { version = "=0.9.4" }
+meerkat-authorization = { version = "=0.9.4" }
+meerkat-authorization-contracts = { version = "=0.9.4" }
+meerkat-runtime = { version = "=0.9.4" }
+meerkat-workgraph = { version = "=0.9.4" }
+meerkat-tools = { version = "=0.9.4" }
+
+meerkat-mob = { version = "=0.9.4" }
+meerkat-mob-mcp = { version = "=0.9.4" }
+meerkat-mobkit = { package = "meerkat-meta", version = "=0.9.4" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+todo = "deny"
+unimplemented = "deny"
+
+[profile.dev]
+debug = 1
+
+# The unpublished generator uses the same released registry type identities.
+[patch."https://github.com/lukacf/meerkat.git"]
+meerkat-core = { version = "=0.9.4" }
+meerkat-machine-schema = { version = "=0.9.4" }

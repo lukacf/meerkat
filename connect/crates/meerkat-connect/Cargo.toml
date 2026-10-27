@@ -1,0 +1,87 @@
+[package]
+workspace = "../../native-candidate"
+name = "meerkat-connect"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Meerkat Connect's standalone terminal and reusable native setup conversation"
+publish = false
+
+[[bin]]
+name = "toolkit_gateway"
+path = "src/bin/toolkit_gateway.rs"
+required-features = ["console"]
+
+[features]
+default = []
+console = ["dep:meerkat-mobkit", "dep:meerkat-mob", "dep:axum"]
+
+[dependencies]
+meerkat-authorization = { version = "=0.9.4" }
+axum = { version = "0.8", optional = true }
+meerkat-authorization-contracts = { version = "=0.9.4" }
+meerkat-mob = { version = "=0.9.4", optional = true }
+meerkat-mobkit = { package = "meerkat-meta", version = "=0.9.4", optional = true }
+meerkat = { version = "=0.9.4", features = ["local-authorization", "session-store", "mcp", "skills", "native-keyring"] }
+meerkat-core = { version = "=0.9.4" }
+meerkat-mcp = { version = "=0.9.4" }
+meerkat-runtime = { version = "=0.9.4" }
+meerkat-session = { version = "=0.9.4" }
+meerkat-store = { version = "=0.9.4", features = ["sqlite", "jsonl"] }
+meerkat-models = { version = "=0.9.4" }
+meerkat-llm-core = { version = "=0.9.4", default-features = false }
+meerkat-auth-core = { version = "=0.9.4" }
+meerkat-openai = { version = "=0.9.4", default-features = false }
+meerkat-anthropic = { version = "=0.9.4", default-features = false, features = ["oauth"] }
+meerkat-gemini = { version = "=0.9.4", default-features = false, features = ["oauth"] }
+clap = { version = "4.5", features = ["derive"] }
+futures-util = "0.3"
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+sha2.workspace = true
+tempfile.workspace = true
+toolkit-package = { path = "../toolkit-package", default-features = false }
+meerkat-toolkit = { path = "../meerkat-toolkit" }
+nix = { version = "=0.31.3", features = ["signal", "process", "term", "poll", "fs", "user"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+async-trait.workspace = true
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "cookies"] }
+cookie = "=0.18.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus-secret-service = { version = "=4.1.0", default-features = false, features = ["crypto-rust", "vendored"] }
+
+[target.'cfg(unix)'.dependencies]
+toolkit-mobkit = { path = "../toolkit-mobkit", features = ["native-host"] }
+
+[dev-dependencies]
+# Canonical definitions for mandatory mob comms in the fresh SDK fixture.
+meerkat-comms = { version = "=0.9.4", default-features = false }
+# Native definitions for the fresh SDK host's expected surface, not a capture.
+meerkat-tools = { version = "=0.9.4", default-features = false }
+# Exact read-only backend evidence in the SDK fixture, never a second Toolkit owner.
+rusqlite.workspace = true
+toolkit-store = { path = "../toolkit-store" }
+meerkat-workgraph = { version = "=0.9.4" }
+# Native fault controls are available only to this crate's tests.
+meerkat = { version = "=0.9.4", features = ["test-support"] }
+meerkat-client = { version = "=0.9.4" }
+meerkat-mob = { version = "=0.9.4" }
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+hmac = "0.12"
+base64 = "0.22"
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "mobkit_setup_member"
+required-features = ["console"]

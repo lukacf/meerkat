@@ -1,0 +1,70 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "home-assistant-mcp-setup",
+  "version": "0.1.0",
+  "description": "Guidance-only setup recipe with explicit source observations and newcomer prerequisites.",
+  "author": {
+    "name": "Meerkat Toolkit"
+  },
+  "license": "MIT OR Apache-2.0",
+  "extensions": {
+    "ai.rkat.toolkit": {
+      "schema_version": 1,
+      "identity": {
+        "publisher": "meerkat-toolkit",
+        "name": "home-assistant-mcp-setup",
+        "version": "0.1.0"
+      },
+      "display_name": "Home Assistant MCP setup",
+      "description": "Guidance-only setup recipe with explicit source observations and newcomer prerequisites.",
+      "provenance": {
+        "source": "https://www.home-assistant.io/integrations/mcp_server/",
+        "source_revision": "sha256:bc0aa96545363e57d8fc832f07fecbf7bd781e960b56fec215a089acc98ec88e",
+        "license": "MIT OR Apache-2.0 for Toolkit-authored recipe metadata only. Provider documentation and hosted service retain their own terms. No implementation is copied.",
+        "notices": [
+          "This package is authored by Meerkat Toolkit, not by the provider.",
+          "No upstream implementation is vendored. Hosted endpoints are mutable services, not pinned executable artifacts.",
+          "Offline recipe validation does not establish installation, authentication, readiness or supported live operations."
+        ],
+        "local_patches": []
+      },
+      "strategies": [
+        {
+          "id": "setup",
+          "kind": "configuration_recipe",
+          "instructions": "Enable the official MCP Server integration on the selected Home Assistant instance. It exposes /api/mcp using Streamable HTTP. Choose exposed entities and confirm control permissions. OAuth supports URL-based client identity; clients that require RFC 7591 dynamic registration need another compatible route. A protected long-lived token is an alternative. Preserve separate authority for physical effects.",
+          "sources": [
+            "https://www.home-assistant.io/integrations/mcp_server/"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "The user-specific instance endpoint, TLS/network route and account are not selected.",
+            "Actual entity/operation schemas and device-effect authority require host verification."
+          ]
+        }
+      ],
+      "known_exports": [
+        {
+          "id": "home-assistant-mcp-setup.service",
+          "role": "service_connector",
+          "description": "Home Assistant MCP setup; only individually selected and owner-verified capabilities may be bound."
+        }
+      ],
+      "assessments": [
+        {
+          "status": "experimental",
+          "scope": "Retained recipe and source inspection only. Live operation and deployment conformance are unverified.",
+          "source_revision": "sha256:bc0aa96545363e57d8fc832f07fecbf7bd781e960b56fec215a089acc98ec88e",
+          "assessed_at_unix_ms": 1790773044140,
+          "evidence": [
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "home-assistant",
+              "revision": "sha256:bc0aa96545363e57d8fc832f07fecbf7bd781e960b56fec215a089acc98ec88e"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

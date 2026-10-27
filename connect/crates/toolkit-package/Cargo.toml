@@ -1,0 +1,57 @@
+[package]
+name = "toolkit-package"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+local-artifacts = ["dep:rustix", "dep:zip", "dep:flate2"]
+local-recipes = ["dep:toolkit-store", "dep:tokio"]
+
+[[bin]]
+name = "toolkit-local-recipes"
+path = "src/bin/toolkit-local-recipes.rs"
+required-features = ["local-recipes"]
+
+[[bin]]
+name = "toolkit-node-plan"
+path = "src/bin/toolkit-node-plan.rs"
+
+[[bin]]
+name = "toolkit-python-plan"
+path = "src/bin/toolkit-python-plan.rs"
+
+[[bin]]
+name = "toolkit-mcpb-install"
+path = "src/bin/toolkit-mcpb-install.rs"
+required-features = ["local-artifacts"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error = "=0.1.20"
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+url.workspace = true
+cap-std = "4.0.3"
+toolkit-store = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rustix = { version = "=1.1.5", features = ["fs"], optional = true }
+zip = { version = "=2.4.2", default-features = false, features = ["deflate-flate2", "flate2"], optional = true }
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true
+async-trait.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true

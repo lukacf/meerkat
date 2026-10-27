@@ -1,0 +1,110 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "google-calendar-api-setup",
+  "version": "0.2.0",
+  "description": "Two explicit service-connector strategies with separate host prerequisites: a Google-hosted MCP developer preview or Toolkit Python REST operations. No automatic fallback.",
+  "author": {
+    "name": "Meerkat Toolkit"
+  },
+  "license": "MIT OR Apache-2.0",
+  "extensions": {
+    "ai.rkat.toolkit": {
+      "schema_version": 1,
+      "identity": {
+        "publisher": "meerkat-toolkit",
+        "name": "google-calendar-api-setup",
+        "version": "0.2.0"
+      },
+      "display_name": "Google Calendar: hosted MCP preview or Toolkit Python REST operations",
+      "description": "Two explicit service-connector strategies with separate host prerequisites: a Google-hosted MCP developer preview or Toolkit Python REST operations. No automatic fallback.",
+      "provenance": {
+        "source": "https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server",
+        "source_revision": "sha256:c5958f3dfe6d0f7c295f0ee6464dbc0ac42a5c6f715c71df01cf0b19a610e11a",
+        "license": "MIT OR Apache-2.0 for Toolkit-authored metadata. Google documentation states CC BY 4.0 for prose and Apache-2.0 for samples, subject to page exceptions; hosted services retain their own terms. No provider implementation is copied.",
+        "notices": [
+          "Authored by Meerkat Toolkit, not Google. Documentation body hashes identify observed public bytes, not the hosted implementation.",
+          "This additive version preserves 0.1.0 and the google-calendar-api-setup.service export identity. Select the exact version, library digest and strategy; no automatic upgrade or fallback.",
+          "The hosted endpoint is a restricted Developer Preview. Catalog visibility is not preview eligibility, authenticated account readiness or mutation authority.",
+          "An endpoint or operation library supplies setup inputs only. Existing owners must authenticate the selected account and bind current schemas, policy, operation authority and role readiness before reporting usable tools."
+        ],
+        "local_patches": []
+      },
+      "strategies": [
+        {
+          "id": "hosted-mcp-preview",
+          "kind": "remote_mcp",
+          "instructions": "Explicitly select the Google-hosted Calendar Developer Preview and its retained Streamable HTTP endpoint. The guide advertises event reads and writes, but its sample OAuth scopes permit only calendar-list reads, event reads and free/busy. The sample does not authorize mutations. Observe current tool schemas and have the credential/policy owner verify the selected account, calendar and operation-specific scopes before binding any operation. Preview eligibility and host-selected prompt/response screening are prerequisites. If setup or authorization is refused, report that result; do not switch to REST.",
+          "sources": [
+            "https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server",
+            "https://developers.google.com/workspace/preview",
+            "https://developers.google.com/workspace/guides/configure-mcp-security",
+            "https://developers.google.com/workspace/calendar/api/auth"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "Preview membership, permitted preview use, selected project/API enablement, host OAuth registration and account consent are not established by this bundle.",
+            "The guide sample uses readonly/freebusy scopes despite advertised write tools. Actual operation authority, current schemas and owner-authenticated role readiness require separate verification; no implicit scope expansion is supplied.",
+            "The hosted implementation is mutable. No live Google operation, account isolation, revocation or deployment support assessment is claimed."
+          ]
+        },
+        {
+          "id": "toolkit-rest",
+          "kind": "configuration_recipe",
+          "instructions": "Explicitly select Python GoogleCalendarOperations in sdk/python with the google-calendar optional profile. Read GOOGLE-CALENDAR.md and this version's SUPPORT.md for the exact retained source checkpoint. The host supplies an authenticated HTTPX client, API base and selected calendar. Coverage is one-page event listing, get, insert, patch and delete; unsupported Calendar options refuse. Preserve exact provider event IDs, ETags and returned versions. A write error or cancellation carries unknown outcome and permits no automatic retry, replacement event ID or fallback. Preserve PairedHost internal-calendar restrictions, origin stamping, version ledger, deterministic IDs and final readback in their existing owners. This is a separately selected REST strategy; the library does not store credentials, perform OAuth or activate tools.",
+          "sources": [
+            "https://developers.google.com/workspace/calendar/api/auth",
+            "https://developers.google.com/workspace/calendar/api/guides/version-resources"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "The host must bind the selected Python SDK source or separately verified artifact, selected account/calendar, operation schemas and lifecycle to the existing service export. The operation library is not an activated tool surface.",
+            "The existing host credential owner must supply OAuth registration, account consent, minimal operation scopes and credential refresh/revoke. This recipe adds no credential storage, OAuth flow or authentication fallback.",
+            "The retained source checkpoint and local protocol tests do not establish public package availability, live Google access, current account authorization or complete PairedHost adoption."
+          ]
+        }
+      ],
+      "known_exports": [
+        {
+          "id": "google-calendar-api-setup.service",
+          "role": "service_connector",
+          "description": "Selected Google Calendar operations. MCP preview and Python REST share one service export identity; only exact owner-authorized operations may be published."
+        }
+      ],
+      "assessments": [
+        {
+          "status": "experimental",
+          "scope": "Retained setup inputs and official documentation inspection. The linked Python source checkpoint has local protocol and PairedHost composition evidence, not live Google readiness, preview enrollment, activation or complete application migration.",
+          "source_revision": "sha256:c5958f3dfe6d0f7c295f0ee6464dbc0ac42a5c6f715c71df01cf0b19a610e11a",
+          "assessed_at_unix_ms": 1790852643258,
+          "evidence": [
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "calendar-mcp",
+              "revision": "sha256:c5958f3dfe6d0f7c295f0ee6464dbc0ac42a5c6f715c71df01cf0b19a610e11a"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "calendar-preview",
+              "revision": "sha256:8fec44d757b15722db67108ad1a71a201f0d7d18de64cacb269189424e737cb7"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "calendar-security",
+              "revision": "sha256:2975b08b8c8df595355221ba8ea003f3b5b8d0511480ef77cbd396d7441d7d7f"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "calendar-auth",
+              "revision": "sha256:4d8340fa2ef8a183b3b4d76c3eaf6b9824a53939229179618ee613a1e1882177"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "calendar-versions",
+              "revision": "sha256:fbdc380d349fa4734aeab810f07d470b98b4840b61f0e058ae8287856fc5c47d"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

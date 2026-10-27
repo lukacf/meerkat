@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "maintainer": "meerkat-toolkit",
+  "reviewed_at_unix_ms": 1790772921474,
+  "sources": [
+    {
+      "id": "slack",
+      "url": "https://docs.slack.dev/ai/slack-mcp-server/",
+      "observed_sha256": "7db6c89782fdbd3bc823637d780ce39a7ad403e97d664be78a6607c21f29ecad",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Provider documentation and hosted service retain their own terms. No implementation is copied."
+    }
+  ],
+  "recipes": [
+    {
+      "strategy": "setup",
+      "export": "slack-mcp-setup.service",
+      "role": "service_connector",
+      "prerequisites": [
+        {
+          "kind": "developer_registration",
+          "instruction": "Register or reuse this host application, with its own app identity and callback; do not borrow another client registration."
+        },
+        {
+          "kind": "administrator",
+          "instruction": "Obtain required workspace app approval and confirm permitted user scopes."
+        }
+      ],
+      "plan": {
+        "kind": "guidance_only",
+        "blockers": [
+          "No Toolkit-owned Slack app registration or callback is retained in this package.",
+          "Current tool schemas, selected operations and credential-owner binding remain required."
+        ]
+      }
+    }
+  ]
+}

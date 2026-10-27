@@ -1,0 +1,33 @@
+---
+title: "An organizational host"
+description: "Use deployment identities, administrator rollout and explicit audiences in a GitOps application."
+icon: "building"
+---
+
+This example shows an application with multiple people, shared agents, deployment-owned service identities and GitOps activation.
+
+## Prepare a deployment proposal
+
+An employee asks a shared assistant to answer questions in a support channel using a document source. The setup agents identify two independent outcomes: document service access and frontend exposure.
+
+The host can lack a shell or permit no executable changes at runtime. Connect records the selected package, image/configuration/policy changes, affected tasks and missing administrator action through the host's permitted repository workflow. A PR or merge is a deployment observation, not integration readiness.
+
+After rollout, the deployment owner attests the realized artifact and configuration. Credential and policy owners establish selected workload identity and role grants. Runtime and interaction owners acknowledge the requested bindings.
+
+## Separate personal and service authority
+
+A shared specialist must not fall back to its owner's personal account when a delegated request lacks permission. Each hop retains the authenticated requester or explicit service mandate and applies current source, account, destination and local permissions.
+
+A personal agent can delegate to a shared initiative agent and then an investigator. Preserve the original requester and permitted resources at each step, and keep conversation access scoped to its intended participants.
+
+Apply [access control](/reference/access-control) at resource reads, agent delegation and output delivery.
+
+## Inject durable storage
+
+Use `ToolkitStore` for setup records, events and effects. The SQLite backend supplies durable admission, compare-and-swap and fencing. A custom backend implements the same transaction and recovery contract.
+
+## Deliver proactively
+
+A notification subscription binds content class, recipient audience, destination, trigger and lifetime. The outbound owner rechecks current audience before each permitted attempt. Pause or unsubscribe handles already queued output according to the binding's policy.
+
+Shared multi-caller setup is planned for 0.9.5. It will serve several waiting tasks while preserving their separate authority, conversation and result destinations. Ordinary 0.9.4 setup keeps each caller and continuation separate.

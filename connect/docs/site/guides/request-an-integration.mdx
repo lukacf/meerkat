@@ -1,0 +1,266 @@
+---
+title: "Ask for an integration"
+description: "Describe the work you want done, including its audience and constraints."
+icon: "comment"
+---
+
+Start in the standalone `meerkat-connect` CLI or an application's integrated Console. Describe the task and let the setup agent identify the integration and account requirements.
+
+Start with the outcome. "Read updates from these two channels and email me a summary" is more useful than "Install a Slack plugin." It preserves the requested time window, resources, recipient and business purpose without assuming an implementation.
+
+## Give enough context
+
+Include the account or workspace when you know it, the resources involved, the intended audience, and whether the connection is for one task or continuing use. A remembered name, URL or repository is a useful clue. It is not necessary to pick a protocol or package first.
+
+<Tabs>
+  <Tab title="Read or act on a service">
+    ```text
+    Read last week's updates from our launch Slack channels.
+    Email a summary to my work address, with links to the source messages.
+    Use my Acme workspace account.
+    ```
+    This requests service access. It does not expose a bot, grant an audience access to your assistant, or select Gmail automatically.
+  </Tab>
+  <Tab title="Expose an assistant">
+    ```text
+    Let the approved Support group talk to the existing Work Assistant
+    in our private support channel. Keep each admitted thread separate
+    and send replies into that same thread.
+    ```
+    This requests a frontend on a host that supports that target-agent choice. An example home-automation host instead routes each admitted sender to their own agent. Participant permission, conversation policy and service authority must be established separately from provider app installation. Follow [Set up an agent frontend](/guides/setup-a-frontend) for host selection, pairing, review and the lifecycle after setup exits.
+  </Tab>
+</Tabs>
+
+## Use several public services in one Console task (development)
+
+<Note>
+This development path covers one reviewed set of 2-8 public MCP services that
+need no provider sign-in. One installed two-service journey has completed through
+the controlled Console API. Browser interaction and authenticated-service batches
+remain separate. The optional warm path below has native controls, but its
+installed acceptance is still pending.
+</Note>
+
+Ask for the useful result in your original conversation, for example:
+
+```text
+Make a background-reading brief for the current top three Hacker News stories.
+Use English Wikipedia for background. Include each story's discussion link,
+a relevant Wikipedia article, and which story I should read first and why.
+```
+
+The agent chooses the integrations and installation jobs. Software installation
+can have its own reviews. The **complete-set access review** then presents all
+selected services together: each connector, declared operation source, remote
+endpoint when applicable, exact operations, and task access deadline. It also
+shows the agent, proposed continuation instruction and tool-catalog access.
+Approve only the complete set you intend to use; no sign-in credentials belong
+in this public-service review.
+
+Read **agent tool permissions** separately from the per-service task access.
+The review covers the complete successor tool policy, including preserved
+permissions, and states that it lasts until superseded. Ending the task does not
+undo that separately reviewed policy. The policy alone does not authorize a
+service call: that call still needs its exact current service grant.
+
+Approval does not establish readiness. Each member must become Ready through
+its own attachment before the original question continues with the complete
+set. An unavailable required service prevents continuation; a download or
+accepted review does not establish readiness. Successful continuation answers
+the same original question without requiring you to repeat it.
+
+A host can separately enable [another public acquisition through the same live
+helper](/guides/host-composition#acquire-another-public-service-through-the-same-live-helper-development).
+Its access review names fresh task-specific setup authority and metadata access
+for both named agents across both named sessions. With that selection, the
+continued task can request another integration. Keeping an earlier connection
+requires selecting it again in the new complete-set review, with fresh grants;
+old access is not inherited. Without the configured selection, later acquisition
+remains unavailable through this continuation. Installed warm acceptance is
+still pending.
+
+## Set up a service key in the terminal
+
+The terminal can set up library integrations and selected Python/Node stdio packages with declared credential fields. The agent identifies those requirements before the installation review.
+
+<Steps>
+  <Step title="Choose the realm and describe the task">
+    Run the supplied `meerkat-connect` in an interactive terminal and choose a
+    realm, or select it directly:
+
+    ```sh
+    meerkat-connect --realm work
+    ```
+
+    Before the conversation opens, review access for the supplied setup helper,
+    complete model-provider setup if prompted, and review the setup assistant's
+    model and tools. These reviews are separate from the service installation
+    and access review below. Accepted startup changes can remain saved if you
+    stop later.
+
+    At `You:`, ask, for example: "Set up Tavily for web search in this realm."
+    The agent chooses and checks the integration, its operations and its
+    credential requirements.
+  </Step>
+  <Step title="Review the concrete installation and access">
+    The terminal shows the selected realm, integration launch, credential fields
+    or declared environment names, agent, operations and access duration. Approve this selection before
+    entering credentials.
+  </Step>
+  <Step title="Enter each credential privately">
+    Type or paste each value at its hidden terminal prompt. These values stay
+    outside the agent conversation. Use `/quit` to stop before these credentials
+    are saved.
+  </Step>
+  <Step title="Read the saved result">
+    Connect closes setup before finalizing the reviewed installation. On success,
+    native owners save the new realm configuration and credentials, then issue
+    the exact reviewed access. Connect reports the result and returns to the
+    setup conversation. Read configuration, credential and grant outcomes
+    separately; a failed or uncertain result does not prove that nothing was
+    saved. The installation can outlive a time-limited grant.
+  </Step>
+  <Step title="Use the service from an ordinary agent">
+    After Connect reports successful finalization and returns to `You:`, enter
+    `/quit` and wait for normal exit. This closes the setup conversation; it does
+    not perform the business task or undo saved access.
+
+    From the same working directory, start an ordinary agent in that realm:
+
+    ```sh
+    rkat --realm work run --wait-for-mcp --mcp-auth stored "<your complete business request>"
+    ```
+
+    Replace the quoted placeholder with the full request. This opens a fresh
+    session using the realm's saved configuration and the normal agent's current
+    grants. It does not resume the setup conversation or an earlier running
+    agent. A successful service call is still needed before treating the service
+    as ready.
+  </Step>
+</Steps>
+
+<Accordion title="If you used explicit roots or a different model target">
+Repeat any `--state-root`, `--context-root` and `--user-config-root` overrides so
+`rkat` selects the same configuration and realm root. These flags are optional;
+ordinary setup does not require custom directories.
+
+An existing model target selected with `--choose-model` applies to that Connect
+invocation, without rewriting your defaults. If it differs from the ordinary
+default, pass the same `--model` and exact configured
+`--auth-binding REALM:BINDING[:PROFILE]` to `rkat run`. Reuse the existing
+credential owner; do not copy a key into the command or conversation.
+</Accordion>
+
+This initial installation path accepts a new service name. Later credential
+changes use the separate management flow below. See
+[host composition](/guides/host-composition#standalone-service-secret-setup)
+for persistence and partial-outcome semantics.
+
+## Finish or change an agent's access
+
+Return to `meerkat-connect` in the same realm and ask, for example, "Finish my
+mail setup and let the normal agent read messages" or "Stop the research agent
+using mail". The agent can discover configured services and their declared
+operation names. You do not need to recover an installation job or type native
+configuration. A missing credential and missing agent access are separate steps.
+
+The protected review names the realm, service, agent, exact operations and access
+lifetime. Granting access issues and selects a new grant for that target; it can
+replace a previous selection. It does not reinstall the service or change shared
+credentials. New selections apply to later-opened realms; open owners can retain
+their current selections. Connect closes setup, finishes cleanup, performs the
+reviewed native action, then returns its result to the conversation.
+
+Revocation targets the grant selected for that agent and service when the action
+executes. Another administrative change can alter that selection before execution.
+Connect reports revocation, removal from the selection and cleanup separately.
+Only a native `Revoked` result confirms revocation; deferred or uncertain cleanup
+is still reported. Other agents' access and shared credentials remain separate.
+
+The inventory lists each service's configured operations. Review the separate access decision for the target agent. An uncertain earlier action stays uncertain after any new action;
+Connect does not retry it automatically. A successful grant still needs a normal
+new session to check the intended service operation. Frontend roles use their
+host's separate admission and setup flow.
+
+## Reconnect or disconnect an OAuth account
+
+In the standalone CLI, ask "Reconnect my mail account" or "Disconnect my mail
+account". The agent can inspect existing services and native account status in
+the selected realm without making you supply internal identifiers.
+
+For reconnect, the terminal recovers the original requested scopes and matching
+client profile from private native metadata when available. It shows the exact
+account and inputs for review. If the metadata is missing or the profile changed,
+it asks you to review new choices. Sign-in then happens in your own browser. The
+CLI preserves the existing service configuration and grants, including revoked
+or expired grants; signing in again does not itself restore agent access.
+
+During sign-in, enter `/cancel` to cancel that attempt and return to the
+conversation. `/quit` or Ctrl-C exits after entered native work settles. If login
+completed before cancellation settled, the account remains connected. An
+uncertain completion is reported as uncertain and is not retried automatically.
+
+Disconnect is a credential-slot action. The review names services known to use
+that slot in this realm, but other consumers may also depend on it. Native logout
+clears whichever account occupies the slot when it runs and drains current native
+flows. It does not join a lost host callback task, prevent a later login, revoke
+independent grants or frontend roles, remove the service definition, or promise
+revocation at the provider. A later status observation is separate from the
+outcome of that logout.
+
+Switching a service to a different account and recovering a lost sign-in attempt
+are separate management flows, not exposed by these CLI tools. Installed Console
+account management has its own host admission and presentation contracts.
+
+## Finish setup or change a service credential
+
+Return to `meerkat-connect` in the same realm and say what you want, for example:
+"Finish the missing Tavily credentials", "Replace my Tavily key", or "Remove
+this service's saved key". The agent reads the realm's own configured services
+and declared credential fields to identify the exact selection. You do not need
+to know its native service identifier or environment variable names.
+
+The protected terminal shows the selected service, fields, current presence and
+action. After your fresh approval, replacement values are collected at hidden
+prompts. Setting a field fills or replaces its value; it does not promise to
+write only if the field is still empty. Removing a field clears only that saved
+credential. The service definition, other fields and existing agent grants stay
+as they are. An inherited service must be managed in its owning realm.
+
+A cancelled initial setup may have saved the service but only some credentials.
+This flow can fill the remaining fields. If the initial setup did not issue an
+agent grant, credential management does not create one; access still needs its
+own supported approval path. A fresh normal session can check the intended
+operation once the service has both its required credentials and agent access.
+
+Cancellation can leave an entered update completed, while later selected fields
+remain untouched. Connect waits for the entered native update and reports its
+actual result before ending the request. If a result is uncertain, current
+presence or a later explicitly approved change cannot settle that earlier
+attempt. Connect does not retry it automatically.
+
+Changed credentials affect later connections. A process that already received a
+value can retain it; removing a saved value neither revokes it at the provider
+nor immediately disconnects such a process. New launches that need a removed
+value refuse until it is supplied again. These operations concern service
+credentials; frontend routing and host setup remain separate.
+
+## Read the setup result
+
+| Result | What happens next |
+| --- | --- |
+| Ready for this role | The original task can use the acknowledged binding under current policy |
+| Human action needed | Complete the displayed account or administrator step through its owner |
+| Deployment needed | Review the concrete activation proposal through the host's deployment workflow |
+| Partial | Independent work can continue; the missing role remains visible |
+| Unsupported or unavailable | The host explains the missing contract or integration path without pretending setup succeeded |
+
+A browser redirect, successful download or green process is progress, not complete setup. [Readiness](/concepts/readiness) identifies the actual acknowledgments.
+
+## Stop the right thing
+
+Stopping setup ends that task's acquisition request. Cancelling the task stops the business work. Revoking a grant removes permitted use. Disconnecting an account affects its connection. These actions should have separate labels and state their remaining effects.
+
+Existing authority should be reused when it covers the requested action. Setup should ask about an unresolved account, recipient, audience, cost or executable change only when that choice is needed.
+
+For a concrete investigation, see [the remembered-tool example](/examples/remembered-tool).

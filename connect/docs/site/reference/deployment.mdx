@@ -1,0 +1,87 @@
+---
+title: "Deployment and activation owners"
+description: "Realize one logical package selection through the host's permitted local, remote or GitOps path."
+icon: "server"
+---
+
+Connect describes package components and activation selections. The host realizes them through local artifact preparation, a container runtime or its deployment workflow.
+
+## Host-selected paths
+
+| Path | Permitted work | What remains before readiness |
+| --- | --- | --- |
+| Active-package configuration | Bind permitted account, secrets or resources under accepted policy | Current account, grant and role acknowledgments |
+| Immediate activation | Prepare selected artifacts under host provisioning authority | Activation plus role-specific runtime receipts |
+| Example home-automation host: immutable activation | Prepare an exact executable/configuration/policy proposal | Deployment owner approval and one proposal per activation |
+| Organizational GitOps | Prepare exact image/configuration/policy change through authorized workflow | Real rollout, current executor identity and role acknowledgments |
+| Authorized remote execution host | Delegate effects unavailable to a browser/local surface | Remote owner receipts bound to the original selection |
+
+This example host queues separate proposals and activates one at a time. Another host can explicitly support a combined approved payload. Several waiters sharing one proposal do not imply several proposals were batched.
+
+## Exact approval and realization
+
+A proposal includes the actual selected artifacts, dependency closure, configuration, policy changes, migration, cost/disruption and affected requests. Approval binds that payload. A changed payload needs the appropriate owner decision again.
+
+A downloaded archive is not a launched component. A healthy process is not an active role. A GitOps PR, merge or warm pod is not the acknowledgment from the currently selected rollout/executor. Old-instance receipts cannot certify a replacement.
+
+## Local artifact preparation
+
+The optional `toolkit-package` `local-artifacts` feature provides `LocalArtifactPreparer` on Linux and macOS. A trusted host supplies a dedicated capability root, validated selection, component, explicit layout and already-open inputs. Preparation freezes and checks selected SHA-256 bytes and publishes a private tree without executing, downloading or authenticating anything.
+
+The implemented layouts are a single entrypoint file and a strict bounded ZIP32 profile. It is not a general ZIP, wheel, npm or interpreter-environment installer. A locked dependency declaration still requires its separate ecosystem realization.
+
+The host records the preparation root with its effect intent before entry. `reopen_verified` checks the original expected component/layout and re-derives membership from raw bytes. A locator string or self-consistent edited receipt cannot certify replacement content.
+
+`PublishedButUnconfirmed` preserves uncertainty when publication occurred but a subsequent durability step failed. The owner reconciles the selected location; it does not simply prepare another copy and call the first failed.
+
+## Local Compose backend
+
+A canonical `toolkit-compose-plan` executable and the Python
+`meerkat_toolkit.compose` module now implement a bounded local container path:
+prepare, start, observe, explicit resume, request stdio, stop and separate removal.
+The host supplies the exact package selection, profile, tools, engine identity
+and already-present images. Docker owns execution observations; Connect reuses
+the canonical manifest dependency order and does not create native grants.
+
+`prepared` identifies reviewable files; `observed` reports the operation's relevant
+Docker facts; `unconfirmed` preserves a failed or uncertain outcome. Request stdio
+cleanup returns `observation: null`, with no fresh graph-availability claim.
+`request.stopped: true` records durable stopped-container readback. It can coexist
+with `status: unconfirmed` when the stream failed or its return code is unknown.
+Successful `run-stdio` exit requires observed cleanup, a stopped request and stream
+return code zero. Use a separate observation for current graph facts. None of these
+states establishes domain readiness.
+
+Set the per-server
+`connect_timeout_secs = 60` for connection, handshake and tool enumeration when startup includes container graph admission. That setting changes neither tool execution timeouts nor
+shutdown grace. See [native MCP configuration](/guides/native-mcp) for the host
+handoff boundary.
+
+Explicit resume can finish a partial graph after fresh readback without replacing
+known containers. Stop preserves named state; removal requires a separate explicit
+state-deletion disposition. Cross-candidate state adoption and migration are not
+implemented. A private workspace lock serializes all operations, including each
+entire request stream and its cleanup; it is not distributed fencing. See the
+Python SDK's `COMPOSE.md` for exact commands, limits and host-custody requirements.
+
+## Kubernetes GitOps preparation
+
+`toolkit-gitops-prepare` produces concrete JSON files from one explicit container
+selection and a pinned host profile: an existing Deployment replacement and a
+new immutable ConfigMap. It preserves the old configuration, binds exact Git
+source, image, configuration and policy references, and emits file preconditions
+and hashes. A changed profile or input requires a new proposal.
+
+The profile prepares one stateless independent container and one service export as native Kubernetes JSON.
+The host must check and apply the complete change through its approved workflow.
+Preparation performs no registry lookup, Git mutation or cluster operation and
+reports no rollout or role readiness. See the source package's `GITOPS.md` for
+the complete wire contract and supported constraints.
+
+## Shutdown and replacement
+
+Component contracts define drain, cancellation, fencing, state retention and rollback. Keep ownership of entered work through awaited cleanup. A stalled old instance must not continue producing effects alongside a replacement unless the actual exclusivity/fencing contract permits it.
+
+Where a backend cannot prove clean shutdown, surface degraded or uncertain state. Neither process timeout nor cancellation of a waiter establishes that remote work ended.
+
+See [store contracts](/reference/stores), [readiness](/concepts/readiness) and [the organizational example](/examples/organizational-host).

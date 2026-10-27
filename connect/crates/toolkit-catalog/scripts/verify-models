@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Check recorded generated models and require every declared transition hit."""
+
+import hashlib
+import json
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def parse_coverage(model, text, transitions):
+    lines = model.splitlines()
+    observed = {}
+    # TLC identifies each disjunct of Next by its exact source span. Match that
+    # span to the generated transition call, not a second transition roster.
+    pattern = r'^<Next line \d+, col \d+ to line \d+, col \d+ of module model \((\d+) (\d+) (\d+) (\d+)\)>: (\d+):(\d+)$'
+    for line in text.splitlines():
+        match = re.fullmatch(pattern, line)
+        if not match:
+            continue
+        first, start, last, end, distinct, total = map(int, match.groups())
+        span = lines[first - 1:last]
+        span[-1] = span[-1][:end]
+        span[0] = span[0][start - 1:]
+        source = '\n'.join(span)
+        names = [name for name in transitions if re.search(r'\b' + re.escape(name) + r'\(', source)]
+        if len(names) != 1:
+            raise ValueError(f'ambiguous generated transition span: {source}')
+        observed[names[0]] = {'distinct_successor_states': distinct, 'total_successor_states': total}
+    if set(observed) != set(transitions):
+        raise ValueError(f'missing or extra transition coverage: {set(transitions) ^ set(observed)}')
+    return observed
+
+
+def main():
+    run = Path(sys.argv[1]).resolve()
+    manifest = json.loads((run / 'manifest.json').read_text())
+    if manifest['result'] != 'passed' or not manifest['rendered_artifacts_match_regeneration']:
+        raise ValueError('package and generated artifact checks must pass first')
+    sources = manifest['source_hashes_after']
+    if any(digest(Path(path)) != expected for path, expected in sources.items()):
+        raise ValueError('source changed after package verification')
+    generated = run / 'generated'
+    if any(digest(generated / name) != expected for name, expected in manifest['artifact_hashes'].items()):
+        raise ValueError('generated artifact changed after verification')
+    transitions = json.loads((generated / 'transitions.json').read_text())
+    if not transitions or len(set(transitions)) != len(transitions):
+        raise ValueError('invalid generated transition inventory')
+    model = (generated / 'model.tla').read_text()
+    result = {
+        'scope': 'bounded standalone acquisition machine invariants and transition successor coverage; no host or runtime conformance',
+        'package_manifest_sha256': digest(run / 'manifest.json'),
+        'artifact_hashes': manifest['artifact_hashes'],
+        'verifier_sha256': digest(Path(__file__)),
+        'tlc_launcher': shutil.which('tlc'),
+        'profiles': {},
+    }
+    passed = True
+    for profile in ('ci', 'deep'):
+        command = ['tlc', '-workers', '1', '-seed', '1', '-coverage', '1', '-metadir', str(run / ('tlc-' + profile)),
+                   '-config', str(generated / (profile + '.cfg')), str(generated / 'model.tla')]
+        log = run / ('tlc-' + profile + '.log')
+        print('Running ' + profile + ' model', flush=True)
+        with log.open('w') as output:
+            process = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, check=False)
+        text = log.read_text()
+        entry = {'command': command, 'exit_code': process.returncode, 'log_sha256': digest(log)}
+        entry['completed_without_error'] = process.returncode == 0 and 'Model checking completed. No error has been found.' in text
+        try:
+            entry['transition_actions'] = parse_coverage(model, text, transitions)
+            entry['all_transitions_hit'] = all(count['total_successor_states'] > 0 for count in entry['transition_actions'].values())
+        except ValueError as error:
+            entry['coverage_error'] = str(error)
+            entry['all_transitions_hit'] = False
+        summaries = re.findall(r'^.*states generated, .*distinct states found, .*states left on queue\.$', text, re.MULTILINE)
+        entry['states_summary'] = summaries[-1] if summaries else None
+        result['profiles'][profile] = entry
+        passed &= entry['completed_without_error'] and entry['all_transitions_hit']
+        print(f'{profile}: completed={entry["completed_without_error"]}, all transitions hit={entry["all_transitions_hit"]}', flush=True)
+    result['source_unchanged'] = all(digest(Path(path)) == expected for path, expected in sources.items())
+    result['artifacts_unchanged'] = all(digest(generated / name) == expected for name, expected in manifest['artifact_hashes'].items())
+    passed &= result['source_unchanged'] and result['artifacts_unchanged']
+    result['result'] = 'passed' if passed else 'failed'
+    (run / 'tlc-manifest.json').write_text(json.dumps(result, indent=2) + '\n')
+    print(run / 'tlc-manifest.json', flush=True)
+    return 0 if passed else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,0 +1,147 @@
+---
+title: "Use installed tools in Meerkat"
+description: "Connect an installed MCP integration through Meerkat's existing host configuration."
+icon: "plug"
+---
+
+After installation, attach the selected MCP integration through Meerkat's host configuration or live-session API. The host selects its account, resource access and agent permissions.
+
+## Preserve the installed launch
+
+The installer supplies `ready/mcp.json` and `ready/installed.json`. Verify the
+selected installation and keep these files unchanged. For a stdio entry,
+translate the selected server's name, exact command, ordered argument strings
+and optional nonsecret environment values into
+`<context-root>/.rkat/mcp.toml`:
+
+```toml
+[[servers]]
+name = "selected-integration"
+command = "/absolute/installed/runtime/bin/python"
+args = ["-I", "-B", "-m", "example_integration"]
+```
+
+The example paths and module are placeholders. Use the actual installer output.
+The native configuration uses TOML rather than the JSON `mcpServers` wrapper. This
+handoff supports stdio `command`, `args` and optional `env`; refuse other fields
+until their semantics have a supported mapping. In particular, do not drop a
+`cwd` requirement, and do not pass literal strings containing `${`, which the
+native TOML loader would expand.
+
+The host supplies the minimal process environment. Empty `env` does not clear
+inherited variables. Credentials remain with the host; do not paste them into
+shared configuration or agent messages. Configure account authentication and
+operation policy through their existing owners.
+
+## Let the native catalog expose tools
+
+Start the configured session with `rkat run --wait-for-mcp` using the host's
+model configuration. This starts an agent; it is not a connection-only probe.
+Use explicit context, state and user configuration roots when the session must
+be isolated from other configured servers.
+
+For example, after the host supplies an existing model configuration and the
+required environment, it can run:
+
+```sh
+"$RKAT" --context-root "$CONTEXT_ROOT" \
+  --state-root "$STATE_ROOT" --user-config-root "$USER_CONFIG_ROOT" \
+  --realm "$REALM" run --wait-for-mcp --model "$MODEL" \
+  "Use the selected integration to answer the requested task."
+```
+
+These variables are host-selected paths and identifiers. The context root
+contains the prepared `.rkat/mcp.toml`; the explicit roots must also expose the
+host's intended model configuration. A clean configuration root does not
+automatically inherit an existing model login from another root.
+
+MCP operations are deferred by default. The agent uses
+`tool_catalog_search` and `tool_catalog_load` to inspect the native catalog and
+load its selected operation schemas. The business tool becomes available at a
+supported boundary. Budget for search and load as well as the operation itself.
+These calls discover already connected tools; they do not find or install a
+new integration.
+
+Check the actual catalog, selected schema and operation result. Waiting for
+connections, seeing a configuration entry, or receiving a successful model
+response alone does not establish that a particular integration works.
+
+## Add tools to a live session
+
+Meerkat exposes live MCP mutation through its Python SDK and
+`rkat-rpc`. Keep the connected client and original session alive while setup
+finishes. Register setup explicitly with `client.mcp_add` for the intended
+session before asking the agent to install anything; the CLI project MCP file
+is not sufficient to populate this RPC session's live adapter. After the host
+validates and authorizes the installed launch, pass that launch to the existing
+native owner:
+
+```python
+# client is an already connected MeerkatClient using rkat-rpc.
+# session is the original live Session, not a replacement conversation.
+# approved_server is the host-approved native MCP configuration, including name.
+staged = await client.mcp_add(
+    session.id,
+    approved_server,
+    persisted=False,
+)
+
+# "staged" is not a connection or readiness receipt.
+result = await session.turn(
+    "Use the newly configured integration to finish the original request. "
+    "Inspect the native catalog and report any connection failure."
+)
+```
+
+The native runtime applies staged operations at a turn boundary. The agent uses catalog search/load before invoking the
+newly available operation.
+After the turn boundary, inspect the connection and invoke the selected tool. `persisted=False` applies the configuration to the live session.
+
+Keep the genuine setup server's identity and catalog stable during this
+handoff. The server name contributes to native tool provenance. Replacing
+`toolkit-setup` with a differently named recovery server can invalidate the
+original session's saved visibility, even when both expose some identically
+named tools. Reopening a setup workspace is not equivalent to keeping its
+controller alive. Use the documented recovery path for process loss and
+validate native restoration separately.
+
+The generated Connect setup command has a single-use workspace. Preserve its
+process during this live handoff. For process loss, follow
+[saved-setup recovery](/guides/manage-connections#read-saved-work-after-process-loss)
+instead of restarting that command against the old directory. A recovery
+connection supplies selected readback and cannot replace the original setup
+server's authority or restore installation tools.
+
+A connected RPC process supports ordinary sequential turns without
+`keep_alive=True`. That option is a separate comms behavior requiring a
+`comms_name`; do not enable it merely to keep the Python client open.
+Select the model, provider and token limit at creation. Runtime-routed
+continuation does not accept those creation-time overrides on each turn.
+The immediate MCP response's `persisted` value concerns configuration
+persistence. Do not infer configuration writes or restart readiness from a
+later lifecycle event's similarly named field.
+
+## Connect two instances without ambiguous tool names
+
+Distinct server names do not prefix their operation names. If two connections
+expose `search`, the native router excludes the colliding routes. After
+inspecting their actual operations, the host can add an explicit map beneath
+each server entry:
+
+```toml
+[servers.tool_names]
+search = "work_search"
+```
+
+The other connection could map its `search` to `personal_search`. Each map
+belongs to its own preceding `[[servers]]` entry. Exposed names must be distinct,
+1-64 ASCII letters, digits, underscores or hyphens. Keep the installed command
+and arguments unchanged. The native catalog-control names
+`tool_catalog_search` and `tool_catalog_load` are reserved.
+
+This mapping names a route. It does not filter the other operations, restrict
+resources, authenticate an account or grant permission. Verify the resulting
+catalog and apply the host's actual access policy.
+
+See [host composition](/guides/host-composition) for ownership and
+[local installation](/acquisition/local-install) for the preceding setup step.

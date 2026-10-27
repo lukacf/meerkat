@@ -1,0 +1,86 @@
+---
+title: "Author an agent frontend"
+description: "Connect an external interface to an existing agent with explicit admission, conversation and delivery contracts."
+icon: "comments"
+---
+
+A frontend transport is only one part of an agent interface. Provider authenticity, application permission, conversation isolation and output delivery have separate owners.
+
+For choosing and configuring a frontend, follow [Set up an agent frontend](/guides/setup-a-frontend). This page covers authoring the adapter and its host contracts.
+
+Use the Python transport and egress components with your application's admission, conversation and runtime lifecycle services.
+
+<Steps>
+  <Step title="Verify provider facts">
+    Verify the selected provider's signature/token and preserve exact installation, event, participant and conversation identifiers. Bound request size and reject ambiguous envelopes. A signed message supplies provider facts, not an application grant.
+  </Step>
+  <Step title="Admit the intended principal">
+    Map the verified external identity through application policy. Establish separate send, view, control and administration rights and the permitted service mandate. Anonymous use, if supported, needs an explicit audience and budget policy.
+  </Step>
+  <Step title="Bind the conversation and existing agent">
+    Namespace account/channel/thread keys and choose a declared context-sharing policy. Resolve the durable target through the existing identity owner. Do not silently create another agent or merge private conversations when an adapter is unavailable.
+  </Step>
+  <Step title="Declare the response projection">
+    Deliver only the admitted interaction's permitted output. Private reasoning, unrelated transcripts, tool events and artifact URLs are not the default reply payload. Bind the reply route to the admitted audience rather than generated text.
+  </Step>
+  <Step title="Use durable inbox and egress owners">
+    Preserve provider dedup keys, invocation identity, causal reply linkage, multipart state and uncertain receipts. A delivery retry must not create a new agent invocation or repeat a business action. Revalidate the current destination audience before each allowed attempt.
+  </Step>
+  <Step title="Verify lifecycle and modality support">
+    Test pause/removal, recovery, cancellation, member restoration and audience changes. Declare text/media/streaming/approval capabilities and authenticated fallbacks. A live frontend opens a live session only for an admitted interaction and waits for its live/playback owner acknowledgments.
+  </Step>
+</Steps>
+
+## Report a configuration command's disposition
+
+The current generic Forge bridge supports an optional submission outcome. A
+client opts in with exactly one `X-Forge-Frontend-Submission-Outcome: 1` header on
+an authenticated `POST /console/forge/frontends/submit`. A compatible owner may
+then add this field to the existing successful protocol 1 reply:
+
+```json
+{"submission_outcome":{"change_id":"change:one","disposition":"known"}}
+```
+
+The nested object has exactly `change_id` and `disposition`, neither nullable.
+Disposition is `known` or `unknown`. The ID must equal the submitted proposal's
+ID, and the existing envelope's `host` must match the complete current host:
+`protocol`, `host_id`, `application_id` and `source_digest`. The application
+observation remains opaque and unchanged.
+
+In the approved submit hook, choose a strict Boolean from the command's actual
+transaction outcome and pass the original request through the Forge context:
+
+```python
+return self.context.frontend_submission_result(
+    request, observation, known=outcome_is_known,
+)
+```
+
+This typed result binds the original command and host. Do not infer its Boolean
+from arbitrary application status text or HTTP 200. `known` settles the command's
+uncertainty; it does not mean the requested change succeeded, the frontend is
+ready, a native component closed, or a reply was delivered.
+
+Connect accepts `known` only for the exact currently entered submission. It
+returns `recovery_only: false` and clears cached inventory, so the next prepare
+requires a fresh inventory read. A new submission still needs its own human
+approval. Submitted IDs, spent calls and approvals remain spent, and recovery
+locators remain retained. GET/status observations cannot clear that command's
+uncertainty or authorize replay.
+
+Without the exact header, or when the hook returns a plain dictionary, the reply
+retains only `protocol`, `host` and `observation`. Descriptors, prepare and
+GET/status replies keep their existing shapes. An older owner may ignore the
+offer. Absent, `unknown`, malformed, mismatched or lost outcomes keep Connect
+conservative; no observation string restores permission to submit again.
+
+## Proactive delivery
+
+An existing reply grant does not authorize unsolicited output. Notifications and reminders use an explicit subscription or notification binding that names recipients, destination, content class, trigger and lifetime. Reuse the outbound delivery owner, with the same current audience checks, without manufacturing a new user turn.
+
+## Shared services
+
+One package can share credentials or a daemon between service and frontend exports. Removal must preserve resources still used by another role. Health should explain whether transport, admission, conversation, output or a supporting component is degraded.
+
+The [Slack example](/examples/slack-summary) contrasts both roles, and the [the robot example](/examples/robot-extension) adds device and live-media contracts. See [Python frontend reference](/sdks/python-frontends) for the existing modules.

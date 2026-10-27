@@ -1,0 +1,195 @@
+---
+title: "Slack and Gmail over MCP"
+description: "Run selected Slack reads and Gmail reads or writes without custom client code."
+icon: "envelope"
+---
+
+The local `meerkat-toolkit-services` package exposes Connect's existing Slack
+and Gmail operations through standard MCP stdio. An MCP host launches a process
+with a selected account and explicit operations. The package constructs and owns
+the provider client, so consumers do not write Python transport glue.
+
+Slack service operations and a [Slack agent frontend](/guides/agent-frontends) serve different purposes: one gives the agent service access; the other lets people talk to it.
+
+Select `get_user` to expose `slack_get_user` when human-readable author or
+mention attribution is useful. It takes an exact `user` ID and optional boolean
+`include_locale`, returning the provider's profile with that same ID. The host
+must separately authorize `users:read`; `users:read.email` is not needed for
+names. Profile access is independent of `allowed_channel_ids` and does not
+establish channel membership. The agent decides which IDs to look up, preserves
+unresolved IDs after refusals, and keeps people with matching names distinct.
+History reads do not trigger lookups or permission changes automatically.
+
+## Install the local component
+
+Use the selected services component from the current macOS or Linux
+[library edition](/library/local-install). Its `README.md`, component
+wheel, requirements and constraints provide the ordinary pip installation path
+in a new Python environment. The maintained guide is `sdk/services/README.md`
+in the Connect checkout. The package uses the `meerkat_toolkit_services` namespace.
+
+The current library includes structured Gmail sending, optional mailbox-profile
+reads, resumable Slack intervals, fixed Slack channel limits and fixed Gmail
+recipient limits. Its setup host preserves omitted, empty and explicit lists
+through installation and saved-request recovery.
+
+The component contains host-only OAuth helpers for explicit known-account code
+exchange and refresh. Their errors retain a finite optional `provider_code`
+from validated token-endpoint refusals; raw provider descriptions and unknown
+codes are not exposed. This helps the host explain a refusal without choosing
+a retry, initiating another sign-in or claiming a credential was committed.
+The configured MCP tools do not expose these helpers as agent tools.
+The base library excludes the
+optional Google verifier dependencies and `install-google-oauth-offline.txt`;
+using that verifier requires a separately selected `google-oauth` closure.
+
+## Inspect and configure
+
+The installed `meerkat-toolkit-services-mcp` executable supports:
+
+```text
+profiles
+config-help --profile slack
+check-config --config /absolute/slack.json
+describe --config /absolute/slack.json
+serve --config /absolute/slack.json
+```
+
+The first four commands need no credential or provider runtime. A successful
+configuration check verifies local structure and limits, not account access.
+An agent chooses the profile and operations; these commands validate that choice.
+
+Read `prerequisites` and `unresolved_details` in `config-help` before choosing
+credentials. The profile guidance explains Slack app installation and conversation
+scope choices, plus Google OAuth setup and the different permissions for Gmail
+reads, sending and drafts. These instructions are conditional on the operations
+and resources you select. Slack requires a host-selected Web API access token;
+Gmail requires a Google access token. The guidance does not obtain tokens or
+verify their actual grants, account identity or readiness. Gmail's `user_id`
+routes the request and grants no mailbox access by itself. See
+[profile prerequisites](/library/local-install#select-an-account-through-the-host).
+
+For bounded Slack retrieval, the host selects a configuration such as:
+
+```json
+{
+  "profile": "slack",
+  "operations": ["auth_test", "list_conversations_page", "get_conversation", "read_interval"],
+  "config": {
+    "token_env": "HOST_SELECTED_SLACK_TOKEN",
+    "timeout_seconds": 20,
+    "max_response_bytes": 2097152,
+    "max_interval_requests": 30,
+    "max_interval_messages": 1000
+  }
+}
+```
+
+The host launches `serve` with its selected token in the named environment entry.
+Use one process per account. Credential rotation or a new operation selection
+requires replacing that process. Tokens never go in this configuration file or
+tool arguments. Only the fixed official provider origins are available to CLI
+consumers; there are no proxy, redirect, refresh or retry fallbacks.
+
+The host can add `"allowed_channel_ids": ["C12345678"]`
+to Slack's `config` and remove `list_conversations_page` from the operation
+selection. Every channel read, including a resumed interval, must use one of
+those exact IDs. An empty array denies all channel calls; omission leaves the
+adapter's channel routing unrestricted. JSON null and restricted broad listing
+are rejected. The setup browser and MCP preserve the array through review and
+installation. This is a fixed routing limit, not account verification, a grant
+or filtering of quoted content in otherwise allowed messages.
+
+Add `"allowed_recipient_addresses": ["reader@example.com"]`
+to Gmail's `config` and select `send_message`. Every To, Cc and Bcc address must
+match the fixed list. `[]` denies every send; omission adds no recipient limit;
+JSON null is invalid. The list accepts at most 256 unique bare addresses.
+Local-part case is preserved and only ASCII domain case is normalized. Aliases,
+wildcards and internationalized-domain equivalents are not inferred.
+
+Restricted configurations cannot select `send_raw` or `create_draft_raw`, which
+accept opaque MIME. Direct raw SDK APIs remain outside this configured-services
+protection. A recipient refusal reports `permission` and `not_attempted` before
+connector or call-time authentication entry. The host still owns sender, content
+and recipient approval, account binding and current authority.
+
+## Use the selected operations
+
+| Profile | Operations available for explicit selection |
+| --- | --- |
+| Slack | Account observation, conversation discovery/details, individual history/reply pages, bounded interval retrieval, permalink and optional user lookup |
+| Gmail reads | One message-list page, raw or readable message retrieval, one explicitly selected text part and optional mailbox-profile observation |
+| Gmail writes | Send a structured plain-text message or exact MIME bytes once, or create one draft |
+
+Tool names use `slack_` and `gmail_` prefixes. Only configured operations are
+listed or callable. Provider scopes still apply independently of the local
+operation selection.
+
+Select `read_message` and `read_text_part` to read message content. `gmail_read_message` takes a `message_id`, reads the full message
+once and returns decoded inline text with MIME part identities. Plain text and
+HTML remain separate; HTML is returned as source, never rendered. Ordered
+outer headers are retained as message data, not verified sender identities.
+Attached emails do not supply the outer message's sender or body.
+
+Check each part's `omitted_reason` and the result's `body_complete` flag. For a
+separately stored text continuation, call `gmail_read_text_part` with the same
+message ID and its exact `part_id` from the response. An empty part ID identifies
+the root. The operation re-reads the message and resolves that part before
+fetching its external body, if needed. It makes at most two provider reads under
+one configured deadline. It does not fetch links or other attachments.
+
+The formatter supports ASCII, UTF-8, Latin-1 and Windows-1252 text. Unsupported
+or invalid text has an explicit omission or content error. Text attachments
+can be requested explicitly and remain labelled as attachments. Binary content
+and text inside attached emails are not decoded by these operations. The
+existing `get_message` operation remains available for raw provider data.
+
+Full-content reads require the host's existing Gmail read authorization;
+`gmail.metadata` is insufficient. Operation selection does not request or
+broaden scopes. The response, decoded data and resulting projection are bounded
+by the configured response limit and the formatter's structural limits.
+
+`slack_read_interval` takes explicit decimal timestamp strings and budgets.
+The agent interprets the user's time window and conversation choices. Requests
+above the configured budgets are rejected before provider access. Results retain
+coverage gaps, cursors and termination; `finished` does not mean all workspace
+updates were recovered.
+
+Set `resumable: true` to receive a bounded
+`continuation`. Pass it on a later authorized call with the same account and
+exact query selection to resume unfinished pages and threads. Keep every
+part's messages and gaps: `observation_scope: "current_call_only"` means the
+latest response does not summarize earlier reads. The host retains account
+association; the checkpoint is untrusted query data, not authenticated proof.
+No retry or delay is automatic. See [partial interval reads](/examples/slack-summary#continue-a-partial-read).
+
+Select `get_permalink` to expose `slack_get_permalink`. It takes the exact
+channel and decimal-string message timestamp and returns the provider's HTTPS
+URL, preserving thread parameters. It makes one `chat.getPermalink` request and
+does not construct or open a URL, fetch message contents or prove recipient
+access. Failed lookup remains an error.
+
+`gmail_send_message` accepts an explicit sender, To/Cc/Bcc recipients, subject
+and plain-text body, composing bounded MIME before one send. It does not infer
+the account or approve the message. `gmail_send_raw` and `gmail_create_draft_raw` accept canonical standard base64
+of the exact MIME bytes authorized by the host, including every To/Cc/Bcc
+recipient and all content. The adapter does not add or repair headers. A provider
+receipt is not proof of recipient delivery. A timeout, cancellation or invalid
+result after invocation leaves a write uncertain; it must not trigger an
+automatic resend.
+
+The component also supports explicitly selected `gmail_get_profile {}`.
+It observes the configured mailbox without changing the account or sender.
+This is not a stable OAuth identity or a grant. Google's
+[profile endpoint](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users/getProfile)
+does not accept `gmail.send` alone, so send-only setup must not silently request
+broader permissions to use it. Startup, tool discovery and sending never call
+the profile endpoint automatically.
+
+Calls are serialized per process. Cancellation joins request cleanup before a
+later call can enter, and closing the profile waits for entered calls before
+closing its client.
+
+## Use it in a task
+
+See the [Slack-to-email example](/examples/slack-summary) for interval reads, summaries and an authorized email send.

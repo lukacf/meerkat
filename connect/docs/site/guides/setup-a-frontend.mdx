@@ -1,0 +1,53 @@
+---
+title: "Set up an agent frontend"
+description: "Connect a chat or device interface to an agent through your application."
+icon: "comments"
+---
+
+A frontend lets people talk to an agent through Slack, Telegram, a web app or a device. The application runs the interface and owns participant identity, conversation routing and reply delivery.
+
+This guide describes the configuration to provide when integrating a frontend with your host. For service operations such as reading Slack history, use [service setup](/guides/request-an-integration).
+
+## Choose the host and conversation
+
+Select a persistent application that supports the interface. A realm supplies native configuration and storage; the application supplies the listener, routing and delivery lifecycle.
+
+Describe the interaction you want:
+
+```text
+Let the approved Support group talk to the existing Work Assistant
+in our support channel. Keep each admitted thread separate and send
+replies into that same thread.
+```
+
+## Configure the interaction
+
+| Setting | Choose |
+| --- | --- |
+| Interface | Provider installation, endpoint and account |
+| Participants | People or groups allowed to send, view and control |
+| Target | The existing agent or routing policy |
+| Conversations | How provider channels and threads map to agent context |
+| Replies | Permitted destinations and visible output |
+| Service access | Operations the agent may perform for those participants |
+| Lifetime | Persistent or time-limited exposure |
+
+Use the host's protected controls for provider credentials. Sign in to the application separately from connecting the provider account.
+
+## Review and activate
+
+Review the exact package, configuration, participants and requested service authority. Apply executable or deployment changes through the application's deployment workflow.
+
+After activation, send a message from an admitted identity. Confirm that it reaches the intended agent and that its reply returns to the permitted conversation. Check an excluded participant as part of the application's access validation.
+
+## Keep the application running
+
+The application owns the frontend after setup ends. Its process lifecycle is separate from the setup conversation. Use its current status to inspect connection, routing and delivery health.
+
+## Pause or remove
+
+Review what happens to accepted work and queued replies before pausing or disabling the frontend. The application can drain that work or cancel it according to its policy. Remove a shared daemon or credential only after checking the other integrations that use it.
+
+## Build the adapter
+
+The [frontend authoring guide](/guides/agent-frontends) describes provider verification, principal admission and delivery contracts. The [Python frontend SDK](/sdks/python-frontends) supplies transport and durable egress components.

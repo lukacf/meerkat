@@ -1,0 +1,108 @@
+---
+title: "TypeScript SDK"
+description: "Use Node service operations, native application composition and a separate browser management UI entrypoint."
+icon: "js"
+---
+
+`@rkat/toolkit` version `0.9.0` is an ESM package supporting Node 22 or newer. The service libraries run without Meerkat, Meta or a model. The browser UI has a separate entrypoint.
+
+## Install
+
+```sh
+npm install https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0/rkat-toolkit-0.9.0.tgz
+```
+
+## Build from source
+
+From `sdk/typescript/` in the source checkout:
+
+```sh
+npm ci --ignore-scripts
+npm run build
+npm pack --ignore-scripts
+```
+
+The build emits ESM and declarations in `dist`; packing creates a local archive. Select the actual returned archive in an isolated consumer.
+
+## Native application composition
+
+Import the native classes from `@rkat/toolkit/native-host` and their selected
+input types from `@rkat/toolkit/private-host`. This optional POSIX composition
+uses the local Connect gateway and the matching `@rkat/meta-sdk`. Use the matching SDK release. Service
+connector imports remain independent of this entrypoint.
+
+| Startup path | Native binding |
+| --- | --- |
+| Original-owner Restore | `new ToolkitHost(selection).configure(builder)` |
+| Fresh application | `new ToolkitApplicationPreparation(preparation, finalize).build(builder, { signal })` |
+| Admitted replacement | `new ToolkitApplicationUpdate(startup).configure(builder)` |
+
+For Restore and replacement, configure one dedicated `MetaBuilder`, then await
+its normal `build()`. For fresh preparation, await the Connect binding's
+`build()` instead: it joins native initialization with the trusted finalizer and
+adoption. The finalizer accepts a `SelectedHostArtifact` and returns a promise of
+the exact published `HostBootstrapSelection`.
+
+The application supplies the actual gateway, persistent state, session service
+and roster callbacks. Keep that configuration and its source lease with the
+original transaction. Do not replace the configured transport or prepared
+application carrier. A replacement uses the native `declareSpecUpdate` option
+only when its transaction calls for it; an expected revision of zero is valid.
+
+After a successful build, retain `host.hostControl` with that runtime and await
+`runtime.shutdown()` when closing the application. A
+`GatewayStartupCleanupError` retains its original errors and a `cleanup`
+capability for the same runtime; retain and await that capability's `shutdown()`
+if startup cleanup rejects. Creating another host binding is not cleanup.
+For fresh preparation, `host.preparationAttempt` and `host.settlement` preserve
+the actual preparation, finalization and native outcomes. Abort joins work that
+has entered; failure does not prove rollback or authorize replay.
+
+See [host composition](/guides/host-composition#native-application-lifecycle) for startup and reconnect rules. The source companion `sdk/typescript/NATIVE-HOST.md` describes the native SDK prerequisites and lifecycle contract.
+
+## Import an explicit operation
+
+```ts
+import { SlackOperations } from "@rkat/toolkit/connectors/slack";
+import type { SlackContext } from "@rkat/toolkit/connectors/slack";
+
+// Supplied by the host's existing connection and credential owner.
+declare const selectedSlack: SlackContext;
+const slack = new SlackOperations(selectedSlack);
+const page = await slack.historyPage("C0123456789", { limit: 15 });
+```
+
+The declaration is a host dependency, not an authentication implementation. `SlackContext` contains `baseUrl` and `fetch: (request: Request) => Promise<Response>`. The selected closure injects authentication privately and binds the actual account.
+
+`slack.getUser(user, { includeLocale, signal }?)` reads one exact user profile
+through that same binding. The host separately authorizes `users:read`; the
+operation does not request scopes or run automatically during history reads.
+The result preserves optional profile fields and the exact user ID. A name is
+display information, not proof of channel membership or an email recipient.
+
+## Transport contract
+
+The borrowed Fetch must preserve destination, method, headers, body, manual redirect mode and cancellation signal. It must not replay, retarget, add default query parameters or switch accounts. Auth refresh cannot secretly repeat a write.
+
+Construction captures the endpoint and Fetch function. Later context-property changes do not retarget that operation instance. The host still owns current grants, credential lifecycle, network policy, transport pools and retirement.
+
+Requests use manual redirects, omitted ambient credentials and no caching. The library cannot undo a redirect already performed by a nonconforming host closure. This is trusted in-process composition, not a sandbox against hostile JavaScript.
+
+## Data and cancellation
+
+Request objects use a plain JSON data profile. The library refuses accessors, functions, sparse arrays, cycles and unsafe/nonfinite numbers before sending. JavaScript binary64 and safe-integer limits remain relevant; arbitrary Python integers are not part of this profile.
+
+Responses use strict bounded JSON parsing. Duplicate keys, malformed encoding and unsupported response shapes fail. The pinned runtime parser is `jsonc-parser` 3.3.1.
+
+Deadlines initiate abort and await Fetch settlement and reader cleanup. They cannot impose a hard cleanup bound on a host implementation that ignores abort. There is no automatic retry or transport close.
+
+<CardGroup cols={2}>
+  <Card title="Service operation reference" href="/sdks/typescript-connectors" icon="plug">
+    Current methods and the differences from Python.
+  </Card>
+  <Card title="Browser UI" href="/sdks/ui" icon="window-maximize">
+    Mount controlled views backed by authenticated host owners.
+  </Card>
+</CardGroup>
+
+The package export map is in `sdk/typescript/package.json`; public declarations are generated from `sdk/typescript/src/`.

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Continue sign-in</title>
+</head>
+<body>
+  <main>
+    <h1>Continue sign-in</h1>
+    <p id="status" role="status">Sending your sign-in response to Console...</p>
+    <p><a href="/console" rel="noreferrer">Return to Console</a></p>
+    <noscript>JavaScript is needed to complete sign-in. Return to Console to retry setup.</noscript>
+  </main>
+  <script>(() => {
+  "use strict";
+  const path = "/host/toolkit/setup/callback";
+  const status = document.getElementById("status");
+  const fail = () => { status.textContent = "The sign-in response could not be confirmed. Return to Console to check setup."; };
+  let query;
+  let hadFragment;
+  try {
+    query = window.location.search.slice(1);
+    hadFragment = Boolean(window.location.hash);
+    window.history.replaceState(null, "", path);
+  } catch {
+    fail();
+    return;
+  }
+  if (window.top !== window || hadFragment || !query || new TextEncoder().encode(query).length > 16384) {
+    fail();
+    return;
+  }
+  const body = JSON.stringify({ query });
+  query = null;
+  if (new TextEncoder().encode(body).length > 65536) {
+    fail();
+    return;
+  }
+  void (async () => {
+    try {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        mode: "cors",
+        credentials: "same-origin",
+        redirect: "error",
+        cache: "no-store",
+        referrerPolicy: "no-referrer"
+      });
+      if (response.body) await response.body.cancel();
+      if (response.status === 401) {
+        status.textContent = "Your Console sign-in has expired. Return to Console and sign in again before retrying setup.";
+      } else if (response.status === 409 || response.status === 410) {
+        status.textContent = "This sign-in attempt is no longer available. Return to Console to restart sign-in.";
+      } else if (response.ok) {
+        status.textContent = "Your sign-in response was received. Return to Console to continue setup.";
+      } else {
+        fail();
+      }
+    } catch {
+      fail();
+    }
+  })();
+})();</script>
+</body>
+</html>

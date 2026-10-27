@@ -1,0 +1,20 @@
+[package]
+workspace = "../../native-candidate"
+name = "toolkit-catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+meerkat-machine-dsl.workspace = true
+meerkat-machine-schema.workspace = true
+meerkat-machine-codegen.workspace = true
+indexmap.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

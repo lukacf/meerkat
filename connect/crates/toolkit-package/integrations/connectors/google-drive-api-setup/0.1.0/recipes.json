@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "maintainer": "meerkat-toolkit",
+  "reviewed_at_unix_ms": 1790887993587,
+  "sources": [
+    {
+      "id": "drive-files-list",
+      "url": "https://developers.google.com/workspace/drive/api/reference/rest/v3/files/list",
+      "observed_sha256": "ed65f7996431e772abe324ce45a2ae13377207443965fce2c8650efae55e7998",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose and Apache-2.0 samples, subject to page exceptions; service terms separate. No provider implementation or sample code is copied."
+    },
+    {
+      "id": "drive-files-get",
+      "url": "https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get",
+      "observed_sha256": "9862f152929eb1542d77d255f54cab3e1b6ca3b5888461f6a229cdb5b92d4bc6",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose and Apache-2.0 samples, subject to page exceptions; service terms separate. No provider implementation or sample code is copied."
+    },
+    {
+      "id": "drive-files-export",
+      "url": "https://developers.google.com/workspace/drive/api/reference/rest/v3/files/export",
+      "observed_sha256": "970fa5a626a71d65ee767d4bed56c1fd152a6d730f6fedde510cdfd316f01793",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose and Apache-2.0 samples, subject to page exceptions; service terms separate. No provider implementation or sample code is copied."
+    },
+    {
+      "id": "drive-files-create",
+      "url": "https://developers.google.com/workspace/drive/api/reference/rest/v3/files/create",
+      "observed_sha256": "5ebcaeb3b111006e4ddecb90e7abbe3e35e71d133c40b69eee94313ddbb04e07",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose and Apache-2.0 samples, subject to page exceptions; service terms separate. No provider implementation or sample code is copied."
+    },
+    {
+      "id": "drive-files-update",
+      "url": "https://developers.google.com/workspace/drive/api/reference/rest/v3/files/update",
+      "observed_sha256": "60e74786b2b455f8ecc92ab80b39a4a518a1e632f8ae80a16d5b5e20d152dca9",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose and Apache-2.0 samples, subject to page exceptions; service terms separate. No provider implementation or sample code is copied."
+    },
+    {
+      "id": "drive-files-delete",
+      "url": "https://developers.google.com/workspace/drive/api/reference/rest/v3/files/delete",
+      "observed_sha256": "b6b750032639e0125f54fd5b21e2a2ec035ad4d5011a96f9b457c3913d6bc190",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose and Apache-2.0 samples, subject to page exceptions; service terms separate. No provider implementation or sample code is copied."
+    },
+    {
+      "id": "drive-permissions-create",
+      "url": "https://developers.google.com/workspace/drive/api/reference/rest/v3/permissions/create",
+      "observed_sha256": "a702f5f3fa0aa923a81f1111a364538ab8e22260382f13a86ea181a6e527c639",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose and Apache-2.0 samples, subject to page exceptions; service terms separate. No provider implementation or sample code is copied."
+    },
+    {
+      "id": "drive-uploads",
+      "url": "https://developers.google.com/workspace/drive/api/guides/manage-uploads",
+      "observed_sha256": "fe35ca4d9321efc3eaa9081c5cde00e185b292ba0f6fc20551a3b98a4db5e656",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose and Apache-2.0 samples, subject to page exceptions; service terms separate. No provider implementation or sample code is copied."
+    }
+  ],
+  "recipes": [
+    {
+      "strategy": "toolkit-rest",
+      "export": "google-drive-api-setup.service",
+      "role": "service_connector",
+      "prerequisites": [
+        {
+          "kind": "artifact_preparation",
+          "instruction": "Select authorized exact repository source or a verified private SDK artifact and its actual license files. Read SUPPORT.md and the Python GOOGLE-DRIVE.md/HTTPX-CLIENT.md guides. Select google-drive with Python 3.11+, HTTPX >=0.28.1,<0.29 and AnyIO >=4.13,<5. Do not infer a public PyPI release or install an unverified package from its name/version."
+        },
+        {
+          "kind": "developer_registration",
+          "instruction": "Use the existing credential owner to configure the selected Google project, enabled Drive API, host-appropriate OAuth client, consent/audience and redirect URI, plus any required verification. This metadata does not create a client registration or authorize scope expansion."
+        },
+        {
+          "kind": "account",
+          "instruction": "Select the actual Google account/credential and requested files or folders through existing host account resolution. Use the existing credential owner's opaque non-secret connection/credential reference and independently check its current selected-account and scope binding before probing or activation. Local account labels, quota projects, file IDs, paths and returned metadata are not authenticated account or resource authority; a successful file read is not account attestation."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "Use host-owned OAuth bearer authentication on the selected HTTPX client or per-request httpx.Auth, with the chosen API base and only operation-appropriate consent/scopes. The existing credential owner issues and resolves an opaque non-secret connection/credential reference. Retain only that reference and safe status in setup context; tokens, client secrets, authorization codes and sensitive callback material remain with that owner. When authorization is missing, request the owner's supported secure human-facing authorization handoff outside model context, then resume only on that owner's status for the same selected connection with account/scope binding confirmed. Do not invent a reference format, authorization URL, ceremony or resume API. Cancellation, denial or absent owner support leaves setup incomplete; no automatic account substitution, stronger scopes or fallback. Call prepare_httpx_client at host composition before sharing the client, then keep response-hook order and stream ownership stable. The borrowed client stays host-owned; its auth, hooks and transport must not replay, redirect or retarget."
+        },
+        {
+          "kind": "administrator",
+          "instruction": "Resolve applicable organization restrictions, app access, resource ACLs, shared-resource access and permission-change authority for the selected account. Method scope lists are alternatives, not instructions to request every scope or proof of file access."
+        },
+        {
+          "kind": "application_binding",
+          "instruction": "Bind actual selected operations and schemas to the existing service export with requester/grant/resource policy, local file-path authority, result audience, lifecycle and cleanup. After that policy authorizes a check, use the same selected credential context for get_file(host_selected_file_id, fields=\"id,mimeType\") on a host-selected known readable resource. Require an object with the exact selected id and nonempty string mimeType; missing or mismatched identity is not a passed check. If the requested capability explicitly permits listing instead, issue one narrow list_files_page(query=host_authorized_query, page_size=1, fields=\"files(id),nextPageToken\") and validate its page shape. An empty list proves only acceptance of that query, not arbitrary resource access. Retain safe connection/resource/operation context and observation time with the existing owner. Missing preparation/credentials leaves setup incomplete; authentication refusal returns to the credential owner; 403/404 needs owner diagnosis without inferring absence; timeout, cancellation, transport or malformed-result failures leave the check inconclusive. Read success observes only that read under this selected context at that time, not account identity, all-file access, writes, upload/export readiness or activation. Catalog loading, token resolution and client preparation are not readiness. No mutation, local download/export, automatic next page, retry, stronger credential or account fallback is a health check. Keep approvals and uncertain-write reconciliation with their existing owners. PairedHost retains its broker, query modes, manual continuation, projection, collection and approval owners; this guidance creates no health runner, store, router or runtime."
+        }
+      ],
+      "plan": {
+        "kind": "guidance_only",
+        "blockers": [
+          "The library selection API cannot activate this guidance-only recipe. Existing host owners must bind the selected SDK artifact, current operation schemas, policy, grants and lifetime to the service export; the PairedHost adapter is bounded composition evidence, not generic activation or authority.",
+          "The existing credential owner must establish the selected account, project, OAuth client/consent, operation scopes and resource permissions. A local account label or file ID is not verified credential binding; no credential store, OAuth fallback, refresh policy or scope expansion is supplied.",
+          "The accepted private artifacts establish the bounded local composition recorded in SUPPORT.md. They do not establish public package availability, live Google conformance, native admission, deployment or complete PairedHost adoption; verify a different artifact before use."
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,173 @@
+---
+title: "Python frontend components"
+description: "Provider transports and durable output that hosts compose with their own admission and audience owners."
+icon: "comments"
+---
+
+Use these transports and durable output components with your application's participant admission, conversation routing and audience policy.
+
+## Durable egress
+
+Import `ProactiveEgress` and `EgressStatus` from `meerkat_toolkit.frontend.egress`, and `SenderAuthority` from `.frontend.sender`.
+
+The host supplies the SQLite path, incident/health sinks, sleep function and sender composition. It authorizes the exact recipient and payload before committing output.
+
+| Method | Purpose |
+| --- | --- |
+| `commit_output(...)` | Commit exact issuer/key, candidates, normalized parts and incident flag before provider entry |
+| `spawn_dispatch(output_id)` | Start retained dispatch for an already committed output |
+| `status(output_id=...)` | Observe canonical per-part state |
+| `cancel_output(output_id=..., issuer_id=...)` | Permanently stop new attempts for one exact queued output |
+| `send(...)` | Commit and await dispatch inline |
+| `recover_pending()` / `run_recovery_pass()` | Recover through the existing rows and recovery owner |
+
+An exact same-key retry returns the existing output; changed content conflicts. An unresolved entered attempt after process loss becomes unknown and is not automatically sent again.
+
+Sender receipts distinguish `sent`/`acked`, `known_not_sent` and `unknown`. By default, only explicit known-not-sent evidence permits retries, up to four total attempts. A malformed receipt, exception or entered cancellation does not prove non-delivery. `EgressStatus.delivery_state` is `provider_accepted` only when every part was accepted; mixed per-part outcomes remain visible.
+
+For an explicit host choice accepting possible duplicates, pass
+`delivery_policy=EgressDeliveryPolicy("at_least_once", unknown_resends=1)` to
+`commit_output(...)` or `send(...)`. Import the type from `meerkat_toolkit.frontend`.
+The constructor policy supplies a default only for new outputs when this argument
+is omitted or `None`. Explicit `EgressDeliveryPolicy()` selects the conservative
+policy for a new output even if the constructor default opts in.
+
+The first commit saves the policy atomically. Same-key replay, concurrent requests
+and reopening retain that first selection, consumed quota, history and receipt;
+read `status(...).delivery_policy` to observe it. Policy does not change the request
+digest. A new opted-in output requires the managed format; an unchanged old or
+conservative row can be replayed with a wider requested selection without gaining
+retry authority. The bounded
+profile permits 1-3 UNKNOWN resends inside the same four-attempt budget and
+5/30/120-second backoff. `EgressDeliveryPolicy()` retains the conservative default.
+It provides no native consent exception and does not enable authorization;
+the host must separately enforce current permission on every entry.
+An example home-automation host selects one resend for conversational Telegram replies only. Consent-
+or approval-governed effects still require resolved uncertainty or applicable
+idempotency; this is not a connector write retry policy.
+
+`status(...).uncertain_attempts` retains bounded observations even after a later
+acceptance. Later refusal, expiry or Stop cannot erase an earlier possible
+effect. Completed UNKNOWN may resume under its retained policy; open reservations
+cannot. Only `recover_pending(previous_dispatches_quiesced=True)` may first
+record captured lost results after the host has stopped all prior writers and
+dispatches. This exact-bool assertion is not a process fence. Old rows receive
+no new UNKNOWN resend authority. The existing incident sink reports terminal
+opted-in uncertainty after persistence; hosts retain durable incident delivery
+and reconciliation, not merely callback success.
+
+The host retains and joins dispatch during shutdown. This is not distributed sender fencing or provider exactly-once delivery.
+
+### Retain a selected thread
+
+Pass `EgressCandidate(sender_id="telegram", recipient="-10077", thread_id="42")`
+from `meerkat_toolkit.frontend` to address an explicitly authorized thread.
+The owner persists that destination with the output and retains it through
+restart and formatting retries. `EgressDeliveryContext.thread_id` exposes it
+to the host's current permission check. Changing the thread conflicts with an
+existing request key. Existing two-element candidates and unthreaded dispatch
+remain compatible.
+
+Threaded output requires managed `egress-sqlite-4`. Its sender must explicitly
+accept a `thread_id` keyword; `**kwargs` alone does not establish support.
+Unsupported senders leave output queued without a provider attempt. The host
+selects and authorizes the recipient/thread pair; inbound metadata grants no
+permission, and the adapter must never silently send to the parent conversation.
+
+### Stop a queued output
+
+After authenticating the control request and selecting the exact output, the
+host calls `cancel_output(output_id=output_id, issuer_id=issuer_id)`. The issuer
+check guards against selecting another issuer's output; it does not authenticate
+the caller. Cancellation belongs to the existing durable outbox.
+
+The committed stop prevents new attempt reservations, including retries and
+recovery after restart. Replaying the original output key does not undo it.
+An already reserved attempt may still finish. Its accepted or uncertain receipt
+remains visible alongside `EgressStatus.cancel_requested`; cancellation does not
+recall a provider request or turn uncertainty into known non-delivery.
+
+This operation stops one output. The host's existing subscription and lifecycle
+owners separately apply pause or unsubscribe policy to future notifications.
+Cancelling an awaiting coroutine or returning an authorization denial does not
+permanently cancel delivery.
+
+Cancellation was introduced in `egress-sqlite-2`; v3 added thread destinations,
+and the current v4 owner adds persisted uncertainty policy and attempt history.
+Existing managed v1/v2/v3 databases need
+an explicit `inspect_format` / `migrate_format` transition before opening the
+new owner. The host must first quiesce and fence old owners, retain the previous
+observation and supply its migration binding. Opening a managed database does
+not perform a migration. The transition links the predecessor observation by
+digest; it is not an independent history archive. Additive SQL readability is
+not proof that predecessor code can safely modify these rows on rollback;
+The example host's database compatibility remains an adoption requirement.
+
+### Current delivery permission
+
+Set `authorization_mode="enforced"` and supply `authorize_delivery` to check
+current permission before every provider attempt, including retries and recovery.
+The callback receives an immutable `EgressDeliveryContext` with retained output,
+issuer, logical key, request digest, destination and exact part data. Resolve
+these through the host's existing policy and request owners; identifiers alone
+grant no permission.
+
+Return `EgressAuthorizationDecision.ALLOWED`, `.DENIED` or `.DEFERRED`. Only
+`ALLOWED` reserves a provider attempt. Denial, unavailable policy and malformed
+decisions leave output queued without spending an attempt, subject to its
+existing freshness limit. Accepted parts are not retransmitted; completed
+uncertainty requires the output's explicitly retained resend policy.
+Authorization uses the configured dispatch timeout; cancellation before provider
+reservation creates no uncertain send.
+
+Enforced mode requires the callback; legacy mode rejects a supplied callback.
+The default legacy mode preserves existing callers but cannot establish current
+audience conformance. Hosts must enable enforcement after every restart and
+exclude competing legacy owners. This is a host-policy seam, not atomic provider
+revocation, native admission or completed adoption by downstream hosts.
+
+With a replaceable sender, selection waits before authorization. Connect checks
+that the selected attachment is still current after the callback returns, then
+reserves and enters the provider without another selection wait. A transition
+during the callback leaves the part queued.
+
+## Telegram
+
+`meerkat_toolkit.frontend.telegram.TelegramBotApiTransport` supplies the stdlib wire transport. It supports updates, webhook configuration/removal, file lookup/download, text/photo sending, chat action and `close`. The host supplies one selected token; construction performs no I/O.
+
+`classify_send_response` produces `TelegramSendReceipt` for direct sendMessage/sendPhoto responses. Outcomes are `provider_accepted`, `provider_queued`, `known_not_sent` and `unknown`. A zero provider message identifier is queued, not a usable sent-message receipt. Retry-After does not authorize a resend.
+
+`meerkat_toolkit.frontend.telegram_adapter` supplies provider normalization using the selected `telegram` extra. The host still owns inbound identity, durable inbox, polling cursor commits, media authorization, presentation policy and activation.
+
+`TelegramPresenter.send_text` and `send_photo` each make at most one provider
+send. A complete explicit 400 refusal of valid formatting returns
+`known_not_sent` with `retry_without_formatting=True`. The presenter does not
+send again inside the call.
+
+When composing with `ProactiveEgress`, forward that boolean and map
+`provider_accepted` to `sent`, `provider_queued` to `unknown`, and other outcomes
+unchanged. The existing outbox records the refusal and removes optional
+formatting in one transaction. Its next attempt uses the same content and
+destination, with fresh authorization and its own durable reservation. The
+four-attempt limit and freshness checks still apply after restart. An adapter
+must not hide extra provider sends inside one outbox attempt.
+
+Cancellation joins entered transport work; `close` rejects new work and joins existing operations. Socket timeouts do not guarantee a hard total shutdown bound for uncooperative worker code.
+
+## Slack provider adapter
+
+`meerkat_toolkit.frontend.slack` exports `verify_event_request`, `SlackInstallation`, supported immutable event facts and `SlackReplyTransport`.
+
+The host supplies exact raw bytes/header pairs and an out-of-band signing secret. The parser verifies supported signed requests and returns a challenge, supported text event or unsupported-event fact. It provides no HTTP listener, durable deduplication, application principal mapping or acknowledgment policy.
+
+`SlackReplyTransport` borrows a prepared selected HTTPX client. `send_text(channel_id, text, thread_ts=...)` makes one explicit reply attempt. Its receipt preserves requested/observed destination and `sent`, `known_not_sent` or `unknown`. It never opens a DM, infers a thread or falls back to a channel-level send.
+
+## Example host live image input
+
+`meerkat_toolkit.frontend.paired_host_live.PairedHostLiveImageClient` submits an image to the example host's existing robot route, using a selected literal loopback origin and a current host lease-header callback. `submit_image` takes an existing idempotency key, MIME type and base64 data.
+
+This specialized client creates its own per-submission HTTPX client. It does not use the borrowed service-client preparation contract. An HTTP response is not a native image-acceptance receipt: the caller must observe the exact image job on its original live channel generation before follow-up text is queued.
+
+It is not a camera service, motion API or durable automatic replay mechanism. The [the robot example](/examples/robot-extension) explains the complete intended composition.
+
+Source contracts live in `sdk/python/FRONTEND.md`, `TELEGRAM.md`, `SLACK-FRONTEND.md` and `PAIRED_HOST-LIVE.md`.

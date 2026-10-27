@@ -1,0 +1,23 @@
+---
+title: "Service profiles"
+description: "Use configured service operations through the integration library."
+icon: "plug"
+---
+
+Service profiles package an integration's operations, schemas and configuration for use through MCP. Select a profile when you want the setup agent to configure an existing service implementation.
+
+## Inspect a profile
+
+Read its configuration help for account prerequisites and required fields. Select the operations needed for the task, then validate the configuration before launch. Metadata inspection can run before service credentials are available.
+
+For a concrete command and configuration example, see [Slack and Gmail](/library/slack-gmail).
+
+## Run with a selected account
+
+The host supplies credentials through named references and owns the process lifetime. Use distinct account bindings and retire a process before changing its account or selected operation set.
+
+Apply agent grants separately from the profile's operation list. The profile defines the available surface; the application's policy determines who may use it.
+
+## Embed operations directly
+
+Use the [TypeScript service API](/sdks/typescript-connectors) or [Python service API](/sdks/python-connectors) when your application already manages an authenticated transport. These APIs let you call individual operations without launching an MCP profile.

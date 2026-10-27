@@ -1,0 +1,3845 @@
+{
+  "idle": {
+    "details": {},
+    "jobs": {
+      "jobs": [],
+      "next_before": null
+    },
+    "state": {
+      "catalog": {
+        "available": false,
+        "catalog_sha256": null,
+        "contents_sha256": null
+      },
+      "compose": {
+        "actions": [
+          "observe",
+          "start",
+          "stop",
+          "resume",
+          "remove",
+          "prepare_successor",
+          "adopt_successor",
+          "reconcile_successor",
+          "rebind"
+        ],
+        "available": true,
+        "backend_profile_sha256": "2665803ce235404e295f27390d87cd54d4de983193fef737a6879b0d0adf0eef",
+        "delete_state_namespaces": [
+          "data"
+        ],
+        "execution_uncertain": false,
+        "graph_workspace": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+        "host_profile_sha256": "d636245f497865e0103712b3ea2c0ba3eabc49c78e54318e0bf85c301e7782d0",
+        "mode": "reopen",
+        "operation_timeout_seconds": 10,
+        "pending_operation": false,
+        "pending_transition": null,
+        "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+        "rebind_required": false,
+        "scope": "execute_agent_selected_local_container_plan",
+        "selected_plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+        "staging_root": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/staging",
+        "successor": {
+          "backend_profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+          "inputs_sha256": "cb3dcf7e4c551f260d8fccec8e64c1a11cfcba14d750ccd92dcbc0050d7b020a",
+          "predecessor_plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+          "successor_plan_sha256": null,
+          "transition_sha256": null
+        }
+      },
+      "export_retry": {
+        "available": false
+      },
+      "families": [],
+      "family_contents_sha256": {},
+      "job": null,
+      "job_history": {
+        "available": true,
+        "count": 0
+      },
+      "local_recipes": {
+        "available": false
+      },
+      "mode": "setup",
+      "operation_in_progress": false,
+      "preparation_retry": {
+        "available": true
+      },
+      "reconciliation": {
+        "available": false,
+        "observation": null
+      },
+      "recovery_manifest": {
+        "available": true,
+        "max_requests": 256
+      },
+      "scope": "Host-permitted local software installation and separately delegated container-plan execution; no account access, tool attachment or native authority is supplied.",
+      "selected_retry": {
+        "available": false
+      },
+      "stop": {
+        "available": true
+      }
+    }
+  },
+  "ordinary_pending": {
+    "details": {
+      "1f097d06543d52e6cd59470ecb6fa7ea": {
+        "job": {
+          "action": "prepare_successor",
+          "family": "compose",
+          "id": "1f097d06543d52e6cd59470ecb6fa7ea",
+          "kind": "compose",
+          "request_id": "f90f232b02ba0f1e4f14004bff04ebe0",
+          "result": {
+            "action": "prepare_successor",
+            "backend": {
+              "predecessor": {
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "c9dcf5f31b68b5345c31fb32d59aec89c4de8d8be5c1b658ac1b7bdb82de0438"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "manifest_source_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+                  "profile_sha256": "2665803ce235404e295f27390d87cd54d4de983193fef737a6879b0d0adf0eef",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "e79493bbf286bc34f8ae415d17766b55cf0a0dc78e095edc101c2968ec9a66e9",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "schema_version": 1,
+              "status": "prepared_successor",
+              "successor": {
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "19243dec6f4f6e1d44ddbf3d0d011a7370ab18142befe86752c3575924016cb7"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "manifest_source_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401",
+                  "profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "dc26c203aabea18fc1660a4196cc98876086392efe54c8c6eae81c6adc86d9eb",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "3ce9c1fb428d6aef4bd1453db48699a2": {
+        "job": {
+          "action": "rebind",
+          "family": "compose",
+          "id": "3ce9c1fb428d6aef4bd1453db48699a2",
+          "kind": "compose",
+          "request_id": "f1f95270b8de50e87bed56555c99ef58",
+          "result": {
+            "action": "rebind",
+            "backend": {
+              "selected": {
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "19243dec6f4f6e1d44ddbf3d0d011a7370ab18142befe86752c3575924016cb7"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "manifest_source_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401",
+                  "profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "dc26c203aabea18fc1660a4196cc98876086392efe54c8c6eae81c6adc86d9eb",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "status": "rebound",
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "c3a448aec443a1310ebb30f53e9cc8e5": {
+        "job": {
+          "action": "adopt_successor",
+          "family": "compose",
+          "id": "c3a448aec443a1310ebb30f53e9cc8e5",
+          "kind": "compose",
+          "request_id": "45526b4fd67bf6e8fdccae31179187b2",
+          "result": {
+            "action": "adopt_successor",
+            "backend": {
+              "observation": null,
+              "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+              "status": "unconfirmed",
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "unconfirmed",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "fc600663e52132bc8fa477d198f61f43": {
+        "job": {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "result": {
+            "action": "start",
+            "backend": {
+              "observation": {
+                "available": {
+                  "db": true
+                },
+                "containers": {},
+                "generation": 1,
+                "network": null,
+                "observation_sha256": "3550d2ade1d940339d064e5449cdf8f8c87b123fdab6127c33f917724f731b43",
+                "pending_operation": false,
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "schema_version": 1,
+                "volumes": {}
+              },
+              "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+              "status": "observed"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "fc9222112e82f555b37dfb1aa5170bca": {
+        "job": {
+          "action": "reconcile_successor",
+          "family": "compose",
+          "id": "fc9222112e82f555b37dfb1aa5170bca",
+          "kind": "compose",
+          "request_id": "ea0d85b9a221d82a9c51988d0b77cfd5",
+          "result": {
+            "action": "reconcile_successor",
+            "backend": {
+              "observation": {
+                "available": {
+                  "db": true
+                },
+                "containers": {},
+                "generation": 3,
+                "network": null,
+                "observation_sha256": "acfc92fecf5b684c8772b024aa438cc88bcd13453cd7b2cc1bb07da16b1f1bfd",
+                "pending_operation": false,
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "schema_version": 1,
+                "volumes": {}
+              },
+              "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+              "status": "observed",
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      }
+    },
+    "jobs": {
+      "jobs": [
+        {
+          "action": "rebind",
+          "family": "compose",
+          "id": "3ce9c1fb428d6aef4bd1453db48699a2",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "f1f95270b8de50e87bed56555c99ef58",
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        {
+          "action": "reconcile_successor",
+          "family": "compose",
+          "id": "fc9222112e82f555b37dfb1aa5170bca",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "ea0d85b9a221d82a9c51988d0b77cfd5",
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        {
+          "action": "adopt_successor",
+          "family": "compose",
+          "id": "c3a448aec443a1310ebb30f53e9cc8e5",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "45526b4fd67bf6e8fdccae31179187b2",
+          "status": "unconfirmed",
+          "stop_supported": false
+        },
+        {
+          "action": "prepare_successor",
+          "family": "compose",
+          "id": "1f097d06543d52e6cd59470ecb6fa7ea",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "f90f232b02ba0f1e4f14004bff04ebe0",
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "status": "succeeded",
+          "stop_supported": false
+        }
+      ],
+      "next_before": null
+    },
+    "state": {
+      "catalog": {
+        "available": false,
+        "catalog_sha256": null,
+        "contents_sha256": null
+      },
+      "compose": {
+        "actions": [
+          "observe",
+          "start",
+          "stop",
+          "resume",
+          "remove",
+          "prepare_successor",
+          "adopt_successor",
+          "reconcile_successor",
+          "rebind"
+        ],
+        "available": true,
+        "backend_profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+        "delete_state_namespaces": [
+          "data"
+        ],
+        "execution_uncertain": false,
+        "graph_workspace": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+        "host_profile_sha256": "d636245f497865e0103712b3ea2c0ba3eabc49c78e54318e0bf85c301e7782d0",
+        "mode": "reopen",
+        "operation_timeout_seconds": 10,
+        "pending_operation": true,
+        "pending_transition": null,
+        "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+        "rebind_required": false,
+        "scope": "execute_agent_selected_local_container_plan",
+        "selected_plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+        "staging_root": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/staging",
+        "successor": {
+          "backend_profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+          "inputs_sha256": "cb3dcf7e4c551f260d8fccec8e64c1a11cfcba14d750ccd92dcbc0050d7b020a",
+          "predecessor_plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+          "successor_plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+          "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+        }
+      },
+      "export_retry": {
+        "available": false
+      },
+      "families": [],
+      "family_contents_sha256": {},
+      "job": {
+        "action": "rebind",
+        "family": "compose",
+        "id": "3ce9c1fb428d6aef4bd1453db48699a2",
+        "kind": "compose",
+        "request_id": "f1f95270b8de50e87bed56555c99ef58",
+        "result": {
+          "action": "rebind",
+          "backend": {
+            "selected": {
+              "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+              "schema_version": 1,
+              "status": "prepared",
+              "summary": {
+                "components": {
+                  "mcp": {
+                    "dependencies": [],
+                    "deployment_dependencies": [],
+                    "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "lifetime": "request",
+                    "platform": "linux/amd64",
+                    "readiness": "running",
+                    "service": "mcp",
+                    "stop_timeout_ms": 1000
+                  }
+                },
+                "configuration_sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90",
+                "deployment_order": [],
+                "files": {
+                  "compose.json": {
+                    "mode": 292,
+                    "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                  },
+                  "inputs/configuration": {
+                    "mode": 292,
+                    "sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90"
+                  },
+                  "inputs/files/note": {
+                    "mode": 292,
+                    "sha256": "19243dec6f4f6e1d44ddbf3d0d011a7370ab18142befe86752c3575924016cb7"
+                  },
+                  "inputs/policy": {
+                    "mode": 292,
+                    "sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401"
+                  }
+                },
+                "host_owner": "fixture",
+                "initialization_order": [
+                  "mcp"
+                ],
+                "manifest_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                "manifest_source_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                "policy_sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401",
+                "profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+                "project": "fixture-project",
+                "request_components": [
+                  "mcp"
+                ],
+                "request_sha256": "dc26c203aabea18fc1660a4196cc98876086392efe54c8c6eae81c6adc86d9eb",
+                "shutdown_order": [
+                  "mcp"
+                ]
+              }
+            },
+            "status": "rebound",
+            "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+          },
+          "runtime_bindings": [
+            {
+              "args": [
+                "-I",
+                "-B",
+                "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                "--workspace",
+                "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                "--planner",
+                "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                "--planner-sha256",
+                "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "run-stdio",
+                "--plan-sha256",
+                "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "--component",
+                "mcp"
+              ],
+              "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+              "component": "mcp",
+              "env": {},
+              "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+              "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+              "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+              "scope": "compose_backend_stdio"
+            }
+          ],
+          "scope": "compose_backend_observation_only"
+        },
+        "status": "succeeded",
+        "stop_supported": false
+      },
+      "job_history": {
+        "available": true,
+        "count": 5
+      },
+      "local_recipes": {
+        "available": false
+      },
+      "mode": "setup",
+      "operation_in_progress": false,
+      "preparation_retry": {
+        "available": true
+      },
+      "reconciliation": {
+        "available": false,
+        "observation": null
+      },
+      "recovery_manifest": {
+        "available": true,
+        "max_requests": 256
+      },
+      "scope": "Host-permitted local software installation and separately delegated container-plan execution; no account access, tool attachment or native authority is supplied.",
+      "selected_retry": {
+        "available": false
+      },
+      "stop": {
+        "available": true
+      }
+    }
+  },
+  "outer_uncertain": {
+    "details": {
+      "1f097d06543d52e6cd59470ecb6fa7ea": {
+        "job": {
+          "action": "prepare_successor",
+          "family": "compose",
+          "id": "1f097d06543d52e6cd59470ecb6fa7ea",
+          "kind": "compose",
+          "request_id": "f90f232b02ba0f1e4f14004bff04ebe0",
+          "result": {
+            "action": "prepare_successor",
+            "backend": {
+              "predecessor": {
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "c9dcf5f31b68b5345c31fb32d59aec89c4de8d8be5c1b658ac1b7bdb82de0438"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "manifest_source_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+                  "profile_sha256": "2665803ce235404e295f27390d87cd54d4de983193fef737a6879b0d0adf0eef",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "e79493bbf286bc34f8ae415d17766b55cf0a0dc78e095edc101c2968ec9a66e9",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "schema_version": 1,
+              "status": "prepared_successor",
+              "successor": {
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "19243dec6f4f6e1d44ddbf3d0d011a7370ab18142befe86752c3575924016cb7"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "manifest_source_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401",
+                  "profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "dc26c203aabea18fc1660a4196cc98876086392efe54c8c6eae81c6adc86d9eb",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "3ce9c1fb428d6aef4bd1453db48699a2": {
+        "job": {
+          "action": "rebind",
+          "family": "compose",
+          "id": "3ce9c1fb428d6aef4bd1453db48699a2",
+          "kind": "compose",
+          "request_id": "f1f95270b8de50e87bed56555c99ef58",
+          "result": {
+            "action": "rebind",
+            "backend": {
+              "selected": {
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "19243dec6f4f6e1d44ddbf3d0d011a7370ab18142befe86752c3575924016cb7"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "manifest_source_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401",
+                  "profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "dc26c203aabea18fc1660a4196cc98876086392efe54c8c6eae81c6adc86d9eb",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "status": "rebound",
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "c3a448aec443a1310ebb30f53e9cc8e5": {
+        "job": {
+          "action": "adopt_successor",
+          "family": "compose",
+          "id": "c3a448aec443a1310ebb30f53e9cc8e5",
+          "kind": "compose",
+          "request_id": "45526b4fd67bf6e8fdccae31179187b2",
+          "result": {
+            "action": "adopt_successor",
+            "backend": {
+              "observation": null,
+              "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+              "status": "unconfirmed",
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "unconfirmed",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "c4a1bb22a8adb259222c0849e9a3d044": {
+        "job": {
+          "action": "start",
+          "error": "compose_operation_unconfirmed",
+          "family": "compose",
+          "id": "c4a1bb22a8adb259222c0849e9a3d044",
+          "kind": "compose",
+          "request_id": "e50393b14258f7c094702a354abfe338",
+          "runtime_error": "successor_effect_unresolved",
+          "status": "unconfirmed",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "fc600663e52132bc8fa477d198f61f43": {
+        "job": {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "result": {
+            "action": "start",
+            "backend": {
+              "observation": {
+                "available": {
+                  "db": true
+                },
+                "containers": {},
+                "generation": 1,
+                "network": null,
+                "observation_sha256": "3550d2ade1d940339d064e5449cdf8f8c87b123fdab6127c33f917724f731b43",
+                "pending_operation": false,
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "schema_version": 1,
+                "volumes": {}
+              },
+              "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+              "status": "observed"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "fc9222112e82f555b37dfb1aa5170bca": {
+        "job": {
+          "action": "reconcile_successor",
+          "family": "compose",
+          "id": "fc9222112e82f555b37dfb1aa5170bca",
+          "kind": "compose",
+          "request_id": "ea0d85b9a221d82a9c51988d0b77cfd5",
+          "result": {
+            "action": "reconcile_successor",
+            "backend": {
+              "observation": {
+                "available": {
+                  "db": true
+                },
+                "containers": {},
+                "generation": 3,
+                "network": null,
+                "observation_sha256": "acfc92fecf5b684c8772b024aa438cc88bcd13453cd7b2cc1bb07da16b1f1bfd",
+                "pending_operation": false,
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "schema_version": 1,
+                "volumes": {}
+              },
+              "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+              "status": "observed",
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      }
+    },
+    "jobs": {
+      "jobs": [
+        {
+          "action": "start",
+          "family": "compose",
+          "id": "c4a1bb22a8adb259222c0849e9a3d044",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "e50393b14258f7c094702a354abfe338",
+          "status": "unconfirmed",
+          "stop_supported": false
+        },
+        {
+          "action": "rebind",
+          "family": "compose",
+          "id": "3ce9c1fb428d6aef4bd1453db48699a2",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "f1f95270b8de50e87bed56555c99ef58",
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        {
+          "action": "reconcile_successor",
+          "family": "compose",
+          "id": "fc9222112e82f555b37dfb1aa5170bca",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "ea0d85b9a221d82a9c51988d0b77cfd5",
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        {
+          "action": "adopt_successor",
+          "family": "compose",
+          "id": "c3a448aec443a1310ebb30f53e9cc8e5",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "45526b4fd67bf6e8fdccae31179187b2",
+          "status": "unconfirmed",
+          "stop_supported": false
+        },
+        {
+          "action": "prepare_successor",
+          "family": "compose",
+          "id": "1f097d06543d52e6cd59470ecb6fa7ea",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "f90f232b02ba0f1e4f14004bff04ebe0",
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "status": "succeeded",
+          "stop_supported": false
+        }
+      ],
+      "next_before": null
+    },
+    "state": {
+      "catalog": {
+        "available": false,
+        "catalog_sha256": null,
+        "contents_sha256": null
+      },
+      "compose": {
+        "actions": [
+          "observe",
+          "start",
+          "stop",
+          "resume",
+          "remove",
+          "prepare_successor",
+          "adopt_successor",
+          "reconcile_successor",
+          "rebind"
+        ],
+        "available": true,
+        "backend_profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+        "delete_state_namespaces": [
+          "data"
+        ],
+        "execution_uncertain": true,
+        "graph_workspace": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+        "host_profile_sha256": "d636245f497865e0103712b3ea2c0ba3eabc49c78e54318e0bf85c301e7782d0",
+        "mode": "reopen",
+        "operation_timeout_seconds": 10,
+        "pending_operation": false,
+        "pending_transition": null,
+        "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+        "rebind_required": false,
+        "scope": "execute_agent_selected_local_container_plan",
+        "selected_plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+        "staging_root": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/staging",
+        "successor": {
+          "backend_profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+          "inputs_sha256": "cb3dcf7e4c551f260d8fccec8e64c1a11cfcba14d750ccd92dcbc0050d7b020a",
+          "predecessor_plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+          "successor_plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+          "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+        }
+      },
+      "export_retry": {
+        "available": false
+      },
+      "families": [],
+      "family_contents_sha256": {},
+      "job": {
+        "action": "start",
+        "error": "compose_operation_unconfirmed",
+        "family": "compose",
+        "id": "c4a1bb22a8adb259222c0849e9a3d044",
+        "kind": "compose",
+        "request_id": "e50393b14258f7c094702a354abfe338",
+        "runtime_error": "successor_effect_unresolved",
+        "status": "unconfirmed",
+        "stop_supported": false
+      },
+      "job_history": {
+        "available": true,
+        "count": 6
+      },
+      "local_recipes": {
+        "available": false
+      },
+      "mode": "setup",
+      "operation_in_progress": false,
+      "preparation_retry": {
+        "available": true
+      },
+      "reconciliation": {
+        "available": false,
+        "observation": null
+      },
+      "recovery_manifest": {
+        "available": true,
+        "max_requests": 256
+      },
+      "scope": "Host-permitted local software installation and separately delegated container-plan execution; no account access, tool attachment or native authority is supplied.",
+      "selected_retry": {
+        "available": false
+      },
+      "stop": {
+        "available": true
+      }
+    }
+  },
+  "pending": {
+    "details": {
+      "1f097d06543d52e6cd59470ecb6fa7ea": {
+        "job": {
+          "action": "prepare_successor",
+          "family": "compose",
+          "id": "1f097d06543d52e6cd59470ecb6fa7ea",
+          "kind": "compose",
+          "request_id": "f90f232b02ba0f1e4f14004bff04ebe0",
+          "result": {
+            "action": "prepare_successor",
+            "backend": {
+              "predecessor": {
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "c9dcf5f31b68b5345c31fb32d59aec89c4de8d8be5c1b658ac1b7bdb82de0438"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "manifest_source_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+                  "profile_sha256": "2665803ce235404e295f27390d87cd54d4de983193fef737a6879b0d0adf0eef",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "e79493bbf286bc34f8ae415d17766b55cf0a0dc78e095edc101c2968ec9a66e9",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "schema_version": 1,
+              "status": "prepared_successor",
+              "successor": {
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "19243dec6f4f6e1d44ddbf3d0d011a7370ab18142befe86752c3575924016cb7"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "manifest_source_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401",
+                  "profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "dc26c203aabea18fc1660a4196cc98876086392efe54c8c6eae81c6adc86d9eb",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "c3a448aec443a1310ebb30f53e9cc8e5": {
+        "job": {
+          "action": "adopt_successor",
+          "family": "compose",
+          "id": "c3a448aec443a1310ebb30f53e9cc8e5",
+          "kind": "compose",
+          "request_id": "45526b4fd67bf6e8fdccae31179187b2",
+          "result": {
+            "action": "adopt_successor",
+            "backend": {
+              "observation": null,
+              "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+              "status": "unconfirmed",
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "unconfirmed",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "fc600663e52132bc8fa477d198f61f43": {
+        "job": {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "result": {
+            "action": "start",
+            "backend": {
+              "observation": {
+                "available": {
+                  "db": true
+                },
+                "containers": {},
+                "generation": 1,
+                "network": null,
+                "observation_sha256": "3550d2ade1d940339d064e5449cdf8f8c87b123fdab6127c33f917724f731b43",
+                "pending_operation": false,
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "schema_version": 1,
+                "volumes": {}
+              },
+              "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+              "status": "observed"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      }
+    },
+    "jobs": {
+      "jobs": [
+        {
+          "action": "adopt_successor",
+          "family": "compose",
+          "id": "c3a448aec443a1310ebb30f53e9cc8e5",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "45526b4fd67bf6e8fdccae31179187b2",
+          "status": "unconfirmed",
+          "stop_supported": false
+        },
+        {
+          "action": "prepare_successor",
+          "family": "compose",
+          "id": "1f097d06543d52e6cd59470ecb6fa7ea",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "f90f232b02ba0f1e4f14004bff04ebe0",
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "status": "succeeded",
+          "stop_supported": false
+        }
+      ],
+      "next_before": null
+    },
+    "state": {
+      "catalog": {
+        "available": false,
+        "catalog_sha256": null,
+        "contents_sha256": null
+      },
+      "compose": {
+        "actions": [
+          "observe",
+          "start",
+          "stop",
+          "resume",
+          "remove",
+          "prepare_successor",
+          "adopt_successor",
+          "reconcile_successor",
+          "rebind"
+        ],
+        "available": true,
+        "backend_profile_sha256": "2665803ce235404e295f27390d87cd54d4de983193fef737a6879b0d0adf0eef",
+        "delete_state_namespaces": [
+          "data"
+        ],
+        "execution_uncertain": false,
+        "graph_workspace": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+        "host_profile_sha256": "d636245f497865e0103712b3ea2c0ba3eabc49c78e54318e0bf85c301e7782d0",
+        "mode": "reopen",
+        "operation_timeout_seconds": 10,
+        "pending_operation": false,
+        "pending_transition": {
+          "phase": "activate",
+          "predecessor_plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+          "successor_plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+          "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+        },
+        "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+        "rebind_required": true,
+        "scope": "execute_agent_selected_local_container_plan",
+        "selected_plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+        "staging_root": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/staging",
+        "successor": {
+          "backend_profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+          "inputs_sha256": "cb3dcf7e4c551f260d8fccec8e64c1a11cfcba14d750ccd92dcbc0050d7b020a",
+          "predecessor_plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+          "successor_plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+          "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+        }
+      },
+      "export_retry": {
+        "available": false
+      },
+      "families": [],
+      "family_contents_sha256": {},
+      "job": {
+        "action": "adopt_successor",
+        "family": "compose",
+        "id": "c3a448aec443a1310ebb30f53e9cc8e5",
+        "kind": "compose",
+        "request_id": "45526b4fd67bf6e8fdccae31179187b2",
+        "result": {
+          "action": "adopt_successor",
+          "backend": {
+            "observation": null,
+            "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+            "status": "unconfirmed",
+            "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+          },
+          "runtime_bindings": [],
+          "scope": "compose_backend_observation_only"
+        },
+        "status": "unconfirmed",
+        "stop_supported": false
+      },
+      "job_history": {
+        "available": true,
+        "count": 3
+      },
+      "local_recipes": {
+        "available": false
+      },
+      "mode": "setup",
+      "operation_in_progress": false,
+      "preparation_retry": {
+        "available": true
+      },
+      "reconciliation": {
+        "available": false,
+        "observation": null
+      },
+      "recovery_manifest": {
+        "available": true,
+        "max_requests": 256
+      },
+      "scope": "Host-permitted local software installation and separately delegated container-plan execution; no account access, tool attachment or native authority is supplied.",
+      "selected_retry": {
+        "available": false
+      },
+      "stop": {
+        "available": true
+      }
+    }
+  },
+  "predecessor": {
+    "details": {
+      "fc600663e52132bc8fa477d198f61f43": {
+        "job": {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "result": {
+            "action": "start",
+            "backend": {
+              "observation": {
+                "available": {
+                  "db": true
+                },
+                "containers": {},
+                "generation": 1,
+                "network": null,
+                "observation_sha256": "3550d2ade1d940339d064e5449cdf8f8c87b123fdab6127c33f917724f731b43",
+                "pending_operation": false,
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "schema_version": 1,
+                "volumes": {}
+              },
+              "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+              "status": "observed"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      }
+    },
+    "jobs": {
+      "jobs": [
+        {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "status": "succeeded",
+          "stop_supported": false
+        }
+      ],
+      "next_before": null
+    },
+    "state": {
+      "catalog": {
+        "available": false,
+        "catalog_sha256": null,
+        "contents_sha256": null
+      },
+      "compose": {
+        "actions": [
+          "observe",
+          "start",
+          "stop",
+          "resume",
+          "remove",
+          "prepare_successor",
+          "adopt_successor",
+          "reconcile_successor",
+          "rebind"
+        ],
+        "available": true,
+        "backend_profile_sha256": "2665803ce235404e295f27390d87cd54d4de983193fef737a6879b0d0adf0eef",
+        "delete_state_namespaces": [
+          "data"
+        ],
+        "execution_uncertain": false,
+        "graph_workspace": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+        "host_profile_sha256": "d636245f497865e0103712b3ea2c0ba3eabc49c78e54318e0bf85c301e7782d0",
+        "mode": "reopen",
+        "operation_timeout_seconds": 10,
+        "pending_operation": false,
+        "pending_transition": null,
+        "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+        "rebind_required": false,
+        "scope": "execute_agent_selected_local_container_plan",
+        "selected_plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+        "staging_root": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/staging",
+        "successor": {
+          "backend_profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+          "inputs_sha256": "cb3dcf7e4c551f260d8fccec8e64c1a11cfcba14d750ccd92dcbc0050d7b020a",
+          "predecessor_plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+          "successor_plan_sha256": null,
+          "transition_sha256": null
+        }
+      },
+      "export_retry": {
+        "available": false
+      },
+      "families": [],
+      "family_contents_sha256": {},
+      "job": {
+        "action": "start",
+        "family": "compose",
+        "id": "fc600663e52132bc8fa477d198f61f43",
+        "kind": "compose",
+        "request_id": "4c62354a3e72478d718f350fab6ae654",
+        "result": {
+          "action": "start",
+          "backend": {
+            "observation": {
+              "available": {
+                "db": true
+              },
+              "containers": {},
+              "generation": 1,
+              "network": null,
+              "observation_sha256": "3550d2ade1d940339d064e5449cdf8f8c87b123fdab6127c33f917724f731b43",
+              "pending_operation": false,
+              "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+              "schema_version": 1,
+              "volumes": {}
+            },
+            "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+            "status": "observed"
+          },
+          "runtime_bindings": [
+            {
+              "args": [
+                "-I",
+                "-B",
+                "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                "--workspace",
+                "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                "--planner",
+                "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                "--planner-sha256",
+                "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "run-stdio",
+                "--plan-sha256",
+                "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "--component",
+                "mcp"
+              ],
+              "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+              "component": "mcp",
+              "env": {},
+              "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+              "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+              "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+              "scope": "compose_backend_stdio"
+            }
+          ],
+          "scope": "compose_backend_observation_only"
+        },
+        "status": "succeeded",
+        "stop_supported": false
+      },
+      "job_history": {
+        "available": true,
+        "count": 1
+      },
+      "local_recipes": {
+        "available": false
+      },
+      "mode": "setup",
+      "operation_in_progress": false,
+      "preparation_retry": {
+        "available": true
+      },
+      "reconciliation": {
+        "available": false,
+        "observation": null
+      },
+      "recovery_manifest": {
+        "available": true,
+        "max_requests": 256
+      },
+      "scope": "Host-permitted local software installation and separately delegated container-plan execution; no account access, tool attachment or native authority is supplied.",
+      "selected_retry": {
+        "available": false
+      },
+      "stop": {
+        "available": true
+      }
+    }
+  },
+  "prepared": {
+    "details": {
+      "1f097d06543d52e6cd59470ecb6fa7ea": {
+        "job": {
+          "action": "prepare_successor",
+          "family": "compose",
+          "id": "1f097d06543d52e6cd59470ecb6fa7ea",
+          "kind": "compose",
+          "request_id": "f90f232b02ba0f1e4f14004bff04ebe0",
+          "result": {
+            "action": "prepare_successor",
+            "backend": {
+              "predecessor": {
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "c9dcf5f31b68b5345c31fb32d59aec89c4de8d8be5c1b658ac1b7bdb82de0438"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "manifest_source_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+                  "profile_sha256": "2665803ce235404e295f27390d87cd54d4de983193fef737a6879b0d0adf0eef",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "e79493bbf286bc34f8ae415d17766b55cf0a0dc78e095edc101c2968ec9a66e9",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "schema_version": 1,
+              "status": "prepared_successor",
+              "successor": {
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "19243dec6f4f6e1d44ddbf3d0d011a7370ab18142befe86752c3575924016cb7"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "manifest_source_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401",
+                  "profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "dc26c203aabea18fc1660a4196cc98876086392efe54c8c6eae81c6adc86d9eb",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "fc600663e52132bc8fa477d198f61f43": {
+        "job": {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "result": {
+            "action": "start",
+            "backend": {
+              "observation": {
+                "available": {
+                  "db": true
+                },
+                "containers": {},
+                "generation": 1,
+                "network": null,
+                "observation_sha256": "3550d2ade1d940339d064e5449cdf8f8c87b123fdab6127c33f917724f731b43",
+                "pending_operation": false,
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "schema_version": 1,
+                "volumes": {}
+              },
+              "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+              "status": "observed"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      }
+    },
+    "jobs": {
+      "jobs": [
+        {
+          "action": "prepare_successor",
+          "family": "compose",
+          "id": "1f097d06543d52e6cd59470ecb6fa7ea",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "f90f232b02ba0f1e4f14004bff04ebe0",
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "status": "succeeded",
+          "stop_supported": false
+        }
+      ],
+      "next_before": null
+    },
+    "state": {
+      "catalog": {
+        "available": false,
+        "catalog_sha256": null,
+        "contents_sha256": null
+      },
+      "compose": {
+        "actions": [
+          "observe",
+          "start",
+          "stop",
+          "resume",
+          "remove",
+          "prepare_successor",
+          "adopt_successor",
+          "reconcile_successor",
+          "rebind"
+        ],
+        "available": true,
+        "backend_profile_sha256": "2665803ce235404e295f27390d87cd54d4de983193fef737a6879b0d0adf0eef",
+        "delete_state_namespaces": [
+          "data"
+        ],
+        "execution_uncertain": false,
+        "graph_workspace": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+        "host_profile_sha256": "d636245f497865e0103712b3ea2c0ba3eabc49c78e54318e0bf85c301e7782d0",
+        "mode": "reopen",
+        "operation_timeout_seconds": 10,
+        "pending_operation": false,
+        "pending_transition": null,
+        "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+        "rebind_required": false,
+        "scope": "execute_agent_selected_local_container_plan",
+        "selected_plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+        "staging_root": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/staging",
+        "successor": {
+          "backend_profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+          "inputs_sha256": "cb3dcf7e4c551f260d8fccec8e64c1a11cfcba14d750ccd92dcbc0050d7b020a",
+          "predecessor_plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+          "successor_plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+          "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+        }
+      },
+      "export_retry": {
+        "available": false
+      },
+      "families": [],
+      "family_contents_sha256": {},
+      "job": {
+        "action": "prepare_successor",
+        "family": "compose",
+        "id": "1f097d06543d52e6cd59470ecb6fa7ea",
+        "kind": "compose",
+        "request_id": "f90f232b02ba0f1e4f14004bff04ebe0",
+        "result": {
+          "action": "prepare_successor",
+          "backend": {
+            "predecessor": {
+              "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+              "schema_version": 1,
+              "status": "prepared",
+              "summary": {
+                "components": {
+                  "mcp": {
+                    "dependencies": [],
+                    "deployment_dependencies": [],
+                    "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "lifetime": "request",
+                    "platform": "linux/amd64",
+                    "readiness": "running",
+                    "service": "mcp",
+                    "stop_timeout_ms": 1000
+                  }
+                },
+                "configuration_sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2",
+                "deployment_order": [],
+                "files": {
+                  "compose.json": {
+                    "mode": 292,
+                    "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                  },
+                  "inputs/configuration": {
+                    "mode": 292,
+                    "sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2"
+                  },
+                  "inputs/files/note": {
+                    "mode": 292,
+                    "sha256": "c9dcf5f31b68b5345c31fb32d59aec89c4de8d8be5c1b658ac1b7bdb82de0438"
+                  },
+                  "inputs/policy": {
+                    "mode": 292,
+                    "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+                  }
+                },
+                "host_owner": "fixture",
+                "initialization_order": [
+                  "mcp"
+                ],
+                "manifest_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                "manifest_source_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                "policy_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+                "profile_sha256": "2665803ce235404e295f27390d87cd54d4de983193fef737a6879b0d0adf0eef",
+                "project": "fixture-project",
+                "request_components": [
+                  "mcp"
+                ],
+                "request_sha256": "e79493bbf286bc34f8ae415d17766b55cf0a0dc78e095edc101c2968ec9a66e9",
+                "shutdown_order": [
+                  "mcp"
+                ]
+              }
+            },
+            "schema_version": 1,
+            "status": "prepared_successor",
+            "successor": {
+              "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+              "schema_version": 1,
+              "status": "prepared",
+              "summary": {
+                "components": {
+                  "mcp": {
+                    "dependencies": [],
+                    "deployment_dependencies": [],
+                    "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "lifetime": "request",
+                    "platform": "linux/amd64",
+                    "readiness": "running",
+                    "service": "mcp",
+                    "stop_timeout_ms": 1000
+                  }
+                },
+                "configuration_sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90",
+                "deployment_order": [],
+                "files": {
+                  "compose.json": {
+                    "mode": 292,
+                    "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                  },
+                  "inputs/configuration": {
+                    "mode": 292,
+                    "sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90"
+                  },
+                  "inputs/files/note": {
+                    "mode": 292,
+                    "sha256": "19243dec6f4f6e1d44ddbf3d0d011a7370ab18142befe86752c3575924016cb7"
+                  },
+                  "inputs/policy": {
+                    "mode": 292,
+                    "sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401"
+                  }
+                },
+                "host_owner": "fixture",
+                "initialization_order": [
+                  "mcp"
+                ],
+                "manifest_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                "manifest_source_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                "policy_sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401",
+                "profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+                "project": "fixture-project",
+                "request_components": [
+                  "mcp"
+                ],
+                "request_sha256": "dc26c203aabea18fc1660a4196cc98876086392efe54c8c6eae81c6adc86d9eb",
+                "shutdown_order": [
+                  "mcp"
+                ]
+              }
+            },
+            "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+          },
+          "runtime_bindings": [
+            {
+              "args": [
+                "-I",
+                "-B",
+                "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                "--workspace",
+                "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                "--planner",
+                "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                "--planner-sha256",
+                "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "run-stdio",
+                "--plan-sha256",
+                "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "--component",
+                "mcp"
+              ],
+              "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+              "component": "mcp",
+              "env": {},
+              "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+              "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+              "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+              "scope": "compose_backend_stdio"
+            }
+          ],
+          "scope": "compose_backend_observation_only"
+        },
+        "status": "succeeded",
+        "stop_supported": false
+      },
+      "job_history": {
+        "available": true,
+        "count": 2
+      },
+      "local_recipes": {
+        "available": false
+      },
+      "mode": "setup",
+      "operation_in_progress": false,
+      "preparation_retry": {
+        "available": true
+      },
+      "reconciliation": {
+        "available": false,
+        "observation": null
+      },
+      "recovery_manifest": {
+        "available": true,
+        "max_requests": 256
+      },
+      "scope": "Host-permitted local software installation and separately delegated container-plan execution; no account access, tool attachment or native authority is supplied.",
+      "selected_retry": {
+        "available": false
+      },
+      "stop": {
+        "available": true
+      }
+    }
+  },
+  "rebound": {
+    "details": {
+      "1f097d06543d52e6cd59470ecb6fa7ea": {
+        "job": {
+          "action": "prepare_successor",
+          "family": "compose",
+          "id": "1f097d06543d52e6cd59470ecb6fa7ea",
+          "kind": "compose",
+          "request_id": "f90f232b02ba0f1e4f14004bff04ebe0",
+          "result": {
+            "action": "prepare_successor",
+            "backend": {
+              "predecessor": {
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "c9dcf5f31b68b5345c31fb32d59aec89c4de8d8be5c1b658ac1b7bdb82de0438"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "manifest_source_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+                  "profile_sha256": "2665803ce235404e295f27390d87cd54d4de983193fef737a6879b0d0adf0eef",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "e79493bbf286bc34f8ae415d17766b55cf0a0dc78e095edc101c2968ec9a66e9",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "schema_version": 1,
+              "status": "prepared_successor",
+              "successor": {
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "19243dec6f4f6e1d44ddbf3d0d011a7370ab18142befe86752c3575924016cb7"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "manifest_source_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401",
+                  "profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "dc26c203aabea18fc1660a4196cc98876086392efe54c8c6eae81c6adc86d9eb",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "3ce9c1fb428d6aef4bd1453db48699a2": {
+        "job": {
+          "action": "rebind",
+          "family": "compose",
+          "id": "3ce9c1fb428d6aef4bd1453db48699a2",
+          "kind": "compose",
+          "request_id": "f1f95270b8de50e87bed56555c99ef58",
+          "result": {
+            "action": "rebind",
+            "backend": {
+              "selected": {
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "19243dec6f4f6e1d44ddbf3d0d011a7370ab18142befe86752c3575924016cb7"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "manifest_source_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401",
+                  "profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "dc26c203aabea18fc1660a4196cc98876086392efe54c8c6eae81c6adc86d9eb",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "status": "rebound",
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "c3a448aec443a1310ebb30f53e9cc8e5": {
+        "job": {
+          "action": "adopt_successor",
+          "family": "compose",
+          "id": "c3a448aec443a1310ebb30f53e9cc8e5",
+          "kind": "compose",
+          "request_id": "45526b4fd67bf6e8fdccae31179187b2",
+          "result": {
+            "action": "adopt_successor",
+            "backend": {
+              "observation": null,
+              "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+              "status": "unconfirmed",
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "unconfirmed",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "fc600663e52132bc8fa477d198f61f43": {
+        "job": {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "result": {
+            "action": "start",
+            "backend": {
+              "observation": {
+                "available": {
+                  "db": true
+                },
+                "containers": {},
+                "generation": 1,
+                "network": null,
+                "observation_sha256": "3550d2ade1d940339d064e5449cdf8f8c87b123fdab6127c33f917724f731b43",
+                "pending_operation": false,
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "schema_version": 1,
+                "volumes": {}
+              },
+              "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+              "status": "observed"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "fc9222112e82f555b37dfb1aa5170bca": {
+        "job": {
+          "action": "reconcile_successor",
+          "family": "compose",
+          "id": "fc9222112e82f555b37dfb1aa5170bca",
+          "kind": "compose",
+          "request_id": "ea0d85b9a221d82a9c51988d0b77cfd5",
+          "result": {
+            "action": "reconcile_successor",
+            "backend": {
+              "observation": {
+                "available": {
+                  "db": true
+                },
+                "containers": {},
+                "generation": 3,
+                "network": null,
+                "observation_sha256": "acfc92fecf5b684c8772b024aa438cc88bcd13453cd7b2cc1bb07da16b1f1bfd",
+                "pending_operation": false,
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "schema_version": 1,
+                "volumes": {}
+              },
+              "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+              "status": "observed",
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      }
+    },
+    "jobs": {
+      "jobs": [
+        {
+          "action": "rebind",
+          "family": "compose",
+          "id": "3ce9c1fb428d6aef4bd1453db48699a2",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "f1f95270b8de50e87bed56555c99ef58",
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        {
+          "action": "reconcile_successor",
+          "family": "compose",
+          "id": "fc9222112e82f555b37dfb1aa5170bca",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "ea0d85b9a221d82a9c51988d0b77cfd5",
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        {
+          "action": "adopt_successor",
+          "family": "compose",
+          "id": "c3a448aec443a1310ebb30f53e9cc8e5",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "45526b4fd67bf6e8fdccae31179187b2",
+          "status": "unconfirmed",
+          "stop_supported": false
+        },
+        {
+          "action": "prepare_successor",
+          "family": "compose",
+          "id": "1f097d06543d52e6cd59470ecb6fa7ea",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "f90f232b02ba0f1e4f14004bff04ebe0",
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "status": "succeeded",
+          "stop_supported": false
+        }
+      ],
+      "next_before": null
+    },
+    "state": {
+      "catalog": {
+        "available": false,
+        "catalog_sha256": null,
+        "contents_sha256": null
+      },
+      "compose": {
+        "actions": [
+          "observe",
+          "start",
+          "stop",
+          "resume",
+          "remove",
+          "prepare_successor",
+          "adopt_successor",
+          "reconcile_successor",
+          "rebind"
+        ],
+        "available": true,
+        "backend_profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+        "delete_state_namespaces": [
+          "data"
+        ],
+        "execution_uncertain": false,
+        "graph_workspace": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+        "host_profile_sha256": "d636245f497865e0103712b3ea2c0ba3eabc49c78e54318e0bf85c301e7782d0",
+        "mode": "reopen",
+        "operation_timeout_seconds": 10,
+        "pending_operation": false,
+        "pending_transition": null,
+        "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+        "rebind_required": false,
+        "scope": "execute_agent_selected_local_container_plan",
+        "selected_plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+        "staging_root": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/staging",
+        "successor": {
+          "backend_profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+          "inputs_sha256": "cb3dcf7e4c551f260d8fccec8e64c1a11cfcba14d750ccd92dcbc0050d7b020a",
+          "predecessor_plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+          "successor_plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+          "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+        }
+      },
+      "export_retry": {
+        "available": false
+      },
+      "families": [],
+      "family_contents_sha256": {},
+      "job": {
+        "action": "rebind",
+        "family": "compose",
+        "id": "3ce9c1fb428d6aef4bd1453db48699a2",
+        "kind": "compose",
+        "request_id": "f1f95270b8de50e87bed56555c99ef58",
+        "result": {
+          "action": "rebind",
+          "backend": {
+            "selected": {
+              "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+              "schema_version": 1,
+              "status": "prepared",
+              "summary": {
+                "components": {
+                  "mcp": {
+                    "dependencies": [],
+                    "deployment_dependencies": [],
+                    "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "lifetime": "request",
+                    "platform": "linux/amd64",
+                    "readiness": "running",
+                    "service": "mcp",
+                    "stop_timeout_ms": 1000
+                  }
+                },
+                "configuration_sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90",
+                "deployment_order": [],
+                "files": {
+                  "compose.json": {
+                    "mode": 292,
+                    "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                  },
+                  "inputs/configuration": {
+                    "mode": 292,
+                    "sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90"
+                  },
+                  "inputs/files/note": {
+                    "mode": 292,
+                    "sha256": "19243dec6f4f6e1d44ddbf3d0d011a7370ab18142befe86752c3575924016cb7"
+                  },
+                  "inputs/policy": {
+                    "mode": 292,
+                    "sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401"
+                  }
+                },
+                "host_owner": "fixture",
+                "initialization_order": [
+                  "mcp"
+                ],
+                "manifest_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                "manifest_source_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                "policy_sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401",
+                "profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+                "project": "fixture-project",
+                "request_components": [
+                  "mcp"
+                ],
+                "request_sha256": "dc26c203aabea18fc1660a4196cc98876086392efe54c8c6eae81c6adc86d9eb",
+                "shutdown_order": [
+                  "mcp"
+                ]
+              }
+            },
+            "status": "rebound",
+            "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+          },
+          "runtime_bindings": [
+            {
+              "args": [
+                "-I",
+                "-B",
+                "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                "--workspace",
+                "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                "--planner",
+                "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                "--planner-sha256",
+                "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "run-stdio",
+                "--plan-sha256",
+                "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "--component",
+                "mcp"
+              ],
+              "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+              "component": "mcp",
+              "env": {},
+              "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+              "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+              "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+              "scope": "compose_backend_stdio"
+            }
+          ],
+          "scope": "compose_backend_observation_only"
+        },
+        "status": "succeeded",
+        "stop_supported": false
+      },
+      "job_history": {
+        "available": true,
+        "count": 5
+      },
+      "local_recipes": {
+        "available": false
+      },
+      "mode": "setup",
+      "operation_in_progress": false,
+      "preparation_retry": {
+        "available": true
+      },
+      "reconciliation": {
+        "available": false,
+        "observation": null
+      },
+      "recovery_manifest": {
+        "available": true,
+        "max_requests": 256
+      },
+      "scope": "Host-permitted local software installation and separately delegated container-plan execution; no account access, tool attachment or native authority is supplied.",
+      "selected_retry": {
+        "available": false
+      },
+      "stop": {
+        "available": true
+      }
+    }
+  },
+  "running": {
+    "details": {
+      "1f097d06543d52e6cd59470ecb6fa7ea": {
+        "job": {
+          "action": "prepare_successor",
+          "family": "compose",
+          "id": "1f097d06543d52e6cd59470ecb6fa7ea",
+          "kind": "compose",
+          "request_id": "f90f232b02ba0f1e4f14004bff04ebe0",
+          "result": {
+            "action": "prepare_successor",
+            "backend": {
+              "predecessor": {
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "c9dcf5f31b68b5345c31fb32d59aec89c4de8d8be5c1b658ac1b7bdb82de0438"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "manifest_source_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+                  "profile_sha256": "2665803ce235404e295f27390d87cd54d4de983193fef737a6879b0d0adf0eef",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "e79493bbf286bc34f8ae415d17766b55cf0a0dc78e095edc101c2968ec9a66e9",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "schema_version": 1,
+              "status": "prepared_successor",
+              "successor": {
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "19243dec6f4f6e1d44ddbf3d0d011a7370ab18142befe86752c3575924016cb7"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "manifest_source_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401",
+                  "profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "dc26c203aabea18fc1660a4196cc98876086392efe54c8c6eae81c6adc86d9eb",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "c3a448aec443a1310ebb30f53e9cc8e5": {
+        "job": {
+          "action": "adopt_successor",
+          "family": "compose",
+          "id": "c3a448aec443a1310ebb30f53e9cc8e5",
+          "kind": "compose",
+          "request_id": "45526b4fd67bf6e8fdccae31179187b2",
+          "status": "running",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "fc600663e52132bc8fa477d198f61f43": {
+        "job": {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "result": {
+            "action": "start",
+            "backend": {
+              "observation": {
+                "available": {
+                  "db": true
+                },
+                "containers": {},
+                "generation": 1,
+                "network": null,
+                "observation_sha256": "3550d2ade1d940339d064e5449cdf8f8c87b123fdab6127c33f917724f731b43",
+                "pending_operation": false,
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "schema_version": 1,
+                "volumes": {}
+              },
+              "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+              "status": "observed"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      }
+    },
+    "jobs": {
+      "jobs": [
+        {
+          "action": "adopt_successor",
+          "family": "compose",
+          "id": "c3a448aec443a1310ebb30f53e9cc8e5",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "45526b4fd67bf6e8fdccae31179187b2",
+          "status": "running",
+          "stop_supported": false
+        },
+        {
+          "action": "prepare_successor",
+          "family": "compose",
+          "id": "1f097d06543d52e6cd59470ecb6fa7ea",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "f90f232b02ba0f1e4f14004bff04ebe0",
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "status": "succeeded",
+          "stop_supported": false
+        }
+      ],
+      "next_before": null
+    },
+    "state": {
+      "catalog": {
+        "available": false,
+        "catalog_sha256": null,
+        "contents_sha256": null
+      },
+      "compose": {
+        "actions": [
+          "observe",
+          "start",
+          "stop",
+          "resume",
+          "remove",
+          "prepare_successor",
+          "adopt_successor",
+          "reconcile_successor",
+          "rebind"
+        ],
+        "available": true,
+        "backend_profile_sha256": "2665803ce235404e295f27390d87cd54d4de983193fef737a6879b0d0adf0eef",
+        "delete_state_namespaces": [
+          "data"
+        ],
+        "execution_uncertain": false,
+        "graph_workspace": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+        "host_profile_sha256": "d636245f497865e0103712b3ea2c0ba3eabc49c78e54318e0bf85c301e7782d0",
+        "mode": "reopen",
+        "operation_timeout_seconds": 10,
+        "pending_operation": false,
+        "pending_transition": null,
+        "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+        "rebind_required": false,
+        "scope": "execute_agent_selected_local_container_plan",
+        "selected_plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+        "staging_root": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/staging",
+        "successor": {
+          "backend_profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+          "inputs_sha256": "cb3dcf7e4c551f260d8fccec8e64c1a11cfcba14d750ccd92dcbc0050d7b020a",
+          "predecessor_plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+          "successor_plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+          "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+        }
+      },
+      "export_retry": {
+        "available": false
+      },
+      "families": [],
+      "family_contents_sha256": {},
+      "job": {
+        "action": "adopt_successor",
+        "family": "compose",
+        "id": "c3a448aec443a1310ebb30f53e9cc8e5",
+        "kind": "compose",
+        "request_id": "45526b4fd67bf6e8fdccae31179187b2",
+        "status": "running",
+        "stop_supported": false
+      },
+      "job_history": {
+        "available": true,
+        "count": 3
+      },
+      "local_recipes": {
+        "available": false
+      },
+      "mode": "setup",
+      "operation_in_progress": true,
+      "preparation_retry": {
+        "available": true
+      },
+      "reconciliation": {
+        "available": false,
+        "observation": null
+      },
+      "recovery_manifest": {
+        "available": true,
+        "max_requests": 256
+      },
+      "scope": "Host-permitted local software installation and separately delegated container-plan execution; no account access, tool attachment or native authority is supplied.",
+      "selected_retry": {
+        "available": false
+      },
+      "stop": {
+        "available": true
+      }
+    }
+  },
+  "selected": {
+    "details": {
+      "1f097d06543d52e6cd59470ecb6fa7ea": {
+        "job": {
+          "action": "prepare_successor",
+          "family": "compose",
+          "id": "1f097d06543d52e6cd59470ecb6fa7ea",
+          "kind": "compose",
+          "request_id": "f90f232b02ba0f1e4f14004bff04ebe0",
+          "result": {
+            "action": "prepare_successor",
+            "backend": {
+              "predecessor": {
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "793a5ec76eb028866cf4a7c97f52bb92a467e3e2ecfe59a9b9bc6b072e9a2ee2"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "c9dcf5f31b68b5345c31fb32d59aec89c4de8d8be5c1b658ac1b7bdb82de0438"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "manifest_source_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+                  "profile_sha256": "2665803ce235404e295f27390d87cd54d4de983193fef737a6879b0d0adf0eef",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "e79493bbf286bc34f8ae415d17766b55cf0a0dc78e095edc101c2968ec9a66e9",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "schema_version": 1,
+              "status": "prepared_successor",
+              "successor": {
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "schema_version": 1,
+                "status": "prepared",
+                "summary": {
+                  "components": {
+                    "mcp": {
+                      "dependencies": [],
+                      "deployment_dependencies": [],
+                      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "lifetime": "request",
+                      "platform": "linux/amd64",
+                      "readiness": "running",
+                      "service": "mcp",
+                      "stop_timeout_ms": 1000
+                    }
+                  },
+                  "configuration_sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90",
+                  "deployment_order": [],
+                  "files": {
+                    "compose.json": {
+                      "mode": 292,
+                      "sha256": "9a53efc3927c45a44cc599ea68fff27dad9dbcfa44dc226a43b405997f5401c2"
+                    },
+                    "inputs/configuration": {
+                      "mode": 292,
+                      "sha256": "99478a7297157fca71f1afd29060072370196c060d594575b756b2ba84651e90"
+                    },
+                    "inputs/files/note": {
+                      "mode": 292,
+                      "sha256": "19243dec6f4f6e1d44ddbf3d0d011a7370ab18142befe86752c3575924016cb7"
+                    },
+                    "inputs/policy": {
+                      "mode": 292,
+                      "sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401"
+                    }
+                  },
+                  "host_owner": "fixture",
+                  "initialization_order": [
+                    "mcp"
+                  ],
+                  "manifest_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "manifest_source_sha256": "c6530916ba30c9350a89971499e45c3537337c7b8e4c13e527928d13ffc8eb08",
+                  "package_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                  "policy_sha256": "3f40d4f8e939ec1957db34eb5e5e30a93f0966f3ea2576388fb8788ac84c7401",
+                  "profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+                  "project": "fixture-project",
+                  "request_components": [
+                    "mcp"
+                  ],
+                  "request_sha256": "dc26c203aabea18fc1660a4196cc98876086392efe54c8c6eae81c6adc86d9eb",
+                  "shutdown_order": [
+                    "mcp"
+                  ]
+                }
+              },
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "c3a448aec443a1310ebb30f53e9cc8e5": {
+        "job": {
+          "action": "adopt_successor",
+          "family": "compose",
+          "id": "c3a448aec443a1310ebb30f53e9cc8e5",
+          "kind": "compose",
+          "request_id": "45526b4fd67bf6e8fdccae31179187b2",
+          "result": {
+            "action": "adopt_successor",
+            "backend": {
+              "observation": null,
+              "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+              "status": "unconfirmed",
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "unconfirmed",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "fc600663e52132bc8fa477d198f61f43": {
+        "job": {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "result": {
+            "action": "start",
+            "backend": {
+              "observation": {
+                "available": {
+                  "db": true
+                },
+                "containers": {},
+                "generation": 1,
+                "network": null,
+                "observation_sha256": "3550d2ade1d940339d064e5449cdf8f8c87b123fdab6127c33f917724f731b43",
+                "pending_operation": false,
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "schema_version": 1,
+                "volumes": {}
+              },
+              "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+              "status": "observed"
+            },
+            "runtime_bindings": [
+              {
+                "args": [
+                  "-I",
+                  "-B",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/runtime.py",
+                  "--workspace",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+                  "--planner",
+                  "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/session-2/compose/planner",
+                  "--planner-sha256",
+                  "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                  "run-stdio",
+                  "--plan-sha256",
+                  "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                  "--component",
+                  "mcp"
+                ],
+                "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
+                "component": "mcp",
+                "env": {},
+                "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+                "planner_sha256": "be6fcbf8bfdeb8a1087e775240185f8af79af7179d0411711eebb980778fd300",
+                "runtime_sha256": "735521b5eab7d869d9386bd52f9a11f0b591dbf1104902b2a1275dc165821211",
+                "scope": "compose_backend_stdio"
+              }
+            ],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      },
+      "fc9222112e82f555b37dfb1aa5170bca": {
+        "job": {
+          "action": "reconcile_successor",
+          "family": "compose",
+          "id": "fc9222112e82f555b37dfb1aa5170bca",
+          "kind": "compose",
+          "request_id": "ea0d85b9a221d82a9c51988d0b77cfd5",
+          "result": {
+            "action": "reconcile_successor",
+            "backend": {
+              "observation": {
+                "available": {
+                  "db": true
+                },
+                "containers": {},
+                "generation": 3,
+                "network": null,
+                "observation_sha256": "acfc92fecf5b684c8772b024aa438cc88bcd13453cd7b2cc1bb07da16b1f1bfd",
+                "pending_operation": false,
+                "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+                "schema_version": 1,
+                "volumes": {}
+              },
+              "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+              "status": "observed",
+              "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+            },
+            "runtime_bindings": [],
+            "scope": "compose_backend_observation_only"
+          },
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        "reconciliation": {
+          "available": false,
+          "observation": null
+        }
+      }
+    },
+    "jobs": {
+      "jobs": [
+        {
+          "action": "reconcile_successor",
+          "family": "compose",
+          "id": "fc9222112e82f555b37dfb1aa5170bca",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "ea0d85b9a221d82a9c51988d0b77cfd5",
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        {
+          "action": "adopt_successor",
+          "family": "compose",
+          "id": "c3a448aec443a1310ebb30f53e9cc8e5",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "45526b4fd67bf6e8fdccae31179187b2",
+          "status": "unconfirmed",
+          "stop_supported": false
+        },
+        {
+          "action": "prepare_successor",
+          "family": "compose",
+          "id": "1f097d06543d52e6cd59470ecb6fa7ea",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "f90f232b02ba0f1e4f14004bff04ebe0",
+          "status": "succeeded",
+          "stop_supported": false
+        },
+        {
+          "action": "start",
+          "family": "compose",
+          "id": "fc600663e52132bc8fa477d198f61f43",
+          "kind": "compose",
+          "profile": null,
+          "request_id": "4c62354a3e72478d718f350fab6ae654",
+          "status": "succeeded",
+          "stop_supported": false
+        }
+      ],
+      "next_before": null
+    },
+    "state": {
+      "catalog": {
+        "available": false,
+        "catalog_sha256": null,
+        "contents_sha256": null
+      },
+      "compose": {
+        "actions": [
+          "observe",
+          "start",
+          "stop",
+          "resume",
+          "remove",
+          "prepare_successor",
+          "adopt_successor",
+          "reconcile_successor",
+          "rebind"
+        ],
+        "available": true,
+        "backend_profile_sha256": "2665803ce235404e295f27390d87cd54d4de983193fef737a6879b0d0adf0eef",
+        "delete_state_namespaces": [
+          "data"
+        ],
+        "execution_uncertain": false,
+        "graph_workspace": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/graph",
+        "host_profile_sha256": "d636245f497865e0103712b3ea2c0ba3eabc49c78e54318e0bf85c301e7782d0",
+        "mode": "reopen",
+        "operation_timeout_seconds": 10,
+        "pending_operation": false,
+        "pending_transition": null,
+        "plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+        "rebind_required": true,
+        "scope": "execute_agent_selected_local_container_plan",
+        "selected_plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+        "staging_root": "/private/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/tmpaegy7ugg/staging",
+        "successor": {
+          "backend_profile_sha256": "302ca817c4bee522167768f9e3ba4343c92eef7a31ccbeb71e0430a48fab8ade",
+          "inputs_sha256": "cb3dcf7e4c551f260d8fccec8e64c1a11cfcba14d750ccd92dcbc0050d7b020a",
+          "predecessor_plan_sha256": "3df53542cf295e84d252f677712836db559665511d7a249dc1daf53e4e85be45",
+          "successor_plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+          "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+        }
+      },
+      "export_retry": {
+        "available": false
+      },
+      "families": [],
+      "family_contents_sha256": {},
+      "job": {
+        "action": "reconcile_successor",
+        "family": "compose",
+        "id": "fc9222112e82f555b37dfb1aa5170bca",
+        "kind": "compose",
+        "request_id": "ea0d85b9a221d82a9c51988d0b77cfd5",
+        "result": {
+          "action": "reconcile_successor",
+          "backend": {
+            "observation": {
+              "available": {
+                "db": true
+              },
+              "containers": {},
+              "generation": 3,
+              "network": null,
+              "observation_sha256": "acfc92fecf5b684c8772b024aa438cc88bcd13453cd7b2cc1bb07da16b1f1bfd",
+              "pending_operation": false,
+              "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+              "schema_version": 1,
+              "volumes": {}
+            },
+            "plan_sha256": "3b1d812ba6253dc634d9e964abe2372e0882e099bd94e0022a396ac385921f99",
+            "status": "observed",
+            "transition_sha256": "9dec61934f3a616fec3a026f8ef8b96bf24e05e9e82961657995305ccca73021"
+          },
+          "runtime_bindings": [],
+          "scope": "compose_backend_observation_only"
+        },
+        "status": "succeeded",
+        "stop_supported": false
+      },
+      "job_history": {
+        "available": true,
+        "count": 4
+      },
+      "local_recipes": {
+        "available": false
+      },
+      "mode": "setup",
+      "operation_in_progress": false,
+      "preparation_retry": {
+        "available": true
+      },
+      "reconciliation": {
+        "available": false,
+        "observation": null
+      },
+      "recovery_manifest": {
+        "available": true,
+        "max_requests": 256
+      },
+      "scope": "Host-permitted local software installation and separately delegated container-plan execution; no account access, tool attachment or native authority is supplied.",
+      "selected_retry": {
+        "available": false
+      },
+      "stop": {
+        "available": true
+      }
+    }
+  }
+}

@@ -1,0 +1,13606 @@
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write;
+
+struct InfallibleWrite;
+
+impl InfallibleWrite {
+    fn expect(self, _message: &str) {}
+}
+
+fn push_fmt(out: &mut String, args: std::fmt::Arguments<'_>) {
+    let _ignored = out.write_fmt(args);
+}
+
+fn push_line(out: &mut String, args: std::fmt::Arguments<'_>) {
+    push_fmt(out, args);
+    out.push('\n');
+}
+
+macro_rules! pushln {
+    ($out:expr) => {{
+        $out.push('\n');
+    }};
+    ($out:expr, $($arg:tt)*) => {{
+        push_line($out, format_args!($($arg)*));
+    }};
+}
+
+macro_rules! writeln {
+    ($dst:expr) => {{
+        let _ignored = ::std::writeln!($dst);
+        InfallibleWrite
+    }};
+    ($dst:expr, $($arg:tt)*) => {{
+        let _ignored = ::std::writeln!($dst, $($arg)*);
+        InfallibleWrite
+    }};
+}
+
+const TLA_RUST_U64_MAX_CONSTANT: &str = "RustU64Max";
+const TLC_SAFE_RUST_U64_MAX_VALUE: u64 = 2_147_483_647;
+const SESSION_ID_STRING_BRIDGE_HELPER: &str = "meerkat_machine_session_id_matches_string";
+const TLC_REPRESENTATIVE_DOMAIN_HELPER: &str = "TlcRepresentativeDomain";
+
+use meerkat_machine_schema::{
+    CompositionCoverageManifest, CompositionInvariantKind, CompositionSchema,
+    CompositionStateLimits, CompositionWitness, CoverageAnchor, CoverageSchemaTarget,
+    DriverRefusalFieldSource, EntryInput, EnumSchema, Expr, FeedbackFieldSource, FeedbackInputRef,
+    Guard, HelperSchema, MachineCoverageManifest, MachineSchema, Quantifier, Route,
+    RouteBindingSource, RouteDelivery, RouteTarget, RouteTargetKind, SchedulerRule,
+    TransitionSchema, TriggerMatch, TypePathEnumPayloadAtom, TypePathEnumStructuralVariant,
+    TypePathStructField, TypePathStructFieldAtom, TypeRef, Update, VariantSchema,
+    canonical_machine_schemas,
+};
+
+/// Fail-closed error for composition/machine TLA model generation.
+///
+/// The composition CASE builders and helper ordering used to silently emit
+/// sentinel strings (`"unknown_actor"`, `"unknown_machine"`, …) and swallow
+/// compiler construction errors into `String::new()`. That turned a malformed
+/// composition (a route referencing an undeclared machine/effect/input, or a
+/// helper-call cycle) into a broken-but-passing model. Generation now returns
+/// this typed error so `machine-generate` / `machine-check-drift` fail closed
+/// on malformed input. For every currently-valid schema the resolution checks
+/// pass, so generated output is unchanged.
+/// How a machine's named-type bindings depart from the canonical machine
+/// that shares its id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalNamedTypeMismatchKind {
+    /// A canonical struct binding is missing.
+    MissingStructBinding,
+    /// The binding's generated domain shape differs from the canonical one.
+    DomainShape,
+}
+
+impl std::fmt::Display for CanonicalNamedTypeMismatchKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::MissingStructBinding => "is missing the canonical struct binding",
+            Self::DomainShape => "has a different domain shape than the canonical binding",
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CompositionTlaError {
+    #[error("machine `{machine}`: invalid finite TLC model: {reason}")]
+    InvalidTlcModel { machine: String, reason: String },
+    /// A route's `from_machine` is not a declared machine instance.
+    #[error(
+        "composition `{composition}`: route `{route}` source machine `{machine}` is not a declared machine instance"
+    )]
+    UnknownRouteSourceMachine {
+        composition: String,
+        route: String,
+        machine: String,
+    },
+    /// A route's `to.machine` is not a declared machine instance.
+    #[error(
+        "composition `{composition}`: route `{route}` target machine `{machine}` is not a declared machine instance"
+    )]
+    UnknownRouteTargetMachine {
+        composition: String,
+        route: String,
+        machine: String,
+    },
+    /// A route's `effect_variant` is not a declared effect on its source machine.
+    #[error(
+        "composition `{composition}`: route `{route}` effect `{effect}` is not a declared effect on source machine instance `{machine}`"
+    )]
+    UnknownRouteEffect {
+        composition: String,
+        route: String,
+        machine: String,
+        effect: String,
+    },
+    /// A route's `to.input_variant` is not a declared input on its target machine.
+    #[error(
+        "composition `{composition}`: route `{route}` target input `{input}` is not a declared input on target machine instance `{machine}`"
+    )]
+    UnknownRouteTargetInput {
+        composition: String,
+        route: String,
+        machine: String,
+        input: String,
+    },
+    /// A route's `to.input_variant` is not a declared signal on its target machine.
+    #[error(
+        "composition `{composition}`: route `{route}` target signal `{signal}` is not a declared signal on target machine instance `{machine}`"
+    )]
+    UnknownRouteTargetSignal {
+        composition: String,
+        route: String,
+        machine: String,
+        signal: String,
+    },
+    /// An obligation field on a handoff protocol is absent from the matching
+    /// effect payload (used to be papered over with an `"unknown_<field>"`
+    /// sentinel literal in the generated TLA record).
+    #[error(
+        "composition `{composition}`: handoff protocol `{protocol}` obligation field `{field}` is absent from effect `{effect}` payload"
+    )]
+    UnknownObligationField {
+        composition: String,
+        protocol: String,
+        effect: String,
+        field: String,
+    },
+    /// A generated composition `CASE` operator over a route component could
+    /// not resolve a non-empty mapping for a composition that declares the
+    /// corresponding routes/machines. The previous behaviour laundered this
+    /// into an `OTHER -> "unknown_*"` sentinel, so a model that referenced an
+    /// undeclared actor/machine/effect/input still type-checked. Fail closed
+    /// instead: the operator's `OTHER` catch-all is dropped and an empty
+    /// mapping for a populated composition is a hard codegen error.
+    #[error(
+        "composition `{composition}`: route component `{component}` operator has no resolvable mapping despite declared routes/machines"
+    )]
+    UnknownRouteComponent {
+        composition: String,
+        component: &'static str,
+    },
+    /// A witness references a machine instance that is not part of the
+    /// composition. The renderer must not fall back to an arbitrary schema,
+    /// because that can make a liveness witness weaker than its catalog claim.
+    #[error(
+        "composition `{composition}`: witness `{witness}` references unknown machine instance `{machine}`"
+    )]
+    UnknownWitnessMachine {
+        composition: String,
+        witness: String,
+        machine: String,
+    },
+    /// A witness references a transition that is not declared on its machine.
+    /// Dropping the transition silently would let the generated witness omit
+    /// required progress while still rendering.
+    #[error(
+        "composition `{composition}`: witness `{witness}` references unknown transition `{transition}` on machine instance `{machine}`"
+    )]
+    UnknownWitnessTransition {
+        composition: String,
+        witness: String,
+        machine: String,
+        transition: String,
+    },
+    /// A machine declares a helper-call cycle, so no topological helper order
+    /// exists. The previous fallback silently emitted the cyclic helpers in an
+    /// arbitrary order, producing a model that references helpers before they
+    /// are defined.
+    #[error("machine `{machine}`: helper-call cycle detected: {cycle}")]
+    HelperCycle { machine: String, cycle: String },
+    /// Two distinct UNCHANGED frames derived the same generated operator name.
+    /// Disambiguating with a counter would be order-dependent and would hand
+    /// one action a frame condition it did not have, so this fails the render.
+    #[error("composition `{composition}`: {collision}")]
+    UnchangedFrameCollision {
+        composition: String,
+        collision: UnchangedFrameCollision,
+    },
+    /// Two distinct UNCHANGED frames derived the same generated operator name
+    /// while rendering a per-machine model.
+    #[error("machine `{machine}`: {collision}")]
+    MachineUnchangedFrameCollision {
+        machine: String,
+        collision: UnchangedFrameCollision,
+    },
+    /// Lower-level TLA compiler construction/render failure (e.g. an unknown
+    /// machine schema for a composition instance).
+    #[error("composition TLA compilation failed: {0}")]
+    Compile(String),
+    /// A supplied machine schema fails its own validation.
+    #[error("supplied machine `{machine}` is invalid: {error}")]
+    InvalidSuppliedMachine { machine: String, error: String },
+    /// A supplied catalog lists the same machine id twice.
+    #[error("supplied machine catalog lists machine `{machine}` more than once")]
+    DuplicateSuppliedMachine { machine: String },
+    /// A supplied machine reuses a canonical Meerkat machine id with a
+    /// different schema. A caller's catalog may include a canonical machine
+    /// unchanged, but never a shadow of it.
+    #[error(
+        "supplied machine `{machine}` shares its id with a canonical Meerkat machine but has a different schema"
+    )]
+    ShadowsCanonicalMachine { machine: String },
+    /// A machine that shares a canonical machine's id omits a canonical
+    /// struct named-type binding, or binds a shared named type with a
+    /// different generated domain shape.
+    #[error("machine `{machine}`: named type `{named_type}` {reason}")]
+    CanonicalNamedTypeMismatch {
+        machine: String,
+        named_type: String,
+        reason: CanonicalNamedTypeMismatchKind,
+    },
+    /// Two machines of one composition bind the same named type with
+    /// different generated domain shapes.
+    #[error(
+        "composition `{composition}`: named type `{named_type}` is bound with different domain shapes"
+    )]
+    DivergentNamedTypeBinding {
+        composition: String,
+        named_type: String,
+    },
+    /// The composition does not validate against the supplied catalog.
+    #[error("composition `{composition}` does not validate against the supplied catalog: {error}")]
+    InvalidCompositionForCatalog { composition: String, error: String },
+}
+
+impl From<String> for CompositionTlaError {
+    fn from(message: String) -> Self {
+        CompositionTlaError::Compile(message)
+    }
+}
+
+fn route_target_variant<'a>(
+    machine: &'a MachineSchema,
+    target: &RouteTarget,
+) -> Option<&'a VariantSchema> {
+    match target.kind {
+        RouteTargetKind::Input => machine
+            .inputs
+            .variant_named(target.input_variant.as_str())
+            .ok(),
+        RouteTargetKind::Signal => machine
+            .signals
+            .variant_named(target.input_variant.as_str())
+            .ok(),
+    }
+}
+
+fn transition_trigger_variant<'a>(
+    schema: &'a MachineSchema,
+    transition: &TransitionSchema,
+) -> Option<&'a VariantSchema> {
+    match &transition.on {
+        meerkat_machine_schema::TriggerMatch::Input { variant, .. } => {
+            schema.inputs.variant_named(variant.as_str()).ok()
+        }
+        meerkat_machine_schema::TriggerMatch::Signal { variant, .. } => {
+            schema.signals.variant_named(variant.as_str()).ok()
+        }
+    }
+}
+
+/// Boolean input literals that every enabled instance of `transition` must
+/// carry.
+///
+/// Machine `Next` is an existential disjunction over input domains. Naively
+/// enumerating a large set of boolean validation facts creates a `2^N`
+/// cross-product even when the transition guard immediately requires each fact
+/// to be one literal. Replacing those existential bindings with the forced
+/// literals preserves the exact action relation: assignments carrying the
+/// opposite value cannot satisfy the existing conjunctive guard and therefore
+/// cannot produce a successor state.
+///
+/// Keep the analysis deliberately conservative. Only a whole conjunct that is
+/// structurally a binding, its negation, or a binding/literal equality is
+/// specialized. Values mentioned under disjunctions, helper calls, or other
+/// expressions retain their complete domains. Contradictory requirements also
+/// fall back to full enumeration so codegen never guesses about an
+/// unsatisfiable guard.
+fn transition_forced_bool_literals(
+    transition: &TransitionSchema,
+    binding_types: &BTreeMap<String, TypeRef>,
+) -> BTreeMap<String, bool> {
+    let mut requirements = BTreeMap::<String, Option<bool>>::new();
+    for guard in &transition.guards {
+        collect_conjunctive_bool_requirements(&guard.expr, &mut requirements);
+    }
+    requirements
+        .into_iter()
+        .filter_map(|(binding, required)| {
+            if matches!(binding_types.get(&binding), Some(TypeRef::Bool)) {
+                required.map(|value| (binding, value))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn transition_uses_tlc_representative_payload(
+    schema: &MachineSchema,
+    transition: &TransitionSchema,
+) -> bool {
+    match &transition.on {
+        meerkat_machine_schema::TriggerMatch::Input { variant, .. } => schema
+            .tlc_representative_inputs
+            .iter()
+            .any(|candidate| candidate == variant),
+        meerkat_machine_schema::TriggerMatch::Signal { .. } => false,
+    }
+}
+
+fn tlc_representative_domain(domain: String) -> String {
+    format!("{TLC_REPRESENTATIVE_DOMAIN_HELPER}({domain})")
+}
+
+fn collect_conjunctive_bool_requirements(
+    expr: &Expr,
+    requirements: &mut BTreeMap<String, Option<bool>>,
+) {
+    if let Expr::And(items) = expr {
+        for item in items {
+            collect_conjunctive_bool_requirements(item, requirements);
+        }
+        return;
+    }
+
+    let requirement = match expr {
+        Expr::Binding(binding) => Some((binding.as_str(), true)),
+        Expr::Not(inner) => match inner.as_ref() {
+            Expr::Binding(binding) => Some((binding.as_str(), false)),
+            _ => None,
+        },
+        Expr::Eq(left, right) => bool_binding_literal_equality(left, right, false),
+        Expr::Neq(left, right) => bool_binding_literal_equality(left, right, true),
+        _ => None,
+    };
+    let Some((binding, value)) = requirement else {
+        return;
+    };
+
+    match requirements.get(binding).copied() {
+        None => {
+            requirements.insert(binding.to_owned(), Some(value));
+        }
+        Some(Some(existing)) if existing != value => {
+            requirements.insert(binding.to_owned(), None);
+        }
+        Some(_) => {}
+    }
+}
+
+fn bool_binding_literal_equality<'a>(
+    left: &'a Expr,
+    right: &'a Expr,
+    negate: bool,
+) -> Option<(&'a str, bool)> {
+    let (binding, value) = match (left, right) {
+        (Expr::Binding(binding), Expr::Bool(value))
+        | (Expr::Bool(value), Expr::Binding(binding)) => (binding.as_str(), *value),
+        _ => return None,
+    };
+    Some((binding, if negate { !value } else { value }))
+}
+
+fn tla_bool_literal(value: bool) -> &'static str {
+    if value { "TRUE" } else { "FALSE" }
+}
+
+fn collect_helper_calls(expr: &Expr, calls: &mut BTreeSet<String>) {
+    match expr {
+        Expr::Bool(_)
+        | Expr::U64(_)
+        | Expr::U64Max
+        | Expr::String(_)
+        | Expr::NamedVariant { .. }
+        | Expr::EmptySet
+        | Expr::EmptyMap
+        | Expr::CurrentPhase
+        | Expr::Phase(_)
+        | Expr::Field(_)
+        | Expr::Binding(_)
+        | Expr::Variant(_)
+        | Expr::None => {}
+        Expr::SeqLiteral(items) | Expr::And(items) | Expr::Or(items) => {
+            for item in items {
+                collect_helper_calls(item, calls);
+            }
+        }
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_helper_calls(condition, calls);
+            collect_helper_calls(then_expr, calls);
+            collect_helper_calls(else_expr, calls);
+        }
+        Expr::Not(inner)
+        | Expr::SeqElements(inner)
+        | Expr::Len(inner)
+        | Expr::Head(inner)
+        | Expr::MapKeys(inner)
+        | Expr::Some(inner)
+        | Expr::FieldAccess { base: inner, .. }
+        | Expr::EnumVariantIs { value: inner, .. }
+        | Expr::EnumStringSetPayload { value: inner, .. } => collect_helper_calls(inner, calls),
+        Expr::Eq(left, right)
+        | Expr::Neq(left, right)
+        | Expr::Add(left, right)
+        | Expr::Sub(left, right)
+        | Expr::Gt(left, right)
+        | Expr::Gte(left, right)
+        | Expr::Lt(left, right)
+        | Expr::Lte(left, right)
+        | Expr::SeqStartsWith {
+            seq: left,
+            prefix: right,
+        } => {
+            collect_helper_calls(left, calls);
+            collect_helper_calls(right, calls);
+        }
+        Expr::Contains { collection, value } => {
+            collect_helper_calls(collection, calls);
+            collect_helper_calls(value, calls);
+        }
+        Expr::Count { collection, value } => {
+            collect_helper_calls(collection, calls);
+            collect_helper_calls(value, calls);
+        }
+        Expr::MapContainsKey { map, key } => {
+            collect_helper_calls(map, calls);
+            collect_helper_calls(key, calls);
+        }
+        Expr::MapGet { map, key } | Expr::MapValue { map, key } => {
+            collect_helper_calls(map, calls);
+            collect_helper_calls(key, calls);
+        }
+        Expr::MapLiteral(entries) => {
+            for (key, value) in entries {
+                collect_helper_calls(key, calls);
+                collect_helper_calls(value, calls);
+            }
+        }
+        Expr::Call { helper, args } => {
+            calls.insert(helper.clone());
+            for arg in args {
+                collect_helper_calls(arg, calls);
+            }
+        }
+        Expr::Quantified { over, body, .. } => {
+            collect_helper_calls(over, calls);
+            collect_helper_calls(body, calls);
+        }
+    }
+}
+
+fn expr_uses_u64_max(expr: &Expr) -> bool {
+    match expr {
+        Expr::U64Max => true,
+        Expr::SeqLiteral(items) | Expr::And(items) | Expr::Or(items) => {
+            items.iter().any(expr_uses_u64_max)
+        }
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_uses_u64_max(condition)
+                || expr_uses_u64_max(then_expr)
+                || expr_uses_u64_max(else_expr)
+        }
+        Expr::Not(inner)
+        | Expr::SeqElements(inner)
+        | Expr::Len(inner)
+        | Expr::Head(inner)
+        | Expr::MapKeys(inner)
+        | Expr::Some(inner)
+        | Expr::FieldAccess { base: inner, .. }
+        | Expr::EnumVariantIs { value: inner, .. }
+        | Expr::EnumStringSetPayload { value: inner, .. } => expr_uses_u64_max(inner),
+        Expr::Eq(left, right)
+        | Expr::Neq(left, right)
+        | Expr::Add(left, right)
+        | Expr::Sub(left, right)
+        | Expr::Gt(left, right)
+        | Expr::Gte(left, right)
+        | Expr::Lt(left, right)
+        | Expr::Lte(left, right) => expr_uses_u64_max(left) || expr_uses_u64_max(right),
+        Expr::Contains { collection, value } | Expr::Count { collection, value } => {
+            expr_uses_u64_max(collection) || expr_uses_u64_max(value)
+        }
+        Expr::MapContainsKey { map, key }
+        | Expr::MapGet { map, key }
+        | Expr::MapValue { map, key } => expr_uses_u64_max(map) || expr_uses_u64_max(key),
+        Expr::MapLiteral(entries) => entries
+            .iter()
+            .any(|(key, value)| expr_uses_u64_max(key) || expr_uses_u64_max(value)),
+        Expr::SeqStartsWith { seq, prefix } => expr_uses_u64_max(seq) || expr_uses_u64_max(prefix),
+        Expr::Call { helper, args } => {
+            native_helper_uses_u64_max(helper) || args.iter().any(expr_uses_u64_max)
+        }
+        Expr::Quantified { over, body, .. } => expr_uses_u64_max(over) || expr_uses_u64_max(body),
+        Expr::Bool(_)
+        | Expr::U64(_)
+        | Expr::String(_)
+        | Expr::NamedVariant { .. }
+        | Expr::EmptySet
+        | Expr::EmptyMap
+        | Expr::CurrentPhase
+        | Expr::Phase(_)
+        | Expr::Field(_)
+        | Expr::Binding(_)
+        | Expr::Variant(_)
+        | Expr::None => false,
+    }
+}
+
+fn expr_calls_helper(expr: &Expr, helper: &str) -> bool {
+    let mut calls = BTreeSet::new();
+    collect_helper_calls(expr, &mut calls);
+    calls.contains(helper)
+}
+
+fn native_helper_uses_u64_max(helper: &str) -> bool {
+    matches!(
+        helper,
+        "mob_machine_next_respawn_generation"
+            | "mob_machine_u64_is_exact_successor"
+            | "mob_machine_optional_u64_is_exact_successor"
+    )
+}
+
+fn update_uses_u64_max(update: &Update) -> bool {
+    match update {
+        Update::Assign { expr, .. }
+        | Update::SetInsert { value: expr, .. }
+        | Update::SetRemove { value: expr, .. }
+        | Update::SeqAppend { value: expr, .. }
+        | Update::SeqPrepend { values: expr, .. }
+        | Update::SeqRemoveValue { value: expr, .. }
+        | Update::SeqRemoveAll { values: expr, .. } => expr_uses_u64_max(expr),
+        Update::MapInsert { key, value, .. } => expr_uses_u64_max(key) || expr_uses_u64_max(value),
+        Update::MapRemove { key, .. }
+        | Update::MapIncrement { key, .. }
+        | Update::MapDecrement { key, .. } => expr_uses_u64_max(key),
+        Update::Conditional {
+            condition,
+            then_updates,
+            else_updates,
+        } => {
+            expr_uses_u64_max(condition)
+                || then_updates.iter().any(update_uses_u64_max)
+                || else_updates.iter().any(update_uses_u64_max)
+        }
+        Update::ForEach { over, updates, .. } => {
+            expr_uses_u64_max(over) || updates.iter().any(update_uses_u64_max)
+        }
+        Update::Increment { .. } | Update::Decrement { .. } | Update::SeqPopFront { .. } => false,
+    }
+}
+
+fn update_calls_helper(update: &Update, helper: &str) -> bool {
+    match update {
+        Update::Assign { expr, .. }
+        | Update::SetInsert { value: expr, .. }
+        | Update::SetRemove { value: expr, .. }
+        | Update::SeqAppend { value: expr, .. }
+        | Update::SeqPrepend { values: expr, .. }
+        | Update::SeqRemoveValue { value: expr, .. }
+        | Update::SeqRemoveAll { values: expr, .. } => expr_calls_helper(expr, helper),
+        Update::MapInsert { key, value, .. } => {
+            expr_calls_helper(key, helper) || expr_calls_helper(value, helper)
+        }
+        Update::MapRemove { key, .. }
+        | Update::MapIncrement { key, .. }
+        | Update::MapDecrement { key, .. } => expr_calls_helper(key, helper),
+        Update::Conditional {
+            condition,
+            then_updates,
+            else_updates,
+        } => {
+            expr_calls_helper(condition, helper)
+                || then_updates
+                    .iter()
+                    .any(|update| update_calls_helper(update, helper))
+                || else_updates
+                    .iter()
+                    .any(|update| update_calls_helper(update, helper))
+        }
+        Update::ForEach { over, updates, .. } => {
+            expr_calls_helper(over, helper)
+                || updates
+                    .iter()
+                    .any(|update| update_calls_helper(update, helper))
+        }
+        Update::Increment { .. } | Update::Decrement { .. } | Update::SeqPopFront { .. } => false,
+    }
+}
+
+fn explicit_value_uses_u64_max(value: &meerkat_machine_schema::TlcValue) -> bool {
+    use meerkat_machine_schema::TlcValue;
+    match value {
+        TlcValue::U64(number) => *number == u64::MAX,
+        TlcValue::Some(value) => explicit_value_uses_u64_max(value),
+        TlcValue::Record(fields) => fields.values().any(explicit_value_uses_u64_max),
+        TlcValue::Set(values) => values.iter().any(explicit_value_uses_u64_max),
+        TlcValue::Bool(_) | TlcValue::String(_) | TlcValue::None => false,
+    }
+}
+
+fn machine_uses_u64_max(schema: &MachineSchema) -> bool {
+    schema.tlc_model.as_ref().is_some_and(|model| {
+        [&model.ci, &model.deep].iter().any(|profile| {
+            profile
+                .named_values
+                .values()
+                .flatten()
+                .any(explicit_value_uses_u64_max)
+        })
+    }) || schema
+        .state
+        .init
+        .fields
+        .iter()
+        .any(|field| expr_uses_u64_max(&field.expr))
+        || schema
+            .helpers
+            .iter()
+            .any(|helper| expr_uses_u64_max(&helper.body))
+        || schema
+            .derived
+            .iter()
+            .any(|helper| expr_uses_u64_max(&helper.body))
+        || schema
+            .invariants
+            .iter()
+            .any(|invariant| expr_uses_u64_max(&invariant.expr))
+        || schema.transitions.iter().any(|transition| {
+            transition
+                .guards
+                .iter()
+                .any(|guard| expr_uses_u64_max(&guard.expr))
+                || transition.updates.iter().any(update_uses_u64_max)
+                || transition
+                    .emit
+                    .iter()
+                    .any(|effect| effect.fields.values().any(expr_uses_u64_max))
+        })
+}
+
+fn machine_uses_session_id_string_bridge(schema: &MachineSchema) -> bool {
+    schema
+        .state
+        .init
+        .fields
+        .iter()
+        .any(|field| expr_calls_helper(&field.expr, SESSION_ID_STRING_BRIDGE_HELPER))
+        || schema
+            .helpers
+            .iter()
+            .chain(schema.derived.iter())
+            .any(|helper| expr_calls_helper(&helper.body, SESSION_ID_STRING_BRIDGE_HELPER))
+        || schema
+            .invariants
+            .iter()
+            .any(|invariant| expr_calls_helper(&invariant.expr, SESSION_ID_STRING_BRIDGE_HELPER))
+        || schema.transitions.iter().any(|transition| {
+            transition
+                .guards
+                .iter()
+                .any(|guard| expr_calls_helper(&guard.expr, SESSION_ID_STRING_BRIDGE_HELPER))
+                || transition
+                    .updates
+                    .iter()
+                    .any(|update| update_calls_helper(update, SESSION_ID_STRING_BRIDGE_HELPER))
+                || transition.emit.iter().any(|effect| {
+                    effect
+                        .fields
+                        .values()
+                        .any(|expr| expr_calls_helper(expr, SESSION_ID_STRING_BRIDGE_HELPER))
+                })
+        })
+}
+
+fn composition_uses_session_id_string_bridge(
+    machine_by_instance: &BTreeMap<&str, &MachineSchema>,
+) -> bool {
+    machine_by_instance
+        .values()
+        .copied()
+        .any(machine_uses_session_id_string_bridge)
+}
+
+fn composition_uses_u64_max(
+    schema: &CompositionSchema,
+    machine_by_instance: &BTreeMap<&str, &MachineSchema>,
+) -> bool {
+    machine_by_instance
+        .values()
+        .copied()
+        .any(machine_uses_u64_max)
+        || schema.routes.iter().any(|route| {
+            route.bindings.iter().any(|binding| match &binding.source {
+                RouteBindingSource::Literal(expr) => expr_uses_u64_max(expr),
+                RouteBindingSource::Field { .. } | RouteBindingSource::OwnerProvided => false,
+            })
+        })
+        || schema.witnesses.iter().any(|witness| {
+            witness.preload_inputs.iter().any(|input| {
+                input
+                    .fields
+                    .iter()
+                    .any(|field| expr_uses_u64_max(&field.expr))
+            }) || witness.expected_states.iter().any(|state| {
+                state
+                    .fields
+                    .iter()
+                    .any(|field| expr_uses_u64_max(&field.expr))
+            })
+        })
+}
+
+/// Detect a helper-call cycle via DFS over the helper-call dependency graph,
+/// using a visited set plus an explicit recursion stack to catch back-edges.
+///
+/// Returns the cycle path (in call order) the first time a back-edge is found,
+/// or `None` when the helper graph is acyclic. Only edges to declared helpers
+/// (`known`) are followed; self-references and calls to native/undeclared
+/// helpers are not dependency edges for ordering purposes.
+fn detect_helper_cycle(defs: &[&HelperSchema], known: &BTreeSet<String>) -> Option<Vec<String>> {
+    let deps_of = |helper: &HelperSchema| -> Vec<String> {
+        let mut calls = BTreeSet::new();
+        collect_helper_calls(&helper.body, &mut calls);
+        calls
+            .into_iter()
+            .filter(|dep| dep != &helper.name && known.contains(dep))
+            .collect()
+    };
+    let by_name: BTreeMap<&str, &HelperSchema> =
+        defs.iter().map(|h| (h.name.as_str(), *h)).collect();
+
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    let mut on_stack: BTreeSet<String> = BTreeSet::new();
+    let mut stack_path: Vec<String> = Vec::new();
+    // Explicit work stack of (node, next-dependency-index) frames so the DFS
+    // does not recurse on the (untrusted) helper graph depth.
+    let mut frames: Vec<(String, Vec<String>, usize)> = Vec::new();
+
+    for root in defs {
+        let root_name = root.name.clone();
+        if visited.contains(&root_name) {
+            continue;
+        }
+        frames.push((root_name.clone(), deps_of(root), 0));
+        on_stack.insert(root_name.clone());
+        stack_path.push(root_name);
+
+        while !frames.is_empty() {
+            // Read the next dependency (if any) from the top frame, advancing
+            // its cursor, then release the borrow before mutating `frames`.
+            let next_dep = {
+                let Some((_, deps, idx)) = frames.last_mut() else {
+                    break;
+                };
+                if *idx < deps.len() {
+                    let dep = deps[*idx].clone();
+                    *idx += 1;
+                    Some(dep)
+                } else {
+                    None
+                }
+            };
+
+            match next_dep {
+                Some(dep) => {
+                    if on_stack.contains(&dep) {
+                        // Back-edge: report the cycle path from `dep` onward,
+                        // closing the loop back to `dep`.
+                        let start = stack_path.iter().position(|n| n == &dep).unwrap_or(0);
+                        let mut cycle = stack_path[start..].to_vec();
+                        cycle.push(dep);
+                        return Some(cycle);
+                    }
+                    if visited.contains(&dep) {
+                        continue;
+                    }
+                    let dep_deps = match by_name.get(dep.as_str()) {
+                        Some(helper) => deps_of(helper),
+                        None => Vec::new(),
+                    };
+                    on_stack.insert(dep.clone());
+                    stack_path.push(dep.clone());
+                    frames.push((dep, dep_deps, 0));
+                }
+                None => {
+                    if let Some((node, _, _)) = frames.pop() {
+                        on_stack.remove(&node);
+                        visited.insert(node);
+                    }
+                    stack_path.pop();
+                }
+            }
+        }
+    }
+    None
+}
+
+fn helper_dependency_order(
+    schema: &MachineSchema,
+) -> std::result::Result<Vec<&HelperSchema>, CompositionTlaError> {
+    let defs = schema
+        .helpers
+        .iter()
+        .chain(schema.derived.iter())
+        .collect::<Vec<_>>();
+    let known = defs
+        .iter()
+        .map(|helper| &helper.name)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    // Fail closed: a helper-call cycle has no topological order. The previous
+    // fallback silently dumped the cyclic helpers in arbitrary order, emitting
+    // a model that references a helper before it is defined.
+    if let Some(cycle) = detect_helper_cycle(&defs, &known) {
+        return Err(CompositionTlaError::HelperCycle {
+            machine: schema.machine.as_str().to_owned(),
+            cycle: cycle.join(" -> "),
+        });
+    }
+
+    let mut remaining = defs;
+    let mut ordered = Vec::new();
+
+    while !remaining.is_empty() {
+        let remaining_names = remaining
+            .iter()
+            .map(|helper| &helper.name)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut ready_indices = Vec::new();
+
+        for (index, helper) in remaining.iter().enumerate() {
+            let mut deps = BTreeSet::new();
+            collect_helper_calls(&helper.body, &mut deps);
+            let unresolved = deps.into_iter().filter(|dep| {
+                dep != &helper.name && known.contains(dep) && remaining_names.contains(dep)
+            });
+            if unresolved.count() == 0 {
+                ready_indices.push(index);
+            }
+        }
+
+        if ready_indices.is_empty() {
+            // Unreachable: `detect_helper_cycle` already failed closed on any
+            // cyclic helper graph above, so an acyclic graph always has at
+            // least one ready helper here. Fail closed defensively rather than
+            // re-introducing the silent arbitrary-order fallback.
+            let cycle = remaining
+                .iter()
+                .map(|helper| helper.name.clone())
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            return Err(CompositionTlaError::HelperCycle {
+                machine: schema.machine.as_str().to_owned(),
+                cycle,
+            });
+        }
+
+        for index in ready_indices.into_iter().rev() {
+            ordered.push(remaining.remove(index));
+        }
+    }
+
+    Ok(ordered)
+}
+
+/// Render one coverage anchor as a generated contract-markdown bullet,
+/// surfacing its typed schema target so artifact drift is visible to the
+/// rerun-and-diff gate.
+fn render_contract_coverage_anchor_bullet(anchor: &CoverageAnchor) -> String {
+    let target = match &anchor.target {
+        CoverageSchemaTarget::Machine(machine) => format!("machine `{machine}`"),
+        CoverageSchemaTarget::Route(route) => format!("route `{route}`"),
+    };
+    format!(
+        "- `{}` ({}): `{}` — {}",
+        anchor.id,
+        target,
+        anchor.symbol.as_str(),
+        anchor.note
+    )
+}
+
+pub fn render_machine_contract_markdown(
+    schema: &MachineSchema,
+    coverage: &MachineCoverageManifest,
+) -> String {
+    let mut out = String::new();
+
+    pushln!(&mut out, "# {}", schema.machine);
+    pushln!(&mut out);
+    writeln!(
+        &mut out,
+        "_Generated from the Rust machine catalog. Do not edit by hand._"
+    )
+    .expect("write to string");
+    pushln!(&mut out);
+    pushln!(&mut out, "- Version: `{}`", schema.version);
+    writeln!(
+        &mut out,
+        "- Rust owner: `{}` / `{}`",
+        schema.rust.crate_name, schema.rust.module
+    )
+    .expect("write to string");
+    pushln!(&mut out);
+
+    render_state_markdown(&mut out, schema);
+    let runtime_internal_inputs: BTreeSet<&str> = schema
+        .runtime_internal_inputs
+        .iter()
+        .map(|input| input.as_str())
+        .collect();
+    render_input_subset(&mut out, "Inputs", &schema.inputs, |name| {
+        !runtime_internal_inputs.contains(name)
+    });
+    if !schema.surface_only_inputs.is_empty() {
+        pushln!(&mut out, "## Surface-only Inputs");
+        for input in &schema.surface_only_inputs {
+            pushln!(&mut out, "- `{input}`");
+        }
+        pushln!(&mut out);
+    }
+    if !runtime_internal_inputs.is_empty() {
+        render_input_subset(
+            &mut out,
+            "Runtime-Internal Inputs",
+            &schema.inputs,
+            |name| runtime_internal_inputs.contains(name),
+        );
+    }
+    render_enum_markdown(&mut out, "Signals", &schema.signals);
+    render_enum_markdown(&mut out, "Effects", &schema.effects);
+
+    if !schema.helpers.is_empty() {
+        pushln!(&mut out, "## Helpers");
+        for helper in &schema.helpers {
+            writeln!(
+                &mut out,
+                "- `{}`({}) -> `{}`",
+                helper.name,
+                render_field_list(&helper.params),
+                render_type_ref(&helper.returns)
+            )
+            .expect("write to string");
+        }
+        pushln!(&mut out);
+    }
+
+    if !schema.derived.is_empty() {
+        pushln!(&mut out, "## Derived");
+        for derived in &schema.derived {
+            writeln!(
+                &mut out,
+                "- `{}`({}) -> `{}`",
+                derived.name,
+                render_field_list(&derived.params),
+                render_type_ref(&derived.returns)
+            )
+            .expect("write to string");
+        }
+        pushln!(&mut out);
+    }
+
+    if !schema.command_plans.is_empty() {
+        pushln!(&mut out, "## Command Plans");
+        let transitions_by_name = schema
+            .transitions
+            .iter()
+            .map(|transition| (transition.name.as_str(), transition))
+            .collect::<BTreeMap<_, _>>();
+        for plan in &schema.command_plans {
+            pushln!(&mut out, "### `{}`", plan.name);
+            pushln!(&mut out, "- Authority: `{}`", plan.authority_type);
+            if !plan.source_inputs.is_empty() {
+                writeln!(
+                    &mut out,
+                    "- Source Inputs: {}",
+                    plan.source_inputs
+                        .iter()
+                        .map(|input| format!("`{input}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .expect("write to string");
+            }
+            if !plan.source_signals.is_empty() {
+                writeln!(
+                    &mut out,
+                    "- Source Signals: {}",
+                    plan.source_signals
+                        .iter()
+                        .map(|signal| format!("`{signal}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .expect("write to string");
+            }
+            if !plan.transitions.is_empty() {
+                writeln!(
+                    &mut out,
+                    "- Transitions: {}",
+                    plan.transitions
+                        .iter()
+                        .map(|transition| format!("`{transition}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .expect("write to string");
+                pushln!(&mut out, "- Guard Expansion:");
+                for transition_id in &plan.transitions {
+                    if let Some(transition) = transitions_by_name.get(transition_id.as_str()) {
+                        let guards = if transition.guards.is_empty() {
+                            "`<none>`".to_owned()
+                        } else {
+                            transition
+                                .guards
+                                .iter()
+                                .map(|guard| format!("`{}`", guard.name))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        pushln!(&mut out, "  - `{transition_id}`: {guards}");
+                    }
+                }
+            }
+            if !plan.effects.is_empty() {
+                writeln!(
+                    &mut out,
+                    "- Command Effects: {}",
+                    plan.effects
+                        .iter()
+                        .map(|effect| format!("`{effect}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .expect("write to string");
+            }
+            if !plan.effect_closures.is_empty() {
+                pushln!(&mut out, "- Effect Closure:");
+                for closure in &plan.effect_closures {
+                    writeln!(
+                        &mut out,
+                        "  - `{}` via `{}` ({}) states: {}",
+                        closure.effect,
+                        closure.authority_type,
+                        closure.closure_policy,
+                        closure
+                            .lifecycle
+                            .iter()
+                            .map(|state| format!("`{state}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                    .expect("write to string");
+                }
+            }
+            let emitted_effects = plan
+                .transitions
+                .iter()
+                .filter_map(|transition_id| transitions_by_name.get(transition_id.as_str()))
+                .flat_map(|transition| transition.emit.iter().map(|effect| &effect.variant))
+                .collect::<BTreeSet<_>>();
+            if !emitted_effects.is_empty() {
+                writeln!(
+                    &mut out,
+                    "- Emitted By Transitions: {}",
+                    emitted_effects
+                        .iter()
+                        .map(|effect| format!("`{effect}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .expect("write to string");
+            }
+            pushln!(&mut out);
+        }
+    }
+
+    pushln!(&mut out, "## Invariants");
+    for invariant in &schema.invariants {
+        pushln!(&mut out, "- `{}`", invariant.name);
+    }
+    pushln!(&mut out);
+
+    pushln!(&mut out, "## Transitions");
+    for transition in &schema.transitions {
+        pushln!(&mut out, "### `{}`", transition.name);
+        writeln!(
+            &mut out,
+            "- From: {}",
+            transition
+                .from
+                .iter()
+                .map(|item| format!("`{item}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "- On: `{}`({})",
+            transition.on.variant_str(),
+            transition
+                .on
+                .bindings()
+                .iter()
+                .map(meerkat_machine_schema::identity::FieldId::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .expect("write to string");
+        if !transition.guards.is_empty() {
+            pushln!(&mut out, "- Guards:");
+            for guard in &transition.guards {
+                pushln!(&mut out, "  - `{}`", guard.name);
+            }
+        }
+        if !transition.emit.is_empty() {
+            writeln!(
+                &mut out,
+                "- Emits: {}",
+                transition
+                    .emit
+                    .iter()
+                    .map(|effect| format!("`{}`", effect.variant))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .expect("write to string");
+        }
+        pushln!(&mut out, "- To: `{}`", transition.to);
+        pushln!(&mut out);
+    }
+
+    pushln!(&mut out, "## Coverage");
+    pushln!(&mut out, "### Code Anchors");
+    for anchor in &coverage.code_anchors {
+        pushln!(
+            &mut out,
+            "{}",
+            render_contract_coverage_anchor_bullet(anchor)
+        );
+    }
+    pushln!(&mut out);
+    pushln!(&mut out, "### Scenarios");
+    for scenario in &coverage.scenarios {
+        pushln!(&mut out, "- `{}` — {}", scenario.id, scenario.summary);
+    }
+
+    out
+}
+
+pub fn render_composition_contract_markdown(
+    schema: &CompositionSchema,
+    coverage: &CompositionCoverageManifest,
+) -> String {
+    let mut out = String::new();
+
+    pushln!(&mut out, "# {}", schema.name);
+    pushln!(&mut out);
+    writeln!(
+        &mut out,
+        "_Generated from the Rust composition catalog. Do not edit by hand._"
+    )
+    .expect("write to string");
+    pushln!(&mut out);
+
+    pushln!(&mut out, "## Machines");
+    for machine in &schema.machines {
+        writeln!(
+            &mut out,
+            "- `{}`: `{}` @ actor `{}`",
+            machine.instance_id, machine.machine_name, machine.actor
+        )
+        .expect("write to string");
+    }
+    pushln!(&mut out);
+
+    pushln!(&mut out, "## Routes");
+    for route in &schema.routes {
+        writeln!(
+            &mut out,
+            "- `{}`: `{}`.`{}` -> `{}`.`{}` [{}]",
+            route.name,
+            route.from_machine,
+            route.effect_variant,
+            route.to.machine,
+            route.to.input_variant,
+            render_route_delivery(route)
+        )
+        .expect("write to string");
+    }
+    pushln!(&mut out);
+
+    pushln!(&mut out, "## Target Selectors");
+    if schema.route_target_selectors.is_empty() {
+        pushln!(&mut out, "- `(none)`");
+    } else {
+        for selector in &schema.route_target_selectors {
+            pushln!(
+                &mut out,
+                "- `{}` selects `{}` from `{:?}`",
+                selector.route_name,
+                selector.selector_field,
+                selector.source
+            );
+        }
+    }
+    pushln!(&mut out);
+
+    pushln!(&mut out, "## Driver");
+    if let Some(driver) = &schema.driver {
+        pushln!(
+            &mut out,
+            "- `{}` (`{}` in `{}`)",
+            driver.name,
+            driver.rust.driver_type,
+            driver.rust.module_path
+        );
+        if !driver.watched_effects.is_empty() {
+            pushln!(&mut out, "  - watches:");
+            for watched in &driver.watched_effects {
+                pushln!(
+                    &mut out,
+                    "    - `{}::{}`",
+                    watched.producer_instance,
+                    watched.effect_variant
+                );
+            }
+        }
+        if !driver.dispatch_routes.is_empty() {
+            pushln!(&mut out, "  - dispatches:");
+            for dispatch in &driver.dispatch_routes {
+                pushln!(
+                    &mut out,
+                    "    - `{}` → `{}::{}` ({:?})",
+                    dispatch.name,
+                    dispatch.target_instance,
+                    dispatch.input_variant,
+                    dispatch.target_kind
+                );
+            }
+        }
+        if !driver.refusal_closures.is_empty() {
+            pushln!(&mut out, "  - consumer-refusal closures:");
+            for closure in &driver.refusal_closures {
+                pushln!(
+                    &mut out,
+                    "    - `{}` refusal → `{}::{}`",
+                    closure.dispatch_route,
+                    closure.feedback_instance,
+                    closure.feedback_input
+                );
+            }
+        }
+    } else {
+        pushln!(&mut out, "- `(none)`");
+    }
+    pushln!(&mut out);
+
+    pushln!(&mut out, "## Transaction Plans");
+    if schema.transaction_plans.is_empty() {
+        pushln!(&mut out, "- `(none)`");
+    } else {
+        for plan in &schema.transaction_plans {
+            pushln!(
+                &mut out,
+                "- `{}` via `{}` / `{}` — {}",
+                plan.name,
+                plan.trigger,
+                plan.store_primitive,
+                plan.description
+            );
+        }
+    }
+    pushln!(&mut out);
+
+    pushln!(&mut out, "## Scheduler Rules");
+    if schema.scheduler_rules.is_empty() {
+        pushln!(&mut out, "- `(none)`");
+    } else {
+        for rule in &schema.scheduler_rules {
+            pushln!(&mut out, "- `{}`", render_scheduler_rule(rule));
+        }
+    }
+    pushln!(&mut out);
+
+    let structural_invariants = schema
+        .invariants
+        .iter()
+        .filter(|invariant| invariant.kind.is_structural())
+        .collect::<Vec<_>>();
+    let behavioral_invariants = schema
+        .invariants
+        .iter()
+        .filter(|invariant| invariant.kind.is_behavioral())
+        .collect::<Vec<_>>();
+
+    pushln!(&mut out, "## Structural Requirements");
+    if structural_invariants.is_empty() {
+        pushln!(&mut out, "- `(none)`");
+    } else {
+        for invariant in &structural_invariants {
+            pushln!(&mut out, "- `{}` — {}", invariant.name, invariant.statement);
+        }
+    }
+    pushln!(&mut out);
+
+    writeln!(&mut out, "## Behavioral Invariants");
+    if behavioral_invariants.is_empty() {
+        pushln!(&mut out, "- `(none)`");
+    } else {
+        for invariant in &behavioral_invariants {
+            pushln!(&mut out, "- `{}` — {}", invariant.name, invariant.statement);
+        }
+    }
+    pushln!(&mut out);
+
+    writeln!(&mut out, "## Coverage");
+    pushln!(&mut out, "### Code Anchors");
+    for anchor in &coverage.code_anchors {
+        pushln!(
+            &mut out,
+            "{}",
+            render_contract_coverage_anchor_bullet(anchor)
+        );
+    }
+    pushln!(&mut out);
+    pushln!(&mut out, "### Scenarios");
+    for scenario in &coverage.scenarios {
+        pushln!(&mut out, "- `{}` — {}", scenario.id, scenario.summary);
+    }
+
+    out
+}
+
+pub fn render_machine_ci_cfg(
+    schema: &MachineSchema,
+    deep: bool,
+) -> Result<String, CompositionTlaError> {
+    if schema.tlc_model.is_some() {
+        validate_machine_model(schema)?;
+    }
+    let mut out = String::new();
+    let domains = collect_binding_domains(schema);
+    let named_samples = collect_machine_named_type_samples(schema);
+    let deep_named_samples = with_guard_binding_string_samples(&named_samples, schema);
+    // The native SessionId/String bridge deliberately substitutes its sample
+    // into a fixed-size Deep string pool; keep that bound for bridge machines.
+    let deep_guard_string_samples = deep && !machine_uses_session_id_string_bridge(schema);
+    let named_bindings = collect_machine_named_bindings(schema);
+    let sample_cardinality = machine_cfg_sample_cardinality(schema, deep);
+    let operator_suffix = if deep { "Deep" } else { "Ci" };
+    let uses_u64_max = machine_uses_u64_max(schema);
+    let session_id_cardinality = if deep {
+        schema
+            .deep_domain_overrides
+            .get("SessionIdValues")
+            .copied()
+            .unwrap_or(sample_cardinality)
+    } else {
+        sample_cardinality
+    };
+    let session_id_string_bridge_sample = session_id_string_bridge_sample(
+        deep && machine_uses_session_id_string_bridge(schema),
+        &domains,
+        session_id_cardinality,
+        &named_samples,
+        &named_bindings,
+    );
+
+    pushln!(&mut out, "SPECIFICATION Spec");
+    if !domains.is_empty() || uses_u64_max {
+        pushln!(&mut out, "CONSTANTS");
+        if uses_u64_max {
+            push_u64_max_cfg_assignment(&mut out);
+        }
+        for (name, ty) in domains {
+            if matches!(
+                ty,
+                TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+            ) {
+                continue;
+            }
+            if machine_explicit_values(schema, deep, &ty).is_some()
+                || cfg_assignment_requires_model_operator(&ty, &named_bindings)
+            {
+                writeln!(
+                    &mut out,
+                    "  {} <- {}",
+                    name,
+                    cfg_assignment_operator_name(&name, operator_suffix),
+                )
+                .expect("write to string");
+            } else {
+                // Deep-profile per-domain override (machine analog of the
+                // composition path): absent keys use the profile default.
+                let domain_cardinality = if deep {
+                    schema
+                        .deep_domain_overrides
+                        .get(name.as_str())
+                        .copied()
+                        .unwrap_or(sample_cardinality)
+                } else {
+                    sample_cardinality
+                };
+                writeln!(
+                    &mut out,
+                    "  {} = {}",
+                    name,
+                    render_cfg_domain_assignment(
+                        &ty,
+                        domain_cardinality,
+                        if deep_guard_string_samples {
+                            &deep_named_samples
+                        } else {
+                            &named_samples
+                        },
+                        &named_bindings,
+                        deep_guard_string_samples,
+                        session_id_string_bridge_sample.as_deref(),
+                    )
+                )
+                .expect("write to string");
+            }
+        }
+    }
+    if !schema.invariants.is_empty() {
+        pushln!(&mut out, "INVARIANTS");
+        for invariant in &schema.invariants {
+            pushln!(&mut out, "  {}", invariant.name);
+        }
+    }
+    pushln!(&mut out, "CONSTRAINTS");
+    writeln!(
+        &mut out,
+        "  {}",
+        if deep {
+            "DeepStateConstraint"
+        } else {
+            "CiStateConstraint"
+        }
+    )
+    .expect("write to string");
+
+    Ok(out)
+}
+
+pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> String {
+    render_composition_ci_cfg_from_catalog(schema, deep, &canonical_machine_schemas())
+}
+
+/// [`render_composition_ci_cfg`] against an explicitly supplied machine
+/// catalog, for compositions whose machines live outside Meerkat's catalog.
+pub fn render_composition_ci_cfg_with_catalog(
+    schema: &CompositionSchema,
+    deep: bool,
+    machine_catalog: &[MachineSchema],
+) -> std::result::Result<String, CompositionTlaError> {
+    validate_supplied_catalog(schema, machine_catalog)?;
+    Ok(render_composition_ci_cfg_from_catalog(
+        schema,
+        deep,
+        machine_catalog,
+    ))
+}
+
+fn render_composition_ci_cfg_from_catalog(
+    schema: &CompositionSchema,
+    deep: bool,
+    machine_catalog: &[MachineSchema],
+) -> String {
+    let mut out = String::new();
+    let machine_by_name = machine_catalog
+        .iter()
+        .map(|machine| (machine.machine.as_str(), machine))
+        .collect::<BTreeMap<_, _>>();
+    let machine_by_instance = schema
+        .machines
+        .iter()
+        .filter_map(|instance| {
+            machine_by_name
+                .get(instance.machine_name.as_str())
+                .copied()
+                .map(|machine| (instance.instance_id.as_str(), machine))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let domains = collect_composition_binding_domains(schema, &machine_by_instance);
+    let named_samples = collect_composition_named_type_samples(schema, &machine_by_instance);
+    let named_bindings = collect_composition_named_bindings(machine_by_instance.values().copied());
+    let operator_suffix = if deep { "Deep" } else { "Ci" };
+    let mut instance_invariants = Vec::new();
+    let mut obligation_invariants = Vec::new();
+    let uses_u64_max = composition_uses_u64_max(schema, &machine_by_instance);
+    let session_id_cardinality = if deep {
+        schema
+            .deep_domain_overrides
+            .get("SessionIdValues")
+            .copied()
+            .unwrap_or(schema.deep_domain_cardinality)
+    } else {
+        default_sample_cardinality(false)
+    };
+    let session_id_string_bridge_sample = session_id_string_bridge_sample(
+        deep && composition_uses_session_id_string_bridge(&machine_by_instance),
+        &domains,
+        session_id_cardinality,
+        &named_samples,
+        &named_bindings,
+    );
+
+    for instance in &schema.machines {
+        let Some(machine) = machine_by_instance
+            .get(instance.instance_id.as_str())
+            .copied()
+        else {
+            continue;
+        };
+        for invariant in &machine.invariants {
+            instance_invariants.push(format!(
+                "{}_{}",
+                tla_ident(&instance.instance_id),
+                tla_ident(&invariant.name)
+            ));
+        }
+    }
+    for protocol in &schema.handoff_protocols {
+        let suffix = format!(
+            "{}_{}",
+            tla_ident(&protocol.producer_instance),
+            tla_ident(&protocol.name)
+        );
+        if machine_by_instance
+            .get(protocol.producer_instance.as_str())
+            .is_some_and(|machine| terminal_closure_required(protocol, machine))
+        {
+            obligation_invariants.push(format!("NoOpenObligationsOnTerminal_{suffix}"));
+        }
+    }
+    if schema
+        .handoff_protocols
+        .iter()
+        .any(|protocol| !protocol.allowed_feedback_inputs.is_empty())
+    {
+        obligation_invariants.push("OwnerFeedbackHasProtocolProvenance".to_string());
+    }
+    pushln!(&mut out, "SPECIFICATION Spec");
+    if !domains.is_empty() || uses_u64_max {
+        pushln!(&mut out, "CONSTANTS");
+        if uses_u64_max {
+            push_u64_max_cfg_assignment(&mut out);
+        }
+        for (name, ty) in domains {
+            if matches!(
+                ty,
+                TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+            ) {
+                continue;
+            }
+            let cardinality = if deep {
+                schema
+                    .deep_domain_overrides
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(schema.deep_domain_cardinality)
+            } else {
+                default_sample_cardinality(false)
+            };
+            if cfg_assignment_requires_model_operator(&ty, &named_bindings) {
+                writeln!(
+                    &mut out,
+                    "  {} <- {}",
+                    name,
+                    cfg_assignment_operator_name(&name, operator_suffix),
+                )
+                .expect("write to string");
+            } else {
+                writeln!(
+                    &mut out,
+                    "  {} = {}",
+                    name,
+                    render_cfg_domain_assignment(
+                        &ty,
+                        cardinality,
+                        &named_samples,
+                        &named_bindings,
+                        false,
+                        session_id_string_bridge_sample.as_deref(),
+                    )
+                )
+                .expect("write to string");
+            }
+        }
+    }
+    let behavioral_invariants = schema
+        .invariants
+        .iter()
+        .filter(|invariant| invariant.kind.is_behavioral())
+        .collect::<Vec<_>>();
+    // Structural requirements (route/scheduler/priority presence, etc.) are
+    // static, cheap-to-check predicates over the generated topology. They were
+    // previously only validated in the Deep witness lane; emit them into the
+    // standard INVARIANTS block unconditionally so the default (Ci) verify
+    // profile fails closed on a missing structural requirement instead of
+    // deferring the check to a Deep-only run.
+    let structural_invariants = schema
+        .invariants
+        .iter()
+        .filter(|invariant| invariant.kind.is_structural())
+        .collect::<Vec<_>>();
+    if !behavioral_invariants.is_empty()
+        || !structural_invariants.is_empty()
+        || !instance_invariants.is_empty()
+        || !obligation_invariants.is_empty()
+        || deep
+    {
+        pushln!(&mut out, "INVARIANTS");
+        for invariant in behavioral_invariants {
+            pushln!(&mut out, "  {}", invariant.name);
+        }
+        for invariant in structural_invariants {
+            pushln!(&mut out, "  {}", invariant.name);
+        }
+        for invariant_name in instance_invariants {
+            pushln!(&mut out, "  {}", invariant_name);
+        }
+        for invariant_name in obligation_invariants {
+            pushln!(&mut out, "  {}", invariant_name);
+        }
+        if deep {
+            pushln!(&mut out, "  CoverageInstrumentation");
+        }
+    }
+    pushln!(&mut out, "CONSTRAINTS");
+    writeln!(
+        &mut out,
+        "  {}",
+        if deep {
+            "DeepStateConstraint"
+        } else {
+            "CiStateConstraint"
+        }
+    )
+    .expect("write to string");
+
+    out
+}
+
+pub fn render_composition_witness_cfg(
+    schema: &CompositionSchema,
+    witness: &CompositionWitness,
+) -> String {
+    render_composition_witness_cfg_from_catalog(schema, witness, &canonical_machine_schemas())
+}
+
+/// [`render_composition_witness_cfg`] against an explicitly supplied machine
+/// catalog, for compositions whose machines live outside Meerkat's catalog.
+pub fn render_composition_witness_cfg_with_catalog(
+    schema: &CompositionSchema,
+    witness: &CompositionWitness,
+    machine_catalog: &[MachineSchema],
+) -> std::result::Result<String, CompositionTlaError> {
+    validate_supplied_catalog(schema, machine_catalog)?;
+    Ok(render_composition_witness_cfg_from_catalog(
+        schema,
+        witness,
+        machine_catalog,
+    ))
+}
+
+fn render_composition_witness_cfg_from_catalog(
+    schema: &CompositionSchema,
+    witness: &CompositionWitness,
+    machine_catalog: &[MachineSchema],
+) -> String {
+    let mut out = String::new();
+    let machine_by_name = machine_catalog
+        .iter()
+        .map(|machine| (machine.machine.as_str(), machine))
+        .collect::<BTreeMap<_, _>>();
+    let machine_by_instance = schema
+        .machines
+        .iter()
+        .filter_map(|instance| {
+            machine_by_name
+                .get(instance.machine_name.as_str())
+                .copied()
+                .map(|machine| (instance.instance_id.as_str(), machine))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let domains = collect_composition_binding_domains(schema, &machine_by_instance);
+    let named_samples =
+        collect_composition_witness_named_type_samples(schema, witness, &machine_by_instance);
+    let named_bindings = collect_composition_named_bindings(machine_by_instance.values().copied());
+    let witness_sample_cardinality = schema
+        .witness_domain_cardinality
+        .max(max_named_sample_cardinality(&named_samples));
+    let operator_suffix = witness_cfg_operator_suffix(witness);
+    let mut instance_invariants = Vec::new();
+    let mut obligation_invariants = Vec::new();
+    let uses_u64_max = composition_uses_u64_max(schema, &machine_by_instance);
+
+    for instance in &schema.machines {
+        let Some(machine) = machine_by_instance
+            .get(instance.instance_id.as_str())
+            .copied()
+        else {
+            continue;
+        };
+        for invariant in &machine.invariants {
+            instance_invariants.push(format!(
+                "{}_{}",
+                tla_ident(&instance.instance_id),
+                tla_ident(&invariant.name)
+            ));
+        }
+    }
+    for protocol in &schema.handoff_protocols {
+        let suffix = format!(
+            "{}_{}",
+            tla_ident(&protocol.producer_instance),
+            tla_ident(&protocol.name)
+        );
+        if machine_by_instance
+            .get(protocol.producer_instance.as_str())
+            .is_some_and(|machine| terminal_closure_required(protocol, machine))
+        {
+            obligation_invariants.push(format!("NoOpenObligationsOnTerminal_{suffix}"));
+        }
+    }
+    if schema
+        .handoff_protocols
+        .iter()
+        .any(|protocol| !protocol.allowed_feedback_inputs.is_empty())
+    {
+        obligation_invariants.push("OwnerFeedbackHasProtocolProvenance".to_string());
+    }
+
+    writeln!(
+        &mut out,
+        "SPECIFICATION {}",
+        composition_witness_spec_name(&witness.name)
+    )
+    .expect("write to string");
+    if !domains.is_empty() || uses_u64_max {
+        pushln!(&mut out, "CONSTANTS");
+        if uses_u64_max {
+            push_u64_max_cfg_assignment(&mut out);
+        }
+        for (name, ty) in domains {
+            if matches!(
+                ty,
+                TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+            ) {
+                continue;
+            }
+            if cfg_assignment_requires_model_operator(&ty, &named_bindings) {
+                writeln!(
+                    &mut out,
+                    "  {} <- {}",
+                    name,
+                    cfg_assignment_operator_name(&name, &operator_suffix),
+                )
+                .expect("write to string");
+            } else {
+                writeln!(
+                    &mut out,
+                    "  {} = {}",
+                    name,
+                    render_default_domain_assignment(
+                        &ty,
+                        witness_sample_cardinality,
+                        &named_samples,
+                        &named_bindings,
+                        true,
+                    )
+                )
+                .expect("write to string");
+            }
+        }
+    }
+    let witness_properties = witness
+        .expected_routes
+        .iter()
+        .map(|route| composition_witness_route_property_name(&witness.name, route))
+        .chain(
+            witness
+                .expected_scheduler_rules
+                .iter()
+                .map(|rule| composition_witness_scheduler_property_name(&witness.name, rule)),
+        )
+        .chain(
+            witness
+                .expected_states
+                .iter()
+                .enumerate()
+                .map(|(idx, _)| composition_witness_state_property_name(&witness.name, idx)),
+        )
+        .chain(witness.expected_transitions.iter().map(|transition| {
+            composition_witness_transition_property_name(
+                &witness.name,
+                &transition.machine,
+                &transition.transition,
+            )
+        }))
+        .chain(
+            witness
+                .expected_transition_order
+                .iter()
+                .enumerate()
+                .map(|(idx, _)| {
+                    composition_witness_transition_order_property_name(&witness.name, idx)
+                }),
+        )
+        .collect::<Vec<_>>();
+    let explicit_witness = CompositionTlaCompiler::witness_has_explicit_progress(witness);
+    if !schema.invariants.is_empty()
+        || !instance_invariants.is_empty()
+        || !obligation_invariants.is_empty()
+        || (explicit_witness && !witness_properties.is_empty())
+    {
+        pushln!(&mut out, "INVARIANTS");
+        for invariant in &schema.invariants {
+            pushln!(&mut out, "  {}", invariant.name);
+        }
+        for invariant_name in instance_invariants {
+            pushln!(&mut out, "  {}", invariant_name);
+        }
+        for invariant_name in obligation_invariants {
+            pushln!(&mut out, "  {}", invariant_name);
+        }
+        pushln!(&mut out, "  CoverageInstrumentation");
+        if explicit_witness {
+            for property in &witness_properties {
+                pushln!(&mut out, "  {property}");
+            }
+        }
+    }
+    if !explicit_witness && !witness_properties.is_empty() {
+        pushln!(&mut out, "PROPERTIES");
+        for property in witness_properties {
+            pushln!(&mut out, "  {property}");
+        }
+    }
+    if explicit_witness {
+        pushln!(&mut out, "ACTION_CONSTRAINTS");
+        pushln!(
+            &mut out,
+            "  {}",
+            composition_witness_action_constraint_name(&witness.name)
+        );
+    }
+    pushln!(&mut out, "CONSTRAINTS");
+    writeln!(
+        &mut out,
+        "  {}",
+        composition_witness_state_constraint_name(&witness.name)
+    )
+    .expect("write to string");
+
+    out
+}
+
+pub fn composition_route_observed_operator_name(route_name: impl AsRef<str>) -> String {
+    format!("RouteObserved_{}", tla_ident(route_name))
+}
+
+pub fn composition_route_coverage_operator_name(route_name: impl AsRef<str>) -> String {
+    format!("RouteCoverage_{}", tla_ident(route_name))
+}
+
+pub fn composition_scheduler_triggered_operator_name(rule: &SchedulerRule) -> String {
+    match rule {
+        SchedulerRule::PreemptWhenReady { higher, lower } => format!(
+            "SchedulerTriggered_PreemptWhenReady_{}_{}",
+            tla_ident(higher),
+            tla_ident(lower)
+        ),
+    }
+}
+
+pub fn composition_scheduler_coverage_operator_name(rule: &SchedulerRule) -> String {
+    match rule {
+        SchedulerRule::PreemptWhenReady { higher, lower } => format!(
+            "SchedulerCoverage_PreemptWhenReady_{}_{}",
+            tla_ident(higher),
+            tla_ident(lower)
+        ),
+    }
+}
+
+fn max_named_sample_cardinality(named_samples: &BTreeMap<String, BTreeSet<String>>) -> usize {
+    named_samples.values().map(BTreeSet::len).max().unwrap_or(1)
+}
+
+struct CfgAssignmentOperatorProfile<'a> {
+    suffix: String,
+    explicit_values: Option<&'a meerkat_machine_schema::MachineTlcProfile>,
+    sample_cardinality: usize,
+    domain_overrides: Option<&'a BTreeMap<String, usize>>,
+    named_samples: &'a BTreeMap<String, BTreeSet<String>>,
+    include_string_samples: bool,
+}
+
+fn cfg_assignment_operator_name(domain_name: &str, suffix: impl AsRef<str>) -> String {
+    format!("{}{}", tla_ident(domain_name), tla_ident(suffix))
+}
+
+fn push_u64_max_cfg_assignment(out: &mut String) {
+    pushln!(
+        out,
+        "  \\* Rust u64::MAX, supplied as a finite TLC model-checking value."
+    );
+    writeln!(
+        out,
+        "  {} = {}",
+        TLA_RUST_U64_MAX_CONSTANT, TLC_SAFE_RUST_U64_MAX_VALUE
+    )
+    .expect("write to string");
+}
+
+fn witness_cfg_operator_suffix(witness: &CompositionWitness) -> String {
+    format!("Witness{}", tla_ident(&witness.name))
+}
+
+fn profile_sample_cardinality(
+    profile: &CfgAssignmentOperatorProfile<'_>,
+    domain_name: &str,
+) -> usize {
+    profile
+        .domain_overrides
+        .and_then(|overrides| overrides.get(domain_name).copied())
+        .unwrap_or(profile.sample_cardinality)
+}
+
+fn profile_sample_cardinality_for_domain(
+    profile: &CfgAssignmentOperatorProfile<'_>,
+    domain_name: &str,
+    ty: &TypeRef,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> usize {
+    let sample_cardinality = profile_sample_cardinality(profile, domain_name);
+    if profile.suffix == "Ci" && cfg_assignment_requires_model_operator(ty, named_bindings) {
+        return 0;
+    }
+
+    sample_cardinality
+}
+
+fn machine_cfg_sample_cardinality(schema: &MachineSchema, deep: bool) -> usize {
+    if !deep && schema.ci_step_limit == Some(1) {
+        0
+    } else {
+        default_sample_cardinality(deep)
+    }
+}
+
+fn session_id_string_bridge_sample(
+    enabled: bool,
+    domains: &BTreeMap<String, TypeRef>,
+    session_id_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+
+    assert!(
+        matches!(
+            domains.get("SessionIdValues"),
+            Some(TypeRef::Named(name)) if name.as_str() == "SessionId"
+        ) && matches!(domains.get("StringValues"), Some(TypeRef::String)),
+        "the SessionId/String native bridge requires both model domains"
+    );
+
+    let sample = sample_values_for_named_type(
+        "SessionId",
+        session_id_cardinality.max(1),
+        named_samples,
+        named_bindings,
+    )
+    .into_iter()
+    .next();
+    assert!(
+        sample.is_some(),
+        "the SessionId/String native bridge requires a SessionId sample"
+    );
+    sample
+}
+
+fn render_cfg_domain_assignment(
+    ty: &TypeRef,
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    include_string_samples: bool,
+    session_id_string_bridge_sample: Option<&str>,
+) -> String {
+    let bridge_applies_to_session_id = matches!(
+        ty,
+        TypeRef::Named(name) if name.as_str() == "SessionId"
+    );
+    let effective_cardinality = if session_id_string_bridge_sample.is_some()
+        && (matches!(ty, TypeRef::String) || bridge_applies_to_session_id)
+    {
+        sample_cardinality.max(1)
+    } else {
+        sample_cardinality
+    };
+
+    if let (TypeRef::String, Some(bridge_sample)) = (ty, session_id_string_bridge_sample) {
+        let mut samples =
+            collected_string_samples(effective_cardinality, named_samples, include_string_samples)
+                .into_iter()
+                .map(|sample| tla_string(&sample))
+                .collect::<Vec<_>>();
+        let baseline_sample_count = samples.len();
+        samples.retain(|sample| sample != bridge_sample);
+        samples.insert(0, bridge_sample.to_owned());
+        // Deep transition coverage makes the equality branch a non-vacuity
+        // gate. Substitute the shared SessionId value into StringValues rather
+        // than growing the renderer's actual baseline pool (which can be
+        // smaller than a configured cardinality) and multiplying the explored
+        // state space.
+        if !include_string_samples {
+            samples.truncate(baseline_sample_count);
+        }
+        return format!("{{{}}}", samples.join(", "));
+    }
+
+    render_default_domain_assignment(
+        ty,
+        effective_cardinality,
+        named_samples,
+        named_bindings,
+        include_string_samples,
+    )
+}
+
+fn push_cfg_assignment_operator_definitions(
+    out: &mut String,
+    domains: &BTreeMap<String, TypeRef>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    profile: &CfgAssignmentOperatorProfile<'_>,
+) -> bool {
+    let mut wrote = false;
+    for (name, ty) in domains {
+        let explicit = profile
+            .explicit_values
+            .and_then(|values| profile_explicit_values(values, ty));
+        if cfg_domain_is_skipped_in_cfg(ty)
+            || (explicit.is_none() && !cfg_assignment_requires_model_operator(ty, named_bindings))
+        {
+            continue;
+        }
+        let sample_cardinality =
+            profile_sample_cardinality_for_domain(profile, name, ty, named_bindings);
+        let assignment = explicit.map(render_explicit_values).unwrap_or_else(|| {
+            render_default_domain_assignment(
+                ty,
+                sample_cardinality,
+                profile.named_samples,
+                named_bindings,
+                profile.include_string_samples,
+            )
+        });
+        writeln!(
+            out,
+            "{} == {}",
+            cfg_assignment_operator_name(name, &profile.suffix),
+            assignment
+        )
+        .expect("write to string");
+        wrote = true;
+    }
+    if wrote {
+        pushln!(out);
+    }
+    wrote
+}
+
+fn validate_machine_model(schema: &MachineSchema) -> Result<(), CompositionTlaError> {
+    let invalid = |reason| CompositionTlaError::InvalidTlcModel {
+        machine: schema.machine.to_string(),
+        reason,
+    };
+    schema
+        .validate()
+        .map_err(|error| invalid(error.to_string()))?;
+    if let Some(model) = &schema.tlc_model {
+        let domains = collect_binding_domains(schema);
+        for profile in [&model.ci, &model.deep] {
+            for name in profile.named_values.keys() {
+                if !domains.values().any(|ty| match ty {
+                    TypeRef::Named(id) => id == name,
+                    TypeRef::Enum(id) => id.as_str() == name.as_str(),
+                    _ => false,
+                }) {
+                    return Err(invalid(format!(
+                        "explicit sample type {name} has no standalone model domain"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn profile_explicit_values<'a>(
+    profile: &'a meerkat_machine_schema::MachineTlcProfile,
+    ty: &TypeRef,
+) -> Option<&'a [meerkat_machine_schema::TlcValue]> {
+    let name = match ty {
+        TypeRef::Named(name) => name.as_str(),
+        TypeRef::Enum(name) => name.as_str(),
+        _ => return None,
+    };
+    profile
+        .named_values
+        .iter()
+        .find(|(id, _)| id.as_str() == name)
+        .map(|(_, values)| values.as_slice())
+}
+
+fn machine_explicit_values<'a>(
+    schema: &'a MachineSchema,
+    deep: bool,
+    ty: &TypeRef,
+) -> Option<&'a [meerkat_machine_schema::TlcValue]> {
+    let model = schema.tlc_model.as_ref()?;
+    profile_explicit_values(if deep { &model.deep } else { &model.ci }, ty)
+}
+
+fn render_explicit_values(values: &[meerkat_machine_schema::TlcValue]) -> String {
+    format!(
+        "{{{}}}",
+        values
+            .iter()
+            .map(render_explicit_value)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn render_explicit_value(value: &meerkat_machine_schema::TlcValue) -> String {
+    use meerkat_machine_schema::TlcValue;
+    match value {
+        TlcValue::Bool(value) => if *value { "TRUE" } else { "FALSE" }.into(),
+        TlcValue::U64(value) if *value == u64::MAX => TLA_RUST_U64_MAX_CONSTANT.to_owned(),
+        TlcValue::U64(value) => value.to_string(),
+        TlcValue::String(value) => tla_string(value),
+        TlcValue::None => "None".into(),
+        TlcValue::Some(value) => format!("Some({})", render_explicit_value(value)),
+        TlcValue::Set(values) => render_explicit_values(values),
+        TlcValue::Record(fields) => format!(
+            "[{}]",
+            fields
+                .iter()
+                .map(|(field, value)| format!(
+                    "{} |-> {}",
+                    tla_ident(field.as_str()),
+                    render_explicit_value(value)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn cfg_domain_is_skipped_in_cfg(ty: &TypeRef) -> bool {
+    matches!(
+        ty,
+        TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+    )
+}
+
+fn cfg_assignment_requires_model_operator(
+    ty: &TypeRef,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> bool {
+    match ty {
+        TypeRef::Named(name) => {
+            require_named_binding(named_bindings, name.as_str()).renders_cfg_hostile_record()
+        }
+        TypeRef::Enum(name) => {
+            require_named_binding(named_bindings, name.as_str()).renders_cfg_hostile_record()
+        }
+        TypeRef::Set(inner) | TypeRef::Seq(inner) => {
+            cfg_assignment_requires_model_operator(inner, named_bindings)
+        }
+        TypeRef::Option(_) | TypeRef::Map(_, _) => true,
+        TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::String => false,
+    }
+}
+
+trait CfgRecordRendering {
+    fn renders_cfg_hostile_record(&self) -> bool;
+}
+
+impl CfgRecordRendering for meerkat_machine_schema::RustTypeAtom {
+    fn renders_cfg_hostile_record(&self) -> bool {
+        match self {
+            meerkat_machine_schema::RustTypeAtom::TypePathStruct { .. } => true,
+            meerkat_machine_schema::RustTypeAtom::TypePathEnum {
+                structural_variants,
+                ..
+            } => !structural_variants.is_empty(),
+            _ => false,
+        }
+    }
+}
+
+pub fn composition_witness_cfg_name(name: impl AsRef<str>) -> String {
+    format!("witness-{}.cfg", tla_ident(name.as_ref()))
+}
+
+fn composition_witness_route_property_name(
+    witness: impl AsRef<str>,
+    route_name: impl AsRef<str>,
+) -> String {
+    format!(
+        "WitnessRouteObserved_{}_{}",
+        tla_ident(witness.as_ref()),
+        tla_ident(route_name)
+    )
+}
+
+fn composition_witness_scheduler_property_name(
+    witness: impl AsRef<str>,
+    rule: &SchedulerRule,
+) -> String {
+    format!(
+        "WitnessSchedulerTriggered_{}_{}",
+        tla_ident(witness.as_ref()),
+        tla_ident(witness_scheduler_rule_label(rule))
+    )
+}
+
+fn composition_witness_state_property_name(witness: impl AsRef<str>, index: usize) -> String {
+    format!(
+        "WitnessStateObserved_{}_{}",
+        tla_ident(witness.as_ref()),
+        index + 1
+    )
+}
+
+fn composition_witness_transition_property_name(
+    witness: impl AsRef<str>,
+    machine: impl AsRef<str>,
+    transition: impl AsRef<str>,
+) -> String {
+    format!(
+        "WitnessTransitionObserved_{}_{}_{}",
+        tla_ident(witness.as_ref()),
+        tla_ident(machine),
+        tla_ident(transition)
+    )
+}
+
+fn composition_witness_transition_order_property_name(
+    witness: impl AsRef<str>,
+    index: usize,
+) -> String {
+    format!(
+        "WitnessTransitionOrder_{}_{}",
+        tla_ident(witness.as_ref()),
+        index + 1
+    )
+}
+
+fn witness_scheduler_rule_label(rule: &SchedulerRule) -> String {
+    match rule {
+        SchedulerRule::PreemptWhenReady { higher, lower } => {
+            format!("PreemptWhenReady_{}_{}", higher, lower)
+        }
+    }
+}
+
+fn composition_witness_init_name(name: impl AsRef<str>) -> String {
+    format!("WitnessInit_{}", tla_ident(name.as_ref()))
+}
+
+fn composition_witness_next_name(name: impl AsRef<str>) -> String {
+    format!("WitnessNext_{}", tla_ident(name.as_ref()))
+}
+
+fn composition_witness_spec_name(name: impl AsRef<str>) -> String {
+    format!("WitnessSpec_{}", tla_ident(name.as_ref()))
+}
+
+fn composition_witness_fairness_name(name: impl AsRef<str>, index: usize) -> String {
+    format!("WitnessFairness_{}_{}", tla_ident(name.as_ref()), index + 1)
+}
+
+fn composition_witness_completion_name(name: impl AsRef<str>) -> String {
+    format!("WitnessScriptComplete_{}", tla_ident(name.as_ref()))
+}
+
+fn composition_witness_action_constraint_name(name: impl AsRef<str>) -> String {
+    format!("WitnessNoPrematureStutter_{}", tla_ident(name.as_ref()))
+}
+
+fn composition_witness_state_constraint_name(name: impl AsRef<str>) -> String {
+    format!("WitnessStateConstraint_{}", tla_ident(name.as_ref()))
+}
+
+pub fn render_composition_semantic_model(
+    schema: &CompositionSchema,
+) -> std::result::Result<String, CompositionTlaError> {
+    render_composition_semantic_model_from_catalog(schema, &canonical_machine_schemas())
+}
+
+/// [`render_composition_semantic_model`] against an explicitly supplied
+/// machine catalog, for compositions whose machines live outside Meerkat's
+/// catalog.
+pub fn render_composition_semantic_model_with_catalog(
+    schema: &CompositionSchema,
+    machine_catalog: &[MachineSchema],
+) -> std::result::Result<String, CompositionTlaError> {
+    validate_supplied_catalog(schema, machine_catalog)?;
+    render_composition_semantic_model_from_catalog(schema, machine_catalog)
+}
+
+fn render_composition_semantic_model_from_catalog(
+    schema: &CompositionSchema,
+    machine_catalog: &[MachineSchema],
+) -> std::result::Result<String, CompositionTlaError> {
+    // Fail closed: compiler construction (unknown machine schema, empty
+    // catalog) and rendering (unresolved route component, helper-call cycle,
+    // absent obligation field) used to be swallowed into `String::new()`,
+    // producing a broken-but-passing model. Propagate the typed error so
+    // `machine-generate` / `machine-check-drift` fail on malformed input.
+    let compiler = CompositionTlaCompiler::new(schema, machine_catalog)
+        .map_err(CompositionTlaError::Compile)?;
+    compiler.render()
+}
+
+/// Renders the generated per-composition Rust module (Track-B wave-b V2).
+///
+/// The emitted module is the typed seam between the composition's route
+/// schema and the runtime composition dispatcher. It declares:
+///
+/// * generated producer/effect/input/signal/field identity facts,
+/// * `TypedRoutedInput` / `TypedRoutedSignal` descriptors carrying typed
+///   route targets and `(FieldId, FieldId)` binding pairs,
+/// * a `route_to_input(instance, effect_variant) -> Option<TypedRoutedInput>`
+///   fact resolver for input-kind routes, and
+/// * a `route_to_signal(instance, effect_variant) -> Option<TypedRoutedSignal>`
+///   fact resolver for signal-kind routes.
+///
+/// Returns `None` when the composition declares no driver descriptor; the
+/// driver descriptor continues to carry the Rust emission path for xtask
+/// consumers.
+pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
+    render_composition_driver_from_catalog(schema, &canonical_machine_schemas())
+}
+
+/// [`render_composition_driver`] against an explicitly supplied machine
+/// catalog, for compositions whose machines live outside Meerkat's catalog.
+pub fn render_composition_driver_with_catalog(
+    schema: &CompositionSchema,
+    machine_catalog: &[MachineSchema],
+) -> std::result::Result<Option<String>, CompositionTlaError> {
+    validate_supplied_catalog(schema, machine_catalog)?;
+    Ok(render_composition_driver_from_catalog(
+        schema,
+        machine_catalog,
+    ))
+}
+
+fn render_composition_driver_from_catalog(
+    schema: &CompositionSchema,
+    machine_catalog: &[MachineSchema],
+) -> Option<String> {
+    let driver = schema.driver.as_ref()?;
+
+    let machine_by_name = machine_catalog
+        .iter()
+        .map(|machine| (machine.machine.as_str(), machine))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut producers: Vec<(&str, &MachineSchema)> = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for instance in &schema.machines {
+        if !seen.insert(instance.instance_id.as_str()) {
+            continue;
+        }
+        let Some(machine) = machine_by_name.get(instance.machine_name.as_str()).copied() else {
+            continue;
+        };
+        producers.push((instance.instance_id.as_str(), machine));
+    }
+
+    let composition_name = schema.name.as_str();
+    let mut effect_variants_by_producer: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut input_variants: BTreeSet<&str> = BTreeSet::new();
+    let mut signal_variants: BTreeSet<&str> = BTreeSet::new();
+    let mut fields: BTreeSet<&str> = BTreeSet::new();
+
+    for route in &schema.routes {
+        effect_variants_by_producer
+            .entry(route.from_machine.as_str())
+            .or_default()
+            .insert(route.effect_variant.as_str());
+
+        match route.to.kind {
+            RouteTargetKind::Input => {
+                input_variants.insert(route.to.input_variant.as_str());
+            }
+            RouteTargetKind::Signal => {
+                signal_variants.insert(route.to.input_variant.as_str());
+            }
+        }
+
+        for binding in &route.bindings {
+            fields.insert(binding.to_field.as_str());
+            if let RouteBindingSource::Field { from_field, .. } = &binding.source {
+                fields.insert(from_field.as_str());
+            }
+        }
+    }
+    for closure in &driver.refusal_closures {
+        input_variants.insert(closure.feedback_input.as_str());
+        for binding in &closure.field_bindings {
+            fields.insert(binding.input_field.as_str());
+            if let DriverRefusalFieldSource::EffectField(source_field) = &binding.source {
+                fields.insert(source_field.as_str());
+            }
+        }
+    }
+
+    let mut out = String::new();
+    pushln!(
+        &mut out,
+        "// @generated — composition module for `{composition_name}`"
+    );
+    pushln!(
+        &mut out,
+        "// DO NOT EDIT. Emitted by meerkat_machine_codegen::render_composition_driver."
+    );
+    pushln!(
+        &mut out,
+        "// Source of truth: catalog::compositions::{composition_name}"
+    );
+    pushln!(
+        &mut out,
+        "// Driver: `{}` (rust path: `{}`).",
+        driver.name,
+        driver.rust.module_path
+    );
+    pushln!(&mut out, "#![allow(clippy::expect_used)]");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "use meerkat_machine_schema::identity::{{CompositionId, EffectVariantId, FieldId, InputVariantId, MachineId, MachineInstanceId, RouteId, SignalVariantId}};"
+    );
+    for import in &driver.rust.required_imports {
+        pushln!(&mut out, "{import}");
+    }
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Typed route descriptor resolved from generated composition facts."
+    );
+    pushln!(&mut out, "///");
+    pushln!(
+        &mut out,
+        "/// `bindings` lists producer-field → consumer-field pairs in the"
+    );
+    pushln!(&mut out, "/// order declared by the composition schema.");
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub struct TypedRoutedInput {{");
+    pushln!(&mut out, "    pub route_id: RouteId,");
+    pushln!(&mut out, "    pub instance_id: MachineInstanceId,");
+    pushln!(&mut out, "    pub variant: InputVariantId,");
+    pushln!(&mut out, "    pub bindings: Vec<(FieldId, FieldId)>,");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Typed signal-route descriptor resolved from generated composition facts."
+    );
+    pushln!(&mut out, "///");
+    pushln!(
+        &mut out,
+        "/// `bindings` lists producer-field → consumer-field pairs in the"
+    );
+    pushln!(&mut out, "/// order declared by the composition schema.");
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub struct TypedRoutedSignal {{");
+    pushln!(&mut out, "    pub route_id: RouteId,");
+    pushln!(&mut out, "    pub instance_id: MachineInstanceId,");
+    pushln!(&mut out, "    pub variant: SignalVariantId,");
+    pushln!(&mut out, "    pub bindings: Vec<(FieldId, FieldId)>,");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Generated source for one consumer-refusal feedback field."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub enum GeneratedRefusalFieldSource {{");
+    pushln!(&mut out, "    EffectField(FieldId),");
+    pushln!(&mut out, "    ConsumerErrorCode,");
+    pushln!(&mut out, "    ConsumerErrorMessage,");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Generated feedback closure for a consumer-refused dispatch."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub struct TypedDispatchRefusalClosure {{");
+    pushln!(&mut out, "    pub route_id: RouteId,");
+    pushln!(&mut out, "    pub producer_instance: MachineInstanceId,");
+    pushln!(&mut out, "    pub effect_variant: EffectVariantId,");
+    pushln!(&mut out, "    pub feedback_instance: MachineInstanceId,");
+    pushln!(&mut out, "    pub feedback_input: InputVariantId,");
+    pushln!(
+        &mut out,
+        "    pub field_bindings: Vec<(GeneratedRefusalFieldSource, FieldId)>,"
+    );
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Generated producer identity declared by this composition."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub struct ProducerFacts {{");
+    pushln!(&mut out, "    pub instance_id: MachineInstanceId,");
+    pushln!(&mut out, "    pub machine: MachineId,");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(&mut out, "/// Composition id for this generated fact set.");
+    pushln!(&mut out, "pub fn composition_id() -> CompositionId {{");
+    pushln!(
+        &mut out,
+        "    CompositionId::parse(\"{composition_name}\").expect(\"composition slug\")"
+    );
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(&mut out, "/// Generated producer instance facts.");
+    pushln!(&mut out, "pub mod producers {{");
+    pushln!(&mut out, "    use super::*;");
+    for (instance_id, machine) in &producers {
+        let fn_name = to_snake_case_local(instance_id);
+        let machine_name = machine.machine.as_str();
+        pushln!(&mut out);
+        pushln!(&mut out, "    pub fn {fn_name}() -> ProducerFacts {{");
+        pushln!(&mut out, "        ProducerFacts {{");
+        pushln!(
+            &mut out,
+            "            instance_id: {fn_name}_instance_id(),"
+        );
+        pushln!(&mut out, "            machine: {fn_name}_machine_id(),");
+        pushln!(&mut out, "        }}");
+        pushln!(&mut out, "    }}");
+        pushln!(&mut out);
+        pushln!(
+            &mut out,
+            "    pub fn {fn_name}_instance_id() -> MachineInstanceId {{"
+        );
+        pushln!(
+            &mut out,
+            "        MachineInstanceId::parse(\"{instance_id}\").expect(\"producer instance slug\")"
+        );
+        pushln!(&mut out, "    }}");
+        pushln!(&mut out);
+        pushln!(
+            &mut out,
+            "    pub fn {fn_name}_machine_id() -> MachineId {{"
+        );
+        pushln!(
+            &mut out,
+            "        MachineId::parse(\"{machine_name}\").expect(\"producer machine slug\")"
+        );
+        pushln!(&mut out, "    }}");
+    }
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(&mut out, "/// Generated producer-side effect variant ids.");
+    pushln!(&mut out, "pub mod effects {{");
+    for (instance_id, _) in &producers {
+        let producer_mod = to_snake_case_local(instance_id);
+        pushln!(&mut out);
+        pushln!(&mut out, "    pub mod {producer_mod} {{");
+        pushln!(&mut out, "        use super::super::*;");
+        if let Some(effect_variants) = effect_variants_by_producer.get(instance_id) {
+            for effect_variant in effect_variants {
+                let fn_name = to_snake_case_local(effect_variant);
+                pushln!(&mut out);
+                pushln!(&mut out, "        pub fn {fn_name}() -> EffectVariantId {{");
+                pushln!(
+                    &mut out,
+                    "            EffectVariantId::parse(\"{effect_variant}\").expect(\"effect variant slug\")"
+                );
+                pushln!(&mut out, "        }}");
+            }
+        }
+        pushln!(&mut out, "    }}");
+    }
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(&mut out, "/// Generated consumer input variant ids.");
+    pushln!(&mut out, "pub mod inputs {{");
+    pushln!(&mut out, "    use super::*;");
+    for input_variant in &input_variants {
+        let fn_name = to_snake_case_local(input_variant);
+        pushln!(&mut out);
+        pushln!(&mut out, "    pub fn {fn_name}() -> InputVariantId {{");
+        pushln!(
+            &mut out,
+            "        InputVariantId::parse(\"{input_variant}\").expect(\"input variant slug\")"
+        );
+        pushln!(&mut out, "    }}");
+    }
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(&mut out, "/// Generated consumer signal variant ids.");
+    pushln!(&mut out, "pub mod signals {{");
+    pushln!(&mut out, "    use super::*;");
+    for signal_variant in &signal_variants {
+        let fn_name = to_snake_case_local(signal_variant);
+        pushln!(&mut out);
+        pushln!(&mut out, "    pub fn {fn_name}() -> SignalVariantId {{");
+        pushln!(
+            &mut out,
+            "        SignalVariantId::parse(\"{signal_variant}\").expect(\"signal variant slug\")"
+        );
+        pushln!(&mut out, "    }}");
+    }
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Generated field ids referenced by route bindings."
+    );
+    pushln!(&mut out, "pub mod fields {{");
+    pushln!(&mut out, "    use super::*;");
+    for field in &fields {
+        let fn_name = to_snake_case_local(field);
+        pushln!(&mut out);
+        pushln!(&mut out, "    pub fn {fn_name}() -> FieldId {{");
+        pushln!(
+            &mut out,
+            "        FieldId::parse(\"{field}\").expect(\"field slug\")"
+        );
+        pushln!(&mut out, "    }}");
+    }
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    for route in schema
+        .routes
+        .iter()
+        .filter(|route| route.to.kind == RouteTargetKind::Input)
+    {
+        let route_fn = format!("route_{}", to_snake_case_local(route.name.as_str()));
+        let target_machine = route.to.machine.as_str();
+        let target_variant = route.to.input_variant.as_str();
+        pushln!(
+            &mut out,
+            "/// Generated facts for input route `{}`.",
+            route.name.as_str()
+        );
+        pushln!(&mut out, "pub fn {route_fn}() -> TypedRoutedInput {{");
+        pushln!(&mut out, "    TypedRoutedInput {{");
+        pushln!(
+            &mut out,
+            "        route_id: RouteId::parse(\"{}\").expect(\"route slug\"),",
+            route.name.as_str()
+        );
+        pushln!(
+            &mut out,
+            "        instance_id: MachineInstanceId::parse(\"{target_machine}\").expect(\"composition instance slug\"),"
+        );
+        pushln!(
+            &mut out,
+            "        variant: InputVariantId::parse(\"{target_variant}\").expect(\"composition input slug\"),"
+        );
+        if route.bindings.is_empty() {
+            pushln!(&mut out, "        bindings: Vec::new(),");
+        } else {
+            pushln!(&mut out, "        bindings: vec![");
+            for binding in &route.bindings {
+                let from_field = match &binding.source {
+                    RouteBindingSource::Field { from_field, .. } => from_field.as_str(),
+                    RouteBindingSource::Literal(_) | RouteBindingSource::OwnerProvided => {
+                        continue;
+                    }
+                };
+                let to_field = binding.to_field.as_str();
+                pushln!(
+                    &mut out,
+                    "            (FieldId::parse(\"{from_field}\").expect(\"route producer field slug\"), FieldId::parse(\"{to_field}\").expect(\"route consumer field slug\")),"
+                );
+            }
+            pushln!(&mut out, "        ],");
+        }
+        pushln!(&mut out, "    }}");
+        pushln!(&mut out, "}}");
+        out.push('\n');
+    }
+
+    for closure in &driver.refusal_closures {
+        let route = schema
+            .routes
+            .iter()
+            .find(|route| route.name == closure.dispatch_route)?;
+        let closure_fn = format!(
+            "refusal_closure_{}",
+            to_snake_case_local(closure.dispatch_route.as_str())
+        );
+        pushln!(
+            &mut out,
+            "/// Generated consumer-refusal closure for route `{}`.",
+            closure.dispatch_route
+        );
+        pushln!(
+            &mut out,
+            "pub fn {closure_fn}() -> TypedDispatchRefusalClosure {{"
+        );
+        pushln!(&mut out, "    TypedDispatchRefusalClosure {{");
+        pushln!(
+            &mut out,
+            "        route_id: RouteId::parse(\"{}\").expect(\"route slug\"),",
+            closure.dispatch_route
+        );
+        pushln!(
+            &mut out,
+            "        producer_instance: MachineInstanceId::parse(\"{}\").expect(\"producer instance slug\"),",
+            route.from_machine
+        );
+        pushln!(
+            &mut out,
+            "        effect_variant: EffectVariantId::parse(\"{}\").expect(\"effect variant slug\"),",
+            route.effect_variant
+        );
+        pushln!(
+            &mut out,
+            "        feedback_instance: MachineInstanceId::parse(\"{}\").expect(\"feedback instance slug\"),",
+            closure.feedback_instance
+        );
+        pushln!(
+            &mut out,
+            "        feedback_input: InputVariantId::parse(\"{}\").expect(\"feedback input slug\"),",
+            closure.feedback_input
+        );
+        pushln!(&mut out, "        field_bindings: vec![");
+        for binding in &closure.field_bindings {
+            let source = match &binding.source {
+                DriverRefusalFieldSource::EffectField(field) => format!(
+                    "GeneratedRefusalFieldSource::EffectField(FieldId::parse(\"{}\").expect(\"effect field slug\"))",
+                    field
+                ),
+                DriverRefusalFieldSource::ConsumerErrorCode => {
+                    "GeneratedRefusalFieldSource::ConsumerErrorCode".to_owned()
+                }
+                DriverRefusalFieldSource::ConsumerErrorMessage => {
+                    "GeneratedRefusalFieldSource::ConsumerErrorMessage".to_owned()
+                }
+            };
+            pushln!(
+                &mut out,
+                "            ({source}, FieldId::parse(\"{}\").expect(\"feedback field slug\")),",
+                binding.input_field
+            );
+        }
+        pushln!(&mut out, "        ],");
+        pushln!(&mut out, "    }}");
+        pushln!(&mut out, "}}");
+        out.push('\n');
+    }
+
+    pushln!(
+        &mut out,
+        "/// Resolve a generated route to its consumer-refusal feedback closure."
+    );
+    pushln!(
+        &mut out,
+        "pub fn refusal_closure_for_route(route_id: &RouteId) -> Option<TypedDispatchRefusalClosure> {{"
+    );
+    for closure in &driver.refusal_closures {
+        let closure_fn = format!(
+            "refusal_closure_{}",
+            to_snake_case_local(closure.dispatch_route.as_str())
+        );
+        pushln!(
+            &mut out,
+            "    if route_id == &RouteId::parse(\"{}\").expect(\"route slug\") {{",
+            closure.dispatch_route
+        );
+        pushln!(&mut out, "        return Some({closure_fn}());");
+        pushln!(&mut out, "    }}");
+    }
+    pushln!(&mut out, "    None");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    for route in schema
+        .routes
+        .iter()
+        .filter(|route| route.to.kind == RouteTargetKind::Signal)
+    {
+        let route_fn = format!("route_{}", to_snake_case_local(route.name.as_str()));
+        let target_machine = route.to.machine.as_str();
+        let target_variant = route.to.input_variant.as_str();
+        pushln!(
+            &mut out,
+            "/// Generated facts for signal route `{}`.",
+            route.name.as_str()
+        );
+        pushln!(&mut out, "pub fn {route_fn}() -> TypedRoutedSignal {{");
+        pushln!(&mut out, "    TypedRoutedSignal {{");
+        pushln!(
+            &mut out,
+            "        route_id: RouteId::parse(\"{}\").expect(\"route slug\"),",
+            route.name.as_str()
+        );
+        pushln!(
+            &mut out,
+            "        instance_id: MachineInstanceId::parse(\"{target_machine}\").expect(\"composition instance slug\"),"
+        );
+        pushln!(
+            &mut out,
+            "        variant: SignalVariantId::parse(\"{target_variant}\").expect(\"composition signal slug\"),"
+        );
+        if route.bindings.is_empty() {
+            pushln!(&mut out, "        bindings: Vec::new(),");
+        } else {
+            pushln!(&mut out, "        bindings: vec![");
+            for binding in &route.bindings {
+                let from_field = match &binding.source {
+                    RouteBindingSource::Field { from_field, .. } => from_field.as_str(),
+                    RouteBindingSource::Literal(_) | RouteBindingSource::OwnerProvided => {
+                        continue;
+                    }
+                };
+                let to_field = binding.to_field.as_str();
+                pushln!(
+                    &mut out,
+                    "            (FieldId::parse(\"{from_field}\").expect(\"route producer field slug\"), FieldId::parse(\"{to_field}\").expect(\"route consumer field slug\")),"
+                );
+            }
+            pushln!(&mut out, "        ],");
+        }
+        pushln!(&mut out, "    }}");
+        pushln!(&mut out, "}}");
+        out.push('\n');
+    }
+
+    pushln!(
+        &mut out,
+        "/// Resolve a producer `(instance, effect_variant)` to generated input-route facts."
+    );
+    pushln!(&mut out, "pub fn route_to_input(");
+    pushln!(&mut out, "    producer_instance: &MachineInstanceId,");
+    pushln!(&mut out, "    effect_variant: &EffectVariantId,");
+    pushln!(&mut out, ") -> Option<TypedRoutedInput> {{");
+    for route in schema
+        .routes
+        .iter()
+        .filter(|route| route.to.kind == RouteTargetKind::Input)
+    {
+        let producer_mod = to_snake_case_local(route.from_machine.as_str());
+        let effect_fn = to_snake_case_local(route.effect_variant.as_str());
+        let route_fn = format!("route_{}", to_snake_case_local(route.name.as_str()));
+        pushln!(
+            &mut out,
+            "    if producer_instance == &producers::{producer_mod}_instance_id() && effect_variant == &effects::{producer_mod}::{effect_fn}() {{"
+        );
+        pushln!(&mut out, "        return Some({route_fn}());");
+        pushln!(&mut out, "    }}");
+    }
+    pushln!(&mut out, "    None");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Resolve a producer `(instance, effect_variant)` to generated signal-route facts."
+    );
+    pushln!(&mut out, "pub fn route_to_signal(");
+    pushln!(&mut out, "    producer_instance: &MachineInstanceId,");
+    pushln!(&mut out, "    effect_variant: &EffectVariantId,");
+    pushln!(&mut out, ") -> Option<TypedRoutedSignal> {{");
+    for route in schema
+        .routes
+        .iter()
+        .filter(|route| route.to.kind == RouteTargetKind::Signal)
+    {
+        let producer_mod = to_snake_case_local(route.from_machine.as_str());
+        let effect_fn = to_snake_case_local(route.effect_variant.as_str());
+        let route_fn = format!("route_{}", to_snake_case_local(route.name.as_str()));
+        pushln!(
+            &mut out,
+            "    if producer_instance == &producers::{producer_mod}_instance_id() && effect_variant == &effects::{producer_mod}::{effect_fn}() {{"
+        );
+        pushln!(&mut out, "        return Some({route_fn}());");
+        pushln!(&mut out, "    }}");
+    }
+    pushln!(&mut out, "    None");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    let driver_type = driver.rust.driver_type.as_ref();
+    let store_plan_type = driver.rust.store_plan_type.as_ref();
+    let work_type = driver.rust.work_type.as_ref();
+    let decision_type = driver.rust.decision_type.as_ref();
+
+    pushln!(
+        &mut out,
+        "/// Generated route target selected by `{driver_type}`."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub enum GeneratedRouteTarget {{");
+    pushln!(&mut out, "    Input(TypedRoutedInput),");
+    pushln!(&mut out, "    Signal(TypedRoutedSignal),");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Generated store plan emitted by `{driver_type}`."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub struct {store_plan_type} {{");
+    pushln!(&mut out, "    pub target: GeneratedRouteTarget,");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(&mut out, "impl {store_plan_type} {{");
+    pushln!(
+        &mut out,
+        "    pub fn input(route: TypedRoutedInput) -> Self {{"
+    );
+    pushln!(
+        &mut out,
+        "        Self {{ target: GeneratedRouteTarget::Input(route) }}"
+    );
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out);
+    pushln!(
+        &mut out,
+        "    pub fn signal(route: TypedRoutedSignal) -> Self {{"
+    );
+    pushln!(
+        &mut out,
+        "        Self {{ target: GeneratedRouteTarget::Signal(route) }}"
+    );
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out);
+    pushln!(&mut out, "    pub fn route_id(&self) -> &RouteId {{");
+    pushln!(&mut out, "        match &self.target {{");
+    pushln!(
+        &mut out,
+        "            GeneratedRouteTarget::Input(route) => &route.route_id,"
+    );
+    pushln!(
+        &mut out,
+        "            GeneratedRouteTarget::Signal(route) => &route.route_id,"
+    );
+    pushln!(&mut out, "        }}");
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Generated work packet consumed by `{driver_type}`."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub struct {work_type} {{");
+    pushln!(&mut out, "    pub producer_instance: MachineInstanceId,");
+    pushln!(&mut out, "    pub effect_variant: EffectVariantId,");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(&mut out, "impl {work_type} {{");
+    pushln!(
+        &mut out,
+        "    pub fn new(producer_instance: MachineInstanceId, effect_variant: EffectVariantId) -> Self {{"
+    );
+    pushln!(
+        &mut out,
+        "        Self {{ producer_instance, effect_variant }}"
+    );
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Generated routing decision emitted by `{driver_type}`."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub enum {decision_type} {{");
+    pushln!(&mut out, "    DispatchInput(TypedRoutedInput),");
+    pushln!(&mut out, "    DispatchSignal(TypedRoutedSignal),");
+    pushln!(&mut out, "    NoRoute,");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Generated composition driver constrained by the catalog driver descriptor."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    pushln!(&mut out, "pub struct {driver_type};");
+    pushln!(&mut out);
+    pushln!(&mut out, "impl {driver_type} {{");
+    pushln!(
+        &mut out,
+        "    pub fn decide(work: &{work_type}) -> {decision_type} {{"
+    );
+    pushln!(
+        &mut out,
+        "        if let Some(route) = route_to_input(&work.producer_instance, &work.effect_variant) {{"
+    );
+    pushln!(
+        &mut out,
+        "            return {decision_type}::DispatchInput(route);"
+    );
+    pushln!(&mut out, "        }}");
+    pushln!(
+        &mut out,
+        "        if let Some(route) = route_to_signal(&work.producer_instance, &work.effect_variant) {{"
+    );
+    pushln!(
+        &mut out,
+        "            return {decision_type}::DispatchSignal(route);"
+    );
+    pushln!(&mut out, "        }}");
+    pushln!(&mut out, "        {decision_type}::NoRoute");
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out);
+    pushln!(
+        &mut out,
+        "    pub fn store_plan(decision: {decision_type}) -> Option<{store_plan_type}> {{"
+    );
+    pushln!(&mut out, "        match decision {{");
+    pushln!(
+        &mut out,
+        "            {decision_type}::DispatchInput(route) => Some({store_plan_type}::input(route)),"
+    );
+    pushln!(
+        &mut out,
+        "            {decision_type}::DispatchSignal(route) => Some({store_plan_type}::signal(route)),"
+    );
+    pushln!(&mut out, "            {decision_type}::NoRoute => None,");
+    pushln!(&mut out, "        }}");
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out, "}}");
+
+    Some(out)
+}
+
+fn to_snake_case_local(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_is_sep = true;
+    for ch in value.chars() {
+        if ch == '_' || ch == '-' || ch == ' ' {
+            if !previous_is_sep {
+                out.push('_');
+                previous_is_sep = true;
+            }
+            continue;
+        }
+        if ch.is_ascii_uppercase() {
+            if !out.is_empty() && !previous_is_sep {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            previous_is_sep = false;
+        } else {
+            out.push(ch.to_ascii_lowercase());
+            previous_is_sep = false;
+        }
+    }
+    out.trim_matches('_').to_owned()
+}
+
+pub fn render_machine_semantic_model(
+    schema: &MachineSchema,
+) -> std::result::Result<String, CompositionTlaError> {
+    check_canonical_named_bindings(schema)?;
+    if schema.tlc_model.is_some() {
+        validate_machine_model(schema)?;
+    }
+    let mut compiler = MachineTlaCompiler::new(schema);
+    compiler.render()
+}
+
+fn render_state_markdown(out: &mut String, schema: &MachineSchema) {
+    pushln!(out, "## State");
+    writeln!(
+        out,
+        "- Phase enum: `{}`",
+        schema
+            .state
+            .phase
+            .variants
+            .iter()
+            .map(|variant| variant.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    )
+    .expect("write to string");
+    for field in &schema.state.fields {
+        pushln!(out, "- `{}`: `{}`", field.name, render_type_ref(&field.ty));
+    }
+    pushln!(out);
+}
+
+fn render_enum_markdown(out: &mut String, label: &str, schema: &EnumSchema) {
+    writeln!(out, "## {label}");
+    for variant in &schema.variants {
+        if variant.fields.is_empty() {
+            pushln!(out, "- `{}`", variant.name);
+        } else {
+            writeln!(
+                out,
+                "- `{}`({})",
+                variant.name,
+                render_field_list(&variant.fields)
+            )
+            .expect("write to string");
+        }
+    }
+    pushln!(out);
+}
+
+/// Render a labelled subset of an input enum's variants, keeping only those whose
+/// name satisfies `keep`. Used to split the public command surface from the
+/// runtime-internal inputs in the generated machine contract.
+fn render_input_subset(
+    out: &mut String,
+    label: &str,
+    schema: &EnumSchema,
+    keep: impl Fn(&str) -> bool,
+) {
+    writeln!(out, "## {label}");
+    for variant in schema
+        .variants
+        .iter()
+        .filter(|variant| keep(variant.name.as_str()))
+    {
+        if variant.fields.is_empty() {
+            pushln!(out, "- `{}`", variant.name);
+        } else {
+            writeln!(
+                out,
+                "- `{}`({})",
+                variant.name,
+                render_field_list(&variant.fields)
+            )
+            .expect("write to string");
+        }
+    }
+    pushln!(out);
+}
+
+fn render_field_list(fields: &[meerkat_machine_schema::FieldSchema]) -> String {
+    fields
+        .iter()
+        .map(|field| format!("{}: {}", field.name, render_type_ref(&field.ty)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn collect_binding_domains(schema: &MachineSchema) -> BTreeMap<String, TypeRef> {
+    let mut domains = BTreeMap::new();
+
+    for field in &schema.state.fields {
+        collect_type_domains(&field.ty, &mut domains);
+    }
+
+    for transition in &schema.transitions {
+        if let Some(variant) = transition_trigger_variant(schema, transition) {
+            for binding in transition.on.bindings() {
+                if let Some(field) = variant.fields.iter().find(|field| field.name == *binding) {
+                    collect_type_domains(&field.ty, &mut domains);
+                }
+            }
+        }
+    }
+
+    for variant in &schema.effects.variants {
+        for field in &variant.fields {
+            collect_type_domains(&field.ty, &mut domains);
+        }
+    }
+
+    domains
+}
+
+fn collect_composition_binding_domains(
+    schema: &CompositionSchema,
+    machine_by_instance: &BTreeMap<&str, &MachineSchema>,
+) -> BTreeMap<String, TypeRef> {
+    let mut domains = BTreeMap::new();
+
+    for machine in machine_by_instance.values() {
+        for (name, ty) in collect_binding_domains(machine) {
+            domains.entry(name).or_insert(ty);
+        }
+    }
+
+    for entry_input in &schema.entry_inputs {
+        let Some(machine) = machine_by_instance
+            .get(entry_input.machine.as_str())
+            .copied()
+        else {
+            continue;
+        };
+        let Ok(variant) = machine.inputs.variant_named(&entry_input.input_variant) else {
+            continue;
+        };
+        for field in &variant.fields {
+            collect_type_domains(&field.ty, &mut domains);
+        }
+    }
+
+    domains
+}
+
+fn collect_type_domains(ty: &TypeRef, domains: &mut BTreeMap<String, TypeRef>) {
+    let name = domain_constant_name(ty);
+    domains.entry(name).or_insert_with(|| ty.clone());
+    match ty {
+        TypeRef::Option(inner) | TypeRef::Seq(inner) | TypeRef::Set(inner) => {
+            collect_type_domains(inner, domains);
+        }
+        TypeRef::Map(key, value) => {
+            collect_type_domains(key, domains);
+            collect_type_domains(value, domains);
+        }
+        TypeRef::Bool
+        | TypeRef::U32
+        | TypeRef::U64
+        | TypeRef::String
+        | TypeRef::Named(_)
+        | TypeRef::Enum(_) => {}
+    }
+}
+
+/// Named samples for a machine Deep profile: every named bucket unchanged, but
+/// the generic `String` bucket holds only the string literals a transition
+/// guard requires an input binding to equal (`delivery_id == "terminal"`,
+/// `claim_id == ""`). Without them a transition guarded on such a literal is
+/// unreachable under the generic `"alpha"`/`"beta"` samples and Deep coverage
+/// reports it as zero-hit. Literals from updates, effects or init (messages,
+/// error codes) are deliberately not added, so unrelated machines keep their
+/// sample domains.
+fn with_guard_binding_string_samples(
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    schema: &MachineSchema,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut samples = named_samples.clone();
+    let literals = collect_guard_binding_string_literals(schema);
+    if literals.is_empty() {
+        samples.remove("String");
+    } else {
+        samples.insert("String".to_owned(), literals);
+    }
+    samples
+}
+
+fn collect_guard_binding_string_literals(schema: &MachineSchema) -> BTreeSet<String> {
+    let mut literals = BTreeSet::new();
+    for transition in &schema.transitions {
+        let string_bindings = transition_trigger_variant(schema, transition)
+            .map(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .filter(|field| {
+                        matches!(field.ty, TypeRef::String)
+                            && transition
+                                .on
+                                .bindings()
+                                .iter()
+                                .any(|binding| binding == &field.name)
+                    })
+                    .map(|field| field.name.as_str().to_owned())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        if string_bindings.is_empty() {
+            continue;
+        }
+        for guard in &transition.guards {
+            collect_binding_literal_comparisons(&guard.expr, &string_bindings, &mut literals);
+        }
+    }
+    literals
+}
+
+fn collect_binding_literal_comparisons(
+    expr: &Expr,
+    string_bindings: &BTreeSet<String>,
+    literals: &mut BTreeSet<String>,
+) {
+    match expr {
+        // Only equality makes a guard unreachable without its literal. An
+        // inequality such as `attempt_id != ""` is already satisfied by the
+        // generic samples, so its literal would only add rejection-path states.
+        Expr::Eq(left, right) => {
+            match (left.as_ref(), right.as_ref()) {
+                (Expr::Binding(binding), Expr::String(literal))
+                | (Expr::String(literal), Expr::Binding(binding))
+                    if string_bindings.contains(binding) =>
+                {
+                    literals.insert(literal.clone());
+                }
+                _ => {}
+            }
+            collect_binding_literal_comparisons(left, string_bindings, literals);
+            collect_binding_literal_comparisons(right, string_bindings, literals);
+        }
+        Expr::Neq(left, right) => {
+            collect_binding_literal_comparisons(left, string_bindings, literals);
+            collect_binding_literal_comparisons(right, string_bindings, literals);
+        }
+        Expr::Not(inner) => collect_binding_literal_comparisons(inner, string_bindings, literals),
+        Expr::And(items) | Expr::Or(items) => {
+            for item in items {
+                collect_binding_literal_comparisons(item, string_bindings, literals);
+            }
+        }
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            for item in [condition, then_expr, else_expr] {
+                collect_binding_literal_comparisons(item, string_bindings, literals);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_machine_named_type_samples(
+    schema: &MachineSchema,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let field_types = schema
+        .state
+        .fields
+        .iter()
+        .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+        .collect::<BTreeMap<String, _>>();
+    let helper_returns = schema
+        .helpers
+        .iter()
+        .chain(schema.derived.iter())
+        .map(|helper| (helper.name.clone(), helper.returns.clone()))
+        .collect::<BTreeMap<String, _>>();
+    let mut samples = BTreeMap::new();
+
+    for init in &schema.state.init.fields {
+        if let Some(field_ty) = field_types.get(init.field.as_str()) {
+            collect_named_literals_from_expr(
+                &mut samples,
+                &init.expr,
+                Some(field_ty),
+                &field_types,
+                &helper_returns,
+                &BTreeMap::new(),
+            );
+        }
+    }
+
+    for helper in schema.helpers.iter().chain(schema.derived.iter()) {
+        let bindings = helper
+            .params
+            .iter()
+            .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+            .collect::<BTreeMap<String, _>>();
+        collect_named_literals_from_expr(
+            &mut samples,
+            &helper.body,
+            Some(&helper.returns),
+            &field_types,
+            &helper_returns,
+            &bindings,
+        );
+    }
+
+    for invariant in &schema.invariants {
+        collect_named_literals_from_expr(
+            &mut samples,
+            &invariant.expr,
+            None,
+            &field_types,
+            &helper_returns,
+            &BTreeMap::new(),
+        );
+    }
+
+    for transition in &schema.transitions {
+        let binding_types = transition_trigger_variant(schema, transition)
+            .map(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .filter(|field| {
+                        transition
+                            .on
+                            .bindings()
+                            .iter()
+                            .any(|binding| binding == &field.name)
+                    })
+                    .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+
+        for guard in &transition.guards {
+            collect_named_literals_from_expr(
+                &mut samples,
+                &guard.expr,
+                None,
+                &field_types,
+                &helper_returns,
+                &binding_types,
+            );
+        }
+        for update in &transition.updates {
+            collect_named_literals_from_update(
+                &mut samples,
+                update,
+                &field_types,
+                &helper_returns,
+                &binding_types,
+            );
+        }
+        for effect in &transition.emit {
+            let Ok(effect_variant) = schema.effects.variant_named(effect.variant.as_str()) else {
+                continue;
+            };
+            for field in &effect_variant.fields {
+                if let Some(expr) = effect.fields.get(&field.name) {
+                    collect_named_literals_from_expr(
+                        &mut samples,
+                        expr,
+                        Some(&field.ty),
+                        &field_types,
+                        &helper_returns,
+                        &binding_types,
+                    );
+                }
+            }
+        }
+    }
+
+    samples
+}
+
+fn collect_composition_named_type_samples(
+    schema: &CompositionSchema,
+    machine_by_instance: &BTreeMap<&str, &MachineSchema>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut samples = BTreeMap::new();
+    for machine in machine_by_instance.values() {
+        merge_named_type_samples(&mut samples, collect_machine_named_type_samples(machine));
+    }
+
+    for entry_input in &schema.entry_inputs {
+        let Some(machine) = machine_by_instance
+            .get(entry_input.machine.as_str())
+            .copied()
+        else {
+            continue;
+        };
+        merge_named_type_samples(&mut samples, collect_machine_named_type_samples(machine));
+    }
+
+    for route in &schema.routes {
+        let Some(source_machine) = machine_by_instance
+            .get(route.from_machine.as_str())
+            .copied()
+        else {
+            continue;
+        };
+        let Ok(source_variant) = source_machine.effects.variant_named(&route.effect_variant) else {
+            continue;
+        };
+        let source_field_types = source_variant
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+            .collect::<BTreeMap<String, _>>();
+        let Some(target_machine) = machine_by_instance.get(route.to.machine.as_str()).copied()
+        else {
+            continue;
+        };
+        let Some(target_variant) = route_target_variant(target_machine, &route.to) else {
+            continue;
+        };
+        let field_types = target_variant
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+            .collect::<BTreeMap<String, _>>();
+
+        for binding in &route.bindings {
+            if let RouteBindingSource::Literal(expr) = &binding.source
+                && let Some(field_ty) = field_types.get(binding.to_field.as_str())
+            {
+                collect_named_literals_from_expr(
+                    &mut samples,
+                    expr,
+                    Some(field_ty),
+                    &field_types,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                );
+            }
+            if let RouteBindingSource::Field { from_field, .. } = &binding.source
+                && let (Some(source_ty), Some(target_ty)) = (
+                    source_field_types.get(from_field.as_str()),
+                    field_types.get(binding.to_field.as_str()),
+                )
+            {
+                propagate_named_samples_between_types(&mut samples, source_ty, target_ty);
+            }
+        }
+    }
+
+    for witness in &schema.witnesses {
+        for preload in &witness.preload_inputs {
+            let Some(machine) = machine_by_instance.get(preload.machine.as_str()).copied() else {
+                continue;
+            };
+            let Ok(variant) = machine
+                .inputs
+                .variant_named(&preload.input_variant)
+                .or_else(|_| machine.signals.variant_named(&preload.input_variant))
+            else {
+                continue;
+            };
+            let field_types = variant
+                .fields
+                .iter()
+                .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+                .collect::<BTreeMap<String, _>>();
+
+            for field in &preload.fields {
+                if let Some(field_ty) = field_types.get(field.field.as_str()) {
+                    collect_named_literals_from_expr(
+                        &mut samples,
+                        &field.expr,
+                        Some(field_ty),
+                        &field_types,
+                        &BTreeMap::new(),
+                        &BTreeMap::new(),
+                    );
+                }
+            }
+        }
+    }
+
+    samples
+}
+
+fn collect_composition_witness_named_type_samples(
+    schema: &CompositionSchema,
+    witness: &CompositionWitness,
+    machine_by_instance: &BTreeMap<&str, &MachineSchema>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut samples = BTreeMap::new();
+
+    for preload in &witness.preload_inputs {
+        let Some(machine) = machine_by_instance.get(preload.machine.as_str()).copied() else {
+            continue;
+        };
+        let Ok(variant) = machine
+            .inputs
+            .variant_named(&preload.input_variant)
+            .or_else(|_| machine.signals.variant_named(&preload.input_variant))
+        else {
+            continue;
+        };
+        let field_types = variant
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+            .collect::<BTreeMap<String, _>>();
+
+        for field in &preload.fields {
+            if let Some(field_ty) = field_types.get(field.field.as_str()) {
+                collect_named_literals_from_expr(
+                    &mut samples,
+                    &field.expr,
+                    Some(field_ty),
+                    &field_types,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                );
+            }
+        }
+    }
+
+    let witness_routes = schema
+        .routes
+        .iter()
+        .filter(|route| {
+            witness
+                .expected_routes
+                .iter()
+                .any(|name| name == &route.name)
+        })
+        .collect::<Vec<_>>();
+    collect_route_binding_named_type_samples_to_fixpoint(
+        &mut samples,
+        &witness_routes,
+        machine_by_instance,
+    );
+
+    samples
+}
+
+fn merge_named_type_samples(
+    target: &mut BTreeMap<String, BTreeSet<String>>,
+    source: BTreeMap<String, BTreeSet<String>>,
+) {
+    for (name, values) in source {
+        target.entry(name).or_default().extend(values);
+    }
+}
+
+fn collect_route_binding_named_type_samples_to_fixpoint(
+    samples: &mut BTreeMap<String, BTreeSet<String>>,
+    routes: &[&Route],
+    machine_by_instance: &BTreeMap<&str, &MachineSchema>,
+) {
+    loop {
+        let mut changed = false;
+        for route in routes {
+            changed |=
+                collect_route_binding_named_type_samples(samples, route, machine_by_instance);
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn collect_route_binding_named_type_samples(
+    samples: &mut BTreeMap<String, BTreeSet<String>>,
+    route: &Route,
+    machine_by_instance: &BTreeMap<&str, &MachineSchema>,
+) -> bool {
+    let Some(source_machine) = machine_by_instance
+        .get(route.from_machine.as_str())
+        .copied()
+    else {
+        return false;
+    };
+    let Ok(source_variant) = source_machine.effects.variant_named(&route.effect_variant) else {
+        return false;
+    };
+    let source_field_types = source_variant
+        .fields
+        .iter()
+        .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+        .collect::<BTreeMap<String, _>>();
+    let Some(target_machine) = machine_by_instance.get(route.to.machine.as_str()).copied() else {
+        return false;
+    };
+    let Some(target_variant) = route_target_variant(target_machine, &route.to) else {
+        return false;
+    };
+    let target_field_types = target_variant
+        .fields
+        .iter()
+        .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+        .collect::<BTreeMap<String, _>>();
+
+    let mut changed = false;
+    for binding in &route.bindings {
+        if let RouteBindingSource::Literal(expr) = &binding.source
+            && let Some(field_ty) = target_field_types.get(binding.to_field.as_str())
+        {
+            let before = samples.clone();
+            collect_named_literals_from_expr(
+                samples,
+                expr,
+                Some(field_ty),
+                &target_field_types,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+            );
+            changed |= *samples != before;
+        }
+        if let RouteBindingSource::Field { from_field, .. } = &binding.source
+            && let (Some(source_ty), Some(target_ty)) = (
+                source_field_types.get(from_field.as_str()),
+                target_field_types.get(binding.to_field.as_str()),
+            )
+        {
+            changed |= propagate_named_samples_between_types(samples, source_ty, target_ty);
+        }
+    }
+
+    changed
+}
+
+fn propagate_named_samples_between_types(
+    samples: &mut BTreeMap<String, BTreeSet<String>>,
+    source_ty: &TypeRef,
+    target_ty: &TypeRef,
+) -> bool {
+    match (source_ty, target_ty) {
+        (TypeRef::Option(source_inner), TypeRef::Option(target_inner))
+        | (TypeRef::Seq(source_inner), TypeRef::Seq(target_inner))
+        | (TypeRef::Set(source_inner), TypeRef::Set(target_inner)) => {
+            propagate_named_samples_between_types(samples, source_inner, target_inner)
+        }
+        _ => {
+            let (Some(source_bucket), Some(target_bucket)) =
+                (type_sample_bucket(source_ty), type_sample_bucket(target_ty))
+            else {
+                return false;
+            };
+            if let Some(source_samples) = samples.get(&source_bucket).cloned() {
+                let target_samples = samples.entry(target_bucket).or_default();
+                let before = target_samples.len();
+                target_samples.extend(source_samples);
+                target_samples.len() != before
+            } else {
+                false
+            }
+        }
+    }
+}
+
+fn collect_named_literals_from_update(
+    samples: &mut BTreeMap<String, BTreeSet<String>>,
+    update: &Update,
+    field_types: &BTreeMap<String, TypeRef>,
+    helper_returns: &BTreeMap<String, TypeRef>,
+    binding_types: &BTreeMap<String, TypeRef>,
+) {
+    match update {
+        Update::Assign { field, expr } => {
+            collect_named_literals_from_expr(
+                samples,
+                expr,
+                field_types.get(field.as_str()),
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+        }
+        Update::MapInsert { field, key, value } => {
+            if let Some(TypeRef::Map(key_ty, value_ty)) = field_types.get(field.as_str()) {
+                collect_named_literals_from_expr(
+                    samples,
+                    key,
+                    Some(key_ty),
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+                collect_named_literals_from_expr(
+                    samples,
+                    value,
+                    Some(value_ty),
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+            }
+        }
+        Update::MapRemove { field, key } => {
+            if let Some(TypeRef::Map(key_ty, _)) = field_types.get(field.as_str()) {
+                collect_named_literals_from_expr(
+                    samples,
+                    key,
+                    Some(key_ty),
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+            }
+        }
+        Update::MapIncrement { field, key, .. } | Update::MapDecrement { field, key, .. } => {
+            if let Some(TypeRef::Map(key_ty, _)) = field_types.get(field.as_str()) {
+                collect_named_literals_from_expr(
+                    samples,
+                    key,
+                    Some(key_ty),
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+            }
+        }
+        Update::SetInsert { field, value } | Update::SetRemove { field, value } => {
+            if let Some(TypeRef::Set(inner_ty)) = field_types.get(field.as_str()) {
+                collect_named_literals_from_expr(
+                    samples,
+                    value,
+                    Some(inner_ty),
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+            }
+        }
+        Update::SeqAppend { field, value } | Update::SeqRemoveValue { field, value } => {
+            if let Some(TypeRef::Seq(inner_ty)) = field_types.get(field.as_str()) {
+                collect_named_literals_from_expr(
+                    samples,
+                    value,
+                    Some(inner_ty),
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+            }
+        }
+        Update::SeqPrepend { field, values } | Update::SeqRemoveAll { field, values } => {
+            if let Some(field_ty) = field_types.get(field.as_str()) {
+                collect_named_literals_from_expr(
+                    samples,
+                    values,
+                    Some(field_ty),
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+            }
+        }
+        Update::Conditional {
+            condition,
+            then_updates,
+            else_updates,
+        } => {
+            collect_named_literals_from_expr(
+                samples,
+                condition,
+                None,
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+            for nested in then_updates {
+                collect_named_literals_from_update(
+                    samples,
+                    nested,
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+            }
+            for nested in else_updates {
+                collect_named_literals_from_update(
+                    samples,
+                    nested,
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+            }
+        }
+        Update::ForEach {
+            binding,
+            over,
+            updates,
+        } => {
+            collect_named_literals_from_expr(
+                samples,
+                over,
+                None,
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+            let mut nested_bindings = binding_types.clone();
+            if let Some(over_ty) = infer_expr_type(over, field_types, helper_returns, binding_types)
+            {
+                match over_ty {
+                    TypeRef::Seq(inner_ty) | TypeRef::Set(inner_ty) => {
+                        nested_bindings.insert(binding.clone(), (*inner_ty).clone());
+                    }
+                    TypeRef::Map(key_ty, _) => {
+                        nested_bindings.insert(binding.clone(), (*key_ty).clone());
+                    }
+                    _ => {}
+                }
+            }
+            for nested in updates {
+                collect_named_literals_from_update(
+                    samples,
+                    nested,
+                    field_types,
+                    helper_returns,
+                    &nested_bindings,
+                );
+            }
+        }
+        Update::Increment { .. } | Update::Decrement { .. } | Update::SeqPopFront { .. } => {}
+    }
+}
+
+fn collect_named_literals_from_expr(
+    samples: &mut BTreeMap<String, BTreeSet<String>>,
+    expr: &Expr,
+    expected_ty: Option<&TypeRef>,
+    field_types: &BTreeMap<String, TypeRef>,
+    helper_returns: &BTreeMap<String, TypeRef>,
+    binding_types: &BTreeMap<String, TypeRef>,
+) {
+    if let Expr::String(value) = expr
+        && let Some(bucket) = expected_ty.and_then(type_sample_bucket)
+    {
+        samples.entry(bucket).or_default().insert(value.clone());
+    }
+
+    if let (Expr::NamedVariant { variant, .. }, Some(expected_ty)) = (expr, expected_ty)
+        && let Some(bucket) = type_sample_bucket(expected_ty)
+    {
+        samples
+            .entry(bucket)
+            .or_default()
+            .insert(variant.as_str().to_owned());
+    }
+
+    match expr {
+        Expr::Eq(left, right) | Expr::Neq(left, right) => {
+            let left_ty = infer_expr_type(left, field_types, helper_returns, binding_types);
+            let right_ty = infer_expr_type(right, field_types, helper_returns, binding_types);
+            if let (Some(left_ty), Expr::String(value)) = (&left_ty, right.as_ref())
+                && let Some(bucket) = type_sample_bucket(left_ty)
+            {
+                samples.entry(bucket).or_default().insert(value.clone());
+            }
+            if let (Some(right_ty), Expr::String(value)) = (&right_ty, left.as_ref())
+                && let Some(bucket) = type_sample_bucket(right_ty)
+            {
+                samples.entry(bucket).or_default().insert(value.clone());
+            }
+            if let (Some(left_ty), Expr::NamedVariant { variant, .. }) = (&left_ty, right.as_ref())
+                && let Some(bucket) = type_sample_bucket(left_ty)
+            {
+                samples
+                    .entry(bucket)
+                    .or_default()
+                    .insert(variant.as_str().to_owned());
+            }
+            if let (Some(right_ty), Expr::NamedVariant { variant, .. }) = (&right_ty, left.as_ref())
+                && let Some(bucket) = type_sample_bucket(right_ty)
+            {
+                samples
+                    .entry(bucket)
+                    .or_default()
+                    .insert(variant.as_str().to_owned());
+            }
+            collect_named_literals_from_expr(
+                samples,
+                left,
+                left_ty.as_ref(),
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+            collect_named_literals_from_expr(
+                samples,
+                right,
+                right_ty.as_ref(),
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+        }
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_named_literals_from_expr(
+                samples,
+                condition,
+                Some(&TypeRef::Bool),
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+            collect_named_literals_from_expr(
+                samples,
+                then_expr,
+                expected_ty,
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+            collect_named_literals_from_expr(
+                samples,
+                else_expr,
+                expected_ty,
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+        }
+        Expr::Not(inner)
+        | Expr::SeqElements(inner)
+        | Expr::Len(inner)
+        | Expr::Head(inner)
+        | Expr::MapKeys(inner)
+        | Expr::Some(inner)
+        | Expr::FieldAccess { base: inner, .. }
+        | Expr::EnumVariantIs { value: inner, .. }
+        | Expr::EnumStringSetPayload { value: inner, .. } => {
+            let nested_ty = infer_expr_type(inner, field_types, helper_returns, binding_types);
+            collect_named_literals_from_expr(
+                samples,
+                inner,
+                nested_ty.as_ref(),
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+        }
+        Expr::And(items) | Expr::Or(items) => {
+            for item in items {
+                collect_named_literals_from_expr(
+                    samples,
+                    item,
+                    None,
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+            }
+        }
+        Expr::SeqLiteral(items) => {
+            let item_expected_ty = match expected_ty {
+                Some(TypeRef::Seq(inner)) => Some(inner.as_ref()),
+                _ => None,
+            };
+            for item in items {
+                collect_named_literals_from_expr(
+                    samples,
+                    item,
+                    item_expected_ty,
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+            }
+        }
+        Expr::Add(left, right)
+        | Expr::Sub(left, right)
+        | Expr::Gt(left, right)
+        | Expr::Gte(left, right)
+        | Expr::Lt(left, right)
+        | Expr::Lte(left, right) => {
+            collect_named_literals_from_expr(
+                samples,
+                left,
+                infer_expr_type(left, field_types, helper_returns, binding_types).as_ref(),
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+            collect_named_literals_from_expr(
+                samples,
+                right,
+                infer_expr_type(right, field_types, helper_returns, binding_types).as_ref(),
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+        }
+        Expr::Contains { collection, value } => {
+            let collection_ty =
+                infer_expr_type(collection, field_types, helper_returns, binding_types);
+            let value_ty = match collection_ty {
+                Some(TypeRef::Set(inner_ty) | TypeRef::Seq(inner_ty)) => Some(*inner_ty),
+                Some(TypeRef::Map(key_ty, _)) => Some(*key_ty),
+                _ => None,
+            };
+            collect_named_literals_from_expr(
+                samples,
+                collection,
+                None,
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+            collect_named_literals_from_expr(
+                samples,
+                value,
+                value_ty.as_ref(),
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+        }
+        Expr::Count { collection, value } => {
+            let collection_ty =
+                infer_expr_type(collection, field_types, helper_returns, binding_types);
+            let value_ty = match collection_ty {
+                Some(TypeRef::Set(inner_ty) | TypeRef::Seq(inner_ty)) => Some(*inner_ty),
+                Some(TypeRef::Map(key_ty, _)) => Some(*key_ty),
+                _ => None,
+            };
+            collect_named_literals_from_expr(
+                samples,
+                collection,
+                None,
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+            collect_named_literals_from_expr(
+                samples,
+                value,
+                value_ty.as_ref(),
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+        }
+        Expr::MapContainsKey { map, key } => {
+            let map_ty = infer_expr_type(map, field_types, helper_returns, binding_types);
+            let key_ty = match map_ty {
+                Some(TypeRef::Map(key_ty, _)) => Some(*key_ty),
+                _ => None,
+            };
+            collect_named_literals_from_expr(
+                samples,
+                map,
+                None,
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+            collect_named_literals_from_expr(
+                samples,
+                key,
+                key_ty.as_ref(),
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+        }
+        Expr::SeqStartsWith { seq, prefix } => {
+            let seq_ty = infer_expr_type(seq, field_types, helper_returns, binding_types);
+            collect_named_literals_from_expr(
+                samples,
+                seq,
+                seq_ty.as_ref(),
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+            collect_named_literals_from_expr(
+                samples,
+                prefix,
+                seq_ty.as_ref(),
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+        }
+        Expr::MapGet { map, key } | Expr::MapValue { map, key } => {
+            let map_ty = infer_expr_type(map, field_types, helper_returns, binding_types);
+            let key_ty = match map_ty {
+                Some(TypeRef::Map(key_ty, _)) => Some(*key_ty),
+                _ => None,
+            };
+            collect_named_literals_from_expr(
+                samples,
+                map,
+                None,
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+            collect_named_literals_from_expr(
+                samples,
+                key,
+                key_ty.as_ref(),
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+        }
+        Expr::MapLiteral(entries) => {
+            let (key_ty, value_ty) = match expected_ty {
+                Some(TypeRef::Map(key_ty, value_ty)) => {
+                    (Some(key_ty.as_ref()), Some(value_ty.as_ref()))
+                }
+                _ => (None, None),
+            };
+            for (key, value) in entries {
+                collect_named_literals_from_expr(
+                    samples,
+                    key,
+                    key_ty,
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+                collect_named_literals_from_expr(
+                    samples,
+                    value,
+                    value_ty,
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+            }
+        }
+        Expr::Call { helper: _, args } => {
+            for arg in args {
+                collect_named_literals_from_expr(
+                    samples,
+                    arg,
+                    infer_expr_type(arg, field_types, helper_returns, binding_types).as_ref(),
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+            }
+        }
+        Expr::Quantified {
+            binding,
+            over,
+            body,
+            ..
+        } => {
+            collect_named_literals_from_expr(
+                samples,
+                over,
+                None,
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+            // Thread the quantifier binding's element type into the body so
+            // literals compared against the binding land in the element's
+            // named sample domain (e.g. `exists(name in <Set<ToolName>>,
+            // name == "view_image")` buckets the literal under `ToolName`).
+            let element_ty = infer_expr_type(over, field_types, helper_returns, binding_types)
+                .and_then(|ty| match ty {
+                    TypeRef::Set(inner) | TypeRef::Seq(inner) => Some(*inner),
+                    _ => None,
+                });
+            let mut body_binding_types = binding_types.clone();
+            if let Some(element_ty) = element_ty {
+                body_binding_types.insert(binding.clone(), element_ty);
+            }
+            collect_named_literals_from_expr(
+                samples,
+                body,
+                Some(&TypeRef::Bool),
+                field_types,
+                helper_returns,
+                &body_binding_types,
+            );
+        }
+        Expr::Bool(_)
+        | Expr::U64(_)
+        | Expr::U64Max
+        | Expr::String(_)
+        | Expr::NamedVariant { .. }
+        | Expr::EmptySet
+        | Expr::EmptyMap
+        | Expr::CurrentPhase
+        | Expr::Phase(_)
+        | Expr::Field(_)
+        | Expr::Binding(_)
+        | Expr::Variant(_)
+        | Expr::None => {}
+    }
+}
+
+fn infer_expr_type(
+    expr: &Expr,
+    field_types: &BTreeMap<String, TypeRef>,
+    helper_returns: &BTreeMap<String, TypeRef>,
+    binding_types: &BTreeMap<String, TypeRef>,
+) -> Option<TypeRef> {
+    match expr {
+        Expr::Bool(_) => Some(TypeRef::Bool),
+        Expr::U64(_) | Expr::U64Max => Some(TypeRef::U64),
+        Expr::String(_) | Expr::CurrentPhase | Expr::Phase(_) | Expr::Variant(_) => {
+            Some(TypeRef::String)
+        }
+        Expr::NamedVariant { enum_name, .. } => Some(TypeRef::Enum(enum_name.clone())),
+        Expr::FieldAccess { .. } => None,
+        Expr::EnumVariantIs { .. } => Some(TypeRef::Bool),
+        Expr::EnumStringSetPayload { .. } => Some(TypeRef::Set(Box::new(TypeRef::String))),
+        Expr::Field(name) => field_types.get(name.as_str()).cloned(),
+        Expr::Binding(name) => binding_types.get(name).cloned(),
+        Expr::None => None,
+        Expr::IfElse {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            let then_ty = infer_expr_type(then_expr, field_types, helper_returns, binding_types);
+            let else_ty = infer_expr_type(else_expr, field_types, helper_returns, binding_types);
+            if then_ty == else_ty {
+                then_ty
+            } else {
+                then_ty.or(else_ty)
+            }
+        }
+        Expr::Not(_)
+        | Expr::And(_)
+        | Expr::Or(_)
+        | Expr::Eq(_, _)
+        | Expr::Neq(_, _)
+        | Expr::Gt(_, _)
+        | Expr::Gte(_, _)
+        | Expr::Lt(_, _)
+        | Expr::Lte(_, _)
+        | Expr::Contains { .. }
+        | Expr::MapContainsKey { .. }
+        | Expr::SeqStartsWith { .. }
+        | Expr::Quantified { .. } => Some(TypeRef::Bool),
+        Expr::Add(_, _) | Expr::Sub(_, _) | Expr::Len(_) | Expr::Count { .. } => Some(TypeRef::U64),
+        Expr::SeqElements(inner) => {
+            match infer_expr_type(inner, field_types, helper_returns, binding_types) {
+                Some(TypeRef::Seq(inner_ty)) => Some(TypeRef::Set(inner_ty)),
+                _ => None,
+            }
+        }
+        Expr::Head(inner) => {
+            match infer_expr_type(inner, field_types, helper_returns, binding_types) {
+                Some(TypeRef::Seq(inner_ty)) => Some(*inner_ty),
+                _ => None,
+            }
+        }
+        Expr::MapKeys(inner) => {
+            match infer_expr_type(inner, field_types, helper_returns, binding_types) {
+                Some(TypeRef::Map(key_ty, _)) => Some(TypeRef::Set(key_ty)),
+                _ => None,
+            }
+        }
+        Expr::MapGet { map, .. } | Expr::MapValue { map, .. } => {
+            match infer_expr_type(map, field_types, helper_returns, binding_types) {
+                Some(TypeRef::Map(_, value_ty)) => Some(*value_ty),
+                _ => None,
+            }
+        }
+        Expr::MapLiteral(entries) => entries.first().and_then(|(key, value)| {
+            let key_ty = infer_expr_type(key, field_types, helper_returns, binding_types)?;
+            let value_ty = infer_expr_type(value, field_types, helper_returns, binding_types)?;
+            Some(TypeRef::Map(Box::new(key_ty), Box::new(value_ty)))
+        }),
+        Expr::Some(inner) => infer_expr_type(inner, field_types, helper_returns, binding_types)
+            .map(|inner_ty| TypeRef::Option(Box::new(inner_ty))),
+        Expr::Call { helper, .. } if helper == "mob_machine_step_status_from_frame_node_status" => {
+            meerkat_machine_schema::identity::EnumTypeId::parse("StepRunStatus")
+                .ok()
+                .map(TypeRef::Enum)
+        }
+        Expr::Call { helper, .. } if helper == "runtime_delivery_recipient_outcomes_after_set" => {
+            Some(TypeRef::Map(
+                Box::new(TypeRef::String),
+                Box::new(TypeRef::Enum(
+                    meerkat_machine_schema::identity::EnumTypeId::parse("DeliveryRecipientOutcome")
+                        .ok()?,
+                )),
+            ))
+        }
+        Expr::Call { helper, .. } if helper == "mob_machine_run_step_status_after_set" => {
+            Some(TypeRef::Map(
+                Box::new(TypeRef::Named(
+                    meerkat_machine_schema::identity::NamedTypeId::parse("RunId").ok()?,
+                )),
+                Box::new(TypeRef::Map(
+                    Box::new(TypeRef::Named(
+                        meerkat_machine_schema::identity::NamedTypeId::parse("StepId").ok()?,
+                    )),
+                    Box::new(TypeRef::Option(Box::new(TypeRef::Enum(
+                        meerkat_machine_schema::identity::EnumTypeId::parse("StepRunStatus")
+                            .ok()?,
+                    )))),
+                )),
+            ))
+        }
+        Expr::Call { helper, .. }
+            if helper == "mob_machine_run_step_status_after_cancel_unfinished" =>
+        {
+            Some(TypeRef::Map(
+                Box::new(TypeRef::Named(
+                    meerkat_machine_schema::identity::NamedTypeId::parse("RunId").ok()?,
+                )),
+                Box::new(TypeRef::Map(
+                    Box::new(TypeRef::Named(
+                        meerkat_machine_schema::identity::NamedTypeId::parse("StepId").ok()?,
+                    )),
+                    Box::new(TypeRef::Option(Box::new(TypeRef::Enum(
+                        meerkat_machine_schema::identity::EnumTypeId::parse("StepRunStatus")
+                            .ok()?,
+                    )))),
+                )),
+            ))
+        }
+        Expr::Call { helper, .. } if helper == "mob_machine_run_step_bool_after_set" => {
+            Some(TypeRef::Map(
+                Box::new(TypeRef::Named(
+                    meerkat_machine_schema::identity::NamedTypeId::parse("RunId").ok()?,
+                )),
+                Box::new(TypeRef::Map(
+                    Box::new(TypeRef::Named(
+                        meerkat_machine_schema::identity::NamedTypeId::parse("StepId").ok()?,
+                    )),
+                    Box::new(TypeRef::Bool),
+                )),
+            ))
+        }
+        Expr::Call { helper, .. }
+            if helper == "mob_machine_run_step_condition_result_after_set" =>
+        {
+            Some(TypeRef::Map(
+                Box::new(TypeRef::Named(
+                    meerkat_machine_schema::identity::NamedTypeId::parse("RunId").ok()?,
+                )),
+                Box::new(TypeRef::Map(
+                    Box::new(TypeRef::Named(
+                        meerkat_machine_schema::identity::NamedTypeId::parse("StepId").ok()?,
+                    )),
+                    Box::new(TypeRef::Option(Box::new(TypeRef::Bool))),
+                )),
+            ))
+        }
+        Expr::Call { helper, .. }
+            if helper == "mob_machine_run_step_u64_after_set"
+                || helper == "mob_machine_run_step_u64_after_increment" =>
+        {
+            Some(TypeRef::Map(
+                Box::new(TypeRef::Named(
+                    meerkat_machine_schema::identity::NamedTypeId::parse("RunId").ok()?,
+                )),
+                Box::new(TypeRef::Map(
+                    Box::new(TypeRef::Named(
+                        meerkat_machine_schema::identity::NamedTypeId::parse("StepId").ok()?,
+                    )),
+                    Box::new(TypeRef::U64),
+                )),
+            ))
+        }
+        Expr::Call { helper, .. } if helper == "mob_machine_run_retry_count_after_increment" => {
+            Some(TypeRef::Map(
+                Box::new(TypeRef::Named(
+                    meerkat_machine_schema::identity::NamedTypeId::parse("RunId").ok()?,
+                )),
+                Box::new(TypeRef::Map(
+                    Box::new(TypeRef::String),
+                    Box::new(TypeRef::U64),
+                )),
+            ))
+        }
+        Expr::Call { helper, .. } if helper == "mob_machine_frame_node_bool_after_set" => {
+            Some(TypeRef::Map(
+                Box::new(TypeRef::Named(
+                    meerkat_machine_schema::identity::NamedTypeId::parse("FrameId").ok()?,
+                )),
+                Box::new(TypeRef::Map(
+                    Box::new(TypeRef::Named(
+                        meerkat_machine_schema::identity::NamedTypeId::parse("FlowNodeId").ok()?,
+                    )),
+                    Box::new(TypeRef::Bool),
+                )),
+            ))
+        }
+        Expr::Call { helper, .. } => helper_returns.get(helper).cloned(),
+        Expr::SeqLiteral(items) => items.first().and_then(|item| {
+            infer_expr_type(item, field_types, helper_returns, binding_types)
+                .map(|inner_ty| TypeRef::Seq(Box::new(inner_ty)))
+        }),
+        Expr::EmptySet => None,
+        Expr::EmptyMap => None,
+    }
+}
+
+fn default_sample_cardinality(deep: bool) -> usize {
+    if deep { 2 } else { 1 }
+}
+
+fn type_sample_bucket(ty: &TypeRef) -> Option<String> {
+    match ty {
+        TypeRef::String => Some("String".into()),
+        TypeRef::Named(name) => Some(name.as_str().to_owned()),
+        TypeRef::Enum(name) => Some(name.as_str().to_owned()),
+        _ => None,
+    }
+}
+
+fn collected_sample_literals(
+    bucket: &str,
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+) -> Option<Vec<String>> {
+    let samples = named_samples.get(bucket)?;
+    let limit = sample_cardinality.max(1);
+    let rendered = samples
+        .iter()
+        .take(limit)
+        .map(tla_string)
+        .collect::<Vec<_>>();
+    (!rendered.is_empty()).then_some(rendered)
+}
+
+fn generic_string_samples(sample_cardinality: usize) -> Vec<String> {
+    if sample_cardinality > 1 {
+        vec!["alpha".into(), "beta".into()]
+    } else {
+        vec!["alpha".into()]
+    }
+}
+
+fn collected_string_samples(
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    include_named_samples: bool,
+) -> Vec<String> {
+    let mut values = generic_string_samples(sample_cardinality);
+    if include_named_samples && let Some(samples) = named_samples.get("String") {
+        for sample in samples {
+            if !values.iter().any(|existing| existing == sample) {
+                values.push(sample.clone());
+            }
+        }
+    }
+    values
+}
+
+fn render_default_domain_assignment(
+    ty: &TypeRef,
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    include_string_samples: bool,
+) -> String {
+    match ty {
+        TypeRef::Bool => "{TRUE, FALSE}".into(),
+        TypeRef::U32 | TypeRef::U64 => {
+            if sample_cardinality > 1 {
+                "{0, 1, 2}".into()
+            } else {
+                // CI uses {1} to avoid state explosion from zero-as-unlimited
+                // semantics in scheduler guards (Or(max==0, count<max)).
+                // Counter fields that start at 0 get it via Init, not NatValues.
+                // Deep uses {0, 1} to cover the full range.
+                "{1}".into()
+            }
+        }
+        TypeRef::String if sample_cardinality == 0 => "{}".into(),
+        TypeRef::String => format!(
+            "{{{}}}",
+            collected_string_samples(sample_cardinality, named_samples, include_string_samples)
+                .into_iter()
+                .map(|sample| tla_string(&sample))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TypeRef::Named(name) => render_named_type_domain_assignment(
+            name.as_str(),
+            sample_cardinality,
+            named_samples,
+            named_bindings,
+        ),
+        TypeRef::Enum(name) => render_enum_type_domain_assignment(
+            name.as_str(),
+            sample_cardinality,
+            named_samples,
+            named_bindings,
+        ),
+        TypeRef::Seq(inner) => {
+            let samples = sample_values(
+                inner,
+                sample_cardinality,
+                named_samples,
+                named_bindings,
+                include_string_samples,
+            );
+            if samples.len() >= 2 {
+                format!(
+                    "{{<<>>, <<{}>>, <<{}, {}>>}}",
+                    samples[0], samples[0], samples[1]
+                )
+            } else if let Some(sample) = samples.first() {
+                format!("{{<<>>, <<{}>>}}", sample)
+            } else {
+                "{<<>>}".into()
+            }
+        }
+        TypeRef::Set(inner) => {
+            let samples = sample_values(
+                inner,
+                sample_cardinality,
+                named_samples,
+                named_bindings,
+                include_string_samples,
+            );
+            if samples.len() >= 2 {
+                format!(
+                    "{{{{}}, {{{}}}, {{{}, {}}}}}",
+                    samples[0], samples[0], samples[1]
+                )
+            } else if let Some(sample) = samples.first() {
+                format!("{{{{}}, {{{}}}}}", sample)
+            } else {
+                "{{}}".into()
+            }
+        }
+        TypeRef::Option(inner) => {
+            let samples = sample_values(
+                inner,
+                sample_cardinality,
+                named_samples,
+                named_bindings,
+                include_string_samples,
+            )
+            .into_iter()
+            .map(|sample| format!("[tag |-> {}, value |-> {}]", tla_string("some"), sample))
+            .collect::<Vec<_>>();
+            if samples.is_empty() {
+                format!(
+                    "{{[tag |-> {}, value |-> {}]}}",
+                    tla_string("none"),
+                    tla_string("none")
+                )
+            } else {
+                format!(
+                    "{{[tag |-> {}, value |-> {}], {}}}",
+                    tla_string("none"),
+                    tla_string("none"),
+                    samples.join(", ")
+                )
+            }
+        }
+        TypeRef::Map(_, _) => "{}".into(),
+    }
+}
+
+fn render_named_type_domain_assignment(
+    name: impl AsRef<str>,
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> String {
+    use meerkat_machine_schema::RustTypeAtom;
+
+    let name = name.as_ref();
+    if name == "OperationSource" {
+        return format!(
+            "{{{}}}",
+            operation_source_samples(sample_cardinality).join(", ")
+        );
+    }
+    match require_named_binding(named_bindings, name) {
+        RustTypeAtom::U64 | RustTypeAtom::U32 | RustTypeAtom::U16 | RustTypeAtom::U8 => {
+            if sample_cardinality > 1 {
+                "{1, 2}".into()
+            } else {
+                "{1}".into()
+            }
+        }
+        RustTypeAtom::Bool => "{TRUE, FALSE}".into(),
+        RustTypeAtom::StringEnum { variants } => {
+            format!(
+                "{{{}}}",
+                string_enum_variant_samples(name, variants).join(", ")
+            )
+        }
+        RustTypeAtom::TypePathEnum {
+            unit_variants,
+            structural_variants,
+            ..
+        } => format!(
+            "{{{}}}",
+            type_path_enum_variant_samples(
+                unit_variants,
+                structural_variants,
+                sample_cardinality,
+                named_samples,
+                named_bindings,
+            )
+            .join(", ")
+        ),
+        RustTypeAtom::TypePathFieldPresenceSet { fields, .. } => format!(
+            "{{{}}}",
+            field_presence_set_samples(fields, sample_cardinality).join(", ")
+        ),
+        RustTypeAtom::TypePathStruct { fields, .. } => format!(
+            "{{{}}}",
+            type_path_struct_samples(fields, sample_cardinality, named_samples, named_bindings)
+                .join(", ")
+        ),
+        RustTypeAtom::String | RustTypeAtom::TypePath(_) => {
+            if sample_cardinality == 0 {
+                return "{}".into();
+            }
+
+            if let Some(rendered) =
+                collected_sample_literals(name, sample_cardinality, named_samples)
+            {
+                return format!("{{{}}}", rendered.join(", "));
+            }
+
+            let values = (1..=sample_cardinality.max(1))
+                .map(|idx| tla_string(format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{values}}}")
+        }
+    }
+}
+
+#[allow(clippy::panic)]
+fn render_enum_type_domain_assignment(
+    name: impl AsRef<str>,
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> String {
+    use meerkat_machine_schema::RustTypeAtom;
+
+    let name = name.as_ref();
+    match require_named_binding(named_bindings, name) {
+        RustTypeAtom::StringEnum { variants } => {
+            format!(
+                "{{{}}}",
+                string_enum_variant_samples(name, variants).join(", ")
+            )
+        }
+        RustTypeAtom::TypePathEnum {
+            unit_variants,
+            structural_variants,
+            ..
+        } => format!(
+            "{{{}}}",
+            type_path_enum_variant_samples(
+                unit_variants,
+                structural_variants,
+                sample_cardinality,
+                named_samples,
+                named_bindings,
+            )
+            .join(", ")
+        ),
+        other => {
+            panic!(
+                "generated enum domain `{name}` requires StringEnum or TypePathEnum binding, found {other:?}"
+            );
+        }
+    }
+}
+
+fn sample_values(
+    ty: &TypeRef,
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    include_string_samples: bool,
+) -> Vec<String> {
+    match ty {
+        TypeRef::Bool => vec!["TRUE".into(), "FALSE".into()],
+        TypeRef::U32 | TypeRef::U64 => {
+            if sample_cardinality > 1 {
+                vec!["1".into(), "2".into()]
+            } else {
+                vec!["1".into()]
+            }
+        }
+        TypeRef::String if sample_cardinality == 0 => Vec::new(),
+        TypeRef::String => {
+            collected_string_samples(sample_cardinality, named_samples, include_string_samples)
+                .into_iter()
+                .map(|sample| tla_string(&sample))
+                .collect()
+        }
+        TypeRef::Named(name) if named_type_uses_nat_domain(named_bindings, name.as_str()) => {
+            if sample_cardinality > 1 {
+                vec!["1".into(), "2".into()]
+            } else {
+                vec!["1".into()]
+            }
+        }
+        TypeRef::Named(name) => {
+            let name = name.as_str();
+            sample_values_for_named_type(name, sample_cardinality, named_samples, named_bindings)
+        }
+        TypeRef::Enum(name) => {
+            let name = name.as_str();
+            sample_values_for_enum_type(name, sample_cardinality, named_samples, named_bindings)
+        }
+        TypeRef::Option(inner) => {
+            let mut values = vec![format!(
+                "[tag |-> {}, value |-> {}]",
+                tla_string("none"),
+                tla_string("none")
+            )];
+            values.extend(
+                sample_values(
+                    inner,
+                    sample_cardinality,
+                    named_samples,
+                    named_bindings,
+                    include_string_samples,
+                )
+                .into_iter()
+                .map(|sample| format!("[tag |-> {}, value |-> {}]", tla_string("some"), sample)),
+            );
+            values
+        }
+        TypeRef::Seq(inner) => sample_values(
+            inner,
+            sample_cardinality,
+            named_samples,
+            named_bindings,
+            include_string_samples,
+        ),
+        TypeRef::Set(inner) => sample_values(
+            inner,
+            sample_cardinality,
+            named_samples,
+            named_bindings,
+            include_string_samples,
+        ),
+        TypeRef::Map(_, _) => vec![],
+    }
+}
+
+fn sample_values_for_named_type(
+    name: &str,
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> Vec<String> {
+    use meerkat_machine_schema::RustTypeAtom;
+
+    if name == "OperationSource" {
+        return operation_source_samples(sample_cardinality);
+    }
+    match require_named_binding(bindings, name) {
+        RustTypeAtom::U64 | RustTypeAtom::U32 | RustTypeAtom::U16 | RustTypeAtom::U8 => {
+            if sample_cardinality > 1 {
+                vec!["1".into(), "2".into()]
+            } else {
+                vec!["1".into()]
+            }
+        }
+        RustTypeAtom::Bool => vec!["TRUE".into(), "FALSE".into()],
+        RustTypeAtom::StringEnum { variants } => string_enum_variant_samples(name, variants),
+        RustTypeAtom::TypePathEnum {
+            unit_variants,
+            structural_variants,
+            ..
+        } => type_path_enum_variant_samples(
+            unit_variants,
+            structural_variants,
+            sample_cardinality,
+            named_samples,
+            bindings,
+        ),
+        RustTypeAtom::TypePathFieldPresenceSet { fields, .. } => {
+            field_presence_set_samples(fields, sample_cardinality)
+        }
+        RustTypeAtom::TypePathStruct { fields, .. } => {
+            type_path_struct_samples(fields, sample_cardinality, named_samples, bindings)
+        }
+        RustTypeAtom::String | RustTypeAtom::TypePath(_) => {
+            if sample_cardinality == 0 {
+                return Vec::new();
+            }
+            if let Some(samples) = named_samples.get(name) {
+                let limit = sample_cardinality.max(1);
+                let rendered = samples
+                    .iter()
+                    .take(limit)
+                    .map(tla_string)
+                    .collect::<Vec<_>>();
+                if !rendered.is_empty() {
+                    return rendered;
+                }
+            }
+            (1..=sample_cardinality.max(1))
+                .map(|idx| tla_string(format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
+                .collect()
+        }
+    }
+}
+
+#[allow(clippy::panic)]
+fn sample_values_for_enum_type(
+    name: &str,
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> Vec<String> {
+    use meerkat_machine_schema::RustTypeAtom;
+
+    match require_named_binding(bindings, name) {
+        RustTypeAtom::StringEnum { variants } => string_enum_variant_samples(name, variants),
+        RustTypeAtom::TypePathEnum {
+            unit_variants,
+            structural_variants,
+            ..
+        } => type_path_enum_variant_samples(
+            unit_variants,
+            structural_variants,
+            sample_cardinality,
+            named_samples,
+            bindings,
+        ),
+        other => {
+            panic!(
+                "generated enum domain `{name}` requires StringEnum or TypePathEnum binding, found {other:?}"
+            );
+        }
+    }
+}
+
+#[allow(clippy::panic)]
+fn require_named_binding<'a>(
+    bindings: &'a BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    name: &str,
+) -> &'a meerkat_machine_schema::RustTypeAtom {
+    bindings
+        .get(name)
+        .unwrap_or_else(|| panic!("missing NamedTypeBinding for generated domain `{name}`"))
+}
+
+fn string_enum_variant_samples(
+    name: &str,
+    variants: &[meerkat_machine_schema::identity::EnumVariantId],
+) -> Vec<String> {
+    variants
+        .iter()
+        .map(|variant| tla_string(string_enum_wire_label(name, variant.as_str())))
+        .collect()
+}
+
+fn render_named_variant_value(
+    enum_name: &str,
+    variant: &str,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> String {
+    let label = tla_string(string_enum_wire_label(enum_name, variant));
+    if named_bindings
+        .get(enum_name)
+        .is_some_and(CfgRecordRendering::renders_cfg_hostile_record)
+    {
+        format!("[tag |-> {label}]")
+    } else {
+        label
+    }
+}
+
+fn type_path_enum_variant_samples(
+    unit_variants: &[meerkat_machine_schema::identity::EnumVariantId],
+    structural_variants: &[TypePathEnumStructuralVariant],
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> Vec<String> {
+    let unit_variants_are_records = !structural_variants.is_empty();
+    let mut samples = unit_variants
+        .iter()
+        .map(|variant| {
+            let tag = tla_string(variant.as_str());
+            if unit_variants_are_records {
+                format!("[tag |-> {tag}]")
+            } else {
+                tag
+            }
+        })
+        .collect::<Vec<_>>();
+    if sample_cardinality > 0 {
+        samples.extend(structural_variants.iter().flat_map(|variant| {
+            render_type_path_enum_structural_samples(
+                variant,
+                sample_cardinality,
+                named_samples,
+                named_bindings,
+            )
+        }));
+    }
+    samples
+}
+
+fn field_presence_set_samples(
+    fields: &[meerkat_machine_schema::identity::FieldId],
+    sample_cardinality: usize,
+) -> Vec<String> {
+    if sample_cardinality == 0 {
+        return Vec::new();
+    }
+    let limit = sample_cardinality.max(1);
+    let rendered_fields = fields
+        .iter()
+        .map(|field| tla_string(field.as_str()))
+        .collect::<Vec<_>>();
+    let mut samples = rendered_fields
+        .iter()
+        .take(limit)
+        .map(|field| format!("{{{field}}}"))
+        .collect::<Vec<_>>();
+    if limit > rendered_fields.len() && rendered_fields.len() >= 2 {
+        samples.push(format!("{{{}}}", rendered_fields.join(", ")));
+    }
+    samples
+}
+
+fn operation_source_samples(sample_cardinality: usize) -> Vec<String> {
+    let mut samples = vec![
+        format!(
+            "[kind |-> {}, session_id |-> Some({}), peer_id |-> None, address |-> None]",
+            tla_string("SessionChild"),
+            tla_string("sessionid_1")
+        ),
+        format!(
+            "[kind |-> {}, session_id |-> None, peer_id |-> Some({}), address |-> Some({})]",
+            tla_string("BackendPeer"),
+            tla_string("peerid_1"),
+            tla_string("peeraddress_1")
+        ),
+    ];
+    if sample_cardinality > 2 {
+        samples.push(format!(
+            "[kind |-> {}, session_id |-> Some({}), peer_id |-> None, address |-> None]",
+            tla_string("SessionChild"),
+            tla_string("sessionid_2")
+        ));
+    }
+    samples
+}
+
+fn type_path_struct_samples(
+    fields: &[TypePathStructField],
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> Vec<String> {
+    if sample_cardinality == 0 {
+        return Vec::new();
+    }
+    if fields.is_empty() {
+        return vec!["[]".to_owned()];
+    }
+
+    let limit = sample_cardinality.max(1);
+    let mut field_values = Vec::new();
+    for field in fields {
+        let values =
+            type_path_struct_field_samples(field, sample_cardinality, named_samples, bindings);
+        if values.is_empty() {
+            return Vec::new();
+        }
+        field_values.push((field.name.as_str().to_owned(), values));
+    }
+
+    (0..limit)
+        .map(|idx| {
+            let fields = field_values
+                .iter()
+                .map(|(name, values)| {
+                    let value = &values[idx % values.len()];
+                    format!("{name} |-> {value}")
+                })
+                .collect::<Vec<_>>();
+            format!("[{}]", fields.join(", "))
+        })
+        .collect()
+}
+
+fn type_path_struct_field_samples(
+    field: &TypePathStructField,
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> Vec<String> {
+    match &field.atom {
+        TypePathStructFieldAtom::String => {
+            if sample_cardinality == 0 {
+                Vec::new()
+            } else {
+                generic_string_samples(sample_cardinality)
+                    .into_iter()
+                    .map(tla_string)
+                    .collect()
+            }
+        }
+        TypePathStructFieldAtom::Named(name) => {
+            sample_values_for_named_type(name.as_str(), sample_cardinality, named_samples, bindings)
+        }
+        TypePathStructFieldAtom::OptionalNamed(name) => {
+            let mut values = vec!["None".to_owned()];
+            values.extend(
+                sample_values_for_named_type(
+                    name.as_str(),
+                    sample_cardinality,
+                    named_samples,
+                    bindings,
+                )
+                .into_iter()
+                .map(|value| format!("Some({value})")),
+            );
+            values
+        }
+    }
+}
+
+fn render_type_path_enum_structural_samples(
+    variant: &TypePathEnumStructuralVariant,
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> Vec<String> {
+    let mut samples = vec![vec![format!(
+        "tag |-> {}",
+        tla_string(variant.variant.as_str())
+    )]];
+    for field in &variant.fields {
+        let values = match &field.atom {
+            TypePathEnumPayloadAtom::StringSet => string_set_payload_samples(sample_cardinality),
+            TypePathEnumPayloadAtom::NamedSet(type_name) => named_set_payload_samples(
+                type_name.as_str(),
+                sample_cardinality,
+                named_samples,
+                named_bindings,
+            ),
+            TypePathEnumPayloadAtom::String => {
+                if sample_cardinality == 0 {
+                    Vec::new()
+                } else {
+                    generic_string_samples(sample_cardinality)
+                        .into_iter()
+                        .map(tla_string)
+                        .collect()
+                }
+            }
+            TypePathEnumPayloadAtom::OptionalString => {
+                let mut values = vec![format!(
+                    "[tag |-> {}, value |-> {}]",
+                    tla_string("none"),
+                    tla_string("none")
+                )];
+                if sample_cardinality > 0 {
+                    values.extend(generic_string_samples(sample_cardinality).into_iter().map(
+                        |sample| {
+                            format!(
+                                "[tag |-> {}, value |-> {}]",
+                                tla_string("some"),
+                                tla_string(&sample)
+                            )
+                        },
+                    ));
+                }
+                values
+            }
+            TypePathEnumPayloadAtom::Named(type_name) => sample_values_for_named_type(
+                type_name.as_str(),
+                sample_cardinality,
+                named_samples,
+                named_bindings,
+            ),
+        };
+        let mut next_samples = Vec::new();
+        for sample in &samples {
+            for value in &values {
+                let mut next = sample.clone();
+                next.push(format!("{} |-> {value}", field.name));
+                next_samples.push(next);
+            }
+        }
+        samples = next_samples;
+    }
+    samples
+        .into_iter()
+        .map(|fields| format!("[{}]", fields.join(", ")))
+        .collect()
+}
+
+/// TLA sample sets for a structural enum payload carrying a finite set of
+/// values from a named value domain. Mirrors [`string_set_payload_samples`]
+/// shape (empty / one-member / two-member sets) over the named domain's
+/// sample pool so payload sets stay aligned with catalog key domains.
+fn named_set_payload_samples(
+    type_name: &str,
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> Vec<String> {
+    let mut values = if sample_cardinality == 0 {
+        Vec::new()
+    } else {
+        sample_values_for_named_type(type_name, sample_cardinality, named_samples, named_bindings)
+    };
+    // Pad the payload element pool with synthetic domain members up to the
+    // requested cardinality so the deep model still covers differing
+    // same-variant multi-member payloads when the collected named-sample
+    // pool is smaller than the cardinality.
+    let mut synthetic_idx = 0usize;
+    while sample_cardinality > 0 && values.len() < sample_cardinality {
+        synthetic_idx += 1;
+        let synthetic = tla_string(format!(
+            "{}_{synthetic_idx}",
+            tla_ident(type_name).to_lowercase()
+        ));
+        if !values.contains(&synthetic) {
+            values.push(synthetic);
+        }
+    }
+    let mut samples = vec!["{}".to_owned()];
+    if let Some(first) = values.first() {
+        samples.push(format!("{{{first}}}"));
+    }
+    if values.len() >= 2 {
+        samples.push(format!("{{{}, {}}}", values[0], values[1]));
+    }
+    samples
+}
+
+fn string_set_payload_samples(sample_cardinality: usize) -> Vec<String> {
+    let values = if sample_cardinality == 0 {
+        Vec::new()
+    } else {
+        generic_string_samples(sample_cardinality)
+            .into_iter()
+            .map(tla_string)
+            .collect::<Vec<_>>()
+    };
+    let mut samples = vec!["{}".to_owned()];
+    if let Some(first) = values.first() {
+        samples.push(format!("{{{first}}}"));
+    }
+    if values.len() >= 2 {
+        samples.push(format!("{{{}, {}}}", values[0], values[1]));
+    }
+    samples
+}
+
+fn string_enum_wire_label(name: &str, variant: &str) -> String {
+    if name == meerkat_core::turn_execution_authority::ContentShape::SCHEMA_TYPE_NAME
+        && let Some(shape) =
+            meerkat_core::turn_execution_authority::ContentShape::from_schema_variant(variant)
+    {
+        return shape.as_str().to_owned();
+    }
+
+    variant.to_owned()
+}
+
+/// Consult the schema's named-type binding table to decide whether a
+/// named type's TLA domain is `Nat` (numeric) rather than string-like.
+///
+/// A named type resolves to a `Nat` TLA domain when its Rust atom lowers
+/// to an unsigned integer width — the TLA projection mirrors the Rust
+/// atom. Schemas reach codegen only after validation, so every
+/// referenced named type has a binding; an unbound name here is a
+/// codegen invariant violation.
+fn named_type_uses_nat_domain(
+    bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    name: &str,
+) -> bool {
+    use meerkat_machine_schema::RustTypeAtom;
+    matches!(
+        bindings.get(name),
+        Some(RustTypeAtom::U64 | RustTypeAtom::U32 | RustTypeAtom::U16 | RustTypeAtom::U8)
+    )
+}
+
+/// Collect the `NamedTypeId → RustTypeAtom` map for a single machine.
+fn collect_machine_named_bindings(
+    schema: &MachineSchema,
+) -> BTreeMap<String, meerkat_machine_schema::RustTypeAtom> {
+    assert_machine_named_bindings_match_canonical(schema);
+    schema
+        .named_types
+        .iter()
+        .map(|binding| (binding.name.as_str().to_owned(), binding.rust.clone()))
+        .collect()
+}
+
+/// A machine that shares a canonical machine's id must bind every canonical
+/// struct named type, and bind each shared named type with the canonical
+/// generated domain shape.
+fn check_canonical_named_bindings(schema: &MachineSchema) -> Result<(), CompositionTlaError> {
+    let Some(canonical) = canonical_machine_schemas()
+        .into_iter()
+        .find(|canonical| canonical.machine == schema.machine)
+    else {
+        return Ok(());
+    };
+    let mismatch = |named_type: &str, reason| CompositionTlaError::CanonicalNamedTypeMismatch {
+        machine: schema.machine.as_str().to_owned(),
+        named_type: named_type.to_owned(),
+        reason,
+    };
+    for canonical_binding in canonical.named_types.iter().filter(|binding| {
+        matches!(
+            binding.rust,
+            meerkat_machine_schema::RustTypeAtom::TypePathStruct { .. }
+        )
+    }) {
+        if !schema
+            .named_types
+            .iter()
+            .any(|binding| binding.name == canonical_binding.name)
+        {
+            return Err(mismatch(
+                canonical_binding.name.as_str(),
+                CanonicalNamedTypeMismatchKind::MissingStructBinding,
+            ));
+        }
+    }
+    for binding in &schema.named_types {
+        let Some(canonical_binding) = canonical
+            .named_types
+            .iter()
+            .find(|candidate| candidate.name == binding.name)
+        else {
+            continue;
+        };
+        if !canonical_binding
+            .rust
+            .has_same_composition_domain_shape(&binding.rust)
+        {
+            return Err(mismatch(
+                binding.name.as_str(),
+                CanonicalNamedTypeMismatchKind::DomainShape,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Internal invariant for the infallible renderers, whose callers pass
+/// canonical machines; the public fallible entry points check first.
+fn assert_machine_named_bindings_match_canonical(schema: &MachineSchema) {
+    if let Err(CompositionTlaError::CanonicalNamedTypeMismatch {
+        machine,
+        named_type,
+        reason,
+    }) = check_canonical_named_bindings(schema)
+    {
+        assert!(
+            reason != CanonicalNamedTypeMismatchKind::MissingStructBinding,
+            "generated machine `{machine}` missing canonical named-type `{named_type}` binding"
+        );
+        assert!(
+            reason != CanonicalNamedTypeMismatchKind::DomainShape,
+            "generated machine `{machine}` named-type `{named_type}` binding must match canonical domain shape"
+        );
+    }
+}
+
+/// Validate a caller-supplied machine catalog before rendering a composition
+/// against it: every machine validates, ids are unique, no machine shadows a
+/// canonical Meerkat machine with a different schema, the composition's
+/// machines agree on shared named types, and the composition validates
+/// against the catalog. The render paths behind this never panic on a
+/// supplied catalog.
+fn validate_supplied_catalog(
+    schema: &CompositionSchema,
+    machine_catalog: &[MachineSchema],
+) -> Result<(), CompositionTlaError> {
+    let canonical = canonical_machine_schemas();
+    let mut seen = BTreeSet::new();
+    for machine in machine_catalog {
+        machine
+            .validate()
+            .map_err(|error| CompositionTlaError::InvalidSuppliedMachine {
+                machine: machine.machine.as_str().to_owned(),
+                error: error.to_string(),
+            })?;
+        if !seen.insert(machine.machine.as_str()) {
+            return Err(CompositionTlaError::DuplicateSuppliedMachine {
+                machine: machine.machine.as_str().to_owned(),
+            });
+        }
+        if canonical
+            .iter()
+            .any(|candidate| candidate.machine == machine.machine && candidate != machine)
+        {
+            return Err(CompositionTlaError::ShadowsCanonicalMachine {
+                machine: machine.machine.as_str().to_owned(),
+            });
+        }
+    }
+    let mut merged: BTreeMap<&str, &meerkat_machine_schema::RustTypeAtom> = BTreeMap::new();
+    for instance in &schema.machines {
+        let Some(machine) = machine_catalog
+            .iter()
+            .find(|machine| machine.machine.as_str() == instance.machine_name.as_str())
+        else {
+            continue;
+        };
+        for binding in &machine.named_types {
+            match merged.get(binding.name.as_str()) {
+                Some(existing) if !existing.has_same_composition_domain_shape(&binding.rust) => {
+                    return Err(CompositionTlaError::DivergentNamedTypeBinding {
+                        composition: schema.name.as_str().to_owned(),
+                        named_type: binding.name.as_str().to_owned(),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    merged.insert(binding.name.as_str(), &binding.rust);
+                }
+            }
+        }
+    }
+    let machines = machine_catalog.iter().collect::<Vec<_>>();
+    schema.validate_against(&machines).map_err(|error| {
+        CompositionTlaError::InvalidCompositionForCatalog {
+            composition: schema.name.as_str().to_owned(),
+            error: error.to_string(),
+        }
+    })
+}
+
+/// Merge every machine's named-type bindings into one map for
+/// composition-level TLA rendering. Duplicate names must agree on generated
+/// domain shape across machines (validation enforces this by construction).
+fn collect_composition_named_bindings<'a>(
+    machines_by_instance: impl IntoIterator<Item = &'a MachineSchema>,
+) -> BTreeMap<String, meerkat_machine_schema::RustTypeAtom> {
+    let mut merged: BTreeMap<String, meerkat_machine_schema::RustTypeAtom> = BTreeMap::new();
+    for machine in machines_by_instance {
+        assert_machine_named_bindings_match_canonical(machine);
+        for binding in &machine.named_types {
+            let slug = binding.name.as_str().to_owned();
+            if let Some(existing) = merged.get(&slug) {
+                assert!(
+                    existing.has_same_composition_domain_shape(&binding.rust),
+                    "composition named-type `{slug}` binding must agree across machine schemas"
+                );
+            } else {
+                merged.insert(slug, binding.rust.clone());
+            }
+        }
+    }
+    merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A populated witness map literal renders as a TLC function in both the
+    /// witness-literal path and the expression path, never as the `None`
+    /// fallback (#1811).
+    #[test]
+    fn a_witness_map_literal_renders_as_a_tlc_function() {
+        let machines = meerkat_machine_schema::canonical_machine_schemas();
+        let compositions = meerkat_machine_schema::canonical_composition_schemas();
+        let composition = compositions
+            .iter()
+            .find(|candidate| candidate.name.as_str() == "job_runtime_delivery")
+            .expect("job_runtime_delivery composition");
+        let compiler =
+            CompositionTlaCompiler::new(composition, &machines).expect("composition compiler");
+        let literal = Expr::MapLiteral(vec![
+            (
+                Expr::String("alpha".into()),
+                Expr::String("member-a".into()),
+            ),
+            (Expr::String("beta".into()), Expr::U64(2)),
+        ]);
+        assert_eq!(
+            compiler.render_literal_expr(&literal),
+            "(\"alpha\" :> \"member-a\" @@ \"beta\" :> 2)"
+        );
+        assert_eq!(
+            crate::render::render_expr_for_tests(&literal),
+            "(\"alpha\" :> \"member-a\" @@ \"beta\" :> 2)"
+        );
+    }
+
+    /// Every quantified Next disjunct leads with its transition's source-phase
+    /// guard, so TLC rejects the whole disjunct in other phases instead of
+    /// enumerating each parameter tuple per state (#1499 measured 464 s
+    /// unhoisted against 158 s hoisted on work_graph_lifecycle ci, identical
+    /// state counts).
+    #[test]
+    fn quantified_next_disjuncts_lead_with_the_source_phase_guard() {
+        let model =
+            render_machine_semantic_model(&meerkat_machine()).expect("render MeerkatMachine model");
+        let next = model
+            .split_once("\nNext ==\n")
+            .map(|(_, rest)| rest.split("\n\n").next().unwrap_or(""))
+            .expect("Next block");
+        let quantified = next
+            .lines()
+            .filter(|line| line.contains("\\E "))
+            .collect::<Vec<_>>();
+        assert!(
+            !quantified.is_empty(),
+            "MeerkatMachine has quantified transitions"
+        );
+        for line in &quantified {
+            assert!(
+                line.starts_with("    \\/ (phase = "),
+                "quantified Next disjunct without a leading phase guard: {line}"
+            );
+        }
+        assert!(
+            next.contains("    \\/ (phase = \"Running\") /\\ \\E run_id \\in RunIdValues : RequestCancelAfterBoundary(run_id)"),
+            "the guard is the transition's own source phase"
+        );
+    }
+
+    fn next_disjunct_for<'a>(model: &'a str, action: &str) -> &'a str {
+        let next = model
+            .split_once("\nNext ==\n")
+            .map(|(_, rest)| rest.split("\n\n").next().unwrap_or(""))
+            .expect("Next block");
+        next.lines()
+            .find(|line| line.contains(&format!(" {action}(")))
+            .expect("Next disjunct for the action")
+    }
+
+    /// A declared domain, not a binding name, decides an input field's TLC
+    /// domain: additional values extend the default unsigned range, a state
+    /// binding explores exactly the state field, and an undeclared
+    /// `expected_revision` gets the plain default (the old name match is gone).
+    #[test]
+    fn declared_input_field_domains_decide_the_rendered_domain() {
+        use meerkat_machine_schema::catalog::dsl::dsl_workgraph_lifecycle_machine;
+        use meerkat_machine_schema::identity::{FieldId, InputVariantId};
+        use meerkat_machine_schema::{InputFieldDomain, InputFieldDomainKind};
+
+        let shipped = dsl_workgraph_lifecycle_machine();
+        let model = render_machine_semantic_model(&shipped).expect("render workgraph model");
+        assert!(
+            next_disjunct_for(&model, "UpdateOpen")
+                .contains("\\E expected_revision \\in {revision} : "),
+            "a state-bound declaration explores exactly the state field"
+        );
+
+        let mut sampled = shipped.clone();
+        sampled.input_field_domains.push(InputFieldDomain {
+            input: InputVariantId::parse("CreateOpen").expect("input slug"),
+            field: FieldId::parse("unresolved_blocker_count").expect("field slug"),
+            domain: InputFieldDomainKind::AdditionalValues([3, 8].into_iter().collect()),
+        });
+        let model = render_machine_semantic_model(&sampled).expect("render sampled model");
+        assert!(
+            next_disjunct_for(&model, "CreateOpen")
+                .contains("\\E arg_unresolved_blocker_count \\in (0..2 \\cup {3, 8}) : "),
+            "additional values extend the default unsigned domain"
+        );
+
+        let mut undeclared = shipped;
+        undeclared.input_field_domains.clear();
+        let model = render_machine_semantic_model(&undeclared).expect("render undeclared model");
+        assert!(
+            next_disjunct_for(&model, "UpdateOpen").contains("\\E expected_revision \\in 0..2 : "),
+            "without a declaration the binding name no longer selects a domain"
+        );
+    }
+
+    #[test]
+    fn substituted_compound_values_are_delimited_and_atoms_are_not() {
+        for atom in [
+            "x",
+            "packet.payload.run_id",
+            "Some(run_id)",
+            "MapSet(m, k, v)",
+            "m[k]",
+            "f(a)[b](c)",
+            "(a + 1)",
+            "\"a(b\"",
+            "42",
+        ] {
+            assert_eq!(tla_delimited(atom), atom, "{atom} is already an operand");
+        }
+        for compound in [
+            "IF c THEN a ELSE b",
+            "x + 1",
+            "s \\cup {x}",
+            "(a) + (b)",
+            "f(a) = b",
+            "~x",
+        ] {
+            assert_eq!(
+                tla_delimited(compound),
+                format!("({compound})"),
+                "{compound} must be delimited before splicing"
+            );
+        }
+    }
+
+    /// A field assigned by a conditional update earlier in the same block is
+    /// read through its pending value, a bare `IF c THEN a ELSE b`. Spliced
+    /// unparenthesized into a later expression, TLA+ precedence captured the
+    /// surrounding operator. Shipped instance: the meerkat_mob_seam
+    /// `TurnRunFailed` payload unwraps the conditionally updated
+    /// `terminal_cause_kind` as `IF "value" \in DOMAIN v THEN v["value"] ELSE
+    /// None`; with `v` bare, `["value"]` applied to v's ELSE branch only, so
+    /// the THEN branch emitted the Option record instead of its value.
+    #[test]
+    fn a_conditionally_updated_field_read_later_in_the_block_splices_as_one_operand() {
+        let model = render_composition_semantic_model(&meerkat_mob_seam_composition())
+            .expect("render meerkat_mob_seam model");
+        assert!(
+            model.contains(
+                "terminal_cause_kind |-> (IF \"value\" \\in DOMAIN (IF (IF (meerkat_terminal_cause_kind = None)"
+            ),
+            "the TurnRunFailed unwrap must test the whole conditional value"
+        );
+        assert!(
+            !model.contains("ELSE meerkat_terminal_cause_kind[\"value\"]"),
+            "no index may bind to one branch of a spliced conditional"
+        );
+    }
+
+    /// A set insert or remove of a field that a conditional update already
+    /// changed earlier in the same block takes the field's pending value, a
+    /// bare `IF c THEN a ELSE b`, as its left operand. Spliced unparenthesized,
+    /// the ELSE branch captured the set operator, so the THEN branch lost the
+    /// second update. Shipped instance: MobMachine's topology convergence
+    /// removes both absent identities from `pending_respawn_topology`; the
+    /// model removed only `a_identity` when both were absent.
+    #[test]
+    fn a_set_update_after_a_conditional_update_takes_the_whole_conditional() {
+        let model = render_machine_semantic_model(&mob_machine()).expect("render MobMachine model");
+        assert!(
+            model.contains(
+                "((IF ((a_identity \\in DOMAIN identity_to_runtime) = FALSE) THEN (pending_respawn_topology \\ {a_identity}) ELSE pending_respawn_topology) \\ {b_identity})"
+            ),
+            "the second removal must apply to the whole conditional value"
+        );
+        assert!(
+            !model.contains("ELSE pending_respawn_topology \\ {b_identity}"),
+            "no set operator may bind to one branch of a spliced conditional"
+        );
+    }
+
+    /// Every update kind that reads a field's pending value must splice it so
+    /// no operator after it can bind into one branch of a pending conditional
+    /// (`IF c THEN a ELSE b`, left by an earlier conditional update in the
+    /// same block): each occurrence must close an operand, followed only by
+    /// `)`, `,` or the end of the value. The match is exhaustive, so a new
+    /// `Update` kind must be classified here.
+    #[test]
+    fn every_update_kind_splices_a_pending_conditional_as_one_operand() {
+        use meerkat_machine_schema::identity::FieldId;
+        const PENDING: &str = "IF c THEN a ELSE b";
+        let field = || FieldId::parse("f").expect("field slug");
+        let x = || Expr::Binding("x".to_owned());
+        let samples = vec![
+            Update::Increment {
+                field: field(),
+                amount: 1,
+            },
+            Update::Decrement {
+                field: field(),
+                amount: 1,
+            },
+            Update::MapInsert {
+                field: field(),
+                key: x(),
+                value: x(),
+            },
+            Update::MapIncrement {
+                field: field(),
+                key: x(),
+                amount: 1,
+            },
+            Update::MapDecrement {
+                field: field(),
+                key: x(),
+                amount: 1,
+            },
+            Update::MapRemove {
+                field: field(),
+                key: x(),
+            },
+            Update::SetInsert {
+                field: field(),
+                value: x(),
+            },
+            Update::SetRemove {
+                field: field(),
+                value: x(),
+            },
+            Update::SeqAppend {
+                field: field(),
+                value: x(),
+            },
+            Update::SeqPrepend {
+                field: field(),
+                values: x(),
+            },
+            Update::SeqPopFront { field: field() },
+            Update::SeqRemoveValue {
+                field: field(),
+                value: x(),
+            },
+            Update::SeqRemoveAll {
+                field: field(),
+                values: x(),
+            },
+            Update::Conditional {
+                condition: Expr::Binding("d".to_owned()),
+                then_updates: vec![Update::SetInsert {
+                    field: field(),
+                    value: x(),
+                }],
+                else_updates: vec![Update::SetRemove {
+                    field: field(),
+                    value: x(),
+                }],
+            },
+            Update::ForEach {
+                binding: "y".to_owned(),
+                over: x(),
+                updates: vec![Update::SetInsert {
+                    field: field(),
+                    value: Expr::Binding("y".to_owned()),
+                }],
+            },
+        ];
+        let schema = mob_machine();
+        for update in &samples {
+            // Exhaustive: classify every kind. `Assign` does not read the
+            // field's pending value, so it cannot splice it.
+            match update {
+                Update::Assign { .. } => continue,
+                Update::Increment { .. }
+                | Update::Decrement { .. }
+                | Update::MapInsert { .. }
+                | Update::MapIncrement { .. }
+                | Update::MapDecrement { .. }
+                | Update::MapRemove { .. }
+                | Update::SetInsert { .. }
+                | Update::SetRemove { .. }
+                | Update::SeqAppend { .. }
+                | Update::SeqPrepend { .. }
+                | Update::SeqPopFront { .. }
+                | Update::SeqRemoveValue { .. }
+                | Update::SeqRemoveAll { .. }
+                | Update::Conditional { .. }
+                | Update::ForEach { .. } => {}
+            }
+            let mut compiler = MachineTlaCompiler::new(&schema);
+            let mut env = BTreeMap::from([("f".to_owned(), PENDING.to_owned())]);
+            let binding_types =
+                BTreeMap::from([("x".to_owned(), TypeRef::Set(Box::new(TypeRef::U64)))]);
+            compiler.apply_update("Probe", &mut env, &BTreeMap::new(), &binding_types, update);
+            let rendered = env.get("f").expect("the update writes f");
+            assert!(
+                rendered.contains(PENDING),
+                "{update:?} must read the pending value: {rendered}"
+            );
+            for (at, _) in rendered.match_indices(PENDING) {
+                let after = rendered[at + PENDING.len()..].chars().next();
+                assert!(
+                    matches!(after, None | Some(')' | ',')),
+                    "{update:?} lets {after:?} bind into the pending conditional: {rendered}"
+                );
+            }
+        }
+    }
+
+    /// A `for` loop lowers to one fold per touched field, and each fold must
+    /// read the other fields as they were BEFORE the loop, as the sequential
+    /// kernel does within an iteration. Writing each fold back into the env
+    /// while lowering handed later folds an earlier field's post-loop value:
+    /// the causal-tail batch then looked up already-removed cursors and left
+    /// orphaned queued rows, which the generated outbox invariant caught. So
+    /// no fold of a loop may take another fold of the same loop as an
+    /// argument.
+    #[test]
+    fn a_for_each_fold_reads_the_other_fields_before_the_loop() {
+        let model =
+            render_machine_semantic_model(&meerkat_machine()).expect("render MeerkatMachine model");
+        let mut checked = 0;
+        for line in model.lines() {
+            let Some(eq) = line.find("' = ") else {
+                continue;
+            };
+            let rhs = &line[eq + 4..];
+            let Some(open) = rhs.find('(') else {
+                continue;
+            };
+            let head = &rhs[..open];
+            let Some(pos) = head.find("_ForEach") else {
+                continue;
+            };
+            let digits: String = head[pos + "_ForEach".len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            let same_loop = format!("{}_ForEach{digits}_", &head[..pos]);
+            assert!(
+                !rhs[open..].contains(&same_loop),
+                "a for-loop fold takes another fold of the same loop as an argument: {line}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "the MeerkatMachine model has for-loop folds to check"
+        );
+    }
+    use meerkat_machine_schema::RustTypeAtom;
+    use meerkat_machine_schema::catalog::dsl::{
+        dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
+    };
+    use meerkat_machine_schema::catalog::meerkat_mob_seam_composition;
+    use meerkat_machine_schema::identity::{
+        EffectVariantId, MachineId, MachineInstanceId, TransitionId,
+    };
+
+    fn string_domain_values(assignment: &str) -> BTreeSet<String> {
+        assignment
+            .trim_start_matches('{')
+            .trim_end_matches('}')
+            .split(", ")
+            .filter(|value| !value.is_empty())
+            .map(|value| value.trim_matches('"').to_owned())
+            .collect()
+    }
+
+    fn cfg_string_domain_values(cfg: &str, domain: &str) -> BTreeSet<String> {
+        let prefix = format!("  {domain} = ");
+        cfg.lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .map(string_domain_values)
+            .unwrap_or_default()
+    }
+
+    fn default_string_domain_values(sample_cardinality: usize) -> BTreeSet<String> {
+        string_domain_values(&render_default_domain_assignment(
+            &TypeRef::String,
+            sample_cardinality,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+        ))
+    }
+
+    fn assert_session_id_string_overlap(cfg: &str, profile: &str) {
+        let session_ids = cfg_string_domain_values(cfg, "SessionIdValues");
+        let strings = cfg_string_domain_values(cfg, "StringValues");
+        assert!(
+            !session_ids.is_empty() && !strings.is_empty(),
+            "{profile} must sample both bridged domains"
+        );
+        assert!(
+            !session_ids.is_disjoint(&strings),
+            "{profile} must make the SessionId/string equality branch satisfiable"
+        );
+        assert!(
+            strings
+                .iter()
+                .any(|candidate| !session_ids.contains(candidate)),
+            "{profile} must retain a non-matching string candidate for the rejection branch"
+        );
+    }
+
+    #[test]
+    fn conjunctive_bool_specialization_is_literal_only_and_conservative() {
+        let expr = Expr::And(vec![
+            Expr::Binding("required_true".to_owned()),
+            Expr::Not(Box::new(Expr::Binding("required_false".to_owned()))),
+            Expr::Eq(
+                Box::new(Expr::Binding("equal_true".to_owned())),
+                Box::new(Expr::Bool(true)),
+            ),
+            Expr::Neq(
+                Box::new(Expr::Bool(true)),
+                Box::new(Expr::Binding("not_equal_true".to_owned())),
+            ),
+            Expr::Or(vec![
+                Expr::Binding("under_disjunction".to_owned()),
+                Expr::Binding("alternative".to_owned()),
+            ]),
+            Expr::Binding("conflicting".to_owned()),
+            Expr::Not(Box::new(Expr::Binding("conflicting".to_owned()))),
+        ]);
+        let mut requirements = BTreeMap::new();
+
+        collect_conjunctive_bool_requirements(&expr, &mut requirements);
+
+        assert_eq!(requirements.get("required_true"), Some(&Some(true)));
+        assert_eq!(requirements.get("required_false"), Some(&Some(false)));
+        assert_eq!(requirements.get("equal_true"), Some(&Some(true)));
+        assert_eq!(requirements.get("not_equal_true"), Some(&Some(false)));
+        assert!(!requirements.contains_key("under_disjunction"));
+        assert!(!requirements.contains_key("alternative"));
+        assert_eq!(requirements.get("conflicting"), Some(&None));
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    fn composition_semantic_model_fails_closed_on_undeclared_route_source_machine() {
+        let mut schema = meerkat_mob_seam_composition();
+        let route = schema
+            .routes
+            .first_mut()
+            .expect("seam composition has at least one route");
+        // Repoint the route source at an instance id that is not declared in
+        // the composition. The CASE builder used to map this to an
+        // `"unknown_machine"` sentinel; generation must now fail closed.
+        route.from_machine =
+            MachineInstanceId::parse("undeclared_source_instance").expect("valid slug");
+
+        let result = render_composition_semantic_model(&schema);
+        assert!(
+            matches!(
+                result,
+                Err(CompositionTlaError::UnknownRouteSourceMachine { .. })
+            ),
+            "expected UnknownRouteSourceMachine, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    fn composition_semantic_model_fails_closed_on_undeclared_route_effect() {
+        let mut schema = meerkat_mob_seam_composition();
+        let route = schema
+            .routes
+            .first_mut()
+            .expect("seam composition has at least one route");
+        // Keep the (declared) source machine but reference an effect variant
+        // that the source machine does not declare.
+        route.effect_variant =
+            EffectVariantId::parse("UndeclaredEffectVariant").expect("valid slug");
+
+        let result = render_composition_semantic_model(&schema);
+        assert!(
+            matches!(result, Err(CompositionTlaError::UnknownRouteEffect { .. })),
+            "expected UnknownRouteEffect, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    fn composition_semantic_model_fails_closed_on_undeclared_witness_transition() {
+        let mut schema = meerkat_mob_seam_composition();
+        schema
+            .witnesses
+            .first_mut()
+            .expect("seam composition has at least one witness")
+            .expected_transitions
+            .first_mut()
+            .expect("seam witness has at least one expected transition")
+            .transition = TransitionId::parse("UndeclaredWitnessTransition").expect("valid slug");
+
+        let result = render_composition_semantic_model(&schema);
+        assert!(
+            matches!(
+                result,
+                Err(CompositionTlaError::UnknownWitnessTransition { .. })
+            ),
+            "expected UnknownWitnessTransition, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    fn composition_semantic_model_renders_for_valid_schema() {
+        // Sanity: the fail-closed gate does not reject a currently-valid
+        // composition. (Byte-identity of the output is enforced separately by
+        // `make machine-check-drift`.)
+        let schema = meerkat_mob_seam_composition();
+        let result = render_composition_semantic_model(&schema);
+        assert!(
+            result.is_ok(),
+            "valid composition should render: {result:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "composition named-type `AgentRuntimeId` binding must agree across machine schemas"
+    )]
+    fn composition_named_binding_merge_rejects_divergent_domain_shapes() {
+        let mut meerkat = meerkat_machine();
+        meerkat.machine = MachineId::parse("CompositionMergeLeft").expect("test machine id");
+        let mut mob = mob_machine();
+        mob.machine = MachineId::parse("CompositionMergeRight").expect("test machine id");
+        let binding = mob
+            .named_types
+            .iter_mut()
+            .find(|binding| binding.name.as_str() == "AgentRuntimeId")
+            .expect("MobMachine AgentRuntimeId binding");
+        binding.rust = RustTypeAtom::U64;
+
+        let _ = collect_composition_named_bindings([&meerkat, &mob]);
+    }
+
+    #[test]
+    fn composition_named_binding_merge_allows_machine_local_type_path_twins() {
+        let meerkat = meerkat_machine();
+        let mob = mob_machine();
+
+        let bindings = collect_composition_named_bindings([&meerkat, &mob]);
+
+        assert!(
+            matches!(
+                bindings.get("PeerAddress"),
+                Some(RustTypeAtom::TypePath(path))
+                    if path == "crate::catalog::dsl::meerkat_machine::PeerAddress"
+            ),
+            "path-only TypePath twins should not block composition-domain binding merge"
+        );
+    }
+
+    #[test]
+    fn mob_generation_native_helper_declares_and_assigns_u64_boundary() {
+        let schema = mob_machine();
+        assert!(machine_uses_u64_max(&schema));
+
+        let model = render_machine_semantic_model(&schema).expect("render MobMachine model");
+        let constants_line = model
+            .lines()
+            .find(|line| line.starts_with("CONSTANTS "))
+            .expect("MobMachine model constants");
+        assert!(constants_line.contains(TLA_RUST_U64_MAX_CONSTANT));
+
+        for deep in [false, true] {
+            let cfg = render_machine_ci_cfg(&schema, deep).expect("valid machine CFG");
+            assert!(
+                cfg.contains(&format!(
+                    "  {TLA_RUST_U64_MAX_CONSTANT} = {TLC_SAFE_RUST_U64_MAX_VALUE}"
+                )),
+                "{} config must assign the boundary",
+                if deep { "deep" } else { "ci" }
+            );
+        }
+    }
+
+    #[test]
+    fn meerkat_deep_cfg_samples_the_native_session_id_string_bridge() {
+        let schema = meerkat_machine();
+        assert!(machine_uses_session_id_string_bridge(&schema));
+
+        let deep_cfg = render_machine_ci_cfg(&schema, true).expect("valid deep CFG");
+        assert_session_id_string_overlap(&deep_cfg, "MeerkatMachine Deep config");
+        assert_eq!(
+            cfg_string_domain_values(&deep_cfg, "StringValues").len(),
+            default_string_domain_values(default_sample_cardinality(true)).len(),
+            "bridge reachability must substitute a Deep string sample, not add one"
+        );
+
+        let ci_cfg = render_machine_ci_cfg(&schema, false).expect("valid CI CFG");
+        assert!(
+            cfg_string_domain_values(&ci_cfg, "SessionIdValues").is_empty()
+                && cfg_string_domain_values(&ci_cfg, "StringValues").is_empty(),
+            "the step-limit-one CI profile must remain uninflated"
+        );
+    }
+
+    #[test]
+    fn mob_deep_cfg_does_not_inflate_unrelated_string_domains() {
+        let schema = mob_machine();
+        assert!(!machine_uses_session_id_string_bridge(&schema));
+
+        let deep_cfg = render_machine_ci_cfg(&schema, true).expect("valid deep CFG");
+        let session_ids = cfg_string_domain_values(&deep_cfg, "SessionIdValues");
+        let strings = cfg_string_domain_values(&deep_cfg, "StringValues");
+        assert!(
+            session_ids.is_disjoint(&strings),
+            "a machine without the native bridge must retain independent domains"
+        );
+    }
+
+    #[test]
+    fn mob_identity_classifier_uses_a_typed_tlc_lifecycle_representative() {
+        let schema = mob_machine();
+        assert_eq!(
+            schema
+                .tlc_representative_inputs
+                .iter()
+                .map(|input| input.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ClassifyIdentityReconciliation"],
+            "the schema must explicitly own the TLC-only classifier abstraction"
+        );
+
+        let model = render_machine_semantic_model(&schema).expect("render MobMachine model");
+        assert!(
+            model.contains(
+                "TlcRepresentativeDomain(values) == IF values = {} THEN {} ELSE {CHOOSE value \\in values : TRUE}"
+            ),
+            "the representative domain must remain typed and nonempty-aware"
+        );
+        assert!(
+            model.contains(
+                "\\E intent \\in TlcRepresentativeDomain(IdentityAuthorityConditionValues) : \\E lease \\in TlcRepresentativeDomain(IdentityLeaseConditionValues)"
+            ),
+            "MobMachine lifecycle Next must sample one typed identity-classifier tuple"
+        );
+        assert!(
+            !model.contains(
+                "\\E intent \\in IdentityAuthorityConditionValues : \\E lease \\in IdentityLeaseConditionValues : \\E external_binding_required \\in BOOLEAN"
+            ),
+            "MobMachine lifecycle Next must not reintroduce the exhaustive classifier cartesian product"
+        );
+
+        let composition = render_composition_semantic_model(&meerkat_mob_seam_composition())
+            .expect("render Meerkat/Mob composition");
+        assert!(
+            composition.contains(
+                "\\E arg_intent \\in TlcRepresentativeDomain(IdentityAuthorityConditionValues) : \\E arg_lease \\in TlcRepresentativeDomain(IdentityLeaseConditionValues)"
+            ),
+            "composition lifecycle exploration must honor the same schema-owned abstraction"
+        );
+    }
+
+    #[test]
+    fn meerkat_mob_composition_deep_cfg_samples_the_included_native_bridge() {
+        let schema = meerkat_mob_seam_composition();
+        let deep_cfg = render_composition_ci_cfg(&schema, true);
+
+        assert_session_id_string_overlap(&deep_cfg, "Meerkat/Mob composition Deep config");
+        let string_cardinality = schema
+            .deep_domain_overrides
+            .get("StringValues")
+            .copied()
+            .unwrap_or(schema.deep_domain_cardinality);
+        assert_eq!(
+            cfg_string_domain_values(&deep_cfg, "StringValues").len(),
+            default_string_domain_values(string_cardinality).len(),
+            "composition bridge reachability must substitute a string sample, not add one"
+        );
+
+        let ci_cfg = render_composition_ci_cfg(&schema, false);
+        assert!(
+            cfg_string_domain_values(&ci_cfg, "SessionIdValues")
+                .is_disjoint(&cfg_string_domain_values(&ci_cfg, "StringValues")),
+            "the composition CI profile must remain unchanged"
+        );
+    }
+
+    #[test]
+    fn runtime_delivery_recipient_insert_has_identical_local_map_semantics_in_tla() {
+        let schema = meerkat_machine_schema::catalog::dsl::dsl_runtime_delivery_machine();
+        let model = render_machine_semantic_model(&schema).expect("render recipient model");
+        let definition = "runtime_delivery_recipient_outcomes_after_set(current, recipient, outcome) ==\n    MapSet(current, recipient, outcome)\n";
+        assert!(model.contains(definition));
+        assert!(
+            model
+                .matches("runtime_delivery_recipient_outcomes_after_set(")
+                .count()
+                > 1,
+            "the generated settlement must call the formally defined insert"
+        );
+        let composition = render_composition_semantic_model(
+            &meerkat_machine_schema::catalog::job_runtime_delivery_composition(),
+        )
+        .expect("render embedded recipient model");
+        assert!(
+            composition.contains(&format!("runtime_delivery__{definition}")),
+            "embedded delivery machines require their scoped helper definition too"
+        );
+    }
+
+    #[test]
+    fn meerkat_session_id_native_helper_matches_typed_option_contract() {
+        let model =
+            render_machine_semantic_model(&meerkat_machine()).expect("render MeerkatMachine model");
+        let expected = r"meerkat_machine_session_id_matches_string(current, candidate) ==
+    current # None /\ current.value = candidate
+";
+
+        assert!(
+            model.contains(expected),
+            "MeerkatMachine TLA session identity operator must preserve the Rust typed-option/string comparison contract"
+        );
+    }
+
+    #[test]
+    fn mob_placed_native_helpers_are_defined_in_the_tla_model() {
+        let model = render_machine_semantic_model(&mob_machine()).expect("render MobMachine model");
+
+        for operator in [
+            "mob_machine_finalized_placed_kickoff_recovery_well_formed(",
+            "mob_machine_placed_completion_obligation_well_formed(",
+            "mob_machine_placed_completion_custody_admits(",
+            "mob_machine_adaptive_lifecycle_drained(",
+            "mob_machine_adaptive_run_custody_drained(",
+            "mob_machine_placed_kickoff_obligation_well_formed(",
+            "mob_machine_placed_kickoff_correlation_available(",
+            "mob_machine_placed_kickoff_custody_absent_for_identity(",
+            "mob_machine_placed_kickoff_custody_absent_for_host(",
+            "mob_machine_remote_turn_input_id_available_to_kickoff(",
+            "mob_machine_placed_carrier_binding_active(",
+            "mob_machine_placed_carrier_binding_confirmed_revoked(",
+            "mob_machine_host_binding_generation_tombstone(",
+        ] {
+            assert!(
+                model
+                    .lines()
+                    .any(|line| line.starts_with(operator) && line.ends_with(" ==")),
+                "MobMachine TLA model must define native operator {operator}"
+            );
+        }
+    }
+
+    #[test]
+    fn mob_placed_kickoff_correlation_tla_helper_covers_every_shared_input_namespace() {
+        let model = render_machine_semantic_model(&mob_machine()).expect("render MobMachine model");
+        let expected = r"mob_machine_placed_kickoff_correlation_available(pending_kickoffs, resolved_kickoffs, retained_kickoffs, pending_turns, committed_turns, resolved_turns, pending_completions, resolved_completions, candidate) ==
+    /\ \A row \in pending_kickoffs \cup resolved_kickoffs : /\ row.agent_identity # candidate.agent_identity /\ \lnot (/\ row.host_id = candidate.host_id /\ row.generation = candidate.generation /\ row.fence_token = candidate.fence_token /\ row.input_id = candidate.input_id)
+    /\ \A identity \in DOMAIN retained_kickoffs : retained_kickoffs[identity].agent_identity # candidate.agent_identity
+    /\ \A row \in pending_turns \cup committed_turns \cup resolved_turns : \lnot (/\ row.agent_identity = candidate.agent_identity /\ row.host_id = candidate.host_id /\ row.generation = candidate.generation /\ row.fence_token = candidate.fence_token /\ row.input_id = candidate.input_id)
+    /\ \A row \in pending_completions \cup resolved_completions : \lnot (/\ row.agent_identity = candidate.agent_identity /\ row.host_id = candidate.host_id /\ row.generation = candidate.generation /\ row.fence_token = candidate.fence_token /\ row.input_id = candidate.input_id)
+";
+
+        assert!(
+            model.contains(expected),
+            "MobMachine TLA kickoff-correlation helper must reject collisions across kickoff, remote-turn, and placed-completion custody"
+        );
+    }
+
+    #[test]
+    fn mob_placed_kickoff_recovery_tla_helper_does_not_shadow_machine_phase() {
+        let model = render_machine_semantic_model(&mob_machine()).expect("render MobMachine model");
+        assert!(
+            model.contains(
+                r#"Cardinality({ kickoff_phase \in {"Started", "CallbackPending", "Failed", "Cancelled"} :"#
+            ),
+            "kickoff recovery helper must bind a helper-local identifier"
+        );
+        assert!(
+            !model.contains(
+                r#"Cardinality({ phase \in {"Started", "CallbackPending", "Failed", "Cancelled"} :"#
+            ),
+            "TLA forbids the helper-local binder from shadowing the machine's phase variable"
+        );
+    }
+
+    #[test]
+    fn mob_adaptive_run_custody_native_helper_matches_rust_contract() {
+        let model = render_machine_semantic_model(&mob_machine()).expect("render MobMachine model");
+        let expected = r#"mob_machine_adaptive_run_custody_drained(adaptive_run_id, active_layer, active_members, layer_run, layer_phases, layer_dispositions) ==
+    /\ adaptive_run_id \notin DOMAIN active_layer
+    /\ (IF adaptive_run_id \in DOMAIN active_members THEN active_members[adaptive_run_id] ELSE 0) = 0
+    /\ \A layer_id \in DOMAIN layer_run :
+           \/ layer_run[layer_id] # adaptive_run_id
+           \/ /\ layer_id \in DOMAIN layer_dispositions
+              /\ layer_id \in DOMAIN layer_phases
+              /\ layer_phases[layer_id] \in {"Completed", "SetupFailed", "RunFailed", "ResultInvalid", "Canceled"}
+"#;
+
+        assert!(
+            model.contains(expected),
+            "MobMachine TLA adaptive-run custody operator must preserve the Rust absence, zero-active-member, and terminal-layer contract"
+        );
+    }
+}
+
+fn render_sequence_domain_definition(inner: &TypeRef) -> String {
+    let inner_domain = render_type_domain_expr(inner);
+    format!(
+        "{{<<>>}} \\cup {{<<x>> : x \\in {inner_domain}}} \\cup {{<<x, y>> : x \\in {inner_domain}, y \\in {inner_domain}}}"
+    )
+}
+
+fn render_option_domain_definition(inner: &TypeRef) -> String {
+    let inner_domain = render_type_domain_expr(inner);
+    format!("{{None}} \\cup {{Some(x) : x \\in {inner_domain}}}")
+}
+
+fn render_map_domain_definition(key: &TypeRef, value: &TypeRef) -> String {
+    let key_domain = render_type_domain_expr(key);
+    let value_domain = render_type_domain_expr(value);
+    let empty_map = "[x \\in {} |-> None]";
+    format!(
+        "{{{empty_map}}} \\cup {{ [x \\in {{k}} |-> v] : k \\in {key_domain}, v \\in {value_domain} }}"
+    )
+}
+
+fn ordered_composite_domain_definitions(
+    constants: &BTreeMap<String, TypeRef>,
+) -> Vec<(&String, &TypeRef)> {
+    let mut domains = constants
+        .iter()
+        .filter(|(_, ty)| {
+            matches!(
+                ty,
+                TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+            )
+        })
+        .collect::<Vec<_>>();
+    domains.sort_by_key(|(name, ty)| (domain_dependency_depth(ty), (*name).clone()));
+    domains
+}
+
+fn domain_dependency_depth(ty: &TypeRef) -> usize {
+    match ty {
+        TypeRef::Option(inner) | TypeRef::Seq(inner) | TypeRef::Set(inner) => {
+            1 + domain_dependency_depth(inner)
+        }
+        TypeRef::Map(key, value) => {
+            1 + domain_dependency_depth(key).max(domain_dependency_depth(value))
+        }
+        TypeRef::Bool
+        | TypeRef::U32
+        | TypeRef::U64
+        | TypeRef::String
+        | TypeRef::Named(_)
+        | TypeRef::Enum(_) => 0,
+    }
+}
+
+/// The rendered payload of one owner feedback input.
+struct FeedbackPayload {
+    payload_expr: String,
+    quantifiers: Vec<String>,
+    /// `(obligation field, bound member variable)` per `ObligationMember`.
+    members: Vec<(String, String)>,
+}
+
+/// Whether `NoOpenObligationsOnTerminal_<protocol>` applies: the producer has
+/// terminal phases and the protocol is `AckRequired`, so only owner feedback
+/// closes its obligations. Under `AckOrAbort` and `TerminalClosure` the
+/// terminal phase is itself the closure, and a `PublicationOnly` protocol has
+/// no feedback (the publication closes it), so for those the invariant would be
+/// unsatisfiable once the producer reaches a terminal phase.
+fn terminal_closure_required(
+    protocol: &meerkat_machine_schema::EffectHandoffProtocol,
+    producer: &MachineSchema,
+) -> bool {
+    !producer.state.terminal_phases.is_empty()
+        && matches!(
+            protocol.closure_policy,
+            meerkat_machine_schema::ClosurePolicy::AckRequired
+        )
+}
+
+fn render_type_domain_expr(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Bool => "BOOLEAN".into(),
+        // dogma #172 (codegen half): U32 and U64 are distinct bounded domains,
+        // not one collapsed `NatValues`. The domains-map machinery auto-declares
+        // the `U32Values` CONSTANT and emits its .cfg sample assignment, so a
+        // u32 field references its own domain (matching the kernel's u32 width
+        // check) rather than aliasing the unbounded u64 domain.
+        TypeRef::U32 => "U32Values".into(),
+        TypeRef::U64 => "NatValues".into(),
+        TypeRef::String => "StringValues".into(),
+        TypeRef::Named(_)
+        | TypeRef::Enum(_)
+        | TypeRef::Set(_)
+        | TypeRef::Seq(_)
+        | TypeRef::Option(_)
+        | TypeRef::Map(_, _) => domain_constant_name(ty),
+    }
+}
+
+fn domain_constant_name(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Named(name) => format!("{}Values", tla_ident(name)),
+        TypeRef::Enum(name) => format!("{}Values", tla_ident(name)),
+        TypeRef::Seq(inner) => format!("SeqOf{}Values", tla_ident(type_ref_name(inner))),
+        TypeRef::Set(inner) => format!("SetOf{}Values", tla_ident(type_ref_name(inner))),
+        TypeRef::String => "StringValues".into(),
+        TypeRef::Bool => "BooleanValues".into(),
+        TypeRef::U32 => "U32Values".into(),
+        TypeRef::U64 => "NatValues".into(),
+        TypeRef::Option(inner) => format!("Option{}Values", tla_ident(type_ref_name(inner))),
+        TypeRef::Map(key, value) => {
+            format!(
+                "Map{}{}Values",
+                tla_ident(type_ref_name(key)),
+                tla_ident(type_ref_name(value))
+            )
+        }
+    }
+}
+
+fn type_ref_name(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Bool => "Bool".into(),
+        TypeRef::U32 => "U32".into(),
+        TypeRef::U64 => "U64".into(),
+        TypeRef::String => "String".into(),
+        TypeRef::Named(name) => name.as_str().to_owned(),
+        TypeRef::Enum(name) => name.as_str().to_owned(),
+        TypeRef::Option(inner) => format!("Option{}", type_ref_name(inner)),
+        TypeRef::Set(inner) => format!("Set{}", type_ref_name(inner)),
+        TypeRef::Seq(inner) => format!("Seq{}", type_ref_name(inner)),
+        TypeRef::Map(key, value) => format!("Map{}{}", type_ref_name(key), type_ref_name(value)),
+    }
+}
+
+struct CompositionTlaCompiler<'a> {
+    schema: &'a CompositionSchema,
+    machine_by_instance: BTreeMap<&'a str, &'a MachineSchema>,
+    named_bindings: BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    fallback_machine: &'a MachineSchema,
+    unchanged_frames: RefCell<UnchangedFrameInterner>,
+}
+
+const COMPOSITION_UNCHANGED_CHUNK_SIZE: usize = 64;
+const COMPOSITION_UNCHANGED_SPLIT_THRESHOLD: usize = 96;
+
+/// Prefix for the generated named UNCHANGED frame operators.
+///
+/// Deliberately upper-camel: the machine-poster TLA reader treats a
+/// `^[a-z_][A-Za-z0-9_]* == ...` line before `THEOREM` as a machine invariant,
+/// and a line ending in bare `==` as the head of a multi-line definition. An
+/// upper-case name on a single line is invisible to both.
+const UNCHANGED_FRAME_PREFIX: &str = "UnchangedFrame_";
+
+/// Stable 64-bit FNV-1a.
+///
+/// Frame operator names are derived from frame content so that adding or
+/// removing a transition perturbs exactly the frames it touches instead of
+/// renumbering every later one. That only holds if the hash itself is stable:
+/// `std::collections::hash_map::DefaultHasher` is explicitly documented as not
+/// stable across Rust releases, so a toolchain bump would rename every frame
+/// and turn `machine-check-drift` red with no source change. FNV-1a is pinned
+/// here for that reason.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+/// Renders one UNCHANGED frame as a single TLA line.
+///
+/// `chunking` carries the composition-only `(split_threshold, chunk_size)`
+/// policy: TLC's semantic pass can overflow on very large tuple frames, so a
+/// composition frame past the threshold is expressed as a conjunction of
+/// smaller tuples. `/\` is an ordinary infix operator, so the conjunction is
+/// the same formula as the previously emitted bulleted list. Machines pass
+/// `None` and keep their single-tuple frame verbatim.
+fn unchanged_frame_body(vars: &[String], chunking: Option<(usize, usize)>) -> String {
+    if let Some((split_threshold, chunk_size)) = chunking
+        && vars.len() > split_threshold
+    {
+        return vars
+            .chunks(chunk_size)
+            .map(|chunk| format!("UNCHANGED << {} >>", chunk.join(", ")))
+            .collect::<Vec<_>>()
+            .join(" /\\ ");
+    }
+    format!("UNCHANGED << {} >>", vars.join(", "))
+}
+
+/// Interns the distinct UNCHANGED frames of one generated TLA module.
+///
+/// The renderer used to expand a full frame tuple inline at every action. On
+/// the largest composition that was 32,850 expansions of 650 distinct frames,
+/// which is where ~85% of the emitted bytes went. Each distinct frame is now
+/// emitted once as a named operator and referenced by name.
+#[derive(Default)]
+struct UnchangedFrameInterner {
+    /// Frame operator name -> single-line frame body. Names are derived from
+    /// the body, so a name already bound to a *different* body is a hash
+    /// collision, never a rename.
+    frames: BTreeMap<String, String>,
+    /// First observed collision, if any. Recorded rather than resolved: a
+    /// counter suffix would be order-dependent across schema edits and, worse,
+    /// would silently hand one action a different frame condition than it had.
+    /// The owning `render` turns this into a typed error and emits nothing.
+    collision: Option<UnchangedFrameCollision>,
+}
+
+/// Two distinct frames that derive the same operator name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnchangedFrameCollision {
+    pub name: String,
+    pub first: String,
+    pub second: String,
+}
+
+impl std::fmt::Display for UnchangedFrameCollision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "frame operator `{}` derives from two different frames:\n  {}\n  {}",
+            self.name, self.first, self.second
+        )
+    }
+}
+
+impl UnchangedFrameInterner {
+    /// Returns the operator name for `body`, registering the definition on
+    /// first sight.
+    fn intern(&mut self, body: String) -> String {
+        let name = format!("{UNCHANGED_FRAME_PREFIX}{:016x}", fnv1a64(body.as_bytes()));
+        match self.frames.get(&name) {
+            Some(existing) if *existing == body => {}
+            Some(existing) => {
+                if self.collision.is_none() {
+                    self.collision = Some(UnchangedFrameCollision {
+                        name: name.clone(),
+                        first: existing.clone(),
+                        second: body,
+                    });
+                }
+            }
+            None => {
+                self.frames.insert(name.clone(), body);
+            }
+        }
+        name
+    }
+
+    fn collision(&self) -> Option<&UnchangedFrameCollision> {
+        self.collision.as_ref()
+    }
+
+    /// Renders the definition block, sorted by operator name.
+    ///
+    /// Sorted rather than first-use order so that a later schema edit inserts
+    /// or drops a single definition line instead of shifting every definition
+    /// after it. Returns `String::new()` when the module has no frames.
+    fn definitions_block(&self) -> String {
+        if self.frames.is_empty() {
+            return String::new();
+        }
+        let mut out = String::new();
+        pushln!(
+            &mut out,
+            "\\* Named UNCHANGED frames. One definition per distinct frame; every action"
+        );
+        pushln!(
+            &mut out,
+            "\\* that leaves those variables unchanged references the definition by name."
+        );
+        for (name, body) in &self.frames {
+            pushln!(&mut out, "{name} == {body}");
+        }
+        pushln!(&mut out);
+        out
+    }
+}
+
+impl<'a> CompositionTlaCompiler<'a> {
+    fn new(
+        schema: &'a CompositionSchema,
+        machine_catalog: &'a [MachineSchema],
+    ) -> Result<Self, String> {
+        let machine_catalog_by_name = machine_catalog
+            .iter()
+            .map(|machine| (machine.machine.as_str(), machine))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut machine_by_instance = BTreeMap::new();
+        for instance in &schema.machines {
+            let machine = machine_catalog_by_name
+                .get(instance.machine_name.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "unknown machine schema `{}` for composition `{}`",
+                        instance.machine_name, schema.name
+                    )
+                })?;
+            machine_by_instance.insert(instance.instance_id.as_str(), machine);
+        }
+        let named_bindings =
+            collect_composition_named_bindings(machine_by_instance.values().copied());
+
+        Ok(Self {
+            schema,
+            machine_by_instance,
+            named_bindings,
+            fallback_machine: machine_catalog.first().ok_or_else(|| {
+                format!(
+                    "no machine catalog available for composition `{}`",
+                    schema.name
+                )
+            })?,
+            unchanged_frames: RefCell::new(UnchangedFrameInterner::default()),
+        })
+    }
+
+    fn render_unchanged_vars(&self, out: &mut String, prefix: &str, vars: &[String]) {
+        if vars.is_empty() {
+            return;
+        }
+        // The frame is interned on its variable list alone and referenced at
+        // the caller's own `prefix`, so the conjunct keeps its original column.
+        // Indentation is semantically load-bearing in TLA bulleted lists.
+        let body = unchanged_frame_body(
+            vars,
+            Some((
+                COMPOSITION_UNCHANGED_SPLIT_THRESHOLD,
+                COMPOSITION_UNCHANGED_CHUNK_SIZE,
+            )),
+        );
+        let name = self.unchanged_frames.borrow_mut().intern(body);
+        writeln!(out, "{prefix}{name}").expect("write to string");
+    }
+
+    fn render(&self) -> std::result::Result<String, CompositionTlaError> {
+        // Fail-closed gate: every route component must resolve against the
+        // composition schema before any CASE expression is emitted. This makes
+        // the defensive `OTHER -> "unknown_*"` branches in the generated TLA
+        // provably unreachable rather than silent catch-alls.
+        self.validate_routes()?;
+
+        let mut out = String::new();
+        let constants = self.collect_binding_domains();
+        let named_samples =
+            collect_composition_named_type_samples(self.schema, &self.machine_by_instance);
+        let machine_vars = self.machine_vars();
+        let obligation_vars = self.obligation_vars();
+        let mut machine_invariant_names = Vec::new();
+
+        pushln!(&mut out, "---- MODULE model ----");
+        pushln!(&mut out, "EXTENDS TLC, Naturals, Sequences, FiniteSets");
+        pushln!(&mut out);
+        writeln!(
+            &mut out,
+            "\\* Generated composition model for {}.",
+            self.schema.name
+        )
+        .expect("write to string");
+        pushln!(&mut out);
+
+        let mut model_constants = constants
+            .iter()
+            .filter(|(_, ty)| {
+                !matches!(
+                    ty,
+                    TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+                )
+            })
+            .map(|(name, _)| name)
+            .cloned()
+            .collect::<Vec<_>>();
+        if composition_uses_u64_max(self.schema, &self.machine_by_instance) {
+            model_constants.push(TLA_RUST_U64_MAX_CONSTANT.to_owned());
+        }
+        if !model_constants.is_empty() {
+            if model_constants
+                .iter()
+                .any(|constant| constant == TLA_RUST_U64_MAX_CONSTANT)
+            {
+                pushln!(
+                    &mut out,
+                    "\\* RustU64Max is the TLA boundary for Expr::U64Max; production generated Rust renders u64::MAX."
+                );
+            }
+            writeln!(&mut out, "CONSTANTS {}", model_constants.join(", "))
+                .expect("write to string");
+            pushln!(&mut out);
+        }
+
+        writeln!(&mut out, "None == [tag |-> \"none\", value |-> \"none\"]")
+            .expect("write to string");
+        writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]");
+        pushln!(&mut out);
+
+        push_cfg_assignment_operator_definitions(
+            &mut out,
+            &constants,
+            &self.named_bindings,
+            &CfgAssignmentOperatorProfile {
+                suffix: "Ci".to_owned(),
+                explicit_values: None,
+                sample_cardinality: default_sample_cardinality(false),
+                domain_overrides: None,
+                named_samples: &named_samples,
+                include_string_samples: false,
+            },
+        );
+        push_cfg_assignment_operator_definitions(
+            &mut out,
+            &constants,
+            &self.named_bindings,
+            &CfgAssignmentOperatorProfile {
+                suffix: "Deep".to_owned(),
+                explicit_values: None,
+                sample_cardinality: self.schema.deep_domain_cardinality,
+                domain_overrides: Some(&self.schema.deep_domain_overrides),
+                named_samples: &named_samples,
+                include_string_samples: false,
+            },
+        );
+        for witness in &self.schema.witnesses {
+            let witness_samples = collect_composition_witness_named_type_samples(
+                self.schema,
+                witness,
+                &self.machine_by_instance,
+            );
+            push_cfg_assignment_operator_definitions(
+                &mut out,
+                &constants,
+                &self.named_bindings,
+                &CfgAssignmentOperatorProfile {
+                    suffix: witness_cfg_operator_suffix(witness),
+                    explicit_values: None,
+                    sample_cardinality: self
+                        .schema
+                        .witness_domain_cardinality
+                        .max(max_named_sample_cardinality(&witness_samples)),
+                    domain_overrides: None,
+                    named_samples: &witness_samples,
+                    include_string_samples: true,
+                },
+            );
+        }
+        for (name, ty) in ordered_composite_domain_definitions(&constants) {
+            let definition = match ty {
+                TypeRef::Seq(inner) => render_sequence_domain_definition(inner),
+                TypeRef::Option(inner) => render_option_domain_definition(inner),
+                TypeRef::Map(key, value) => render_map_domain_definition(key, value),
+                _ => continue,
+            };
+            writeln!(&mut out, "{} == {}", name, definition).expect("write to string");
+        }
+        if constants.values().any(|ty| {
+            matches!(
+                ty,
+                TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+            )
+        }) {
+            pushln!(&mut out);
+        }
+        writeln!(
+            &mut out,
+            "MapLookup(map, key) == IF key \\in DOMAIN map THEN map[key] ELSE None"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "MapSet(map, key, value) == [x \\in DOMAIN map \\cup {{key}} |-> IF x = key THEN value ELSE map[x]]"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "MapIncrement(map, key, amount) == [x \\in DOMAIN map \\cup {{key}} |-> IF x = key THEN (IF key \\in DOMAIN map THEN map[key] ELSE 0) + amount ELSE map[x]]"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "MapDecrement(map, key, amount) == [x \\in DOMAIN map \\cup {{key}} |-> IF x = key THEN (IF key \\in DOMAIN map THEN map[key] ELSE 0) - amount ELSE map[x]]"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "MapRemove(map, key) == [x \\in DOMAIN map \\ {{key}} |-> map[x]]"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "StartsWith(seq, prefix) == /\\ Len(prefix) <= Len(seq) /\\ SubSeq(seq, 1, Len(prefix)) = prefix"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "SeqElements(seq) == {{seq[i] : i \\in 1..Len(seq)}}"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "Count(seq, value) == Cardinality({{i \\in DOMAIN seq : seq[i] = value}})"
+        )
+        .expect("write to string");
+        if self.schema.machines.iter().any(|instance| {
+            !self
+                .machine(instance.instance_id.as_str())
+                .tlc_representative_inputs
+                .is_empty()
+        }) {
+            writeln!(
+                &mut out,
+                "{TLC_REPRESENTATIVE_DOMAIN_HELPER}(values) == IF values = {{}} THEN {{}} ELSE {{CHOOSE value \\in values : TRUE}}"
+            )
+            .expect("write to string");
+        }
+        writeln!(
+            &mut out,
+            "RECURSIVE SeqRemove(_, _)\nSeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THEN Tail(seq) ELSE <<Head(seq)>> \\o SeqRemove(Tail(seq), value)"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "RECURSIVE SeqRemoveAll(_, _)\nSeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "AppendIfMissing(seq, value) == IF value \\in SeqElements(seq) THEN seq ELSE Append(seq, value)"
+        )
+        .expect("write to string");
+        self.render_static_sets(&mut out)?;
+
+        let all_vars = {
+            let mut v = machine_vars;
+            v.extend(obligation_vars.clone());
+            v.push("model_step_count".into());
+            v.push("pending_inputs".into());
+            v.push("observed_inputs".into());
+            v.push("pending_routes".into());
+            v.push("delivered_routes".into());
+            v.push("emitted_effects".into());
+            v.push("observed_transitions".into());
+            v.push("witness_current_script_input".into());
+            v.push("witness_remaining_script_inputs".into());
+            v
+        };
+        writeln!(&mut out, "VARIABLES {}", all_vars.join(", ")).expect("write to string");
+        writeln!(&mut out, "vars == << {} >>", all_vars.join(", ")).expect("write to string");
+        pushln!(&mut out);
+
+        // Named UNCHANGED frames are spliced back in here once the whole module
+        // body is rendered: the frames are discovered while rendering actions,
+        // but TLA requires an operator to be defined before it is referenced.
+        // This is the first point where every frame variable is in scope.
+        let unchanged_frame_anchor = out.len();
+
+        writeln!(
+            &mut out,
+            "RoutePackets == SeqElements(pending_routes) \\cup delivered_routes"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "PendingActors == {{ActorOfMachine(packet.machine) : packet \\in SeqElements(pending_inputs)}}"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "HigherPriorityReady(actor) == \\E priority \\in ActorPriorities : /\\ priority[2] = actor /\\ priority[1] \\in PendingActors"
+        )
+        .expect("write to string");
+        pushln!(&mut out);
+
+        pushln!(&mut out, "BaseInit ==");
+        for instance in &self.schema.machines {
+            let machine = self.machine(instance.instance_id.as_str());
+            writeln!(
+                &mut out,
+                "    /\\ {} = {}",
+                self.phase_var(instance.instance_id.as_str()),
+                tla_string(&machine.state.init.phase)
+            )
+            .expect("write to string");
+            for field in &machine.state.fields {
+                let init_expr = machine
+                    .state
+                    .init
+                    .fields
+                    .iter()
+                    .find(|item| item.field == field.name)
+                    .map(|item| {
+                        let compiler = MachineTlaCompiler::new_with_helper_prefix(
+                            machine,
+                            format!("{}__", tla_ident(&instance.instance_id)),
+                        )
+                        .with_phase_symbol(self.phase_var(instance.instance_id.as_str()))
+                        .with_field_env_override(
+                            self.machine_field_env(instance.instance_id.as_str()),
+                        );
+                        compiler.render_expr(&item.expr, &BTreeMap::new(), &BTreeMap::new())
+                    })
+                    .unwrap_or_else(|| default_state_init_expr(&field.ty));
+                writeln!(
+                    &mut out,
+                    "    /\\ {} = {}",
+                    self.field_var(instance.instance_id.as_str(), field.name.as_str()),
+                    init_expr
+                )
+                .expect("write to string");
+            }
+        }
+        for var in &obligation_vars {
+            pushln!(&mut out, "    /\\ {} = {{}}", var);
+        }
+        pushln!(&mut out, "    /\\ model_step_count = 0");
+        pushln!(&mut out, "    /\\ pending_routes = <<>>");
+        pushln!(&mut out, "    /\\ delivered_routes = {{}}");
+        pushln!(&mut out, "    /\\ emitted_effects = {{}}");
+        pushln!(&mut out, "    /\\ observed_transitions = {{}}");
+        pushln!(&mut out);
+
+        pushln!(&mut out, "Init ==");
+        pushln!(&mut out, "    /\\ BaseInit");
+        pushln!(&mut out, "    /\\ pending_inputs = <<>>");
+        pushln!(&mut out, "    /\\ observed_inputs = {{}}");
+        pushln!(&mut out, "    /\\ witness_current_script_input = None");
+        pushln!(&mut out, "    /\\ witness_remaining_script_inputs = <<>>");
+        pushln!(&mut out);
+
+        for witness in &self.schema.witnesses {
+            writeln!(
+                &mut out,
+                "{} ==",
+                composition_witness_init_name(&witness.name)
+            )
+            .expect("write to string");
+            writeln!(&mut out, "    /\\ BaseInit");
+            writeln!(
+                &mut out,
+                "    /\\ pending_inputs = {}",
+                self.witness_initial_pending_inputs_expr(witness)
+            )
+            .expect("write to string");
+            writeln!(
+                &mut out,
+                "    /\\ observed_inputs = {}",
+                self.witness_initial_observed_inputs_expr(witness)
+            )
+            .expect("write to string");
+            writeln!(
+                &mut out,
+                "    /\\ witness_current_script_input = {}",
+                self.witness_current_script_input_expr(witness)
+            )
+            .expect("write to string");
+            writeln!(
+                &mut out,
+                "    /\\ witness_remaining_script_inputs = {}",
+                self.witness_remaining_script_inputs_expr(witness)
+            )
+            .expect("write to string");
+            pushln!(&mut out);
+        }
+
+        for instance in &self.schema.machines {
+            let machine = self.machine(instance.instance_id.as_str());
+            let helper_prefix = format!("{}__", tla_ident(&instance.instance_id));
+            let mut compiler = MachineTlaCompiler::new_with_helper_prefix(machine, helper_prefix)
+                .with_phase_symbol(self.phase_var(instance.instance_id.as_str()))
+                .with_field_env_override(self.machine_field_env(instance.instance_id.as_str()));
+            for derived in helper_dependency_order(machine)? {
+                compiler.render_helper(&mut out, derived);
+                pushln!(&mut out);
+            }
+            if machine.machine.as_str() == "MobMachine" {
+                compiler.render_mob_machine_native_helpers(&mut out);
+                pushln!(&mut out);
+            }
+            if machine.machine.as_str() == "MeerkatMachine" {
+                compiler.render_meerkat_machine_native_helpers(&mut out);
+                pushln!(&mut out);
+            }
+            if machine.machine.as_str() == "RuntimeDeliveryMachine" {
+                compiler.render_runtime_delivery_native_helpers(&mut out);
+                pushln!(&mut out);
+            }
+
+            let mut rendered_actions = Vec::new();
+            for transition in &machine.transitions {
+                let mut action = String::new();
+                self.render_machine_transition_action(
+                    &mut compiler,
+                    instance.instance_id.as_str(),
+                    transition,
+                    &mut action,
+                )?;
+                rendered_actions.push(action);
+            }
+
+            for helper in &compiler.helper_defs {
+                pushln!(&mut out, "{helper}");
+                pushln!(&mut out);
+            }
+
+            for action in &rendered_actions {
+                pushln!(&mut out, "{action}");
+                pushln!(&mut out);
+            }
+
+            let invariant_field_env = self.machine_field_env(instance.instance_id.as_str());
+            let invariant_binding_env = BTreeMap::new();
+            let invariant_types = BTreeMap::new();
+            for invariant in &machine.invariants {
+                let invariant_name =
+                    self.machine_invariant_name(instance.instance_id.as_str(), &invariant.name);
+                machine_invariant_names.push(invariant_name.clone());
+                writeln!(
+                    &mut out,
+                    "{} == {}",
+                    invariant_name,
+                    compiler.render_expr_with_types(
+                        &invariant.expr,
+                        &invariant_field_env,
+                        &invariant_binding_env,
+                        &invariant_types
+                    )
+                )
+                .expect("write to string");
+            }
+            if !machine.invariants.is_empty() {
+                pushln!(&mut out);
+            }
+        }
+
+        self.render_entry_packet_admissibility_helpers(&mut out)?;
+        self.render_entry_input_actions(&mut out);
+        self.render_deliver_queued_route_action(&mut out);
+        self.render_reject_pending_entry_input_action(&mut out);
+        self.render_quiescent_stutter(&mut out);
+        self.render_witness_inject_actions(&mut out);
+        self.render_witness_completion_operators(&mut out);
+        self.render_witness_action_constraint_operators(&mut out);
+        self.render_witness_satisfied_stutter_actions(&mut out);
+        // TLA+ does not permit action references before their definitions.
+        // Owner-feedback actions participate in CoreNext and witness Next, so
+        // render them before either dispatcher is declared.
+        self.render_owner_actor_processes(&mut out)?;
+
+        let core_next_branches = self.core_next_branches();
+
+        pushln!(&mut out, "CoreNext ==");
+        for branch in &core_next_branches {
+            pushln!(&mut out, "    \\/ {branch}");
+        }
+        pushln!(&mut out);
+
+        let inject_branches = self
+            .schema
+            .entry_inputs
+            .iter()
+            .map(|entry_input| self.render_entry_input_call(entry_input))
+            .collect::<Vec<_>>();
+
+        pushln!(&mut out, "InjectNext ==");
+        if inject_branches.is_empty() {
+            pushln!(&mut out, "    FALSE");
+        } else {
+            for branch in &inject_branches {
+                pushln!(&mut out, "    \\/ {branch}");
+            }
+        }
+        pushln!(&mut out);
+
+        pushln!(&mut out, "Next ==");
+        pushln!(&mut out, "    \\/ CoreNext");
+        if !inject_branches.is_empty() {
+            pushln!(&mut out, "    \\/ InjectNext");
+        }
+        pushln!(&mut out);
+
+        for witness in &self.schema.witnesses {
+            let witness_branches = self.witness_next_branches(witness)?;
+            writeln!(
+                &mut out,
+                "{} ==",
+                composition_witness_next_name(&witness.name)
+            )
+            .expect("write to string");
+            for branch in &witness_branches {
+                pushln!(&mut out, "    \\/ {branch}");
+            }
+            writeln!(
+                &mut out,
+                "    \\/ {}",
+                self.render_witness_inject_next_call(witness)
+            )
+            .expect("write to string");
+            pushln!(&mut out);
+        }
+        pushln!(&mut out);
+
+        for invariant in &self.schema.invariants {
+            writeln!(
+                &mut out,
+                "{} == {}",
+                invariant.name,
+                render_composition_invariant_formula(self.schema, &invariant.kind)
+            )
+            .expect("write to string");
+        }
+        if !self.schema.invariants.is_empty() {
+            pushln!(&mut out);
+        }
+
+        self.render_obligation_invariants(&mut out, &mut machine_invariant_names)?;
+
+        self.render_coverage_instrumentation(&mut out);
+
+        writeln!(
+            &mut out,
+            "CiStateConstraint == {}",
+            render_composition_state_constraint(
+                self.schema,
+                self.schema
+                    .ci_limits
+                    .as_ref()
+                    .unwrap_or(&CompositionStateLimits::ci_defaults()),
+                self
+            )
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "DeepStateConstraint == {}",
+            render_composition_state_constraint(
+                self.schema,
+                &composition_deep_state_limits(self.schema),
+                self
+            )
+        )
+        .expect("write to string");
+        for witness in &self.schema.witnesses {
+            writeln!(
+                &mut out,
+                "{} == {}",
+                composition_witness_state_constraint_name(&witness.name),
+                render_composition_state_constraint(
+                    self.schema,
+                    &effective_composition_state_limits(&witness.state_limits, Some(witness)),
+                    self
+                )
+            )
+            .expect("write to string");
+        }
+        pushln!(&mut out);
+
+        pushln!(&mut out, "Spec ==");
+        pushln!(&mut out, "    /\\ Init");
+        pushln!(&mut out, "    /\\ [][Next]_vars");
+        pushln!(&mut out);
+
+        for witness in &self.schema.witnesses {
+            let fairness_clauses = self.witness_fairness_clauses(witness)?;
+            let fairness_chunk_names = fairness_clauses
+                .chunks(24)
+                .enumerate()
+                .map(|(index, chunk)| {
+                    let chunk_name = composition_witness_fairness_name(&witness.name, index);
+                    writeln!(&mut out, "{chunk_name} ==").expect("write to string");
+                    for clause in chunk {
+                        writeln!(&mut out, "    /\\ WF_vars({clause})").expect("write to string");
+                    }
+                    pushln!(&mut out);
+                    chunk_name
+                })
+                .collect::<Vec<_>>();
+
+            writeln!(
+                &mut out,
+                "{} ==",
+                composition_witness_spec_name(&witness.name),
+            )
+            .expect("write to string");
+            writeln!(
+                &mut out,
+                "    /\\ {}",
+                composition_witness_init_name(&witness.name),
+            )
+            .expect("write to string");
+            writeln!(
+                &mut out,
+                "    /\\ [] [{}]_vars",
+                composition_witness_next_name(&witness.name)
+            )
+            .expect("write to string");
+            for chunk_name in fairness_chunk_names {
+                writeln!(&mut out, "    /\\ {chunk_name}").expect("write to string");
+            }
+            pushln!(&mut out);
+        }
+        for witness in &self.schema.witnesses {
+            for route in &witness.expected_routes {
+                let formula = composition_route_observed_operator_name(route);
+                writeln!(
+                    &mut out,
+                    "{} == {}",
+                    composition_witness_route_property_name(&witness.name, route),
+                    self.render_witness_obligation_formula(witness, formula)
+                )
+                .expect("write to string");
+            }
+            for rule in &witness.expected_scheduler_rules {
+                let formula = composition_scheduler_triggered_operator_name(rule);
+                writeln!(
+                    &mut out,
+                    "{} == {}",
+                    composition_witness_scheduler_property_name(&witness.name, rule),
+                    self.render_witness_obligation_formula(witness, formula)
+                )
+                .expect("write to string");
+            }
+            for (idx, state) in witness.expected_states.iter().enumerate() {
+                let formula = self.render_witness_state_formula(state);
+                writeln!(
+                    &mut out,
+                    "{} == {}",
+                    composition_witness_state_property_name(&witness.name, idx),
+                    self.render_witness_obligation_formula(witness, formula)
+                )
+                .expect("write to string");
+            }
+            for transition in &witness.expected_transitions {
+                let formula = self.render_witness_transition_formula(transition);
+                writeln!(
+                    &mut out,
+                    "{} == {}",
+                    composition_witness_transition_property_name(
+                        &witness.name,
+                        &transition.machine,
+                        &transition.transition,
+                    ),
+                    self.render_witness_obligation_formula(witness, formula)
+                )
+                .expect("write to string");
+            }
+            for (idx, ordering) in witness.expected_transition_order.iter().enumerate() {
+                let formula = self.render_witness_transition_order_formula(ordering);
+                writeln!(
+                    &mut out,
+                    "{} == {}",
+                    composition_witness_transition_order_property_name(&witness.name, idx),
+                    self.render_witness_obligation_formula(witness, formula)
+                )
+                .expect("write to string");
+            }
+        }
+        if !self.schema.witnesses.is_empty() {
+            pushln!(&mut out);
+        }
+        for invariant in &self.schema.invariants {
+            pushln!(&mut out, "THEOREM Spec => []{}", invariant.name);
+        }
+        for invariant_name in &machine_invariant_names {
+            pushln!(&mut out, "THEOREM Spec => []{}", invariant_name);
+        }
+        pushln!(&mut out);
+        writeln!(
+            &mut out,
+            "============================================================================="
+        )
+        .expect("write to string");
+
+        // Fail closed on a frame-name collision: the rendered body already
+        // references one name for two different frames, so returning it would
+        // silently give an action the wrong frame condition.
+        let frames = self.unchanged_frames.borrow();
+        if let Some(collision) = frames.collision() {
+            return Err(CompositionTlaError::UnchangedFrameCollision {
+                composition: self.schema.name.as_str().to_owned(),
+                collision: collision.clone(),
+            });
+        }
+        out.insert_str(unchanged_frame_anchor, &frames.definitions_block());
+
+        Ok(out)
+    }
+
+    fn collect_binding_domains(&self) -> BTreeMap<String, TypeRef> {
+        collect_composition_binding_domains(self.schema, &self.machine_by_instance)
+    }
+
+    fn machine(&self, instance_id: impl AsRef<str>) -> &MachineSchema {
+        self.machine_by_instance
+            .get(instance_id.as_ref())
+            .copied()
+            .unwrap_or(self.fallback_machine)
+    }
+
+    fn actor(&self, instance_id: impl AsRef<str>) -> &str {
+        let instance_id = instance_id.as_ref();
+        self.schema
+            .machines
+            .iter()
+            .find(|machine| machine.instance_id.as_str() == instance_id)
+            .map(|machine| machine.actor.as_str())
+            .unwrap_or("")
+    }
+
+    fn phase_var(&self, instance_id: impl AsRef<str>) -> String {
+        format!("{}_phase", tla_ident(instance_id))
+    }
+
+    fn field_var(&self, instance_id: impl AsRef<str>, field: impl AsRef<str>) -> String {
+        format!("{}_{}", tla_ident(instance_id), tla_ident(field))
+    }
+
+    fn machine_invariant_name(
+        &self,
+        instance_id: impl AsRef<str>,
+        invariant: impl AsRef<str>,
+    ) -> String {
+        format!("{}_{}", tla_ident(instance_id), tla_ident(invariant))
+    }
+
+    fn machine_transition_name(
+        &self,
+        instance_id: impl AsRef<str>,
+        transition: &TransitionSchema,
+    ) -> String {
+        format!("{}_{}", tla_ident(instance_id), tla_ident(&transition.name))
+    }
+
+    fn machine_transition_call(&self, instance_id: &str, transition: &TransitionSchema) -> String {
+        if transition.on.bindings().is_empty() {
+            self.machine_transition_name(instance_id, transition)
+        } else {
+            let binding_types = transition_trigger_variant(self.machine(instance_id), transition)
+                .map(|variant| {
+                    variant
+                        .fields
+                        .iter()
+                        .filter(|field| {
+                            transition
+                                .on
+                                .bindings()
+                                .iter()
+                                .any(|binding| binding == &field.name)
+                        })
+                        .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .unwrap_or_default();
+            let forced_bool_literals = transition_forced_bool_literals(transition, &binding_types);
+            let mut prefix = String::new();
+            for binding in transition.on.bindings() {
+                if forced_bool_literals.contains_key(binding.as_str()) {
+                    continue;
+                }
+                let local = format!("arg_{}", tla_ident(binding.as_str()));
+                let Some(ty) = binding_types.get(binding.as_str()) else {
+                    return self.machine_transition_name(instance_id, transition);
+                };
+                let domain = self.binding_domain_for_binding(
+                    instance_id,
+                    trigger_input_variant(transition),
+                    binding.as_str(),
+                    ty,
+                );
+                let domain = if transition_uses_tlc_representative_payload(
+                    self.machine(instance_id),
+                    transition,
+                ) {
+                    tlc_representative_domain(domain)
+                } else {
+                    domain
+                };
+                push_fmt(&mut prefix, format_args!("\\E {local} \\in {domain} : "));
+            }
+            let args = transition
+                .on
+                .bindings()
+                .iter()
+                .map(|binding| {
+                    forced_bool_literals
+                        .get(binding.as_str())
+                        .map(|value| tla_bool_literal(*value).to_owned())
+                        .unwrap_or_else(|| format!("arg_{}", tla_ident(binding.as_str())))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{prefix}{}({args})",
+                self.machine_transition_name(instance_id, transition)
+            )
+        }
+    }
+
+    fn binding_domain_for_type(&self, ty: &TypeRef) -> String {
+        match ty {
+            TypeRef::Bool => "BOOLEAN".into(),
+            TypeRef::U32 | TypeRef::U64 => "0..2".into(),
+            TypeRef::String => "StringValues".into(),
+            TypeRef::Named(_)
+            | TypeRef::Enum(_)
+            | TypeRef::Seq(_)
+            | TypeRef::Set(_)
+            | TypeRef::Option(_)
+            | TypeRef::Map(_, _) => domain_constant_name(ty),
+        }
+    }
+
+    /// Payload domain for one bound field of `input` on `instance_id`: the
+    /// machine's declared input field domain if it has one, otherwise the
+    /// type's default domain.
+    fn binding_domain_for_binding(
+        &self,
+        instance_id: &str,
+        input: Option<&str>,
+        binding: &str,
+        ty: &TypeRef,
+    ) -> String {
+        let declared =
+            input.and_then(|input| self.machine(instance_id).input_field_domain(input, binding));
+        match declared {
+            Some(meerkat_machine_schema::InputFieldDomainKind::StateField(state_field)) => {
+                format!("{{{}}}", self.field_var(instance_id, state_field.as_str()))
+            }
+            Some(meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(values)) => {
+                additional_values_domain(&self.binding_domain_for_type(ty), values)
+            }
+            None => self.binding_domain_for_type(ty),
+        }
+    }
+
+    fn machine_vars(&self) -> Vec<String> {
+        let mut vars = Vec::new();
+        for instance in &self.schema.machines {
+            vars.push(self.phase_var(instance.instance_id.as_str()));
+            let machine = self.machine(instance.instance_id.as_str());
+            for field in &machine.state.fields {
+                vars.push(self.field_var(instance.instance_id.as_str(), field.name.as_str()));
+            }
+        }
+        vars
+    }
+
+    fn machine_field_env(&self, instance_id: &str) -> BTreeMap<String, String> {
+        let machine = self.machine(instance_id);
+        machine
+            .state
+            .fields
+            .iter()
+            .map(|field| {
+                (
+                    field.name.as_str().to_owned(),
+                    self.field_var(instance_id, field.name.as_str()),
+                )
+            })
+            .collect()
+    }
+
+    fn obligation_symbol_suffix(
+        &self,
+        protocol: &meerkat_machine_schema::EffectHandoffProtocol,
+    ) -> String {
+        format!(
+            "{}_{}",
+            tla_ident(&protocol.producer_instance),
+            tla_ident(&protocol.name)
+        )
+    }
+
+    fn obligation_var(&self, protocol: &meerkat_machine_schema::EffectHandoffProtocol) -> String {
+        format!("obligation_{}", self.obligation_symbol_suffix(protocol))
+    }
+
+    /// Returns TLA+ variable names for obligation tracking — one per
+    /// concrete producer/protocol pair.
+    fn obligation_vars(&self) -> Vec<String> {
+        self.schema
+            .handoff_protocols
+            .iter()
+            .map(|protocol| self.obligation_var(protocol))
+            .collect()
+    }
+
+    fn feedback_variant(
+        &self,
+        feedback: &FeedbackInputRef,
+    ) -> std::result::Result<&VariantSchema, String> {
+        self.machine(&feedback.machine_instance)
+            .inputs
+            .variant_named(&feedback.input_variant)
+            .map_err(|_| {
+                format!(
+                    "feedback variant `{}` not found for machine `{}`",
+                    feedback.input_variant, feedback.machine_instance
+                )
+            })
+    }
+
+    /// The feedback input's payload record, the quantifiers over the values it
+    /// leaves open, and the obligation members it names. An `ObligationMember`
+    /// value ranges over that set field of the obligation token, so the owner
+    /// can only name a member the obligation actually carries.
+    fn feedback_payload_expr(
+        &self,
+        feedback: &FeedbackInputRef,
+        token_var: &str,
+    ) -> std::result::Result<FeedbackPayload, String> {
+        let variant = self.feedback_variant(feedback)?;
+        let mut owner_context_quantifiers = Vec::new();
+        let mut payload_fields = Vec::new();
+        let mut members = Vec::new();
+
+        for field in &variant.fields {
+            let binding = feedback
+                .field_bindings
+                .iter()
+                .find(|binding| binding.input_field == field.name)
+                .ok_or_else(|| format!("feedback binding for field `{}` not found", field.name))?;
+            let expr = match &binding.source {
+                FeedbackFieldSource::ObligationField(source_field) => {
+                    format!("{token_var}.{}", tla_ident(source_field))
+                }
+                FeedbackFieldSource::ObligationMember(source_field) => {
+                    let var_name = format!("member_{}", tla_ident(source_field));
+                    owner_context_quantifiers.push(format!(
+                        "{var_name} \\in {token_var}.{}",
+                        tla_ident(source_field)
+                    ));
+                    members.push((tla_ident(source_field), var_name.clone()));
+                    var_name
+                }
+                FeedbackFieldSource::OwnerContext(name) => {
+                    let var_name = format!("owner_ctx_{}", tla_ident(name));
+                    let domain = render_type_domain_expr(&field.ty);
+                    owner_context_quantifiers.push(format!("{var_name} \\in {domain}"));
+                    var_name
+                }
+            };
+            payload_fields.push(format!("{} |-> {}", tla_ident(&field.name), expr));
+        }
+
+        let payload_expr = if payload_fields.is_empty() {
+            "[tag |-> \"unit\"]".to_string()
+        } else {
+            format!("[{}]", payload_fields.join(", "))
+        };
+
+        Ok(FeedbackPayload {
+            payload_expr,
+            quantifiers: owner_context_quantifiers,
+            members,
+        })
+    }
+
+    /// Obligation fields some feedback input of `protocol` names members of.
+    /// The obligation token stays open while any of them is non-empty.
+    fn protocol_member_fields(
+        protocol: &meerkat_machine_schema::EffectHandoffProtocol,
+    ) -> BTreeSet<String> {
+        protocol
+            .allowed_feedback_inputs
+            .iter()
+            .flat_map(|feedback| feedback.field_bindings.iter())
+            .filter_map(|binding| match &binding.source {
+                FeedbackFieldSource::ObligationMember(field) => Some(tla_ident(field)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Renders obligation closure invariants into the TLA+ output.
+    ///
+    /// For each handoff protocol, generates:
+    /// - `NoOpenObligationsOnTerminal_<protocol>`: when the producer machine is
+    ///   in a terminal phase, the obligation set must be empty.
+    /// - `NoFeedbackWithoutObligation_<protocol>`: a feedback input can only be
+    ///   observed if there's a corresponding outstanding obligation.
+    fn render_obligation_invariants(
+        &self,
+        out: &mut String,
+        invariant_names: &mut Vec<String>,
+    ) -> std::result::Result<(), String> {
+        for protocol in &self.schema.handoff_protocols {
+            let suffix = self.obligation_symbol_suffix(protocol);
+            let var = self.obligation_var(protocol);
+            let phase_var = self.phase_var(&protocol.producer_instance);
+
+            // Find terminal phases for the producer machine.
+            let machine = self.machine(&protocol.producer_instance);
+            let terminal_phases: Vec<&str> = machine
+                .state
+                .terminal_phases
+                .iter()
+                .map(meerkat_machine_schema::identity::PhaseId::as_str)
+                .collect();
+
+            // NoOpenObligationsOnTerminal: terminal phase => obligation set is
+            // empty. Only an AckRequired protocol needs owner feedback to close
+            // its obligations; under AckOrAbort and TerminalClosure the terminal
+            // phase is itself the closure, and a PublicationOnly protocol has no
+            // feedback (the publication closes it), so for those the invariant
+            // would be unsatisfiable once the producer reaches a terminal phase.
+            if terminal_closure_required(protocol, machine) {
+                let inv_name = format!("NoOpenObligationsOnTerminal_{}", suffix);
+                let terminal_disjuncts: Vec<String> = terminal_phases
+                    .iter()
+                    .map(|phase| format!("{} = {}", phase_var, tla_string(phase)))
+                    .collect();
+                writeln!(
+                    out,
+                    "{} == ({}) => {} = {{}}",
+                    inv_name,
+                    terminal_disjuncts.join(" \\/ "),
+                    var
+                )
+                .expect("write to string");
+                invariant_names.push(inv_name);
+            }
+        }
+
+        let owner_feedback_sources = self
+            .schema
+            .handoff_protocols
+            .iter()
+            .flat_map(|protocol| {
+                protocol.allowed_feedback_inputs.iter().map(move |feedback| {
+                    format!(
+                        "(/\\ input_packet.machine = {} /\\ input_packet.variant = {} /\\ input_packet.source_machine = {} /\\ input_packet.source_effect = {} /\\ \\E effect_packet \\in emitted_effects : /\\ effect_packet.machine = {} /\\ effect_packet.variant = {} /\\ effect_packet.effect_id = input_packet.effect_id)",
+                        tla_string(&feedback.machine_instance),
+                        tla_string(&feedback.input_variant),
+                        tla_string(&protocol.producer_instance),
+                        tla_string(&protocol.effect_variant),
+                        tla_string(&protocol.producer_instance),
+                        tla_string(&protocol.effect_variant),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if !owner_feedback_sources.is_empty() {
+            pushln!(out, "OwnerFeedbackHasProtocolProvenance ==");
+            pushln!(out, "    \\A input_packet \\in observed_inputs :");
+            pushln!(out, "        input_packet.source_kind /= \"owner\"");
+            writeln!(
+                out,
+                "        \\/ ({})",
+                owner_feedback_sources.join(" \\/ ")
+            )
+            .expect("write to string");
+            invariant_names.push("OwnerFeedbackHasProtocolProvenance".to_string());
+        }
+
+        if !self.schema.handoff_protocols.is_empty() {
+            pushln!(out);
+        }
+        Ok(())
+    }
+
+    /// Renders owner-actor process definitions: nondeterministic actions that
+    /// model the owner choosing to submit protocol-allowed feedback when an
+    /// obligation is outstanding.
+    ///
+    /// Each allowed feedback input generates an
+    /// `OwnerFeedback_<protocol>_<input>` action that:
+    /// - Is enabled when the obligation set is non-empty
+    /// - Nondeterministically picks one of the allowed feedback inputs
+    /// - Removes one obligation token from the set
+    /// - Injects the feedback as a pending input
+    ///
+    /// If any protocols have `liveness_annotation`, fairness comments are added.
+    fn render_owner_actor_processes(&self, out: &mut String) -> std::result::Result<(), String> {
+        for protocol in &self.schema.handoff_protocols {
+            let var = self.obligation_var(protocol);
+
+            if protocol.allowed_feedback_inputs.is_empty() {
+                continue;
+            }
+
+            if let Some(liveness) = &protocol.liveness_annotation {
+                writeln!(out, "\\* Liveness: {liveness}").expect("write to string");
+            }
+
+            for feedback in &protocol.allowed_feedback_inputs {
+                let action_name = self.owner_feedback_action_name(protocol, feedback);
+                let FeedbackPayload {
+                    payload_expr,
+                    quantifiers: owner_context_quantifiers,
+                    members,
+                } = self.feedback_payload_expr(feedback, "token")?;
+                let input_expr = format!(
+                    "[machine |-> {}, variant |-> {}, source_kind |-> \"owner\", source_machine |-> {}, source_effect |-> {}, source_route |-> \"none\", effect_id |-> token.effect_id, payload |-> {}]",
+                    tla_string(&feedback.machine_instance),
+                    tla_string(&feedback.input_variant),
+                    tla_string(&protocol.producer_instance),
+                    tla_string(&protocol.effect_variant),
+                    payload_expr,
+                );
+
+                writeln!(out, "{action_name} ==").expect("write to string");
+                writeln!(out, "    /\\ {} /= {{}}", var).expect("write to string");
+                writeln!(out, "    /\\ \\E token \\in {} :", var).expect("write to string");
+                let quantifier_prefix = if owner_context_quantifiers.is_empty() {
+                    String::new()
+                } else {
+                    format!("\\E {} : ", owner_context_quantifiers.join(", "))
+                };
+                // Feedback naming obligation members discharges only those
+                // members; the token closes once every member-bearing field of
+                // the protocol is empty. Other feedback closes the token.
+                let obligation_update = if members.is_empty() {
+                    format!("{var}' = {var} \\ {{token}}")
+                } else {
+                    let residual = format!(
+                        "[token EXCEPT {}]",
+                        members
+                            .iter()
+                            .map(|(field, member)| format!("!.{field} = @ \\ {{{member}}}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    let drained = Self::protocol_member_fields(protocol)
+                        .iter()
+                        .map(|field| format!("{residual}.{field} = {{}}"))
+                        .collect::<Vec<_>>()
+                        .join(" /\\ ");
+                    // Parenthesised: an unbracketed ELSE would swallow the
+                    // conjuncts that follow it in the action.
+                    format!(
+                        "{var}' = (IF {drained} THEN {var} \\ {{token}} ELSE ({var} \\ {{token}}) \\cup {{{residual}}})"
+                    )
+                };
+                writeln!(
+                    out,
+                    "        /\\ {quantifier_prefix}(/\\ pending_inputs' = Append(pending_inputs, {input_expr}) /\\ observed_inputs' = observed_inputs \\cup {{{input_expr}}} /\\ {obligation_update} /\\ model_step_count' = model_step_count + 1)"
+                )
+                .expect("write to string");
+
+                let unchanged_vars: Vec<String> = self
+                    .machine_vars()
+                    .into_iter()
+                    .chain(self.obligation_vars().into_iter().filter(|v| *v != var))
+                    .chain(
+                        [
+                            "pending_routes",
+                            "delivered_routes",
+                            "emitted_effects",
+                            "observed_transitions",
+                            "witness_current_script_input",
+                            "witness_remaining_script_inputs",
+                        ]
+                        .iter()
+                        .map(std::string::ToString::to_string),
+                    )
+                    .collect();
+                self.render_unchanged_vars(out, "    /\\ ", &unchanged_vars);
+                pushln!(out);
+            }
+        }
+        Ok(())
+    }
+
+    fn render_coverage_instrumentation(&self, out: &mut String) {
+        let route_ops = self
+            .schema
+            .routes
+            .iter()
+            .map(|route| composition_route_coverage_operator_name(&route.name))
+            .collect::<Vec<_>>();
+        let scheduler_ops = self
+            .schema
+            .scheduler_rules
+            .iter()
+            .map(composition_scheduler_coverage_operator_name)
+            .collect::<Vec<_>>();
+
+        for route in &self.schema.routes {
+            writeln!(
+                out,
+                "{} == \\E packet \\in delivered_routes : packet.route = {}",
+                composition_route_observed_operator_name(&route.name),
+                tla_string(&route.name)
+            )
+            .expect("write to string");
+            writeln!(
+                out,
+                "{} == ({} \\/ ~{})",
+                composition_route_coverage_operator_name(&route.name),
+                composition_route_observed_operator_name(&route.name),
+                composition_route_observed_operator_name(&route.name)
+            )
+            .expect("write to string");
+        }
+        for rule in &self.schema.scheduler_rules {
+            writeln!(
+                out,
+                "{} == {}",
+                composition_scheduler_triggered_operator_name(rule),
+                render_scheduler_trigger_formula(rule)
+            )
+            .expect("write to string");
+            writeln!(
+                out,
+                "{} == ({} \\/ ~{})",
+                composition_scheduler_coverage_operator_name(rule),
+                composition_scheduler_triggered_operator_name(rule),
+                composition_scheduler_triggered_operator_name(rule)
+            )
+            .expect("write to string");
+        }
+
+        let mut instrumentation_terms = Vec::new();
+        instrumentation_terms.extend(route_ops.into_iter());
+        instrumentation_terms.extend(scheduler_ops.into_iter());
+
+        let instrumentation = if instrumentation_terms.is_empty() {
+            "TRUE".to_string()
+        } else {
+            instrumentation_terms.join(" /\\ ")
+        };
+
+        pushln!(out, "CoverageInstrumentation == {instrumentation}");
+        pushln!(out);
+    }
+
+    /// Fail-closed resolution check for every route in the composition.
+    ///
+    /// Confirms that each route's `from_machine` and `to.machine` is a declared
+    /// machine instance, that `effect_variant` is a declared effect on the
+    /// source machine, and that `to.input_variant` is a declared input/signal
+    /// (per `to.kind`) on the target machine. The composition CASE builders
+    /// (`ActorOfMachine`, `RouteSource`, `RouteEffect`, `RouteTargetMachine`,
+    /// `RouteTargetInput`) used to map an unresolved component to a sentinel
+    /// (`"unknown_*"`) default; with this gate run first, those sentinels are
+    /// unreachable-by-construction for valid input, and malformed input fails
+    /// closed instead of silently emitting a broken model.
+    fn validate_routes(&self) -> std::result::Result<(), CompositionTlaError> {
+        let composition = self.schema.name.as_str();
+        for route in &self.schema.routes {
+            let route_name = route.name.as_str();
+
+            // Source machine instance must be declared.
+            let source = self
+                .machine_by_instance
+                .get(route.from_machine.as_str())
+                .copied()
+                .ok_or_else(|| CompositionTlaError::UnknownRouteSourceMachine {
+                    composition: composition.to_owned(),
+                    route: route_name.to_owned(),
+                    machine: route.from_machine.as_str().to_owned(),
+                })?;
+
+            // Effect variant must be declared on the source machine.
+            if source
+                .effects
+                .variant_named(route.effect_variant.as_str())
+                .is_err()
+            {
+                return Err(CompositionTlaError::UnknownRouteEffect {
+                    composition: composition.to_owned(),
+                    route: route_name.to_owned(),
+                    machine: route.from_machine.as_str().to_owned(),
+                    effect: route.effect_variant.as_str().to_owned(),
+                });
+            }
+
+            // Target machine instance must be declared.
+            let target = self
+                .machine_by_instance
+                .get(route.to.machine.as_str())
+                .copied()
+                .ok_or_else(|| CompositionTlaError::UnknownRouteTargetMachine {
+                    composition: composition.to_owned(),
+                    route: route_name.to_owned(),
+                    machine: route.to.machine.as_str().to_owned(),
+                })?;
+
+            // Target input/signal variant must be declared on the target
+            // machine, dispatching on the route's structural kind.
+            match route.to.kind {
+                RouteTargetKind::Input => {
+                    if target
+                        .inputs
+                        .variant_named(route.to.input_variant.as_str())
+                        .is_err()
+                    {
+                        return Err(CompositionTlaError::UnknownRouteTargetInput {
+                            composition: composition.to_owned(),
+                            route: route_name.to_owned(),
+                            machine: route.to.machine.as_str().to_owned(),
+                            input: route.to.input_variant.as_str().to_owned(),
+                        });
+                    }
+                }
+                RouteTargetKind::Signal => {
+                    if target
+                        .signals
+                        .variant_named(route.to.input_variant.as_str())
+                        .is_err()
+                    {
+                        return Err(CompositionTlaError::UnknownRouteTargetSignal {
+                            composition: composition.to_owned(),
+                            route: route_name.to_owned(),
+                            machine: route.to.machine.as_str().to_owned(),
+                            signal: route.to.input_variant.as_str().to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn render_static_sets(&self, out: &mut String) -> std::result::Result<(), CompositionTlaError> {
+        pushln!(out, "Machines == {{");
+        for (idx, machine) in self.schema.machines.iter().enumerate() {
+            let suffix = if idx + 1 == self.schema.machines.len() {
+                ""
+            } else {
+                ","
+            };
+            writeln!(
+                out,
+                "    <<{}, {}, {}>>{}",
+                tla_string(&machine.instance_id),
+                tla_string(&machine.machine_name),
+                tla_string(&machine.actor),
+                suffix
+            )
+            .expect("write to string");
+        }
+        pushln!(out, "}}");
+        pushln!(out);
+
+        pushln!(out, "RouteNames == {{");
+        for (idx, route) in self.schema.routes.iter().enumerate() {
+            let suffix = if idx + 1 == self.schema.routes.len() {
+                ""
+            } else {
+                ","
+            };
+            pushln!(out, "    {}{}", tla_string(&route.name), suffix);
+        }
+        pushln!(out, "}}");
+        pushln!(out);
+
+        pushln!(out, "Actors == {{");
+        for (idx, machine) in self.schema.machines.iter().enumerate() {
+            let suffix = if idx + 1 == self.schema.machines.len() {
+                ""
+            } else {
+                ","
+            };
+            pushln!(out, "    {}{}", tla_string(&machine.actor), suffix);
+        }
+        pushln!(out, "}}");
+        pushln!(out);
+
+        pushln!(out, "ActorPriorities == {{");
+        for (idx, priority) in self.schema.actor_priorities.iter().enumerate() {
+            let suffix = if idx + 1 == self.schema.actor_priorities.len() {
+                ""
+            } else {
+                ","
+            };
+            writeln!(
+                out,
+                "    <<{}, {}>>{}",
+                tla_string(&priority.higher),
+                tla_string(&priority.lower),
+                suffix
+            )
+            .expect("write to string");
+        }
+        pushln!(out, "}}");
+        pushln!(out);
+
+        pushln!(out, "SchedulerRules == {{");
+        for (idx, rule) in self.schema.scheduler_rules.iter().enumerate() {
+            let suffix = if idx + 1 == self.schema.scheduler_rules.len() {
+                ""
+            } else {
+                ","
+            };
+            pushln!(out, "    {}{}", render_scheduler_rule_tuple(rule), suffix);
+        }
+        writeln!(out, "}}");
+        pushln!(out);
+
+        let composition_name = self.schema.name.as_str();
+        render_composition_case_fn(
+            out,
+            composition_name,
+            "ActorOfMachine",
+            "machine_id",
+            self.schema
+                .machines
+                .iter()
+                .map(|machine| (machine.instance_id.as_str(), tla_string(&machine.actor)))
+                .collect(),
+            CaseDefault::FailClosed {
+                component: "actor",
+                require_mapping: true,
+            },
+        )?;
+        render_composition_case_fn(
+            out,
+            composition_name,
+            "RouteSource",
+            "route_name",
+            self.schema
+                .routes
+                .iter()
+                .map(|route| (route.name.as_str(), tla_string(&route.from_machine)))
+                .collect(),
+            CaseDefault::FailClosed {
+                component: "route_source_machine",
+                require_mapping: false,
+            },
+        )?;
+        render_composition_case_fn(
+            out,
+            composition_name,
+            "RouteEffect",
+            "route_name",
+            self.schema
+                .routes
+                .iter()
+                .map(|route| (route.name.as_str(), tla_string(&route.effect_variant)))
+                .collect(),
+            CaseDefault::FailClosed {
+                component: "route_effect",
+                require_mapping: false,
+            },
+        )?;
+        render_composition_case_fn(
+            out,
+            composition_name,
+            "RouteTargetMachine",
+            "route_name",
+            self.schema
+                .routes
+                .iter()
+                .map(|route| (route.name.as_str(), tla_string(&route.to.machine)))
+                .collect(),
+            CaseDefault::FailClosed {
+                component: "route_target_machine",
+                require_mapping: false,
+            },
+        )?;
+        render_composition_case_fn(
+            out,
+            composition_name,
+            "RouteTargetInput",
+            "route_name",
+            self.schema
+                .routes
+                .iter()
+                .map(|route| (route.name.as_str(), tla_string(&route.to.input_variant)))
+                .collect(),
+            CaseDefault::FailClosed {
+                component: "route_target_input",
+                require_mapping: false,
+            },
+        )?;
+        render_composition_case_fn(
+            out,
+            composition_name,
+            "RouteTargetKind",
+            "route_name",
+            self.schema
+                .routes
+                .iter()
+                .map(|route| {
+                    (
+                        route.name.as_str(),
+                        tla_string(match route.to.kind {
+                            RouteTargetKind::Input => "Input",
+                            RouteTargetKind::Signal => "Signal",
+                        }),
+                    )
+                })
+                .collect(),
+            CaseDefault::ClosedEnum(tla_string("Unknown")),
+        )?;
+        render_composition_case_fn(
+            out,
+            composition_name,
+            "RouteDeliveryKind",
+            "route_name",
+            self.schema
+                .routes
+                .iter()
+                .map(|route| {
+                    (
+                        route.name.as_str(),
+                        tla_string(match route.delivery {
+                            RouteDelivery::Immediate => "Immediate",
+                            RouteDelivery::Enqueue => "Enqueue",
+                        }),
+                    )
+                })
+                .collect(),
+            CaseDefault::ClosedEnum(tla_string("Unknown")),
+        )?;
+        writeln!(
+            out,
+            "RouteTargetActor(route_name) == ActorOfMachine(RouteTargetMachine(route_name))"
+        );
+        pushln!(out);
+        Ok(())
+    }
+
+    fn render_entry_input_actions(&self, out: &mut String) {
+        for entry_input in &self.schema.entry_inputs {
+            let machine = self.machine(entry_input.machine.as_str());
+            let Ok(variant) = machine.inputs.variant_named(&entry_input.input_variant) else {
+                continue;
+            };
+            let action_name = self.entry_input_action_name(entry_input);
+            let params = variant
+                .fields
+                .iter()
+                .map(|field| format!("arg_{}", tla_ident(&field.name)))
+                .collect::<Vec<_>>();
+            let packet_expr = self.input_packet_expr(
+                entry_input.machine.as_str(),
+                &entry_input.input_variant,
+                &variant
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        (
+                            field.name.as_str().to_owned(),
+                            format!("arg_{}", tla_ident(&field.name)),
+                        )
+                    })
+                    .collect::<BTreeMap<String, _>>(),
+                "entry",
+                &entry_input.name,
+                "external_entry",
+                &entry_input.input_variant,
+                "0",
+            );
+
+            if params.is_empty() {
+                pushln!(out, "{} ==", action_name);
+            } else {
+                pushln!(out, "{}({}) ==", action_name, params.join(", "));
+            }
+            writeln!(
+                out,
+                "    /\\ ~({} \\in SeqElements(pending_inputs))",
+                packet_expr
+            )
+            .expect("write to string");
+            writeln!(out, "    /\\ EntryPacketAdmissible({packet_expr})").expect("write to string");
+            writeln!(
+                out,
+                "    /\\ pending_inputs' = Append(pending_inputs, {})",
+                packet_expr
+            )
+            .expect("write to string");
+            writeln!(
+                out,
+                "    /\\ observed_inputs' = observed_inputs \\cup {{{}}}",
+                packet_expr
+            )
+            .expect("write to string");
+            writeln!(out, "    /\\ model_step_count' = model_step_count + 1")
+                .expect("write to string");
+            {
+                let mut unchanged = self.machine_vars();
+                unchanged.extend(self.obligation_vars());
+                unchanged.extend([
+                    "pending_routes".into(),
+                    "delivered_routes".into(),
+                    "emitted_effects".into(),
+                    "observed_transitions".into(),
+                    "witness_current_script_input".into(),
+                    "witness_remaining_script_inputs".into(),
+                ]);
+                self.render_unchanged_vars(out, "    /\\ ", &unchanged);
+            }
+            pushln!(out);
+        }
+    }
+
+    fn render_entry_input_call(&self, entry_input: &EntryInput) -> String {
+        let machine = self.machine(entry_input.machine.as_str());
+        let Ok(variant) = machine.inputs.variant_named(&entry_input.input_variant) else {
+            return self.entry_input_action_name(entry_input);
+        };
+        let action_name = self.entry_input_action_name(entry_input);
+        if variant.fields.is_empty() {
+            action_name
+        } else {
+            let prefix = variant
+                .fields
+                .iter()
+                .map(|field| {
+                    let local = format!("arg_{}", tla_ident(&field.name));
+                    let domain = self.binding_domain_for_type(&field.ty);
+                    format!("\\E {local} \\in {domain} : ")
+                })
+                .collect::<String>();
+            let args = variant
+                .fields
+                .iter()
+                .map(|field| format!("arg_{}", tla_ident(&field.name)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{prefix}{action_name}({args})")
+        }
+    }
+
+    fn render_deliver_queued_route_action(&self, out: &mut String) {
+        writeln!(out, "DeliverQueuedRoute ==");
+        pushln!(out, "    /\\ Len(pending_routes) > 0");
+        pushln!(out, "    /\\ LET route == Head(pending_routes) IN");
+        pushln!(out, "       /\\ pending_routes' = Tail(pending_routes)");
+        writeln!(
+            out,
+            "       /\\ delivered_routes' = delivered_routes \\cup {{route}}"
+        )
+        .expect("write to string");
+        writeln!(out, "       /\\ model_step_count' = model_step_count + 1")
+            .expect("write to string");
+        writeln!(
+            out,
+            "       /\\ pending_inputs' = AppendIfMissing(pending_inputs, [machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> \"route\", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id])"
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "       /\\ observed_inputs' = observed_inputs \\cup {{[machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> \"route\", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id]}}"
+        )
+        .expect("write to string");
+        {
+            let mut unchanged = self.machine_vars();
+            unchanged.extend(self.obligation_vars());
+            unchanged.extend([
+                "emitted_effects".into(),
+                "observed_transitions".into(),
+                "witness_current_script_input".into(),
+                "witness_remaining_script_inputs".into(),
+            ]);
+            self.render_unchanged_vars(out, "       /\\ ", &unchanged);
+        }
+        pushln!(out);
+    }
+
+    fn entry_packet_admissibility_name(&self, instance_id: &str) -> String {
+        format!("EntryPacketAdmissible_{}", tla_ident(instance_id))
+    }
+
+    fn render_entry_packet_admissibility_helpers(
+        &self,
+        out: &mut String,
+    ) -> std::result::Result<(), CompositionTlaError> {
+        if self.schema.entry_inputs.is_empty()
+            && !self
+                .schema
+                .witnesses
+                .iter()
+                .any(|witness| !witness.preload_inputs.is_empty())
+        {
+            return Ok(());
+        }
+
+        for instance in &self.schema.machines {
+            let machine = self.machine(instance.instance_id.as_str());
+            let helper_prefix = format!("{}__entry_packet__", tla_ident(&instance.instance_id));
+            let mut compiler = MachineTlaCompiler::new_with_helper_prefix(machine, helper_prefix)
+                .with_phase_symbol(self.phase_var(instance.instance_id.as_str()))
+                .with_field_env_override(self.machine_field_env(instance.instance_id.as_str()));
+
+            for derived in helper_dependency_order(machine)? {
+                compiler.render_helper(out, derived);
+                pushln!(out);
+            }
+            if machine.machine.as_str() == "MobMachine" {
+                compiler.render_mob_machine_native_helpers(out);
+                pushln!(out);
+            }
+            if machine.machine.as_str() == "MeerkatMachine" {
+                compiler.render_meerkat_machine_native_helpers(out);
+                pushln!(out);
+            }
+            if machine.machine.as_str() == "RuntimeDeliveryMachine" {
+                compiler.render_runtime_delivery_native_helpers(out);
+                pushln!(out);
+            }
+
+            let branches = machine
+                .transitions
+                .iter()
+                .map(|transition| {
+                    self.render_machine_packet_admissibility_branch(
+                        &mut compiler,
+                        instance.instance_id.as_str(),
+                        transition,
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            for helper in &compiler.helper_defs {
+                pushln!(out, "{helper}");
+                pushln!(out);
+            }
+
+            writeln!(
+                out,
+                "{}(packet) ==",
+                self.entry_packet_admissibility_name(instance.instance_id.as_str())
+            )
+            .expect("write to string");
+            if branches.is_empty() {
+                pushln!(out, "    FALSE");
+            } else {
+                for branch in &branches {
+                    pushln!(out, "    \\/ {branch}");
+                }
+            }
+            pushln!(out);
+        }
+
+        writeln!(out, "EntryPacketAdmissible(packet) ==").expect("write to string");
+        pushln!(out, "    CASE");
+        for (idx, instance) in self.schema.machines.iter().enumerate() {
+            let prefix = if idx == 0 { "      " } else { "      [] " };
+            writeln!(
+                out,
+                "{}packet.machine = {} -> {}(packet)",
+                prefix,
+                tla_string(&instance.instance_id),
+                self.entry_packet_admissibility_name(instance.instance_id.as_str())
+            )
+            .expect("write to string");
+        }
+        pushln!(out, "      [] OTHER -> FALSE");
+        pushln!(out);
+        Ok(())
+    }
+
+    fn render_machine_packet_admissibility_branch(
+        &self,
+        compiler: &mut MachineTlaCompiler<'_>,
+        instance_id: &str,
+        transition: &TransitionSchema,
+    ) -> String {
+        let phase_var = self.phase_var(instance_id);
+        let from_guard = if transition.from.len() == 1 {
+            format!("{phase_var} = {}", tla_string(&transition.from[0]))
+        } else {
+            transition
+                .from
+                .iter()
+                .map(|phase| format!("{phase_var} = {}", tla_string(phase)))
+                .collect::<Vec<_>>()
+                .join(" \\/ ")
+        };
+
+        let binding_types = compiler.binding_type_map(transition);
+        let binding_env = transition
+            .on
+            .bindings()
+            .iter()
+            .map(|binding| {
+                (
+                    binding.as_str().to_owned(),
+                    format!("packet.payload.{}", tla_ident(binding)),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let field_env = self.machine_field_env(instance_id);
+
+        let mut clauses = vec![
+            format!(
+                "packet.variant = {}",
+                tla_string(transition.on.variant_str())
+            ),
+            from_guard,
+        ];
+        clauses.extend(
+            transition.guards.iter().map(|guard| {
+                compiler.render_guard(guard, &field_env, &binding_env, &binding_types)
+            }),
+        );
+
+        format!(
+            "/\\ {}",
+            clauses
+                .into_iter()
+                .map(|clause| format!("({clause})"))
+                .collect::<Vec<_>>()
+                .join(" /\\ ")
+        )
+    }
+
+    fn render_reject_pending_entry_input_action(&self, out: &mut String) {
+        if self.schema.entry_inputs.is_empty() {
+            return;
+        }
+
+        writeln!(out, "RejectPendingEntryInput ==").expect("write to string");
+        pushln!(out, "    /\\ \\E packet \\in SeqElements(pending_inputs) :");
+        pushln!(out, "       /\\ packet.source_kind = \"entry\"");
+        pushln!(out, "       /\\ ~EntryPacketAdmissible(packet)");
+        pushln!(
+            out,
+            "       /\\ pending_inputs' = SeqRemove(pending_inputs, packet)"
+        );
+        pushln!(out, "       /\\ observed_inputs' = observed_inputs");
+        pushln!(out, "       /\\ pending_routes' = pending_routes");
+        pushln!(out, "       /\\ delivered_routes' = delivered_routes");
+        pushln!(out, "       /\\ emitted_effects' = emitted_effects");
+        pushln!(
+            out,
+            "       /\\ observed_transitions' = observed_transitions"
+        );
+        writeln!(out, "       /\\ model_step_count' = model_step_count + 1")
+            .expect("write to string");
+        let mut unchanged = self.machine_vars();
+        unchanged.extend(self.obligation_vars());
+        unchanged.extend([
+            "witness_current_script_input".into(),
+            "witness_remaining_script_inputs".into(),
+        ]);
+        self.render_unchanged_vars(out, "       /\\ ", &unchanged);
+        pushln!(out);
+    }
+
+    fn render_quiescent_stutter(&self, out: &mut String) {
+        writeln!(out, "QuiescentStutter ==");
+        pushln!(out, "    /\\ Len(pending_routes) = 0");
+        pushln!(out, "    /\\ Len(pending_inputs) = 0");
+        pushln!(out, "    /\\ UNCHANGED vars");
+        pushln!(out);
+    }
+
+    fn render_witness_inject_next_call(&self, witness: &CompositionWitness) -> String {
+        format!("WitnessInjectNext_{}", tla_ident(&witness.name))
+    }
+
+    fn render_witness_satisfied_stutter_call(&self, witness: &CompositionWitness) -> String {
+        format!("WitnessSatisfiedStutter_{}", tla_ident(&witness.name))
+    }
+
+    fn core_next_branches(&self) -> Vec<String> {
+        let mut branches = Vec::new();
+        if !self.schema.routes.is_empty() {
+            branches.push("DeliverQueuedRoute".into());
+        }
+        if !self.schema.entry_inputs.is_empty() {
+            branches.push("RejectPendingEntryInput".into());
+        }
+        for instance in &self.schema.machines {
+            let machine = self.machine(instance.instance_id.as_str());
+            for transition in &machine.transitions {
+                branches
+                    .push(self.machine_transition_call(instance.instance_id.as_str(), transition));
+            }
+        }
+        branches.extend(self.owner_feedback_branches());
+        branches.push("QuiescentStutter".into());
+        branches
+    }
+
+    fn owner_feedback_branches(&self) -> Vec<String> {
+        self.schema
+            .handoff_protocols
+            .iter()
+            .flat_map(|protocol| {
+                protocol
+                    .allowed_feedback_inputs
+                    .iter()
+                    .map(move |feedback| self.owner_feedback_action_name(protocol, feedback))
+            })
+            .collect()
+    }
+
+    fn owner_feedback_action_name(
+        &self,
+        protocol: &meerkat_machine_schema::EffectHandoffProtocol,
+        feedback: &FeedbackInputRef,
+    ) -> String {
+        format!(
+            "OwnerFeedback_{}_{}",
+            self.obligation_symbol_suffix(protocol),
+            tla_ident(&feedback.input_variant)
+        )
+    }
+
+    fn witness_owner_feedback_branches(&self, witness: &CompositionWitness) -> Vec<String> {
+        let expected_inputs = witness
+            .expected_transitions
+            .iter()
+            .filter_map(|expected| {
+                let machine = self.machine_by_instance.get(expected.machine.as_str())?;
+                let transition = machine
+                    .transitions
+                    .iter()
+                    .find(|transition| transition.name == expected.transition)?;
+                match &transition.on {
+                    TriggerMatch::Input { variant, .. } => {
+                        Some((expected.machine.clone(), variant.clone()))
+                    }
+                    TriggerMatch::Signal { .. } => None,
+                }
+            })
+            .collect::<BTreeSet<_>>();
+
+        let ordered_predecessor_effects = witness
+            .expected_transition_order
+            .iter()
+            .filter_map(|order| {
+                let predecessor_machine = self
+                    .machine_by_instance
+                    .get(order.earlier.machine.as_str())?;
+                let predecessor = predecessor_machine
+                    .transitions
+                    .iter()
+                    .find(|transition| transition.name == order.earlier.transition)?;
+                Some((
+                    (order.later.machine.clone(), order.later.transition.clone()),
+                    predecessor
+                        .emit
+                        .iter()
+                        .map(|effect| (order.earlier.machine.clone(), effect.variant.clone()))
+                        .collect::<BTreeSet<_>>(),
+                ))
+            })
+            .fold(
+                BTreeMap::<_, BTreeSet<_>>::new(),
+                |mut effects, (transition, predecessor_effects)| {
+                    effects
+                        .entry(transition)
+                        .or_default()
+                        .extend(predecessor_effects);
+                    effects
+                },
+            );
+
+        self.schema
+            .handoff_protocols
+            .iter()
+            .flat_map(|protocol| {
+                protocol
+                    .allowed_feedback_inputs
+                    .iter()
+                    .filter_map(|feedback| {
+                        let input = (
+                            feedback.machine_instance.clone(),
+                            feedback.input_variant.clone(),
+                        );
+                        if !expected_inputs.contains(&input) {
+                            return None;
+                        }
+                        let receiver_machine = self
+                            .machine_by_instance
+                            .get(feedback.machine_instance.as_str())?;
+                        let receiver = receiver_machine.transitions.iter().find(|transition| {
+                            matches!(
+                                &transition.on,
+                                TriggerMatch::Input { variant, .. }
+                                    if variant == &feedback.input_variant
+                            )
+                        })?;
+                        let receiver_key =
+                            (feedback.machine_instance.clone(), receiver.name.clone());
+                        if let Some(predecessor_effects) =
+                            ordered_predecessor_effects.get(&receiver_key)
+                        {
+                            let producer = (
+                                protocol.producer_instance.clone(),
+                                protocol.effect_variant.clone(),
+                            );
+                            if !predecessor_effects.contains(&producer) {
+                                return None;
+                            }
+                        }
+                        Some(self.owner_feedback_action_name(protocol, feedback))
+                    })
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn witness_next_branches(
+        &self,
+        witness: &CompositionWitness,
+    ) -> Result<Vec<String>, CompositionTlaError> {
+        if !Self::witness_has_explicit_progress(witness) {
+            let mut branches = vec!["CoreNext".into()];
+            branches.push(self.render_witness_satisfied_stutter_call(witness));
+            return Ok(branches);
+        }
+        let mut branches = self.witness_progress_branches(witness)?;
+        branches.push(self.render_witness_satisfied_stutter_call(witness));
+        Ok(branches)
+    }
+
+    fn witness_progress_branches(
+        &self,
+        witness: &CompositionWitness,
+    ) -> Result<Vec<String>, CompositionTlaError> {
+        let mut branches = Vec::new();
+        if !witness.expected_routes.is_empty() {
+            branches.push("DeliverQueuedRoute".into());
+        }
+        for expected in &witness.expected_transitions {
+            branches.push(self.witness_transition_call(witness, expected)?);
+        }
+        branches.extend(self.witness_owner_feedback_branches(witness));
+        Ok(branches)
+    }
+
+    fn witness_transition_call(
+        &self,
+        witness: &CompositionWitness,
+        expected: &meerkat_machine_schema::CompositionWitnessTransition,
+    ) -> Result<String, CompositionTlaError> {
+        let machine = self
+            .machine_by_instance
+            .get(expected.machine.as_str())
+            .ok_or_else(|| CompositionTlaError::UnknownWitnessMachine {
+                composition: self.schema.name.to_string(),
+                witness: witness.name.to_string(),
+                machine: expected.machine.to_string(),
+            })?;
+        let transition = machine
+            .transitions
+            .iter()
+            .find(|transition| transition.name == expected.transition)
+            .ok_or_else(|| CompositionTlaError::UnknownWitnessTransition {
+                composition: self.schema.name.to_string(),
+                witness: witness.name.to_string(),
+                machine: expected.machine.to_string(),
+                transition: expected.transition.to_string(),
+            })?;
+        if transition.on.bindings().is_empty() {
+            return Ok(self.machine_transition_name(expected.machine.as_str(), transition));
+        }
+        // A scripted witness supplies exact typed packets. Sampling the ordinary
+        // exploration domains again can make those packets impossible to consume
+        // (for example, revisions 3 and 4 outside the bounded 0..2 sample).
+        // Reuse the same guarded action with the queued payload, without changing
+        // ordinary exploration bounds or bypassing action admission checks.
+        let args = transition
+            .on
+            .bindings()
+            .iter()
+            .map(|binding| format!("witness_packet.payload.{}", tla_ident(binding)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(format!(
+            "\\E witness_packet \\in SeqElements(pending_inputs) : /\\ witness_packet.machine = {} /\\ witness_packet.variant = {} /\\ {}({args})",
+            tla_string(expected.machine.as_str()),
+            tla_string(transition.on.variant_str()),
+            self.machine_transition_name(expected.machine.as_str(), transition),
+        ))
+    }
+
+    fn witness_fairness_clauses(
+        &self,
+        witness: &CompositionWitness,
+    ) -> Result<Vec<String>, CompositionTlaError> {
+        if Self::witness_has_explicit_progress(witness) {
+            return Ok(Vec::new());
+        }
+
+        let mut clauses = self.core_fairness_clauses();
+        if witness.preload_inputs.len() > 1 {
+            clauses.push(self.render_witness_inject_next_call(witness));
+        }
+        Ok(clauses)
+    }
+
+    fn core_fairness_clauses(&self) -> Vec<String> {
+        let mut clauses = Vec::new();
+        if !self.schema.routes.is_empty() {
+            clauses.push("DeliverQueuedRoute".into());
+        }
+        if !self.schema.entry_inputs.is_empty() {
+            clauses.push("RejectPendingEntryInput".into());
+        }
+        clauses.extend(self.schema.machines.iter().flat_map(|instance| {
+            let machine = self.machine(instance.instance_id.as_str());
+            machine
+                .transitions
+                .iter()
+                .map(|transition| {
+                    self.machine_transition_call(instance.instance_id.as_str(), transition)
+                })
+                .collect::<Vec<_>>()
+        }));
+        clauses
+    }
+
+    fn witness_has_explicit_progress(witness: &CompositionWitness) -> bool {
+        !witness.preload_inputs.is_empty() || !witness.expected_transitions.is_empty()
+    }
+
+    fn entry_input_action_name(&self, entry_input: &EntryInput) -> String {
+        format!("Inject_{}", tla_ident(&entry_input.name))
+    }
+
+    fn input_packet_expr(
+        &self,
+        machine_id: impl AsRef<str>,
+        input_variant: impl AsRef<str>,
+        payload_fields: &BTreeMap<String, String>,
+        source_kind: impl AsRef<str>,
+        source_route: impl AsRef<str>,
+        source_machine: impl AsRef<str>,
+        source_effect: impl AsRef<str>,
+        effect_id: impl AsRef<str>,
+    ) -> String {
+        format!(
+            "[machine |-> {}, variant |-> {}, payload |-> {}, source_kind |-> {}, source_route |-> {}, source_machine |-> {}, source_effect |-> {}, effect_id |-> {}]",
+            tla_string(machine_id),
+            tla_string(input_variant),
+            self.payload_record_expr(payload_fields),
+            tla_string(source_kind),
+            tla_string(source_route),
+            tla_string(source_machine),
+            tla_string(source_effect),
+            effect_id.as_ref()
+        )
+    }
+
+    fn input_packet_expr_from_payload_expr(
+        &self,
+        machine_id: impl AsRef<str>,
+        input_variant: impl AsRef<str>,
+        payload_expr: &str,
+        source_kind: impl AsRef<str>,
+        source_route: impl AsRef<str>,
+        source_machine: impl AsRef<str>,
+        source_effect: impl AsRef<str>,
+        effect_id: impl AsRef<str>,
+    ) -> String {
+        format!(
+            "[machine |-> {}, variant |-> {}, payload |-> {}, source_kind |-> {}, source_route |-> {}, source_machine |-> {}, source_effect |-> {}, effect_id |-> {}]",
+            tla_string(machine_id),
+            tla_string(input_variant),
+            payload_expr,
+            tla_string(source_kind),
+            tla_string(source_route),
+            tla_string(source_machine),
+            tla_string(source_effect),
+            effect_id.as_ref()
+        )
+    }
+
+    fn payload_record_expr(&self, payload_fields: &BTreeMap<String, String>) -> String {
+        if payload_fields.is_empty() {
+            "[tag |-> \"unit\"]".into()
+        } else {
+            format!(
+                "[{}]",
+                payload_fields
+                    .iter()
+                    .map(|(field, expr)| format!("{field} |-> {expr}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    }
+
+    fn witness_packet_exprs(&self, witness: &CompositionWitness) -> Vec<String> {
+        witness
+            .preload_inputs
+            .iter()
+            .enumerate()
+            .map(|(idx, packet)| {
+                let payload_fields = packet
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        (
+                            field.field.as_str().to_owned(),
+                            self.render_literal_expr(&field.expr),
+                        )
+                    })
+                    .collect::<BTreeMap<String, _>>();
+                self.input_packet_expr(
+                    packet.machine.as_str(),
+                    packet.input_variant.as_str(),
+                    &payload_fields,
+                    "entry",
+                    format!("witness:{}:{}", witness.name, idx + 1),
+                    "external_entry",
+                    &packet.input_variant,
+                    "0",
+                )
+            })
+            .collect()
+    }
+
+    fn witness_initial_batch_size(&self, witness: &CompositionWitness) -> usize {
+        if witness.expected_scheduler_rules.is_empty() {
+            1
+        } else {
+            witness.preload_inputs.len().min(2).max(1)
+        }
+    }
+
+    fn witness_initial_observed_inputs_expr(&self, witness: &CompositionWitness) -> String {
+        let packets = self.witness_packet_exprs(witness);
+        let batch_size = self.witness_initial_batch_size(witness);
+        if packets.is_empty() {
+            "{}".into()
+        } else {
+            format!(
+                "{{{}}}",
+                packets
+                    .into_iter()
+                    .take(batch_size)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    }
+
+    fn witness_initial_pending_inputs_expr(&self, witness: &CompositionWitness) -> String {
+        let packets = self.witness_packet_exprs(witness);
+        let batch_size = self.witness_initial_batch_size(witness);
+        if packets.is_empty() {
+            "<<>>".into()
+        } else {
+            format!(
+                "<<{}>>",
+                packets
+                    .into_iter()
+                    .take(batch_size)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    }
+
+    fn witness_current_script_input_expr(&self, witness: &CompositionWitness) -> String {
+        let packets = self.witness_packet_exprs(witness);
+        let batch_size = self.witness_initial_batch_size(witness);
+        packets
+            .into_iter()
+            .take(batch_size)
+            .last()
+            .unwrap_or_else(|| "None".into())
+    }
+
+    fn witness_remaining_script_inputs_expr(&self, witness: &CompositionWitness) -> String {
+        let packets = self.witness_packet_exprs(witness);
+        let batch_size = self.witness_initial_batch_size(witness);
+        if packets.len() <= batch_size {
+            return "<<>>".into();
+        }
+
+        format!(
+            "<<{}>>",
+            packets
+                .into_iter()
+                .skip(batch_size)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    fn render_witness_inject_actions(&self, out: &mut String) {
+        for witness in &self.schema.witnesses {
+            let action_name = self.render_witness_inject_next_call(witness);
+            pushln!(out, "{action_name} ==");
+            if witness.preload_inputs.len() <= 1 {
+                pushln!(out, "    FALSE");
+                pushln!(out);
+                continue;
+            }
+
+            pushln!(
+                out,
+                "    LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input"
+            );
+            pushln!(
+                out,
+                "        next_remaining_script_inputs == IF Len(witness_remaining_script_inputs) > 0 THEN Tail(witness_remaining_script_inputs) ELSE <<>>"
+            );
+            pushln!(out, "    IN");
+            pushln!(out, "    /\\ witness_current_script_input # None");
+            writeln!(
+                out,
+                "    /\\ ~(witness_current_script_input \\in SeqElements(pending_inputs))"
+            )
+            .expect("write to string");
+            pushln!(out, "    /\\ EntryPacketAdmissible(next_script_input)");
+            pushln!(out, "    /\\ Len(pending_inputs) = 0");
+            pushln!(out, "    /\\ Len(pending_routes) = 0");
+            pushln!(out, "    /\\ Len(witness_remaining_script_inputs) > 0");
+            writeln!(
+                out,
+                "    /\\ pending_inputs' = Append(pending_inputs, next_script_input)"
+            )
+            .expect("write to string");
+            writeln!(
+                out,
+                "    /\\ observed_inputs' = observed_inputs \\cup {{next_script_input}}"
+            )
+            .expect("write to string");
+            writeln!(
+                out,
+                "    /\\ witness_current_script_input' = next_script_input"
+            )
+            .expect("write to string");
+            writeln!(
+                out,
+                "    /\\ witness_remaining_script_inputs' = next_remaining_script_inputs"
+            )
+            .expect("write to string");
+            writeln!(out, "    /\\ model_step_count' = model_step_count + 1")
+                .expect("write to string");
+            {
+                let mut unchanged = self.machine_vars();
+                unchanged.extend(self.obligation_vars());
+                unchanged.extend([
+                    "pending_routes".into(),
+                    "delivered_routes".into(),
+                    "emitted_effects".into(),
+                    "observed_transitions".into(),
+                ]);
+                self.render_unchanged_vars(out, "    /\\ ", &unchanged);
+            }
+            pushln!(out);
+        }
+    }
+
+    fn render_witness_satisfied_stutter_actions(&self, out: &mut String) {
+        for witness in &self.schema.witnesses {
+            let action_name = self.render_witness_satisfied_stutter_call(witness);
+            pushln!(out, "{action_name} ==");
+            let mut conditions = self.witness_satisfaction_conditions(witness);
+            if Self::witness_has_explicit_progress(witness) {
+                conditions.insert(0, composition_witness_completion_name(&witness.name));
+            }
+            if conditions.is_empty() {
+                pushln!(out, "    /\\ FALSE");
+            } else {
+                for condition in conditions {
+                    pushln!(out, "    /\\ {condition}");
+                }
+                pushln!(out, "    /\\ UNCHANGED vars");
+            }
+            pushln!(out);
+        }
+    }
+
+    fn render_witness_completion_operators(&self, out: &mut String) {
+        for witness in &self.schema.witnesses {
+            if !Self::witness_has_explicit_progress(witness) {
+                continue;
+            }
+            writeln!(
+                out,
+                "{} ==",
+                composition_witness_completion_name(&witness.name)
+            )
+            .expect("write to string");
+            pushln!(out, "    /\\ Len(witness_remaining_script_inputs) = 0");
+            pushln!(
+                out,
+                "    /\\ ~(witness_current_script_input \\in SeqElements(pending_inputs))"
+            );
+            pushln!(out, "    /\\ Len(pending_routes) = 0");
+            for condition in self.witness_satisfaction_conditions(witness) {
+                pushln!(out, "    /\\ {condition}");
+            }
+            pushln!(out);
+        }
+    }
+
+    fn render_witness_action_constraint_operators(&self, out: &mut String) {
+        for witness in &self.schema.witnesses {
+            if !Self::witness_has_explicit_progress(witness) {
+                continue;
+            }
+            writeln!(
+                out,
+                "{} ==",
+                composition_witness_action_constraint_name(&witness.name)
+            )
+            .expect("write to string");
+            writeln!(
+                out,
+                "    \\/ {}",
+                composition_witness_completion_name(&witness.name)
+            )
+            .expect("write to string");
+            pushln!(out, "    \\/ model_step_count' # model_step_count");
+            pushln!(out);
+        }
+    }
+
+    fn witness_satisfaction_conditions(&self, witness: &CompositionWitness) -> Vec<String> {
+        let mut conditions = Vec::new();
+        conditions.extend(witness.expected_routes.iter().map(|route| {
+            format!(
+                "\\E packet \\in delivered_routes : packet.route = {}",
+                tla_string(route)
+            )
+        }));
+        conditions.extend(
+            witness
+                .expected_scheduler_rules
+                .iter()
+                .map(render_scheduler_trigger_formula),
+        );
+        conditions.extend(
+            witness
+                .expected_states
+                .iter()
+                .map(|state| format!("({})", self.render_witness_state_formula(state))),
+        );
+        conditions.extend(
+            witness.expected_transitions.iter().map(|transition| {
+                format!("({})", self.render_witness_transition_formula(transition))
+            }),
+        );
+        conditions.extend(
+            witness
+                .expected_transition_order
+                .iter()
+                .map(|order| format!("({})", self.render_witness_transition_order_formula(order))),
+        );
+        conditions
+    }
+
+    fn render_witness_obligation_formula(
+        &self,
+        witness: &CompositionWitness,
+        formula: String,
+    ) -> String {
+        if Self::witness_has_explicit_progress(witness) {
+            format!(
+                "{} => ({formula})",
+                composition_witness_completion_name(&witness.name)
+            )
+        } else {
+            format!("<> ({formula})")
+        }
+    }
+
+    fn render_literal_expr(&self, expr: &Expr) -> String {
+        match expr {
+            Expr::Bool(value) => {
+                if *value {
+                    "TRUE".into()
+                } else {
+                    "FALSE".into()
+                }
+            }
+            Expr::U64(value) => value.to_string(),
+            Expr::U64Max => TLA_RUST_U64_MAX_CONSTANT.to_owned(),
+            Expr::String(value) => tla_string(value),
+            Expr::NamedVariant { enum_name, variant } => render_named_variant_value(
+                enum_name.as_str(),
+                variant.as_str(),
+                &self.named_bindings,
+            ),
+            Expr::None => "None".into(),
+            Expr::Some(inner) => format!("Some({})", self.render_literal_expr(inner)),
+            Expr::SeqLiteral(items) => {
+                let rendered = items
+                    .iter()
+                    .map(|item| self.render_literal_expr(item))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("<<{rendered}>>")
+            }
+            Expr::EmptySet => "{}".into(),
+            Expr::EmptyMap => "<< >>".into(),
+            // A populated map literal (witness inputs, manifests) as a TLC
+            // function; never the `None` fallback below.
+            Expr::MapLiteral(entries) => {
+                let rendered = entries
+                    .iter()
+                    .map(|(key, value)| {
+                        format!(
+                            "{} :> {}",
+                            self.render_literal_expr(key),
+                            self.render_literal_expr(value)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" @@ ");
+                format!("({rendered})")
+            }
+            _ => "None".into(),
+        }
+    }
+
+    fn render_witness_state_formula(
+        &self,
+        state: &meerkat_machine_schema::CompositionWitnessState,
+    ) -> String {
+        let mut clauses = Vec::new();
+        if let Some(phase) = &state.phase {
+            clauses.push(format!(
+                "{} = {}",
+                self.phase_var(&state.machine),
+                tla_string(phase)
+            ));
+        }
+        for field in &state.fields {
+            clauses.push(format!(
+                "{} = {}",
+                self.field_var(&state.machine, &field.field),
+                self.render_literal_expr(&field.expr)
+            ));
+        }
+        if clauses.is_empty() {
+            "TRUE".into()
+        } else {
+            clauses.join(" /\\ ")
+        }
+    }
+
+    fn render_witness_transition_formula(
+        &self,
+        transition: &meerkat_machine_schema::CompositionWitnessTransition,
+    ) -> String {
+        format!(
+            "\\E packet \\in observed_transitions : /\\ packet.machine = {} /\\ packet.transition = {}",
+            tla_string(&transition.machine),
+            tla_string(&transition.transition)
+        )
+    }
+
+    fn render_witness_transition_order_formula(
+        &self,
+        ordering: &meerkat_machine_schema::CompositionWitnessTransitionOrder,
+    ) -> String {
+        format!(
+            "\\E earlier \\in observed_transitions, later \\in observed_transitions : /\\ earlier.machine = {} /\\ earlier.transition = {} /\\ later.machine = {} /\\ later.transition = {} /\\ earlier.step < later.step",
+            tla_string(&ordering.earlier.machine),
+            tla_string(&ordering.earlier.transition),
+            tla_string(&ordering.later.machine),
+            tla_string(&ordering.later.transition),
+        )
+    }
+
+    fn route_packet_expr(
+        &self,
+        route_name: impl AsRef<str>,
+        from_machine: impl AsRef<str>,
+        effect_variant: impl AsRef<str>,
+        to_machine: impl AsRef<str>,
+        to_input_variant: impl AsRef<str>,
+        payload_expr: &str,
+        effect_id_expr: &str,
+        source_transition: impl AsRef<str>,
+    ) -> String {
+        let to_machine = to_machine.as_ref();
+        format!(
+            "[route |-> {}, source_machine |-> {}, effect |-> {}, target_machine |-> {}, target_input |-> {}, payload |-> {}, actor |-> {}, effect_id |-> {}, source_transition |-> {}]",
+            tla_string(route_name),
+            tla_string(from_machine),
+            tla_string(effect_variant),
+            tla_string(to_machine),
+            tla_string(to_input_variant),
+            payload_expr,
+            tla_string(self.actor(to_machine)),
+            effect_id_expr,
+            tla_string(source_transition)
+        )
+    }
+
+    fn render_machine_transition_action(
+        &self,
+        compiler: &mut MachineTlaCompiler<'_>,
+        instance_id: &str,
+        transition: &TransitionSchema,
+        out: &mut String,
+    ) -> std::result::Result<(), CompositionTlaError> {
+        let machine = self.machine(instance_id);
+        let action_name = self.machine_transition_name(instance_id, transition);
+        let binding_types = compiler.binding_type_map(transition);
+        let binding_env = transition
+            .on
+            .bindings()
+            .iter()
+            .map(|binding| {
+                (
+                    binding.as_str().to_owned(),
+                    format!("packet.payload.{}", tla_ident(binding)),
+                )
+            })
+            .collect::<BTreeMap<String, _>>();
+        let params = transition
+            .on
+            .bindings()
+            .iter()
+            .map(|binding| format!("arg_{}", tla_ident(binding)))
+            .collect::<Vec<_>>();
+
+        if params.is_empty() {
+            writeln!(out, "{} ==", action_name);
+        } else {
+            pushln!(out, "{}({}) ==", action_name, params.join(", "));
+        }
+
+        let phase_var = self.phase_var(instance_id);
+        let from_guard = if transition.from.len() == 1 {
+            format!("{} = {}", phase_var, tla_string(&transition.from[0]))
+        } else {
+            transition
+                .from
+                .iter()
+                .map(|phase| format!("{} = {}", phase_var, tla_string(phase)))
+                .collect::<Vec<_>>()
+                .join(" \\/ ")
+        };
+
+        pushln!(out, "    /\\ \\E packet \\in SeqElements(pending_inputs) :");
+        writeln!(
+            out,
+            "       /\\ packet.machine = {}",
+            tla_string(instance_id)
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "       /\\ packet.variant = {}",
+            tla_string(transition.on.variant_str())
+        )
+        .expect("write to string");
+        for binding in transition.on.bindings() {
+            let arg_name = format!("arg_{}", tla_ident(binding));
+            writeln!(
+                out,
+                "       /\\ packet.payload.{} = {}",
+                tla_ident(binding),
+                arg_name
+            )
+            .expect("write to string");
+        }
+        writeln!(
+            out,
+            "       /\\ ~HigherPriorityReady({})",
+            tla_string(self.actor(instance_id))
+        )
+        .expect("write to string");
+        writeln!(out, "       /\\ {}", from_guard);
+
+        let field_env = self.machine_field_env(instance_id);
+        for guard in &transition.guards {
+            writeln!(
+                out,
+                "       /\\ {}",
+                compiler.render_guard(guard, &field_env, &binding_env, &binding_types)
+            )
+            .expect("write to string");
+        }
+
+        let next_env = compiler.compile_updates(
+            &action_name,
+            &field_env,
+            &binding_env,
+            &binding_types,
+            &transition.updates,
+        );
+        let effect_id_expr = "(model_step_count + 1)".to_string();
+        let current_phase_symbol = compiler.phase_symbol.clone();
+        compiler.phase_symbol = Some(tla_string(&transition.to));
+        let effect_packets = transition
+            .emit
+            .iter()
+            .map(|effect| {
+                let payload_fields = effect
+                    .fields
+                    .iter()
+                    .map(|(field, expr)| {
+                        (
+                            field.as_str().to_owned(),
+                            compiler.render_expr_with_types(
+                                expr,
+                                &next_env,
+                                &binding_env,
+                                &binding_types,
+                            ),
+                        )
+                    })
+                    .collect::<BTreeMap<String, _>>();
+                (
+                    effect.variant.as_str().to_owned(),
+                    format!(
+                        "[machine |-> {}, variant |-> {}, payload |-> {}, effect_id |-> {}, source_transition |-> {}]",
+                        tla_string(instance_id),
+                        tla_string(&effect.variant),
+                        self.payload_record_expr(&payload_fields),
+                        &effect_id_expr,
+                        tla_string(&transition.name)
+                    ),
+                    payload_fields,
+                )
+            })
+            .collect::<Vec<_>>();
+        compiler.phase_symbol = current_phase_symbol;
+
+        let mut queued_route_packets = Vec::new();
+        let mut immediate_route_packets = Vec::new();
+        let mut owner_route_quantifiers = Vec::new();
+        for (effect_variant, _effect_packet, payload_fields) in &effect_packets {
+            for route in self.schema.routes.iter().filter(|route| {
+                route.from_machine.as_str() == instance_id
+                    && route.effect_variant.as_str() == effect_variant.as_str()
+            }) {
+                let (target_payload, route_owner_quantifiers) = self.target_payload_for_route(
+                    machine,
+                    effect_variant,
+                    payload_fields,
+                    route,
+                    compiler,
+                    &next_env,
+                    &binding_env,
+                    &binding_types,
+                );
+                for quantifier in route_owner_quantifiers {
+                    if !owner_route_quantifiers.contains(&quantifier) {
+                        owner_route_quantifiers.push(quantifier);
+                    }
+                }
+                let route_packet = self.route_packet_expr(
+                    &route.name,
+                    instance_id,
+                    effect_variant,
+                    &route.to.machine,
+                    &route.to.input_variant,
+                    &target_payload,
+                    &effect_id_expr,
+                    &transition.name,
+                );
+                match route.delivery {
+                    RouteDelivery::Enqueue => {
+                        queued_route_packets.push((route_packet, target_payload))
+                    }
+                    RouteDelivery::Immediate => immediate_route_packets.push((
+                        route_packet,
+                        self.input_packet_expr_from_payload_expr(
+                            &route.to.machine,
+                            &route.to.input_variant,
+                            &target_payload,
+                            "route",
+                            &route.name,
+                            instance_id,
+                            effect_variant,
+                            &effect_id_expr,
+                        ),
+                    )),
+                }
+            }
+        }
+
+        writeln!(
+            out,
+            "       /\\ {}' = {}",
+            phase_var,
+            tla_string(&transition.to)
+        )
+        .expect("write to string");
+        let touched = machine
+            .state
+            .fields
+            .iter()
+            .filter_map(|field| {
+                let next = next_env.get(field.name.as_str())?;
+                if field_env
+                    .get(field.name.as_str())
+                    .is_some_and(|current| next != current)
+                {
+                    Some((field.name.as_str(), next.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for (field, expr) in &touched {
+            writeln!(
+                out,
+                "       /\\ {}' = {}",
+                self.field_var(instance_id, field),
+                expr
+            )
+            .expect("write to string");
+        }
+
+        let mut unchanged_machine_vars = Vec::new();
+        for instance in &self.schema.machines {
+            if instance.instance_id.as_str() == instance_id {
+                for field in &machine.state.fields {
+                    if !touched.iter().any(|(name, _)| *name == field.name.as_str()) {
+                        unchanged_machine_vars
+                            .push(self.field_var(instance_id, field.name.as_str()));
+                    }
+                }
+            } else {
+                unchanged_machine_vars.push(self.phase_var(instance.instance_id.as_str()));
+                let other_machine = self.machine(instance.instance_id.as_str());
+                for field in &other_machine.state.fields {
+                    unchanged_machine_vars
+                        .push(self.field_var(instance.instance_id.as_str(), field.name.as_str()));
+                }
+            }
+        }
+
+        unchanged_machine_vars.push("witness_current_script_input".into());
+        unchanged_machine_vars.push("witness_remaining_script_inputs".into());
+
+        if !unchanged_machine_vars.is_empty() {
+            self.render_unchanged_vars(out, "       /\\ ", &unchanged_machine_vars);
+        }
+
+        let pending_inputs_next = self.append_if_missing_chain(
+            format!("SeqRemove(pending_inputs, packet)"),
+            &immediate_route_packets
+                .iter()
+                .map(|(_, input_packet)| input_packet)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let pending_routes_next = self.append_if_missing_chain(
+            "pending_routes".into(),
+            &queued_route_packets
+                .iter()
+                .map(|(route_packet, _)| route_packet)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let delivered_routes_next = if immediate_route_packets.is_empty() {
+            "delivered_routes".into()
+        } else {
+            format!(
+                "delivered_routes \\cup {{ {} }}",
+                immediate_route_packets
+                    .iter()
+                    .map(|(route_packet, _)| route_packet)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let observed_inputs_next = {
+            let immediate_inputs = immediate_route_packets
+                .iter()
+                .map(|(_, input_packet)| input_packet)
+                .cloned()
+                .collect::<Vec<_>>();
+            self.union_set_items("observed_inputs".into(), &immediate_inputs)
+        };
+        let emitted_effects_next = if effect_packets.is_empty() {
+            "emitted_effects".into()
+        } else {
+            format!(
+                "emitted_effects \\cup {{ {} }}",
+                effect_packets
+                    .iter()
+                    .map(|(_, effect_packet, _)| effect_packet)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let observed_transitions_next = format!(
+            "observed_transitions \\cup {{{}}}",
+            self.transition_packet_expr(instance_id, transition)
+        );
+
+        // Compute obligation set updates: when a transition emits an effect
+        // that matches a handoff_protocol, add a record to the obligation set
+        // with the protocol's declared obligation fields from the effect payload.
+        let mut obligation_updates: BTreeMap<String, String> = BTreeMap::new();
+        for (effect_variant, _effect_packet, payload_fields) in &effect_packets {
+            for protocol in &self.schema.handoff_protocols {
+                if protocol.producer_instance.as_str() == instance_id
+                    && protocol.effect_variant.as_str() == effect_variant.as_str()
+                {
+                    let var = self.obligation_var(protocol);
+                    let mut record_fields: Vec<String> =
+                        Vec::with_capacity(protocol.obligation_fields.len() + 1);
+                    record_fields.push("effect_id |-> (model_step_count + 1)".to_string());
+                    for field in &protocol.obligation_fields {
+                        let tla_field = tla_ident(field);
+                        // Fail closed: an obligation field that is absent from
+                        // the matching effect's payload used to be papered over
+                        // with an `"unknown_<field>"` sentinel literal.
+                        let value =
+                            payload_fields.get(field.as_str()).cloned().ok_or_else(|| {
+                                CompositionTlaError::UnknownObligationField {
+                                    composition: self.schema.name.as_str().to_owned(),
+                                    protocol: protocol.name.as_str().to_owned(),
+                                    effect: effect_variant.clone(),
+                                    field: field.as_str().to_owned(),
+                                }
+                            })?;
+                        record_fields.push(format!("{} |-> {}", tla_field, value));
+                    }
+                    let record = if record_fields.is_empty() {
+                        "\"token\"".to_string()
+                    } else {
+                        format!("[{}]", record_fields.join(", "))
+                    };
+                    obligation_updates.insert(var.clone(), format!("{} \\cup {{{}}}", var, record));
+                }
+            }
+        }
+
+        let route_update_prefix = if owner_route_quantifiers.is_empty() {
+            "       /\\"
+        } else {
+            writeln!(
+                out,
+                "       /\\ \\E {} :",
+                owner_route_quantifiers.join(", ")
+            )
+            .expect("write to string");
+            "           /\\"
+        };
+        writeln!(
+            out,
+            "{route_update_prefix} pending_inputs' = {pending_inputs_next}"
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{route_update_prefix} observed_inputs' = {observed_inputs_next}"
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{route_update_prefix} pending_routes' = {pending_routes_next}"
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{route_update_prefix} delivered_routes' = {delivered_routes_next}"
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{route_update_prefix} emitted_effects' = {emitted_effects_next}"
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{route_update_prefix} observed_transitions' = {observed_transitions_next}"
+        )
+        .expect("write to string");
+        // Write obligation variable updates — touched protocols get \cup, untouched get UNCHANGED
+        let all_obligation_vars = self.obligation_vars();
+        let mut unchanged_obligation_vars = Vec::new();
+        for ovar in &all_obligation_vars {
+            if let Some(next_expr) = obligation_updates.get(ovar) {
+                writeln!(out, "{route_update_prefix} {}' = {}", ovar, next_expr)
+                    .expect("write to string");
+            } else {
+                unchanged_obligation_vars.push(ovar.clone());
+            }
+        }
+        if !unchanged_obligation_vars.is_empty() {
+            let unchanged_prefix = format!("{route_update_prefix} ");
+            self.render_unchanged_vars(out, &unchanged_prefix, &unchanged_obligation_vars);
+        }
+        writeln!(
+            out,
+            "{route_update_prefix} model_step_count' = model_step_count + 1"
+        )
+        .expect("write to string");
+        Ok(())
+    }
+
+    fn target_payload_for_route(
+        &self,
+        source_machine: &MachineSchema,
+        effect_variant: &str,
+        effect_payload_fields: &BTreeMap<String, String>,
+        route: &Route,
+        compiler: &MachineTlaCompiler<'_>,
+        next_env: &BTreeMap<String, String>,
+        binding_env: &BTreeMap<String, String>,
+        binding_types: &BTreeMap<String, TypeRef>,
+    ) -> (String, Vec<String>) {
+        let target_machine = self.machine(route.to.machine.as_str());
+        let Some(target_variant) = route_target_variant(target_machine, &route.to) else {
+            return (String::new(), Vec::new());
+        };
+        let Ok(source_effect_variant) = source_machine.effects.variant_named(effect_variant) else {
+            return (String::new(), Vec::new());
+        };
+        let mut owner_context_quantifiers = Vec::new();
+        let bindings = route
+            .bindings
+            .iter()
+            .map(|binding| {
+                let expr = match &binding.source {
+                    RouteBindingSource::Field {
+                        from_field,
+                        allow_named_alias: _,
+                    } => effect_payload_fields
+                        .get(from_field.as_str())
+                        .cloned()
+                        .or_else(|| {
+                            source_effect_variant
+                                .fields
+                                .iter()
+                                .find(|field| field.name == *from_field)
+                                .map(|_| format!("packet.payload.{}", tla_ident(from_field)))
+                        })
+                        .unwrap_or_else(|| "None".to_string()),
+                    RouteBindingSource::Literal(expr) => {
+                        compiler.render_expr_with_types(expr, next_env, binding_env, binding_types)
+                    }
+                    RouteBindingSource::OwnerProvided => {
+                        if let Some(target_field) = target_variant
+                            .fields
+                            .iter()
+                            .find(|field| field.name == binding.to_field)
+                        {
+                            let var_name = format!(
+                                "route_owner_ctx_{}_{}",
+                                tla_ident(&route.name),
+                                tla_ident(&binding.to_field)
+                            );
+                            let domain = self.binding_domain_for_binding(
+                                route.to.machine.as_str(),
+                                Some(target_variant.name.as_str()),
+                                binding.to_field.as_str(),
+                                &target_field.ty,
+                            );
+                            owner_context_quantifiers.push(format!("{var_name} \\in {domain}"));
+                            var_name
+                        } else {
+                            "\"owner_val\"".to_string()
+                        }
+                    }
+                };
+                (binding.to_field.as_str().to_owned(), expr)
+            })
+            .collect::<BTreeMap<String, _>>();
+        let payload_fields = target_variant
+            .fields
+            .iter()
+            .map(|field| {
+                let expr = bindings
+                    .get(field.name.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| default_state_init_expr(&field.ty));
+                (field.name.as_str().to_owned(), expr)
+            })
+            .collect::<BTreeMap<String, _>>();
+        (
+            self.payload_record_expr(&payload_fields),
+            owner_context_quantifiers,
+        )
+    }
+
+    fn append_if_missing_chain(&self, base: String, items: &[String]) -> String {
+        items.iter().fold(base, |expr, item| {
+            format!("AppendIfMissing({expr}, {item})")
+        })
+    }
+
+    fn union_set_items(&self, base: String, items: &[String]) -> String {
+        if items.is_empty() {
+            base
+        } else {
+            format!("{base} \\cup {{{}}}", items.join(", "))
+        }
+    }
+
+    fn transition_packet_expr(&self, instance_id: &str, transition: &TransitionSchema) -> String {
+        format!(
+            "[machine |-> {}, transition |-> {}, actor |-> {}, step |-> (model_step_count + 1), from_phase |-> {}, to_phase |-> {}]",
+            tla_string(instance_id),
+            tla_string(&transition.name),
+            tla_string(self.actor(instance_id)),
+            self.phase_var(instance_id),
+            tla_string(&transition.to)
+        )
+    }
+}
+
+struct MachineTlaCompiler<'a> {
+    schema: &'a MachineSchema,
+    named_bindings: BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    helper_defs: Vec<String>,
+    helper_counter: usize,
+    helper_prefix: Option<String>,
+    phase_symbol: Option<String>,
+    field_env_override: Option<BTreeMap<String, String>>,
+    unchanged_frames: UnchangedFrameInterner,
+}
+
+impl<'a> MachineTlaCompiler<'a> {
+    fn new(schema: &'a MachineSchema) -> Self {
+        Self {
+            schema,
+            named_bindings: collect_machine_named_bindings(schema),
+            helper_defs: Vec::new(),
+            helper_counter: 0,
+            helper_prefix: None,
+            phase_symbol: None,
+            field_env_override: None,
+            unchanged_frames: UnchangedFrameInterner::default(),
+        }
+    }
+
+    fn new_with_helper_prefix(schema: &'a MachineSchema, helper_prefix: impl Into<String>) -> Self {
+        Self {
+            schema,
+            named_bindings: collect_machine_named_bindings(schema),
+            helper_defs: Vec::new(),
+            helper_counter: 0,
+            helper_prefix: Some(helper_prefix.into()),
+            phase_symbol: None,
+            field_env_override: None,
+            unchanged_frames: UnchangedFrameInterner::default(),
+        }
+    }
+
+    fn with_phase_symbol(mut self, phase_symbol: impl Into<String>) -> Self {
+        self.phase_symbol = Some(phase_symbol.into());
+        self
+    }
+
+    fn with_field_env_override(mut self, field_env_override: BTreeMap<String, String>) -> Self {
+        self.field_env_override = Some(field_env_override);
+        self
+    }
+
+    fn render(&mut self) -> std::result::Result<String, CompositionTlaError> {
+        let mut out = String::new();
+        let constants = collect_binding_domains(self.schema);
+        let named_samples = collect_machine_named_type_samples(self.schema);
+        let named_bindings = collect_machine_named_bindings(self.schema);
+
+        pushln!(&mut out, "---- MODULE model ----");
+        pushln!(&mut out, "EXTENDS TLC, Naturals, Sequences, FiniteSets");
+        pushln!(&mut out);
+        writeln!(
+            &mut out,
+            "\\* Generated semantic machine model for {}.",
+            self.schema.machine
+        )
+        .expect("write to string");
+        pushln!(&mut out);
+
+        let mut model_constants = constants
+            .iter()
+            .filter(|(_, ty)| {
+                !matches!(
+                    ty,
+                    TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+                )
+            })
+            .map(|(name, _)| name)
+            .cloned()
+            .collect::<Vec<_>>();
+        if machine_uses_u64_max(self.schema) {
+            model_constants.push(TLA_RUST_U64_MAX_CONSTANT.to_owned());
+        }
+        if !model_constants.is_empty() {
+            let constant_list = model_constants.join(", ");
+            if model_constants
+                .iter()
+                .any(|constant| constant == TLA_RUST_U64_MAX_CONSTANT)
+            {
+                pushln!(
+                    &mut out,
+                    "\\* RustU64Max is the TLA boundary for Expr::U64Max; production generated Rust renders u64::MAX."
+                );
+            }
+            writeln!(&mut out, "CONSTANTS {constant_list}");
+            pushln!(&mut out);
+        }
+
+        pushln!(&mut out, "None == [tag |-> \"none\", value |-> \"none\"]");
+        writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]");
+        pushln!(&mut out);
+
+        push_cfg_assignment_operator_definitions(
+            &mut out,
+            &constants,
+            &named_bindings,
+            &CfgAssignmentOperatorProfile {
+                suffix: "Ci".to_owned(),
+                explicit_values: self.schema.tlc_model.as_ref().map(|model| &model.ci),
+                sample_cardinality: machine_cfg_sample_cardinality(self.schema, false),
+                domain_overrides: None,
+                named_samples: &named_samples,
+                include_string_samples: false,
+            },
+        );
+        push_cfg_assignment_operator_definitions(
+            &mut out,
+            &constants,
+            &named_bindings,
+            &CfgAssignmentOperatorProfile {
+                suffix: "Deep".to_owned(),
+                explicit_values: self.schema.tlc_model.as_ref().map(|model| &model.deep),
+                sample_cardinality: machine_cfg_sample_cardinality(self.schema, true),
+                domain_overrides: Some(&self.schema.deep_domain_overrides),
+                named_samples: &with_guard_binding_string_samples(&named_samples, self.schema),
+                include_string_samples: !machine_uses_session_id_string_bridge(self.schema),
+            },
+        );
+
+        for (name, ty) in ordered_composite_domain_definitions(&constants) {
+            let definition = match ty {
+                TypeRef::Seq(inner) => render_sequence_domain_definition(inner),
+                TypeRef::Option(inner) => render_option_domain_definition(inner),
+                TypeRef::Map(key, value) => render_map_domain_definition(key, value),
+                _ => continue,
+            };
+            writeln!(&mut out, "{} == {}", name, definition).expect("write to string");
+        }
+        if constants.values().any(|ty| {
+            matches!(
+                ty,
+                TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+            )
+        }) {
+            pushln!(&mut out);
+        }
+        writeln!(
+            &mut out,
+            "MapLookup(map, key) == IF key \\in DOMAIN map THEN map[key] ELSE None"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "MapSet(map, key, value) == [x \\in DOMAIN map \\cup {{key}} |-> IF x = key THEN value ELSE map[x]]"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "MapIncrement(map, key, amount) == [x \\in DOMAIN map \\cup {{key}} |-> IF x = key THEN (IF key \\in DOMAIN map THEN map[key] ELSE 0) + amount ELSE map[x]]"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "MapDecrement(map, key, amount) == [x \\in DOMAIN map \\cup {{key}} |-> IF x = key THEN (IF key \\in DOMAIN map THEN map[key] ELSE 0) - amount ELSE map[x]]"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "MapRemove(map, key) == [x \\in DOMAIN map \\ {{key}} |-> map[x]]"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "StartsWith(seq, prefix) == /\\ Len(prefix) <= Len(seq) /\\ SubSeq(seq, 1, Len(prefix)) = prefix"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "SeqElements(seq) == {{seq[i] : i \\in 1..Len(seq)}}"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "Count(seq, value) == Cardinality({{i \\in DOMAIN seq : seq[i] = value}})"
+        )
+        .expect("write to string");
+        if !self.schema.tlc_representative_inputs.is_empty() {
+            writeln!(
+                &mut out,
+                "{TLC_REPRESENTATIVE_DOMAIN_HELPER}(values) == IF values = {{}} THEN {{}} ELSE {{CHOOSE value \\in values : TRUE}}"
+            )
+            .expect("write to string");
+        }
+        writeln!(
+            &mut out,
+            "RECURSIVE SeqRemove(_, _)\nSeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THEN SeqRemove(Tail(seq), value) ELSE <<Head(seq)>> \\o SeqRemove(Tail(seq), value)"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "RECURSIVE SeqRemoveAll(_, _)\nSeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))"
+        )
+        .expect("write to string");
+        pushln!(&mut out);
+
+        let variable_list = std::iter::once("phase".to_string())
+            .chain(std::iter::once("model_step_count".to_string()))
+            .chain(
+                self.schema
+                    .state
+                    .fields
+                    .iter()
+                    .map(|field| field.name.as_str().to_owned()),
+            )
+            .collect::<Vec<_>>()
+            .join(", ");
+        pushln!(&mut out, "VARIABLES {variable_list}");
+        pushln!(&mut out);
+        let vars = std::iter::once("phase".to_string())
+            .chain(std::iter::once("model_step_count".to_string()))
+            .chain(
+                self.schema
+                    .state
+                    .fields
+                    .iter()
+                    .map(|field| field.name.as_str().to_owned()),
+            )
+            .collect::<Vec<_>>();
+        pushln!(&mut out, "vars == << {} >>", vars.join(", "));
+        pushln!(&mut out);
+
+        for helper in helper_dependency_order(self.schema)? {
+            self.render_helper(&mut out, helper);
+        }
+        if self.schema.machine.as_str() == "MobMachine" {
+            self.render_mob_machine_native_helpers(&mut out);
+        }
+        if self.schema.machine.as_str() == "MeerkatMachine" {
+            self.render_meerkat_machine_native_helpers(&mut out);
+        }
+        if self.schema.machine.as_str() == "RuntimeDeliveryMachine" {
+            self.render_runtime_delivery_native_helpers(&mut out);
+        }
+        if !self.schema.helpers.is_empty() || !self.schema.derived.is_empty() {
+            pushln!(&mut out);
+        }
+
+        pushln!(&mut out, "Init ==");
+        writeln!(
+            &mut out,
+            "    /\\ phase = {}",
+            tla_string(&self.schema.state.init.phase)
+        )
+        .expect("write to string");
+        pushln!(&mut out, "    /\\ model_step_count = 0");
+        for field in &self.schema.state.fields {
+            let init_expr = self
+                .schema
+                .state
+                .init
+                .fields
+                .iter()
+                .find(|item| item.field == field.name)
+                .map(|item| self.render_expr(&item.expr, &BTreeMap::new(), &BTreeMap::new()))
+                .unwrap_or_else(|| default_state_init_expr(&field.ty));
+            pushln!(&mut out, "    /\\ {} = {}", field.name, init_expr);
+        }
+        pushln!(&mut out);
+
+        let mut rendered_transitions = Vec::new();
+        for transition in &self.schema.transitions {
+            let mut rendered = String::new();
+            self.render_transition(&mut rendered, transition);
+            rendered_transitions.push(rendered);
+        }
+
+        if !self.schema.state.terminal_phases.is_empty() {
+            let terminal_guard = if self.schema.state.terminal_phases.len() == 1 {
+                format!(
+                    "phase = {}",
+                    tla_string(&self.schema.state.terminal_phases[0])
+                )
+            } else {
+                self.schema
+                    .state
+                    .terminal_phases
+                    .iter()
+                    .map(|phase| format!("phase = {}", tla_string(phase)))
+                    .collect::<Vec<_>>()
+                    .join(" \\/ ")
+            };
+            pushln!(&mut out, "TerminalStutter ==");
+            pushln!(&mut out, "    /\\ {}", terminal_guard);
+            pushln!(&mut out, "    /\\ UNCHANGED vars");
+            pushln!(&mut out);
+        }
+
+        // Fail closed on a frame-name collision: the rendered transitions
+        // already reference one name for two different frames, so returning the
+        // module would silently give an action the wrong frame condition.
+        if let Some(collision) = self.unchanged_frames.collision() {
+            return Err(CompositionTlaError::MachineUnchangedFrameCollision {
+                machine: self.schema.machine.as_str().to_owned(),
+                collision: collision.clone(),
+            });
+        }
+        // Every frame variable is in scope from the VARIABLES declaration
+        // above, and every reference is in the transition bodies below.
+        out.push_str(&self.unchanged_frames.definitions_block());
+
+        if !self.helper_defs.is_empty() {
+            for helper in &self.helper_defs {
+                pushln!(&mut out, "{helper}");
+                pushln!(&mut out);
+            }
+        }
+
+        for transition in &rendered_transitions {
+            pushln!(&mut out, "{transition}");
+            pushln!(&mut out);
+        }
+
+        pushln!(&mut out, "Next ==");
+        for transition in &self.schema.transitions {
+            let call = if transition.on.bindings().is_empty() {
+                transition.name.as_str().to_owned()
+            } else {
+                let binding_types = self.binding_type_map(transition);
+                let forced_bool_literals =
+                    transition_forced_bool_literals(transition, &binding_types);
+                let binding_env = transition
+                    .on
+                    .bindings()
+                    .iter()
+                    .map(|binding| {
+                        (
+                            binding.as_str().to_owned(),
+                            self.local_binding_name(binding.as_str()),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let mut prefix = String::new();
+                for binding in transition.on.bindings() {
+                    if forced_bool_literals.contains_key(binding.as_str()) {
+                        continue;
+                    }
+                    let Some(ty) = binding_types.get(binding.as_str()) else {
+                        return Ok(String::new());
+                    };
+                    let domain = self.binding_domain_for_binding(
+                        trigger_input_variant(transition),
+                        binding.as_str(),
+                        ty,
+                    );
+                    let domain =
+                        if transition_uses_tlc_representative_payload(self.schema, transition) {
+                            tlc_representative_domain(domain)
+                        } else {
+                            domain
+                        };
+                    let local = binding_env
+                        .get(binding.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| binding.as_str().to_owned());
+                    prefix.push_str(&format!("\\E {local} \\in {domain} : "));
+                }
+                let args = transition
+                    .on
+                    .bindings()
+                    .iter()
+                    .map(|binding| {
+                        forced_bool_literals
+                            .get(binding.as_str())
+                            .map(|value| tla_bool_literal(*value).to_owned())
+                            .unwrap_or_else(|| {
+                                binding_env
+                                    .get(binding.as_str())
+                                    .cloned()
+                                    .unwrap_or_else(|| binding.as_str().to_owned())
+                            })
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                // Hoist the source-phase guard ahead of the parameter
+                // quantifiers. The guard is the first conjunct of the action
+                // body too, so the disjunct is unchanged in meaning, but TLC
+                // no longer splits it into one action per parameter tuple
+                // that it must enumerate in every state: states outside the
+                // source phase reject the whole disjunct at once.
+                let from_guard = transition
+                    .from
+                    .iter()
+                    .map(|phase| format!("phase = {}", tla_string(phase)))
+                    .collect::<Vec<_>>()
+                    .join(" \\/ ");
+                if prefix.is_empty() || from_guard.is_empty() {
+                    format!("{prefix}{}({})", transition.name, args)
+                } else {
+                    format!("({from_guard}) /\\ {prefix}{}({})", transition.name, args)
+                }
+            };
+            pushln!(&mut out, "    \\/ {}", call);
+        }
+        if !self.schema.state.terminal_phases.is_empty() {
+            pushln!(&mut out, "    \\/ TerminalStutter");
+        }
+        pushln!(&mut out);
+
+        for invariant in &self.schema.invariants {
+            writeln!(
+                &mut out,
+                "{} == {}",
+                invariant.name,
+                self.render_expr(&invariant.expr, &BTreeMap::new(), &BTreeMap::new())
+            )
+            .expect("write to string");
+        }
+        pushln!(&mut out);
+
+        writeln!(
+            &mut out,
+            "CiStateConstraint == {}",
+            render_machine_state_constraint(self.schema, false)
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "DeepStateConstraint == {}",
+            render_machine_state_constraint(self.schema, true)
+        )
+        .expect("write to string");
+        pushln!(&mut out);
+
+        pushln!(&mut out, "Spec == Init /\\ [][Next]_vars");
+        pushln!(&mut out);
+        for invariant in &self.schema.invariants {
+            pushln!(&mut out, "THEOREM Spec => []{}", invariant.name);
+        }
+        pushln!(&mut out);
+        writeln!(
+            &mut out,
+            "============================================================================="
+        )
+        .expect("write to string");
+
+        Ok(out)
+    }
+
+    fn render_helper(&self, out: &mut String, helper: &HelperSchema) {
+        let params = helper
+            .params
+            .iter()
+            .map(|field| self.local_binding_name(field.name.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let binding_env = helper
+            .params
+            .iter()
+            .map(|field| {
+                (
+                    field.name.as_str().to_owned(),
+                    self.local_binding_name(field.name.as_str()),
+                )
+            })
+            .collect::<BTreeMap<String, _>>();
+        let field_env = self.field_env_override.clone().unwrap_or_else(|| {
+            self.schema
+                .state
+                .fields
+                .iter()
+                .map(|field| {
+                    (
+                        field.name.as_str().to_owned(),
+                        field.name.as_str().to_owned(),
+                    )
+                })
+                .collect::<BTreeMap<String, _>>()
+        });
+        let binding_types = helper
+            .params
+            .iter()
+            .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+            .collect::<BTreeMap<String, _>>();
+        if helper.params.is_empty() {
+            writeln!(
+                out,
+                "{} == {}",
+                self.scoped_helper_name(&helper.name),
+                self.render_expr_with_types(&helper.body, &field_env, &binding_env, &binding_types)
+            )
+            .expect("write to string");
+        } else {
+            writeln!(
+                out,
+                "{}({}) == {}",
+                self.scoped_helper_name(&helper.name),
+                params,
+                self.render_expr_with_types(&helper.body, &field_env, &binding_env, &binding_types)
+            )
+            .expect("write to string");
+        }
+    }
+
+    fn render_runtime_delivery_native_helpers(&self, out: &mut String) {
+        writeln!(
+            out,
+            "{}(current, recipient, outcome) ==",
+            self.scoped_helper_name("runtime_delivery_recipient_outcomes_after_set")
+        )
+        .expect("write to string");
+        pushln!(out, "    MapSet(current, recipient, outcome)");
+    }
+
+    fn render_meerkat_machine_native_helpers(&self, out: &mut String) {
+        let prefix = |name: &str| self.scoped_helper_name(name);
+        writeln!(
+            out,
+            "{}(current, candidate) ==",
+            prefix("meerkat_machine_session_id_matches_string")
+        )
+        .expect("write to string");
+        pushln!(out, "    current # None /\\ current.value = candidate");
+        writeln!(
+            out,
+            "{}(endpoints, endpoint_count) ==",
+            prefix("meerkat_peer_endpoint_set_cardinality_matches")
+        )
+        .expect("write to string");
+        pushln!(out, "    Cardinality(endpoints) = endpoint_count");
+        writeln!(
+            out,
+            "{}(endpoints, peer_id) ==",
+            prefix("meerkat_peer_endpoint_set_contains_peer_id")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\E endpoint \\in endpoints: endpoint.peer_id = peer_id"
+        );
+        writeln!(
+            out,
+            "{}(endpoint, peer_id) ==",
+            prefix("meerkat_peer_endpoint_option_peer_id_matches")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    endpoint # None /\\ endpoint.value.peer_id = peer_id"
+        );
+        writeln!(
+            out,
+            "{}(endpoint, peer_id) ==",
+            prefix("meerkat_peer_endpoint_peer_id_matches")
+        )
+        .expect("write to string");
+        pushln!(out, "    endpoint.peer_id = peer_id");
+        writeln!(
+            out,
+            "{}(endpoints) ==",
+            prefix("meerkat_peer_endpoint_set_peer_ids_unique")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    Cardinality(endpoints) = Cardinality({{ endpoint.peer_id : endpoint \\in endpoints }})"
+        );
+        writeln!(
+            out,
+            "{}(rows, operation_by_authority, operation_id) ==",
+            prefix("meerkat_machine_live_bridge_authority_rows_without_operation")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [authority_id \\in {{ candidate \\in DOMAIN rows : IF candidate \\in DOMAIN operation_by_authority THEN operation_by_authority[candidate] # operation_id ELSE TRUE }} |-> rows[authority_id]]"
+        );
+        writeln!(
+            out,
+            "{}(authorities, operation_by_authority, operation_id) ==",
+            prefix("meerkat_machine_live_bridge_authorities_without_operation")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    {{ authority_id \\in authorities : IF authority_id \\in DOMAIN operation_by_authority THEN operation_by_authority[authority_id] # operation_id ELSE TRUE }}"
+        );
+    }
+
+    fn render_mob_machine_native_helpers(&self, out: &mut String) {
+        let prefix = |name: &str| self.scoped_helper_name(name);
+        let local = |name: &str| self.local_binding_name(name);
+        // Row #181: compute the next monotone respawn generation for an
+        // identity. Missing identity starts at generation zero. A retained
+        // u64::MAX generation has no successor and must never wrap to zero.
+        writeln!(
+            out,
+            "{}(arg_identity_runtime_generations, arg_agent_identity) ==",
+            prefix("mob_machine_next_respawn_generation")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    IF arg_agent_identity \\notin DOMAIN arg_identity_runtime_generations"
+        );
+        pushln!(out, "    THEN Some(0)");
+        pushln!(
+            out,
+            "    ELSE IF arg_identity_runtime_generations[arg_agent_identity] = {TLA_RUST_U64_MAX_CONSTANT}"
+        );
+        pushln!(out, "         THEN None");
+        pushln!(
+            out,
+            "         ELSE Some(arg_identity_runtime_generations[arg_agent_identity] + 1)"
+        );
+        // Supervisor epochs use the same non-wrapping u64 successor relation
+        // in both plain and Option-valued recovered tuples. These operators
+        // deliberately mention the Rust u64 ceiling so TLC cannot admit
+        // MAX -> 0 as a successor through unbounded integer arithmetic.
+        writeln!(
+            out,
+            "{}(arg_current, arg_next) ==",
+            prefix("mob_machine_u64_is_exact_successor")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ arg_current # {TLA_RUST_U64_MAX_CONSTANT}");
+        pushln!(out, "    /\\ arg_next = arg_current + 1");
+        writeln!(
+            out,
+            "{}(arg_current, arg_next) ==",
+            prefix("mob_machine_optional_u64_is_exact_successor")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ arg_current # {TLA_RUST_U64_MAX_CONSTANT}");
+        pushln!(out, "    /\\ arg_next = Some(arg_current + 1)");
+        // Remote-turn custody admission is a native MobMachine reducer because
+        // it enforces aggregate cardinality and correlation-key uniqueness
+        // across all three custody sets. Keep this operator structurally
+        // equivalent to the Rust helper in the canonical MobMachine catalog.
+        writeln!(
+            out,
+            "{}(pending, committed, resolved, candidate) ==",
+            prefix("mob_machine_remote_turn_custody_admits")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET same_member_host_count == Cardinality({{ row \\in pending : /\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id }})"
+        );
+        pushln!(
+            out,
+            "            + Cardinality({{ row \\in committed : /\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id }})"
+        );
+        pushln!(
+            out,
+            "            + Cardinality({{ row \\in resolved : /\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id }})"
+        );
+        pushln!(
+            out,
+            "    IN /\\ Cardinality(pending) + Cardinality(committed) + Cardinality(resolved) < 4096"
+        );
+        pushln!(out, "       /\\ candidate.dispatch_sequence > 0");
+        pushln!(out, "       /\\ candidate.input_id # \"\"");
+        pushln!(out, "       /\\ candidate.run_id # \"\"");
+        pushln!(out, "       /\\ candidate.step_id # \"\"");
+        pushln!(out, "       /\\ candidate.host_id # \"\"");
+        pushln!(out, "       /\\ candidate.member_session_id # \"\"");
+        for rows in ["pending", "committed", "resolved"] {
+            pushln!(
+                out,
+                "       /\\ \\A row \\in {rows} : /\\ row.dispatch_sequence # candidate.dispatch_sequence /\\ \\lnot (/\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id /\\ row.generation = candidate.generation /\\ row.fence_token = candidate.fence_token /\\ row.input_id = candidate.input_id)"
+            );
+        }
+        pushln!(out, "       /\\ same_member_host_count < 256");
+        // Placed completion/kickoff helpers. TLC treats canonical UUID lexical
+        // shape as an abstract non-empty string property; Rust performs the
+        // stricter parse-and-roundtrip check at the executable boundary.
+        writeln!(
+            out,
+            "{}(candidate) ==",
+            prefix("mob_machine_placed_completion_obligation_well_formed")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ candidate.agent_identity # \"\"");
+        pushln!(out, "    /\\ candidate.host_id # \"\"");
+        pushln!(out, "    /\\ candidate.host_binding_generation > 0");
+        pushln!(out, "    /\\ candidate.member_session_id # \"\"");
+        pushln!(out, "    /\\ candidate.dispatch_sequence > 0");
+        pushln!(out, "    /\\ candidate.input_id # \"\"");
+        writeln!(
+            out,
+            "{}(pending, resolved, candidate) ==",
+            prefix("mob_machine_placed_completion_custody_admits")
+        )
+        .expect("write to string");
+        pushln!(out, "    LET rows == pending \\cup resolved");
+        pushln!(
+            out,
+            "        same_member_host == Cardinality({{ row \\in rows : /\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id }})"
+        );
+        pushln!(out, "    IN /\\ Cardinality(rows) < 4096");
+        pushln!(
+            out,
+            "       /\\ \\A row \\in rows : /\\ row.dispatch_sequence # candidate.dispatch_sequence /\\ \\lnot (/\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id /\\ row.generation = candidate.generation /\\ row.fence_token = candidate.fence_token /\\ row.input_id = candidate.input_id)"
+        );
+        pushln!(out, "       /\\ same_member_host < 256");
+        writeln!(
+            out,
+            "{}(active_run, active_layer, active_members, layer_phases, layer_dispositions) ==",
+            prefix("mob_machine_adaptive_lifecycle_drained")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ active_run = None");
+        pushln!(out, "    /\\ DOMAIN active_layer = {{}}");
+        pushln!(
+            out,
+            "    /\\ \\A run_id \\in DOMAIN active_members : active_members[run_id] = 0"
+        );
+        pushln!(out, "    /\\ \\A layer_id \\in DOMAIN layer_phases :");
+        pushln!(
+            out,
+            "           \\/ layer_phases[layer_id] = \"Validating\""
+        );
+        pushln!(
+            out,
+            "           \\/ /\\ layer_id \\in DOMAIN layer_dispositions"
+        );
+        pushln!(
+            out,
+            "              /\\ layer_phases[layer_id] \\in {{\"Completed\", \"SetupFailed\", \"RunFailed\", \"ResultInvalid\", \"Canceled\"}}"
+        );
+        writeln!(
+            out,
+            "{}(adaptive_run_id, active_layer, active_members, layer_run, layer_phases, layer_dispositions) ==",
+            prefix("mob_machine_adaptive_run_custody_drained")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ adaptive_run_id \\notin DOMAIN active_layer");
+        pushln!(
+            out,
+            "    /\\ (IF adaptive_run_id \\in DOMAIN active_members THEN active_members[adaptive_run_id] ELSE 0) = 0"
+        );
+        pushln!(out, "    /\\ \\A layer_id \\in DOMAIN layer_run :");
+        pushln!(out, "           \\/ layer_run[layer_id] # adaptive_run_id");
+        pushln!(
+            out,
+            "           \\/ /\\ layer_id \\in DOMAIN layer_dispositions"
+        );
+        pushln!(out, "              /\\ layer_id \\in DOMAIN layer_phases");
+        pushln!(
+            out,
+            "              /\\ layer_phases[layer_id] \\in {{\"Completed\", \"SetupFailed\", \"RunFailed\", \"ResultInvalid\", \"Canceled\"}}"
+        );
+        writeln!(
+            out,
+            "{}(started, callback_pending, failed, cancelled, kickoff_errors, identity, outcome_kind, outcome_error, closure_kind) ==",
+            prefix("mob_machine_finalized_placed_kickoff_recovery_well_formed")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    /\\ Cardinality({{ kickoff_phase \\in {{\"Started\", \"CallbackPending\", \"Failed\", \"Cancelled\"}} :"
+        );
+        pushln!(
+            out,
+            "           CASE kickoff_phase = \"Started\" -> identity \\in started"
+        );
+        pushln!(
+            out,
+            "             [] kickoff_phase = \"CallbackPending\" -> identity \\in callback_pending"
+        );
+        pushln!(
+            out,
+            "             [] kickoff_phase = \"Failed\" -> identity \\in failed"
+        );
+        pushln!(
+            out,
+            "             [] OTHER -> identity \\in cancelled }}) = 1"
+        );
+        pushln!(
+            out,
+            "    /\\ CASE outcome_kind = \"Failed\" -> outcome_error # None"
+        );
+        pushln!(
+            out,
+            "          [] outcome_kind = \"RejectedNoEffect\" -> /\\ outcome_error # None /\\ outcome_error.value # \"\""
+        );
+        pushln!(out, "          [] OTHER -> outcome_error = None");
+        pushln!(
+            out,
+            "    /\\ CASE closure_kind = \"Acknowledged\" -> /\\ outcome_kind # \"RejectedNoEffect\" /\\ outcome_kind # \"Disposed\""
+        );
+        pushln!(
+            out,
+            "          [] closure_kind = \"RejectedNoEffect\" -> outcome_kind = \"RejectedNoEffect\""
+        );
+        pushln!(
+            out,
+            "          [] OTHER -> outcome_kind # \"RejectedNoEffect\""
+        );
+        pushln!(
+            out,
+            "    /\\ CASE identity \\in cancelled -> identity \\notin DOMAIN kickoff_errors"
+        );
+        pushln!(
+            out,
+            "          [] identity \\in started -> /\\ outcome_kind = \"Started\" /\\ identity \\notin DOMAIN kickoff_errors"
+        );
+        pushln!(
+            out,
+            "          [] identity \\in callback_pending -> /\\ outcome_kind = \"CallbackPending\" /\\ identity \\notin DOMAIN kickoff_errors"
+        );
+        pushln!(
+            out,
+            "          [] OTHER -> /\\ outcome_kind \\in {{\"Failed\", \"RejectedNoEffect\"}} /\\ identity \\in DOMAIN kickoff_errors /\\ outcome_error = Some(kickoff_errors[identity])"
+        );
+        writeln!(
+            out,
+            "{}(candidate) ==",
+            prefix("mob_machine_placed_kickoff_obligation_well_formed")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ candidate.agent_identity # \"\"");
+        pushln!(out, "    /\\ candidate.host_id # \"\"");
+        pushln!(out, "    /\\ candidate.host_binding_generation > 0");
+        pushln!(out, "    /\\ candidate.member_session_id # \"\"");
+        pushln!(out, "    /\\ candidate.input_id # \"\"");
+        pushln!(out, "    /\\ candidate.objective_id # \"\"");
+        writeln!(
+            out,
+            "{}(pending_kickoffs, resolved_kickoffs, retained_kickoffs, pending_turns, committed_turns, resolved_turns, pending_completions, resolved_completions, candidate) ==",
+            prefix("mob_machine_placed_kickoff_correlation_available")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    /\\ \\A row \\in pending_kickoffs \\cup resolved_kickoffs : /\\ row.agent_identity # candidate.agent_identity /\\ \\lnot (/\\ row.host_id = candidate.host_id /\\ row.generation = candidate.generation /\\ row.fence_token = candidate.fence_token /\\ row.input_id = candidate.input_id)"
+        );
+        pushln!(
+            out,
+            "    /\\ \\A identity \\in DOMAIN retained_kickoffs : retained_kickoffs[identity].agent_identity # candidate.agent_identity"
+        );
+        pushln!(
+            out,
+            "    /\\ \\A row \\in pending_turns \\cup committed_turns \\cup resolved_turns : \\lnot (/\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id /\\ row.generation = candidate.generation /\\ row.fence_token = candidate.fence_token /\\ row.input_id = candidate.input_id)"
+        );
+        pushln!(
+            out,
+            "    /\\ \\A row \\in pending_completions \\cup resolved_completions : \\lnot (/\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id /\\ row.generation = candidate.generation /\\ row.fence_token = candidate.fence_token /\\ row.input_id = candidate.input_id)"
+        );
+        writeln!(
+            out,
+            "{}(pending, resolved, agent_identity) ==",
+            prefix("mob_machine_placed_kickoff_custody_absent_for_identity")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\A row \\in pending \\cup resolved : row.agent_identity # agent_identity"
+        );
+        writeln!(
+            out,
+            "{}(pending, resolved, host_id) ==",
+            prefix("mob_machine_placed_kickoff_custody_absent_for_host")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\A row \\in pending \\cup resolved : row.host_id # host_id"
+        );
+        writeln!(
+            out,
+            "{}(pending, resolved, retained, candidate) ==",
+            prefix("mob_machine_remote_turn_input_id_available_to_kickoff")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    /\\ \\A row \\in pending \\cup resolved : \\lnot (/\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id /\\ row.generation = candidate.generation /\\ row.fence_token = candidate.fence_token /\\ row.input_id = candidate.input_id)"
+        );
+        pushln!(
+            out,
+            "    /\\ \\A identity \\in DOMAIN retained : \\lnot (/\\ retained[identity].agent_identity = candidate.agent_identity /\\ retained[identity].host_id = candidate.host_id /\\ retained[identity].generation = candidate.generation /\\ retained[identity].fence_token = candidate.fence_token /\\ retained[identity].input_id = candidate.input_id)"
+        );
+        // Retirement atomically prunes every local wiring edge incident to
+        // the retiring identity. This mirrors the catalog-native Rust helper
+        // and keeps cold replay from resurrecting topology to an absent member.
+        writeln!(
+            out,
+            "{}(arg_wiring_edges, arg_agent_identity) ==",
+            prefix("mob_machine_wiring_edges_without_identity")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    {{ edge \\in arg_wiring_edges : /\\ edge.a # arg_agent_identity /\\ edge.b # arg_agent_identity }}"
+        );
+        writeln!(
+            out,
+            "{}(arg_external_peer_edges, arg_agent_identity) ==",
+            prefix("mob_machine_external_peer_edges_without_identity")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    {{ edge \\in arg_external_peer_edges : edge.local # arg_agent_identity }}"
+        );
+        writeln!(
+            out,
+            "{}(arg_external_peer_edges_by_key, arg_agent_identity) ==",
+            prefix("mob_machine_external_peer_edges_by_key_without_identity")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [key \\in {{ key \\in DOMAIN arg_external_peer_edges_by_key : key.local # arg_agent_identity }} |-> arg_external_peer_edges_by_key[key]]"
+        );
+        // Row #351: reconcile-membership spawn/retire set helpers. The DSL
+        // ReconcileMembership effect emits calls to these, but they had no TLA+
+        // operator definitions, so TLC reported "Unknown operator" for
+        // MobMachine (and any composition embedding it). Mirror of the Rust
+        // helpers in `catalog::dsl::mob_machine`: spawn = desired identities not
+        // yet bound to a runtime; retire = currently-bound identities that are
+        // no longer desired, gated on `retire_stale` (empty set otherwise).
+        // `identity_to_runtime` is the bound-identity function (DOMAIN = the
+        // currently-bound identities); `desired` is the target identity set.
+        writeln!(
+            out,
+            "{}(arg_identity_to_runtime, arg_desired) ==",
+            prefix("mob_machine_members_to_spawn")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    {{ member \\in arg_desired : member \\notin DOMAIN arg_identity_to_runtime }}"
+        );
+        writeln!(
+            out,
+            "{}(arg_identity_to_runtime, arg_desired, arg_retire_stale) ==",
+            prefix("mob_machine_members_to_retire")
+        )
+        .expect("write to string");
+        pushln!(out, "    IF arg_retire_stale");
+        pushln!(
+            out,
+            "    THEN {{ member \\in DOMAIN arg_identity_to_runtime : member \\notin arg_desired }}"
+        );
+        pushln!(out, "    ELSE {{}}");
+        // Placed-carrier cleanup is identity-exclusive and carries the exact
+        // durable operation tuple. Both operators are native Rust helpers in
+        // the catalog, so every standalone/composition TLA namespace must
+        // define their semantic twins explicitly.
+        writeln!(
+            out,
+            "{}(arg_obligations, arg_agent_identity) ==",
+            prefix("mob_machine_placed_cleanup_absent_for_identity")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\A obligation \\in arg_obligations : obligation.agent_identity # arg_agent_identity"
+        );
+        writeln!(
+            out,
+            "{}(arg_agent_identity, arg_spawn_id, arg_generation, arg_fence_token, arg_provision_operation_id, arg_operation_owner_session_id, arg_expected_phase) ==",
+            prefix("mob_machine_placed_cleanup_obligation")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [agent_identity |-> arg_agent_identity, spawn_id |-> arg_spawn_id, generation |-> arg_generation, fence_token |-> arg_fence_token, provision_operation_id |-> arg_provision_operation_id, operation_owner_session_id |-> arg_operation_owner_session_id, expected_phase |-> arg_expected_phase]"
+        );
+        // A placed carrier is live only at the exact currently bound host
+        // generation. Keep every partial-map read behind a TLA IF so sampled
+        // malformed/partial states evaluate to FALSE instead of indexing an
+        // absent function key.
+        writeln!(
+            out,
+            "{}(arg_member_placement, arg_current_binding_generations, arg_host_bind_phase, arg_host_binding_generations, arg_agent_identity) ==",
+            prefix("mob_machine_placed_carrier_binding_active")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    IF arg_agent_identity \\notin DOMAIN arg_member_placement"
+        );
+        pushln!(out, "    THEN FALSE");
+        pushln!(
+            out,
+            "    ELSE LET host == arg_member_placement[arg_agent_identity]"
+        );
+        pushln!(
+            out,
+            "         IN IF host \\notin DOMAIN arg_host_bind_phase"
+        );
+        pushln!(out, "            THEN FALSE");
+        pushln!(
+            out,
+            "            ELSE IF arg_host_bind_phase[host] # \"Bound\""
+        );
+        pushln!(out, "                 THEN FALSE");
+        pushln!(
+            out,
+            "                 ELSE IF arg_agent_identity \\notin DOMAIN arg_current_binding_generations"
+        );
+        pushln!(out, "                      THEN FALSE");
+        pushln!(
+            out,
+            "                      ELSE LET generation == arg_current_binding_generations[arg_agent_identity]"
+        );
+        pushln!(out, "                           IN /\\ generation > 0");
+        pushln!(
+            out,
+            "                              /\\ host \\in DOMAIN arg_host_binding_generations"
+        );
+        pushln!(
+            out,
+            "                              /\\ arg_host_binding_generations[host] = generation"
+        );
+        writeln!(
+            out,
+            "{}(arg_host_id, arg_binding_generation) ==",
+            prefix("mob_machine_host_binding_generation_tombstone")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [host_id |-> arg_host_id, binding_generation |-> arg_binding_generation]"
+        );
+        // Cleanup after a revoke is authorized only when the exact retained
+        // carrier generation has a durable revocation tombstone and that host
+        // is no longer Bound.
+        writeln!(
+            out,
+            "{}(arg_member_placement, arg_current_binding_generations, arg_host_bind_phase, arg_confirmed_revocations, arg_agent_identity) ==",
+            prefix("mob_machine_placed_carrier_binding_confirmed_revoked")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    IF arg_agent_identity \\notin DOMAIN arg_member_placement"
+        );
+        pushln!(out, "    THEN FALSE");
+        pushln!(
+            out,
+            "    ELSE LET host == arg_member_placement[arg_agent_identity]"
+        );
+        pushln!(
+            out,
+            "         IN IF arg_agent_identity \\notin DOMAIN arg_current_binding_generations"
+        );
+        pushln!(out, "            THEN FALSE");
+        pushln!(
+            out,
+            "            ELSE LET generation == arg_current_binding_generations[arg_agent_identity]"
+        );
+        pushln!(out, "                 IN /\\ generation > 0");
+        pushln!(
+            out,
+            "                    /\\ (IF host \\in DOMAIN arg_host_bind_phase THEN arg_host_bind_phase[host] # \"Bound\" ELSE TRUE)"
+        );
+        pushln!(
+            out,
+            "                    /\\ [host_id |-> host, binding_generation |-> generation] \\in arg_confirmed_revocations"
+        );
+        // Mob-coordination temporal predicates (work-intent / resource-claim
+        // expiry). The DSL emits calls to these guards but they had no TLA+
+        // definitions, so TLC reported "Unknown operator" for MobMachine (and
+        // for any composition embedding it). The expires-at argument is the
+        // stored `Option<u64>` (`Some(ms)`/`None`) and `now_ms` is a raw value;
+        // `e # None /\ e.value <= now_ms` short-circuits when there is no expiry.
+        // Resource-claim status arrives as the raw status string.
+        writeln!(
+            out,
+            "{}(expires_at_ms, now_ms) ==",
+            prefix("mob_coordination_expired_at")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ expires_at_ms # None");
+        pushln!(out, "    /\\ expires_at_ms.value <= now_ms");
+        writeln!(
+            out,
+            "{}(expires_at_ms, now_ms) == ~{}(expires_at_ms, now_ms)",
+            prefix("mob_coordination_work_intent_unexpired"),
+            prefix("mob_coordination_expired_at")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(expires_at_ms, now_ms) == ~{}(expires_at_ms, now_ms)",
+            prefix("mob_coordination_resource_claim_unexpired"),
+            prefix("mob_coordination_expired_at")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(status, expires_at_ms, now_ms) ==",
+            prefix("mob_coordination_resource_claim_active_at")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ status = \"Active\"");
+        writeln!(
+            out,
+            "    /\\ ~{}(expires_at_ms, now_ms)",
+            prefix("mob_coordination_expired_at")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(status, expires_at_ms, now_ms) == ~{}(status, expires_at_ms, now_ms)",
+            prefix("mob_coordination_resource_claim_inactive_at"),
+            prefix("mob_coordination_resource_claim_active_at")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(edges_by_key, edge) ==",
+            prefix("mob_machine_external_peer_edge_has_matching_key")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET key == [local |-> edge.local, name |-> edge.endpoint.name]"
+        );
+        pushln!(out, "    IN /\\ key \\in DOMAIN edges_by_key");
+        pushln!(out, "       /\\ edges_by_key[key] = edge");
+        writeln!(
+            out,
+            "{}(edge) == edge.local",
+            prefix("mob_machine_external_peer_edge_local")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(edge) == edge.endpoint.peer_id",
+            prefix("mob_machine_external_peer_edge_peer_id")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(key, edge) ==",
+            prefix("mob_machine_external_peer_key_matches_edge")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ key.local = edge.local");
+        pushln!(out, "    /\\ key.name = edge.endpoint.name");
+        writeln!(
+            out,
+            "{}(key, agent_identity) == key.local = agent_identity",
+            prefix("mob_machine_external_peer_key_matches_local")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(edges, agent_identity) ==",
+            prefix("mob_machine_external_peer_identity_absent")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\A edge \\in edges : edge.endpoint.name /= agent_identity"
+        );
+        writeln!(
+            out,
+            "{}({}, agent_identity) ==",
+            prefix("mob_machine_identity_has_session_binding"),
+            local("member_session_bindings")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    /\\ agent_identity \\in DOMAIN {}",
+            local("member_session_bindings")
+        );
+        pushln!(
+            out,
+            "    /\\ {}[agent_identity] /= \"\"",
+            local("member_session_bindings")
+        );
+        writeln!(
+            out,
+            "{}({}, {}, {}, expected_runtime_ids) ==",
+            prefix("mob_machine_session_bound_live_runtime_ids_match"),
+            local("identity_to_runtime"),
+            local("member_session_bindings"),
+            local("live_runtime_ids")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET eligible_ids == {{ candidate \\in DOMAIN {} : {}[candidate] /= \"\" /\\ candidate \\in DOMAIN {} /\\ {}[candidate] \\in {} }}",
+            local("member_session_bindings"),
+            local("member_session_bindings"),
+            local("identity_to_runtime"),
+            local("identity_to_runtime"),
+            local("live_runtime_ids")
+        );
+        pushln!(
+            out,
+            "    IN expected_runtime_ids = {{ {}[id] : id \\in eligible_ids }}",
+            local("identity_to_runtime")
+        );
+        writeln!(
+            out,
+            "{}(endpoint) == endpoint.peer_id",
+            prefix("mob_machine_member_peer_endpoint_peer_id")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(host_id, peer_id) == host_id = peer_id",
+            prefix("mob_machine_host_id_matches_peer_id")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(current_endpoints, prior_endpoints, agent_identity, candidate_endpoint) ==",
+            prefix("mob_machine_member_peer_id_available_for_identity")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    /\\ \\A other_identity \\in DOMAIN current_endpoints : other_identity = agent_identity \\/ current_endpoints[other_identity].peer_id /= candidate_endpoint.peer_id"
+        );
+        pushln!(
+            out,
+            "    /\\ \\A other_identity \\in DOMAIN prior_endpoints : other_identity = agent_identity \\/ \\A endpoint \\in prior_endpoints[other_identity] : endpoint.peer_id /= candidate_endpoint.peer_id"
+        );
+        writeln!(
+            out,
+            "{}(edges, agent_identity) ==",
+            prefix("mob_machine_member_has_no_external_peer_edges")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\A edge \\in edges : edge.local /= agent_identity"
+        );
+        writeln!(
+            out,
+            "{}(all_prior_endpoints, agent_identity, current_endpoint, next_endpoint) ==",
+            prefix("mob_machine_member_prior_peer_endpoints_after_migration")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET prior == IF agent_identity \\in DOMAIN all_prior_endpoints THEN all_prior_endpoints[agent_identity] ELSE {{}}"
+        );
+        pushln!(
+            out,
+            "        retained == {{ endpoint \\in (prior \\cup {{current_endpoint}}) : endpoint.peer_id /= next_endpoint.peer_id }}"
+        );
+        pushln!(out, "    IN IF retained = {{}}");
+        pushln!(
+            out,
+            "       THEN [id \\in (DOMAIN all_prior_endpoints \\ {{agent_identity}}) |-> all_prior_endpoints[id]]"
+        );
+        pushln!(
+            out,
+            "       ELSE [id \\in (DOMAIN all_prior_endpoints \\cup {{agent_identity}}) |-> IF id = agent_identity THEN retained ELSE all_prior_endpoints[id]]"
+        );
+        writeln!(
+            out,
+            "{}(endpoint_identity, migrated_identity, retained_peer_endpoint, current_peer_ids) ==",
+            prefix("mob_machine_member_endpoint_migration_cleanup_peer_id")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    IF endpoint_identity = migrated_identity THEN retained_peer_endpoint.peer_id ELSE current_peer_ids[endpoint_identity]"
+        );
+        writeln!(
+            out,
+            "{}(edge) == edge.a",
+            prefix("mob_machine_wiring_edge_a")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(edge) == edge.b",
+            prefix("mob_machine_wiring_edge_b")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(edge, agent_identity) == edge.a = agent_identity \\/ edge.b = agent_identity",
+            prefix("mob_machine_wiring_edge_contains_identity")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}({}, {}, agent_identity) ==",
+            prefix("mob_machine_member_peer_overlay_complete"),
+            local("wiring_edges"),
+            local("member_peer_endpoints")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\A edge \\in {}: IF edge.a = agent_identity THEN edge.b \\in DOMAIN {} ELSE IF edge.b = agent_identity THEN edge.a \\in DOMAIN {} ELSE TRUE",
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("member_peer_endpoints")
+        );
+        writeln!(
+            out,
+            "{}({}, {}, {}, agent_identity) ==",
+            prefix("mob_machine_member_peer_overlay"),
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("external_peer_edges")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET outgoing_edges == {{ edge \\in {} : edge.a = agent_identity /\\ edge.b \\in DOMAIN {} }}",
+            local("wiring_edges"),
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "        incoming_edges == {{ edge \\in {} : edge.b = agent_identity /\\ edge.a \\in DOMAIN {} }}",
+            local("wiring_edges"),
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "        local_external_edges == {{ edge \\in {} : edge.local = agent_identity }}",
+            local("external_peer_edges")
+        );
+        pushln!(
+            out,
+            "    IN {{ {}[edge.b] : edge \\in outgoing_edges }}",
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "       \\cup {{ {}[edge.a] : edge \\in incoming_edges }}",
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "       \\cup {{ [name |-> edge.endpoint.name, peer_id |-> edge.endpoint.peer_id, address |-> edge.endpoint.address, signing_key |-> edge.endpoint.signing_key] : edge \\in local_external_edges }}"
+        );
+        writeln!(
+            out,
+            "{}({}, a_identity, b_identity) == \\E edge \\in {}: (edge.a = a_identity /\\ edge.b = b_identity) \\/ (edge.a = b_identity /\\ edge.b = a_identity)",
+            prefix("mob_machine_wiring_contains_pair"),
+            local("wiring_edges"),
+            local("wiring_edges")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}({}, {}, agent_identity, excluded_identity) ==",
+            prefix("mob_machine_member_peer_overlay_without_identity_complete"),
+            local("wiring_edges"),
+            local("member_peer_endpoints")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\A edge \\in {}: IF edge.a = agent_identity /\\ edge.b # excluded_identity THEN edge.b \\in DOMAIN {} ELSE IF edge.b = agent_identity /\\ edge.a # excluded_identity THEN edge.a \\in DOMAIN {} ELSE TRUE",
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("member_peer_endpoints")
+        );
+        writeln!(
+            out,
+            "{}({}, {}, {}, agent_identity, excluded_identity) ==",
+            prefix("mob_machine_member_peer_overlay_without_identity"),
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("external_peer_edges")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET outgoing_edges == {{ edge \\in {} : edge.a = agent_identity /\\ edge.b # excluded_identity /\\ edge.b \\in DOMAIN {} }}",
+            local("wiring_edges"),
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "        incoming_edges == {{ edge \\in {} : edge.b = agent_identity /\\ edge.a # excluded_identity /\\ edge.a \\in DOMAIN {} }}",
+            local("wiring_edges"),
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "        local_external_edges == {{ edge \\in {} : edge.local = agent_identity }}",
+            local("external_peer_edges")
+        );
+        pushln!(
+            out,
+            "    IN {{ {}[edge.b] : edge \\in outgoing_edges }}",
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "       \\cup {{ {}[edge.a] : edge \\in incoming_edges }}",
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "       \\cup {{ [name |-> edge.endpoint.name, peer_id |-> edge.endpoint.peer_id, address |-> edge.endpoint.address, signing_key |-> edge.endpoint.signing_key] : edge \\in local_external_edges }}"
+        );
+        writeln!(
+            out,
+            "{}({}, {}, {}, agent_identity, excluded_identity) ==",
+            prefix("mob_machine_member_peer_overlay_without_identity_peer_ids_unique"),
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("external_peer_edges")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "    LET overlay == {}({}, {}, {}, agent_identity, excluded_identity) IN Cardinality(overlay) = Cardinality({{endpoint.peer_id : endpoint \\in overlay}})",
+            prefix("mob_machine_member_peer_overlay_without_identity"),
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("external_peer_edges")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}({}, {}, {}, agent_identity) ==",
+            prefix("mob_machine_member_peer_overlay_peer_ids_unique"),
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("external_peer_edges")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "    LET overlay == {}({}, {}, {}, agent_identity) IN Cardinality(overlay) = Cardinality({{endpoint.peer_id : endpoint \\in overlay}})",
+            prefix("mob_machine_member_peer_overlay"),
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("external_peer_edges")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(edge, a_identity, b_identity) ==",
+            prefix("mob_machine_wiring_edge_matches_members")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ edge.a = a_identity");
+        pushln!(out, "    /\\ edge.b = b_identity");
+        writeln!(
+            out,
+            "{}(all_statuses, run_id, step_id, status) ==",
+            prefix("mob_machine_run_step_status_after_set")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF run_id \\in DOMAIN all_statuses THEN all_statuses[run_id] ELSE [x \\in {{}} |-> None]"
+        );
+        pushln!(
+            out,
+            "    IN MapSet(all_statuses, run_id, MapSet(current, step_id, Some(status)))"
+        );
+        writeln!(
+            out,
+            "{}(all_statuses, run_id) ==",
+            prefix("mob_machine_run_step_status_after_cancel_unfinished")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF run_id \\in DOMAIN all_statuses THEN all_statuses[run_id] ELSE [x \\in {{}} |-> None]"
+        );
+        pushln!(
+            out,
+            "        folded == [step_id \\in DOMAIN current |-> IF current[step_id] = None \\/ current[step_id] = Some(\"Dispatched\") THEN Some(\"Canceled\") ELSE current[step_id]]"
+        );
+        pushln!(out, "    IN MapSet(all_statuses, run_id, folded)");
+        writeln!(
+            out,
+            "{}(all_values, run_id, step_id, value) ==",
+            prefix("mob_machine_run_step_bool_after_set")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF run_id \\in DOMAIN all_values THEN all_values[run_id] ELSE [x \\in {{}} |-> FALSE]"
+        );
+        pushln!(
+            out,
+            "    IN MapSet(all_values, run_id, MapSet(current, step_id, value))"
+        );
+        writeln!(
+            out,
+            "{}(all_results, run_id, step_id, result) ==",
+            prefix("mob_machine_run_step_condition_result_after_set")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF run_id \\in DOMAIN all_results THEN all_results[run_id] ELSE [x \\in {{}} |-> None]"
+        );
+        pushln!(
+            out,
+            "    IN MapSet(all_results, run_id, MapSet(current, step_id, Some(result)))"
+        );
+        writeln!(
+            out,
+            "{}(all_counts, run_id, step_id, value) ==",
+            prefix("mob_machine_run_step_u64_after_set")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF run_id \\in DOMAIN all_counts THEN all_counts[run_id] ELSE [x \\in {{}} |-> 0]"
+        );
+        pushln!(
+            out,
+            "    IN MapSet(all_counts, run_id, MapSet(current, step_id, value))"
+        );
+        writeln!(
+            out,
+            "{}(all_counts, run_id, step_id, delta) ==",
+            prefix("mob_machine_run_step_u64_after_increment")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF run_id \\in DOMAIN all_counts THEN all_counts[run_id] ELSE [x \\in {{}} |-> 0]"
+        );
+        pushln!(
+            out,
+            "        current_value == IF step_id \\in DOMAIN current THEN current[step_id] ELSE 0"
+        );
+        pushln!(
+            out,
+            "    IN MapSet(all_counts, run_id, MapSet(current, step_id, current_value + delta))"
+        );
+        writeln!(
+            out,
+            "{}(all_counts, run_id, retry_key, delta) ==",
+            prefix("mob_machine_run_retry_count_after_increment")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF run_id \\in DOMAIN all_counts THEN all_counts[run_id] ELSE [x \\in {{}} |-> 0]"
+        );
+        pushln!(
+            out,
+            "        current_value == IF retry_key \\in DOMAIN current THEN current[retry_key] ELSE 0"
+        );
+        pushln!(
+            out,
+            "    IN MapSet(all_counts, run_id, MapSet(current, retry_key, current_value + delta))"
+        );
+        writeln!(
+            out,
+            "{}(all_values, frame_id, node_id, value) ==",
+            prefix("mob_machine_frame_node_bool_after_set")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF frame_id \\in DOMAIN all_values THEN all_values[frame_id] ELSE [x \\in {{}} |-> FALSE]"
+        );
+        pushln!(
+            out,
+            "    IN MapSet(all_values, frame_id, MapSet(current, node_id, value))"
+        );
+        writeln!(
+            out,
+            "{}(status) == status \\in {{\"Completed\", \"Failed\", \"Skipped\", \"Canceled\"}}",
+            prefix("mob_machine_node_terminal")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(status) ==",
+            prefix("mob_machine_step_status_from_frame_node_status")
+        )
+        .expect("write to string");
+        pushln!(out, "    IF status = \"Completed\" THEN \"Completed\"");
+        pushln!(out, "    ELSE IF status = \"Skipped\" THEN \"Skipped\"");
+        pushln!(out, "    ELSE IF status = \"Failed\" THEN \"Failed\"");
+        pushln!(out, "    ELSE IF status = \"Canceled\" THEN \"Canceled\"");
+        pushln!(out, "    ELSE \"Dispatched\"");
+        writeln!(
+            out,
+            "{}(all_statuses, frame_branches, ordered_nodes_by_frame, frame_id, node_id) ==",
+            prefix("mob_machine_frame_node_status_after_admit")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF frame_id \\in DOMAIN all_statuses THEN all_statuses[frame_id] ELSE [x \\in {{}} |-> None]"
+        );
+        pushln!(
+            out,
+            "        branches == IF frame_id \\in DOMAIN frame_branches THEN frame_branches[frame_id] ELSE [x \\in {{}} |-> None]"
+        );
+        pushln!(
+            out,
+            "        admitted_branch == IF node_id \\in DOMAIN branches THEN branches[node_id] ELSE None"
+        );
+        pushln!(
+            out,
+            "        after_branch_reservation == [candidate \\in DOMAIN current |->"
+        );
+        pushln!(out, "            IF admitted_branch # None");
+        pushln!(out, "                /\\ candidate # node_id");
+        pushln!(out, "                /\\ candidate \\in DOMAIN branches");
+        pushln!(
+            out,
+            "                /\\ branches[candidate] = admitted_branch"
+        );
+        pushln!(out, "                /\\ current[candidate] = \"Ready\"");
+        pushln!(out, "            THEN \"Pending\" ELSE current[candidate]]");
+        pushln!(
+            out,
+            "        after_admit == MapSet(after_branch_reservation, node_id, \"Running\")"
+        );
+        pushln!(out, "    IN MapSet(all_statuses, frame_id, after_admit)");
+        writeln!(
+            out,
+            "{}(all_ready_queues, all_statuses, ordered_nodes_by_frame, frame_id) ==",
+            prefix("mob_machine_frame_ready_queue_after_terminal")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET statuses == IF frame_id \\in DOMAIN all_statuses THEN all_statuses[frame_id] ELSE [x \\in {{}} |-> None]"
+        );
+        pushln!(
+            out,
+            "        ordered == IF frame_id \\in DOMAIN ordered_nodes_by_frame THEN ordered_nodes_by_frame[frame_id] ELSE <<>>"
+        );
+        pushln!(
+            out,
+            "    IN MapSet(all_ready_queues, frame_id, SelectSeq(ordered, LAMBDA candidate: candidate \\in DOMAIN statuses /\\ statuses[candidate] = \"Ready\"))"
+        );
+        writeln!(
+            out,
+            "{}(all_ready_queues, all_statuses, ordered_nodes_by_frame, frame_id) ==",
+            prefix("mob_machine_frame_ready_queue_after_admit")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "    {}(all_ready_queues, all_statuses, ordered_nodes_by_frame, frame_id)",
+            prefix("mob_machine_frame_ready_queue_after_terminal")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(current, branches, node_id, terminal_status) ==",
+            prefix("mob_machine_frame_node_status_after_terminal_branch")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET after_terminal == MapSet(current, node_id, terminal_status)"
+        );
+        pushln!(out, "    IN [candidate \\in DOMAIN after_terminal |->");
+        pushln!(
+            out,
+            "        IF terminal_status = \"Completed\" /\\ candidate # node_id"
+        );
+        pushln!(
+            out,
+            "            /\\ candidate \\in DOMAIN branches /\\ node_id \\in DOMAIN branches"
+        );
+        pushln!(out, "            /\\ branches[node_id] # None");
+        pushln!(
+            out,
+            "            /\\ branches[candidate] = branches[node_id]"
+        );
+        writeln!(
+            out,
+            "            /\\ ~{}(after_terminal[candidate])",
+            prefix("mob_machine_node_terminal")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "            /\\ after_terminal[candidate] # \"Running\""
+        );
+        pushln!(
+            out,
+            "        THEN \"Skipped\" ELSE after_terminal[candidate]]"
+        );
+        writeln!(
+            out,
+            "{}(after_branch, dependencies, dependency_modes) ==",
+            prefix("mob_machine_frame_node_status_after_terminal_dependencies")
+        )
+        .expect("write to string");
+        pushln!(out, "    [candidate \\in DOMAIN after_branch |->");
+        pushln!(
+            out,
+            "        IF after_branch[candidate] # \"Pending\" THEN after_branch[candidate]"
+        );
+        pushln!(
+            out,
+            "        ELSE LET deps == IF candidate \\in DOMAIN dependencies THEN dependencies[candidate] ELSE <<>>"
+        );
+        pushln!(
+            out,
+            "                 mode == IF candidate \\in DOMAIN dependency_modes THEN dependency_modes[candidate] ELSE \"All\""
+        );
+        pushln!(out, "                 failed == Len(deps) # 0");
+        pushln!(
+            out,
+            "                     /\\ ((mode = \"All\" /\\ \\E dep_index \\in DOMAIN deps: LET dep == deps[dep_index] IN dep \\in DOMAIN after_branch /\\ after_branch[dep] \\in {{\"Failed\", \"Skipped\", \"Canceled\"}})"
+        );
+        pushln!(
+            out,
+            "                         \\/ (mode = \"Any\" /\\ \\A dep_index \\in DOMAIN deps: LET dep == deps[dep_index] IN dep \\in DOMAIN after_branch /\\ after_branch[dep] \\in {{\"Failed\", \"Skipped\", \"Canceled\"}}))"
+        );
+        pushln!(out, "                 satisfied == Len(deps) = 0");
+        pushln!(
+            out,
+            "                     \\/ (mode = \"All\" /\\ \\A dep_index \\in DOMAIN deps: LET dep == deps[dep_index] IN dep \\in DOMAIN after_branch /\\ after_branch[dep] = \"Completed\")"
+        );
+        pushln!(
+            out,
+            "                     \\/ (mode = \"Any\" /\\ \\E dep_index \\in DOMAIN deps: LET dep == deps[dep_index] IN dep \\in DOMAIN after_branch /\\ after_branch[dep] = \"Completed\")"
+        );
+        pushln!(
+            out,
+            "             IN IF failed THEN \"Skipped\" ELSE IF satisfied THEN \"Ready\" ELSE after_branch[candidate]]"
+        );
+        writeln!(
+            out,
+            "{}(all_statuses, frame_branches, ordered_nodes_by_frame, dependencies_by_frame, dependency_modes_by_frame, frame_id, node_id, terminal_status) ==",
+            prefix("mob_machine_frame_node_status_after_terminal")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF frame_id \\in DOMAIN all_statuses THEN all_statuses[frame_id] ELSE [x \\in {{}} |-> None]"
+        );
+        pushln!(
+            out,
+            "        branches == IF frame_id \\in DOMAIN frame_branches THEN frame_branches[frame_id] ELSE [x \\in {{}} |-> None]"
+        );
+        pushln!(
+            out,
+            "        dependencies == IF frame_id \\in DOMAIN dependencies_by_frame THEN dependencies_by_frame[frame_id] ELSE [x \\in {{}} |-> <<>>]"
+        );
+        pushln!(
+            out,
+            "        dependency_modes == IF frame_id \\in DOMAIN dependency_modes_by_frame THEN dependency_modes_by_frame[frame_id] ELSE [x \\in {{}} |-> \"All\"]"
+        );
+        writeln!(
+            out,
+            "        after_branch == {}(current, branches, node_id, terminal_status)",
+            prefix("mob_machine_frame_node_status_after_terminal_branch")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "        after_dependencies == {}(after_branch, dependencies, dependency_modes)",
+            prefix("mob_machine_frame_node_status_after_terminal_dependencies")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    IN MapSet(all_statuses, frame_id, after_dependencies)"
+        );
+    }
+
+    fn render_transition(&mut self, out: &mut String, transition: &TransitionSchema) {
+        let binding_types = self.binding_type_map(transition);
+        let binding_env = transition
+            .on
+            .bindings()
+            .iter()
+            .map(|binding| {
+                (
+                    binding.as_str().to_owned(),
+                    self.local_binding_name(binding.as_str()),
+                )
+            })
+            .collect::<BTreeMap<String, _>>();
+        let params = transition
+            .on
+            .bindings()
+            .iter()
+            .map(|binding| {
+                binding_env
+                    .get(binding.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| binding.as_str().to_owned())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if params.is_empty() {
+            writeln!(out, "{} ==", transition.name);
+        } else {
+            pushln!(out, "{}({}) ==", transition.name, params);
+        }
+
+        let from_guard = if transition.from.len() == 1 {
+            format!("phase = {}", tla_string(&transition.from[0]))
+        } else {
+            transition
+                .from
+                .iter()
+                .map(|phase| format!("phase = {}", tla_string(phase)))
+                .collect::<Vec<_>>()
+                .join(" \\/ ")
+        };
+        pushln!(out, "    /\\ {}", from_guard);
+
+        let mut env = self
+            .schema
+            .state
+            .fields
+            .iter()
+            .map(|field| {
+                (
+                    field.name.as_str().to_owned(),
+                    field.name.as_str().to_owned(),
+                )
+            })
+            .collect::<BTreeMap<String, _>>();
+
+        for guard in &transition.guards {
+            writeln!(
+                out,
+                "    /\\ {}",
+                self.render_guard(guard, &env, &binding_env, &binding_types)
+            )
+            .expect("write to string");
+        }
+
+        env = self.compile_updates(
+            transition.name.as_str(),
+            &env,
+            &binding_env,
+            &binding_types,
+            &transition.updates,
+        );
+
+        pushln!(out, "    /\\ phase' = {}", tla_string(&transition.to));
+        pushln!(out, "    /\\ model_step_count' = model_step_count + 1");
+        let touched = self
+            .schema
+            .state
+            .fields
+            .iter()
+            .filter_map(|field| {
+                let next = env.get(field.name.as_str())?;
+                if next != field.name.as_str() {
+                    Some((field.name.as_str(), next.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for (field, expr) in &touched {
+            pushln!(out, "    /\\ {}' = {}", field, expr);
+        }
+
+        let unchanged = self
+            .schema
+            .state
+            .fields
+            .iter()
+            .filter(|field| !touched.iter().any(|(name, _)| *name == field.name.as_str()))
+            .map(|field| field.name.as_str().to_owned())
+            .collect::<Vec<_>>();
+        if !unchanged.is_empty() {
+            // Machine frames are never chunked: the split policy is a
+            // composition-scale TLC mitigation, and applying it here would
+            // change the emitted formula for wide machines.
+            let name = self
+                .unchanged_frames
+                .intern(unchanged_frame_body(&unchanged, None));
+            pushln!(out, "    /\\ {name}");
+        }
+    }
+
+    fn render_guard(
+        &self,
+        guard: &Guard,
+        env: &BTreeMap<String, String>,
+        binding_env: &BTreeMap<String, String>,
+        binding_types: &BTreeMap<String, TypeRef>,
+    ) -> String {
+        self.render_expr_with_types(&guard.expr, env, binding_env, binding_types)
+    }
+
+    fn binding_type_map(&self, transition: &TransitionSchema) -> BTreeMap<String, TypeRef> {
+        let mut map = BTreeMap::new();
+        if let Some(variant) = transition_trigger_variant(self.schema, transition) {
+            for binding in transition.on.bindings() {
+                if let Some(field) = variant.fields.iter().find(|field| field.name == *binding) {
+                    map.insert(binding.as_str().to_owned(), field.ty.clone());
+                }
+            }
+        }
+        map
+    }
+
+    fn local_binding_name(&self, name: impl AsRef<str>) -> String {
+        let name = name.as_ref();
+        let candidate = tla_ident(name);
+        if candidate == "phase"
+            || self
+                .schema
+                .state
+                .fields
+                .iter()
+                .any(|field| field.name.as_str() == name)
+        {
+            format!("arg_{candidate}")
+        } else {
+            candidate
+        }
+    }
+
+    fn binding_domain_for_type(&self, ty: &TypeRef) -> String {
+        match ty {
+            TypeRef::Bool => "BOOLEAN".into(),
+            TypeRef::U32 | TypeRef::U64 => "0..2".into(),
+            TypeRef::String => "StringValues".into(),
+            TypeRef::Named(_)
+            | TypeRef::Enum(_)
+            | TypeRef::Seq(_)
+            | TypeRef::Set(_)
+            | TypeRef::Option(_)
+            | TypeRef::Map(_, _) => domain_constant_name(ty),
+        }
+    }
+
+    /// Payload domain for one bound field of `input`: the declared input
+    /// field domain if the schema has one, otherwise the type's default.
+    fn binding_domain_for_binding(
+        &self,
+        input: Option<&str>,
+        binding: &str,
+        ty: &TypeRef,
+    ) -> String {
+        match input.and_then(|input| self.schema.input_field_domain(input, binding)) {
+            Some(meerkat_machine_schema::InputFieldDomainKind::StateField(state_field)) => {
+                format!("{{{}}}", state_field.as_str())
+            }
+            Some(meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(values)) => {
+                additional_values_domain(&self.binding_domain_for_type(ty), values)
+            }
+            None => self.binding_domain_for_type(ty),
+        }
+    }
+
+    fn compile_updates(
+        &mut self,
+        transition_name: &str,
+        env: &BTreeMap<String, String>,
+        binding_env: &BTreeMap<String, String>,
+        binding_types: &BTreeMap<String, TypeRef>,
+        updates: &[Update],
+    ) -> BTreeMap<String, String> {
+        let mut current = env.clone();
+        for update in updates {
+            self.apply_update(
+                transition_name,
+                &mut current,
+                binding_env,
+                binding_types,
+                update,
+            );
+        }
+        current
+    }
+
+    fn apply_update(
+        &mut self,
+        transition_name: &str,
+        env: &mut BTreeMap<String, String>,
+        binding_env: &BTreeMap<String, String>,
+        binding_types: &BTreeMap<String, TypeRef>,
+        update: &Update,
+    ) {
+        match update {
+            Update::Assign { field, expr } => {
+                let value = self.render_expr_with_types(expr, env, binding_env, binding_types);
+                env.insert(field.as_str().to_owned(), value);
+            }
+            Update::Increment { field, amount } => {
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                env.insert(field.as_str().to_owned(), format!("({current}) + {amount}"));
+            }
+            Update::Decrement { field, amount } => {
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                env.insert(field.as_str().to_owned(), format!("({current}) - {amount}"));
+            }
+            Update::MapInsert { field, key, value } => {
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                let key_expr = self.render_expr_with_types(key, env, binding_env, binding_types);
+                let value_expr =
+                    self.render_expr_with_types(value, env, binding_env, binding_types);
+                env.insert(
+                    field.as_str().to_owned(),
+                    format!("MapSet({current}, {key_expr}, {value_expr})"),
+                );
+            }
+            Update::MapRemove { field, key } => {
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                let key_expr = self.render_expr_with_types(key, env, binding_env, binding_types);
+                env.insert(
+                    field.as_str().to_owned(),
+                    format!("MapRemove({current}, {key_expr})"),
+                );
+            }
+            Update::MapIncrement { field, key, amount } => {
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                let key_expr = self.render_expr_with_types(key, env, binding_env, binding_types);
+                env.insert(
+                    field.as_str().to_owned(),
+                    format!("MapIncrement({current}, {key_expr}, {amount})"),
+                );
+            }
+            Update::MapDecrement { field, key, amount } => {
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                let key_expr = self.render_expr_with_types(key, env, binding_env, binding_types);
+                env.insert(
+                    field.as_str().to_owned(),
+                    format!("MapDecrement({current}, {key_expr}, {amount})"),
+                );
+            }
+            Update::SetInsert { field, value } => {
+                // The field's pending value may be an unparenthesized
+                // conditional (`IF c THEN a ELSE b`); spliced bare as the left
+                // operand, the ELSE branch would capture the set operator.
+                let current = env
+                    .get(field.as_str())
+                    .map(|value| tla_delimited(value))
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                let value_expr =
+                    self.render_expr_with_types(value, env, binding_env, binding_types);
+                env.insert(
+                    field.as_str().to_owned(),
+                    format!("({current} \\cup {{{value_expr}}})"),
+                );
+            }
+            Update::SetRemove { field, value } => {
+                // The field's pending value may be an unparenthesized
+                // conditional (`IF c THEN a ELSE b`); spliced bare as the left
+                // operand, the ELSE branch would capture the set operator.
+                let current = env
+                    .get(field.as_str())
+                    .map(|value| tla_delimited(value))
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                let value_expr =
+                    self.render_expr_with_types(value, env, binding_env, binding_types);
+                env.insert(
+                    field.as_str().to_owned(),
+                    format!("({current} \\ {{{value_expr}}})"),
+                );
+            }
+            Update::SeqAppend { field, value } => {
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                let value_expr =
+                    self.render_expr_with_types(value, env, binding_env, binding_types);
+                env.insert(
+                    field.as_str().to_owned(),
+                    format!("Append({current}, {value_expr})"),
+                );
+            }
+            Update::SeqPrepend { field, values } => {
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                let value_expr =
+                    self.render_expr_with_types(values, env, binding_env, binding_types);
+                env.insert(
+                    field.as_str().to_owned(),
+                    format!("({value_expr} \\o {current})"),
+                );
+            }
+            Update::SeqPopFront { field } => {
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                env.insert(field.as_str().to_owned(), format!("Tail({current})"));
+            }
+            Update::SeqRemoveValue { field, value } => {
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                let value_expr =
+                    self.render_expr_with_types(value, env, binding_env, binding_types);
+                env.insert(
+                    field.as_str().to_owned(),
+                    format!("SeqRemove({current}, {value_expr})"),
+                );
+            }
+            Update::SeqRemoveAll { field, values } => {
+                let current = env
+                    .get(field.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| field.as_str().to_owned());
+                let value_expr =
+                    self.render_expr_with_types(values, env, binding_env, binding_types);
+                env.insert(
+                    field.as_str().to_owned(),
+                    format!("SeqRemoveAll({current}, {value_expr})"),
+                );
+            }
+            Update::Conditional {
+                condition,
+                then_updates,
+                else_updates,
+            } => {
+                let base = env.clone();
+                let mut then_env = base.clone();
+                for update in then_updates {
+                    self.apply_update(
+                        transition_name,
+                        &mut then_env,
+                        binding_env,
+                        binding_types,
+                        update,
+                    );
+                }
+                let mut else_env = base.clone();
+                for update in else_updates {
+                    self.apply_update(
+                        transition_name,
+                        &mut else_env,
+                        binding_env,
+                        binding_types,
+                        update,
+                    );
+                }
+                let condition_expr =
+                    self.render_expr_with_types(condition, &base, binding_env, binding_types);
+                let touched = union_touched_fields(&base, &then_env, &else_env);
+                for field in touched {
+                    let then_expr = then_env
+                        .get(&field)
+                        .cloned()
+                        .unwrap_or_else(|| field.clone());
+                    let else_expr = else_env
+                        .get(&field)
+                        .cloned()
+                        .unwrap_or_else(|| field.clone());
+                    env.insert(
+                        field.clone(),
+                        format!("IF {condition_expr} THEN {then_expr} ELSE {else_expr}"),
+                    );
+                }
+            }
+            Update::ForEach {
+                binding,
+                over,
+                updates,
+            } => {
+                let helper_index = self.helper_counter;
+                self.helper_counter += 1;
+                let over_expr = self.render_expr_with_types(over, env, binding_env, binding_types);
+                let touched = collect_update_fields(updates);
+                // Every touched field's fold reads the other fields as they
+                // were BEFORE the loop: the loop below writes each fold back
+                // into `env` as it goes, so reading `env` there would hand a
+                // later field the earlier field's post-loop value (all of its
+                // iterations already applied), not the value an iteration
+                // reads in the sequential kernel.
+                let base_env = env.clone();
+                let referenced_bindings = collect_update_bindings(updates)
+                    .into_iter()
+                    .filter(|item| item != binding)
+                    .collect::<BTreeSet<_>>();
+                let referenced_fields = collect_update_fields_exprs(updates)
+                    .into_iter()
+                    .filter(|field| {
+                        touched.contains(field) || base_env.get(field.as_str()) != Some(field)
+                    })
+                    .collect::<BTreeSet<_>>();
+
+                for field in touched {
+                    let current = base_env
+                        .get(&field)
+                        .cloned()
+                        .unwrap_or_else(|| field.clone());
+                    let helper_name = format!(
+                        "{}_ForEach{}_{}",
+                        tla_ident(transition_name),
+                        helper_index,
+                        tla_ident(&field)
+                    );
+                    let collection_kind = infer_collection_kind(over, self.schema, binding_types);
+
+                    let mut param_defs = Vec::new();
+                    let mut call_args = vec![current.clone(), over_expr.clone()];
+                    let mut helper_binding_env = binding_env.clone();
+                    helper_binding_env.insert(binding.clone(), binding.clone());
+                    let mut helper_field_env = self
+                        .schema
+                        .state
+                        .fields
+                        .iter()
+                        .map(|item| (item.name.as_str().to_owned(), item.name.as_str().to_owned()))
+                        .collect::<BTreeMap<String, _>>();
+                    helper_field_env.insert(field.clone(), "acc".into());
+
+                    for outer_binding in &referenced_bindings {
+                        let param = format!("outer_{}", tla_ident(outer_binding));
+                        param_defs.push(param.clone());
+                        call_args.push(
+                            binding_env
+                                .get(outer_binding)
+                                .cloned()
+                                .unwrap_or_else(|| outer_binding.clone()),
+                        );
+                        helper_binding_env.insert(outer_binding.clone(), param);
+                    }
+
+                    for ref_field in &referenced_fields {
+                        if *ref_field == field {
+                            continue;
+                        }
+                        let current_expr = base_env
+                            .get(ref_field)
+                            .cloned()
+                            .unwrap_or_else(|| ref_field.clone());
+                        if current_expr != *ref_field {
+                            let param = format!("captured_{}", tla_ident(ref_field));
+                            param_defs.push(param.clone());
+                            call_args.push(current_expr);
+                            helper_field_env.insert(ref_field.clone(), param);
+                        }
+                    }
+
+                    let body_expr = self.compile_for_each_field_body(
+                        &field,
+                        &helper_field_env,
+                        &helper_binding_env,
+                        binding_types,
+                        updates,
+                    );
+
+                    let helper_def = match collection_kind {
+                        CollectionKind::Sequence => render_sequence_foreach_helper(
+                            &helper_name,
+                            binding,
+                            &param_defs,
+                            &body_expr,
+                        ),
+                        CollectionKind::Set => render_set_foreach_helper(
+                            &helper_name,
+                            binding,
+                            &param_defs,
+                            &body_expr,
+                        ),
+                    };
+                    self.helper_defs.push(helper_def);
+                    env.insert(
+                        field.clone(),
+                        format!("{}({})", helper_name, call_args.join(", ")),
+                    );
+                }
+            }
+        }
+    }
+
+    fn compile_for_each_field_body(
+        &mut self,
+        target_field: &str,
+        env: &BTreeMap<String, String>,
+        binding_env: &BTreeMap<String, String>,
+        binding_types: &BTreeMap<String, TypeRef>,
+        updates: &[Update],
+    ) -> String {
+        let mut current = env.clone();
+        for update in updates {
+            self.apply_update_for_target(
+                target_field,
+                &mut current,
+                binding_env,
+                binding_types,
+                update,
+            );
+        }
+        current
+            .get(target_field)
+            .cloned()
+            .unwrap_or_else(|| target_field.to_owned())
+    }
+
+    fn apply_update_for_target(
+        &mut self,
+        target_field: &str,
+        env: &mut BTreeMap<String, String>,
+        binding_env: &BTreeMap<String, String>,
+        binding_types: &BTreeMap<String, TypeRef>,
+        update: &Update,
+    ) {
+        match update {
+            Update::Conditional {
+                condition,
+                then_updates,
+                else_updates,
+            } => {
+                let base = env.clone();
+                let mut then_env = base.clone();
+                for update in then_updates {
+                    self.apply_update_for_target(
+                        target_field,
+                        &mut then_env,
+                        binding_env,
+                        binding_types,
+                        update,
+                    );
+                }
+                let mut else_env = base.clone();
+                for update in else_updates {
+                    self.apply_update_for_target(
+                        target_field,
+                        &mut else_env,
+                        binding_env,
+                        binding_types,
+                        update,
+                    );
+                }
+                let base_expr = base
+                    .get(target_field)
+                    .cloned()
+                    .unwrap_or_else(|| target_field.to_owned());
+                let then_expr = then_env
+                    .get(target_field)
+                    .cloned()
+                    .unwrap_or_else(|| base_expr.clone());
+                let else_expr = else_env
+                    .get(target_field)
+                    .cloned()
+                    .unwrap_or_else(|| base_expr.clone());
+                if then_expr != base_expr || else_expr != base_expr {
+                    let condition_expr =
+                        self.render_expr_with_types(condition, &base, binding_env, binding_types);
+                    env.insert(
+                        target_field.to_owned(),
+                        format!("IF {condition_expr} THEN {then_expr} ELSE {else_expr}"),
+                    );
+                }
+            }
+            Update::ForEach {
+                binding,
+                over,
+                updates,
+            } => {
+                let helper_index = self.helper_counter;
+                self.helper_counter += 1;
+                let over_expr = self.render_expr_with_types(over, env, binding_env, binding_types);
+                let helper_name = format!(
+                    "{}_NestedForEach{}_{}",
+                    tla_ident(target_field),
+                    helper_index,
+                    tla_ident(binding)
+                );
+                let collection_kind = infer_collection_kind(over, self.schema, binding_types);
+                let mut nested_binding_env = binding_env.clone();
+                nested_binding_env.insert(binding.clone(), binding.clone());
+                let mut nested_env = env.clone();
+                nested_env.insert(target_field.to_owned(), "acc".into());
+                let body_expr = self.compile_for_each_field_body(
+                    target_field,
+                    &nested_env,
+                    &nested_binding_env,
+                    binding_types,
+                    updates,
+                );
+                let helper_def = match collection_kind {
+                    CollectionKind::Sequence => {
+                        render_sequence_foreach_helper(&helper_name, binding, &[], &body_expr)
+                    }
+                    CollectionKind::Set => {
+                        render_set_foreach_helper(&helper_name, binding, &[], &body_expr)
+                    }
+                };
+                self.helper_defs.push(helper_def);
+                let current = env
+                    .get(target_field)
+                    .cloned()
+                    .unwrap_or_else(|| target_field.to_owned());
+                env.insert(
+                    target_field.to_owned(),
+                    format!("{}({}, {})", helper_name, current, over_expr),
+                );
+            }
+            _ => {
+                let before = env
+                    .get(target_field)
+                    .cloned()
+                    .unwrap_or_else(|| target_field.to_owned());
+                self.apply_update(
+                    &format!("Target{}", target_field),
+                    env,
+                    binding_env,
+                    binding_types,
+                    update,
+                );
+                let after = env
+                    .get(target_field)
+                    .cloned()
+                    .unwrap_or_else(|| target_field.to_owned());
+                if after == before {
+                    env.insert(target_field.to_owned(), before);
+                }
+            }
+        }
+    }
+
+    fn render_expr(
+        &self,
+        expr: &Expr,
+        env: &BTreeMap<String, String>,
+        binding_env: &BTreeMap<String, String>,
+    ) -> String {
+        self.render_expr_with_types(expr, env, binding_env, &BTreeMap::new())
+    }
+
+    fn scoped_helper_name(&self, helper: &str) -> String {
+        match &self.helper_prefix {
+            Some(prefix) => format!("{prefix}{}", tla_ident(helper)),
+            None => helper.to_owned(),
+        }
+    }
+
+    fn render_expr_with_types(
+        &self,
+        expr: &Expr,
+        env: &BTreeMap<String, String>,
+        binding_env: &BTreeMap<String, String>,
+        binding_types: &BTreeMap<String, TypeRef>,
+    ) -> String {
+        match expr {
+            Expr::Bool(value) => {
+                if *value {
+                    "TRUE".into()
+                } else {
+                    "FALSE".into()
+                }
+            }
+            Expr::U64(value) => value.to_string(),
+            Expr::U64Max => TLA_RUST_U64_MAX_CONSTANT.to_owned(),
+            Expr::String(value) => tla_string(value),
+            Expr::NamedVariant { enum_name, variant } => render_named_variant_value(
+                enum_name.as_str(),
+                variant.as_str(),
+                &self.named_bindings,
+            ),
+            Expr::FieldAccess { base, field } => format!(
+                "{}.{}",
+                self.render_expr_with_types(base, env, binding_env, binding_types),
+                tla_ident(field.as_str())
+            ),
+            Expr::EnumVariantIs { value, variant, .. } => format!(
+                "({}.tag = {})",
+                self.render_expr_with_types(value, env, binding_env, binding_types),
+                tla_string(variant.as_str())
+            ),
+            Expr::EnumStringSetPayload {
+                value,
+                variant,
+                field,
+                ..
+            } => {
+                let rendered = self.render_expr_with_types(value, env, binding_env, binding_types);
+                let tag = tla_string(variant.as_str());
+                let field = tla_ident(field.as_str());
+                format!("(IF {rendered}.tag = {tag} THEN {rendered}.{field} ELSE {{}})")
+            }
+            Expr::EmptySet => "{}".into(),
+            Expr::EmptyMap => "[x \\in {} |-> None]".into(),
+            Expr::SeqLiteral(items) => format!(
+                "<<{}>>",
+                items
+                    .iter()
+                    .map(|item| self.render_expr_with_types(item, env, binding_env, binding_types))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Expr::CurrentPhase => self.phase_symbol.clone().unwrap_or_else(|| "phase".into()),
+            Expr::Phase(value) => tla_string(value),
+            // A field already assigned earlier in the same update block reads
+            // its pending value, which may be an unparenthesized compound
+            // (a conditional update renders `IF c THEN a ELSE b`). Spliced bare
+            // into a larger expression, TLA+ precedence would capture the
+            // surrounding operator: `IF c THEN a ELSE b = x` parses as
+            // `IF c THEN a ELSE (b = x)`. Delimit every substituted value.
+            Expr::Field(name) => match env.get(name.as_str()) {
+                Some(value) if value != name.as_str() => tla_delimited(value),
+                Some(value) => value.clone(),
+                None => name.as_str().to_owned(),
+            },
+            Expr::Binding(name) => binding_env
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| name.clone()),
+            Expr::Variant(name) => tla_string(name),
+            Expr::None => "None".into(),
+            Expr::IfElse {
+                condition,
+                then_expr,
+                else_expr,
+            } => format!(
+                "(IF {} THEN {} ELSE {})",
+                self.render_expr_with_types(condition, env, binding_env, binding_types),
+                self.render_expr_with_types(then_expr, env, binding_env, binding_types),
+                self.render_expr_with_types(else_expr, env, binding_env, binding_types)
+            ),
+            Expr::Not(inner) => format!(
+                "~({})",
+                self.render_expr_with_types(inner, env, binding_env, binding_types)
+            ),
+            Expr::And(items) => join_exprs(
+                &items
+                    .iter()
+                    .map(|item| self.render_expr_with_types(item, env, binding_env, binding_types))
+                    .collect::<Vec<_>>(),
+                " /\\ ",
+            ),
+            Expr::Or(items) => render_or_short_circuit(
+                &items
+                    .iter()
+                    .map(|item| self.render_expr_with_types(item, env, binding_env, binding_types))
+                    .collect::<Vec<_>>(),
+            ),
+            Expr::Eq(left, right) => format!(
+                "({} = {})",
+                self.render_expr_with_types(left, env, binding_env, binding_types),
+                self.render_expr_with_types(right, env, binding_env, binding_types)
+            ),
+            Expr::Neq(left, right) => format!(
+                "({} # {})",
+                self.render_expr_with_types(left, env, binding_env, binding_types),
+                self.render_expr_with_types(right, env, binding_env, binding_types)
+            ),
+            Expr::Add(left, right) => format!(
+                "({} + {})",
+                self.render_expr_with_types(left, env, binding_env, binding_types),
+                self.render_expr_with_types(right, env, binding_env, binding_types)
+            ),
+            Expr::Sub(left, right) => format!(
+                "({} - {})",
+                self.render_expr_with_types(left, env, binding_env, binding_types),
+                self.render_expr_with_types(right, env, binding_env, binding_types)
+            ),
+            Expr::Gt(left, right) => format!(
+                "({} > {})",
+                self.render_expr_with_types(left, env, binding_env, binding_types),
+                self.render_expr_with_types(right, env, binding_env, binding_types)
+            ),
+            Expr::Gte(left, right) => format!(
+                "({} >= {})",
+                self.render_expr_with_types(left, env, binding_env, binding_types),
+                self.render_expr_with_types(right, env, binding_env, binding_types)
+            ),
+            Expr::Lt(left, right) => format!(
+                "({} < {})",
+                self.render_expr_with_types(left, env, binding_env, binding_types),
+                self.render_expr_with_types(right, env, binding_env, binding_types)
+            ),
+            Expr::Lte(left, right) => format!(
+                "({} <= {})",
+                self.render_expr_with_types(left, env, binding_env, binding_types),
+                self.render_expr_with_types(right, env, binding_env, binding_types)
+            ),
+            Expr::Contains { collection, value } => format!(
+                "({} \\in {})",
+                self.render_expr_with_types(value, env, binding_env, binding_types),
+                self.render_collection_domain(collection, env, binding_env, binding_types)
+            ),
+            Expr::MapContainsKey { map, key } => format!(
+                "({} \\in DOMAIN {})",
+                self.render_expr_with_types(key, env, binding_env, binding_types),
+                self.render_expr_with_types(map, env, binding_env, binding_types)
+            ),
+            Expr::SeqStartsWith { seq, prefix } => format!(
+                "StartsWith({}, {})",
+                self.render_expr_with_types(seq, env, binding_env, binding_types),
+                self.render_expr_with_types(prefix, env, binding_env, binding_types)
+            ),
+            Expr::SeqElements(inner) => format!(
+                "SeqElements({})",
+                self.render_expr_with_types(inner, env, binding_env, binding_types)
+            ),
+            Expr::Len(inner) => {
+                // The kernel counts the entries of a sequence, set or map
+                // alike; TLA+ `Len` is defined only on sequences.
+                let rendered = self.render_expr_with_types(inner, env, binding_env, binding_types);
+                match self.infer_expr_type_for_render(inner, binding_types) {
+                    Some(TypeRef::Map(_, _)) => format!("Cardinality(DOMAIN {rendered})"),
+                    Some(ty) if self.type_renders_as_set(&ty) => {
+                        format!("Cardinality({rendered})")
+                    }
+                    _ => format!("Len({rendered})"),
+                }
+            }
+            Expr::Count { collection, value } => format!(
+                "Count({}, {})",
+                self.render_expr_with_types(collection, env, binding_env, binding_types),
+                self.render_expr_with_types(value, env, binding_env, binding_types)
+            ),
+            Expr::Head(inner) => format!(
+                "Head({})",
+                self.render_expr_with_types(inner, env, binding_env, binding_types)
+            ),
+            Expr::MapKeys(inner) => format!(
+                "DOMAIN {}",
+                self.render_expr_with_types(inner, env, binding_env, binding_types)
+            ),
+            Expr::MapGet { map, key } => format!(
+                "{}",
+                if self.is_scalar_value_projection(map, key, binding_types) {
+                    self.render_expr_with_types(map, env, binding_env, binding_types)
+                } else {
+                    format!(
+                        "(IF {} \\in DOMAIN {} THEN {}[{}] ELSE {})",
+                        self.render_expr_with_types(key, env, binding_env, binding_types),
+                        self.render_expr_with_types(map, env, binding_env, binding_types),
+                        self.render_expr_with_types(map, env, binding_env, binding_types),
+                        self.render_expr_with_types(key, env, binding_env, binding_types),
+                        self.map_absent_value_expr(map, binding_types)
+                    )
+                }
+            ),
+            // A populated map literal as a TLC function: `k1 :> v1 @@ k2 :> v2`
+            // (the TLC module every generated model extends).
+            Expr::MapLiteral(entries) => format!(
+                "({})",
+                entries
+                    .iter()
+                    .map(|(key, value)| format!(
+                        "{} :> {}",
+                        self.render_expr_with_types(key, env, binding_env, binding_types),
+                        self.render_expr_with_types(value, env, binding_env, binding_types)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" @@ ")
+            ),
+            // Strict read: plain function application, so TLC reports an
+            // error if a reachable state reads a key outside DOMAIN (#1811).
+            Expr::MapValue { map, key } => format!(
+                "({})[{}]",
+                self.render_expr_with_types(map, env, binding_env, binding_types),
+                self.render_expr_with_types(key, env, binding_env, binding_types)
+            ),
+            Expr::Some(inner) => format!(
+                "Some({})",
+                self.render_expr_with_types(inner, env, binding_env, binding_types)
+            ),
+            Expr::Call { helper, args } => format!(
+                "{}",
+                if args.is_empty() {
+                    self.scoped_helper_name(helper)
+                } else {
+                    format!(
+                        "{}({})",
+                        self.scoped_helper_name(helper),
+                        args.iter()
+                            .map(|arg| self.render_expr_with_types(
+                                arg,
+                                env,
+                                binding_env,
+                                binding_types
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            ),
+            Expr::Quantified {
+                quantifier,
+                binding,
+                over,
+                body,
+            } => {
+                let keyword = match quantifier {
+                    Quantifier::Any => "\\E",
+                    Quantifier::All => "\\A",
+                };
+                let mut nested_bindings = binding_env.clone();
+                nested_bindings.insert(binding.clone(), binding.clone());
+                let mut nested_binding_types = binding_types.clone();
+                if let Some(item_ty) = self.collection_item_type(over, binding_types) {
+                    nested_binding_types.insert(binding.clone(), item_ty);
+                }
+                format!(
+                    "({} {} \\in {} : {})",
+                    keyword,
+                    binding,
+                    self.render_collection_domain(over, env, binding_env, binding_types),
+                    self.render_expr_with_types(body, env, &nested_bindings, &nested_binding_types)
+                )
+            }
+        }
+    }
+
+    fn infer_expr_type_for_render(
+        &self,
+        expr: &Expr,
+        binding_types: &BTreeMap<String, TypeRef>,
+    ) -> Option<TypeRef> {
+        // A projection into a structural record (`restrictions.lifetime.unresolved`)
+        // takes the declared type of the record field, so `.len()` on a
+        // field-presence set reached through one renders as `Cardinality`.
+        if let Expr::FieldAccess { base, field } = expr {
+            let TypeRef::Named(record) = self.infer_expr_type_for_render(base, binding_types)?
+            else {
+                return None;
+            };
+            let meerkat_machine_schema::RustTypeAtom::TypePathStruct { fields, .. } =
+                self.named_bindings.get(record.as_str())?
+            else {
+                return None;
+            };
+            return match &fields
+                .iter()
+                .find(|candidate| candidate.name == *field)?
+                .atom
+            {
+                meerkat_machine_schema::TypePathStructFieldAtom::String => Some(TypeRef::String),
+                meerkat_machine_schema::TypePathStructFieldAtom::Named(name) => {
+                    Some(TypeRef::Named(name.clone()))
+                }
+                meerkat_machine_schema::TypePathStructFieldAtom::OptionalNamed(name) => {
+                    Some(TypeRef::Option(Box::new(TypeRef::Named(name.clone()))))
+                }
+            };
+        }
+        let field_types = self
+            .schema
+            .state
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+            .collect::<BTreeMap<String, _>>();
+        let helper_returns = self
+            .schema
+            .helpers
+            .iter()
+            .chain(self.schema.derived.iter())
+            .map(|helper| (helper.name.clone(), helper.returns.clone()))
+            .collect::<BTreeMap<String, _>>();
+        infer_expr_type(expr, &field_types, &helper_returns, binding_types)
+    }
+
+    fn type_renders_as_set(&self, ty: &TypeRef) -> bool {
+        match ty {
+            TypeRef::Set(_) => true,
+            TypeRef::Named(name) => matches!(
+                self.named_bindings.get(name.as_str()),
+                Some(meerkat_machine_schema::RustTypeAtom::TypePathFieldPresenceSet { .. })
+            ),
+            TypeRef::Enum(name) => matches!(
+                self.named_bindings.get(name.as_str()),
+                Some(meerkat_machine_schema::RustTypeAtom::TypePathFieldPresenceSet { .. })
+            ),
+            _ => false,
+        }
+    }
+
+    fn render_collection_domain(
+        &self,
+        over: &Expr,
+        env: &BTreeMap<String, String>,
+        binding_env: &BTreeMap<String, String>,
+        binding_types: &BTreeMap<String, TypeRef>,
+    ) -> String {
+        let rendered = self.render_expr_with_types(over, env, binding_env, binding_types);
+        match self.collection_item_type(over, binding_types) {
+            Some(_) if self.is_sequence_expr(over, binding_types) => {
+                format!("SeqElements({rendered})")
+            }
+            _ => rendered,
+        }
+    }
+
+    fn collection_item_type(
+        &self,
+        expr: &Expr,
+        binding_types: &BTreeMap<String, TypeRef>,
+    ) -> Option<TypeRef> {
+        match expr {
+            Expr::Field(name) => self
+                .schema
+                .state
+                .fields
+                .iter()
+                .find(|field| field.name == *name)
+                .and_then(|field| match &field.ty {
+                    TypeRef::Seq(inner) | TypeRef::Set(inner) => Some((**inner).clone()),
+                    _ => None,
+                }),
+            Expr::Binding(name) => binding_types.get(name).and_then(|ty| match ty {
+                TypeRef::Seq(inner) | TypeRef::Set(inner) => Some((**inner).clone()),
+                _ => None,
+            }),
+            Expr::EnumStringSetPayload { .. } => Some(TypeRef::String),
+            Expr::SeqLiteral(items) => {
+                if let Some(first) = items.first() {
+                    self.scalar_expr_type(first, binding_types)
+                } else {
+                    Some(TypeRef::String)
+                }
+            }
+            Expr::MapKeys(_) | Expr::EmptySet => Some(TypeRef::String),
+            _ => None,
+        }
+    }
+
+    fn scalar_expr_type(
+        &self,
+        expr: &Expr,
+        binding_types: &BTreeMap<String, TypeRef>,
+    ) -> Option<TypeRef> {
+        match expr {
+            Expr::Bool(_) => Some(TypeRef::Bool),
+            Expr::U64(_) | Expr::U64Max => Some(TypeRef::U64),
+            Expr::String(_) | Expr::Phase(_) | Expr::Variant(_) => Some(TypeRef::String),
+            Expr::NamedVariant { enum_name, .. } => Some(TypeRef::Enum(enum_name.clone())),
+            Expr::FieldAccess { .. } => None,
+            Expr::EnumVariantIs { .. } => Some(TypeRef::Bool),
+            Expr::EnumStringSetPayload { .. } => Some(TypeRef::Set(Box::new(TypeRef::String))),
+            Expr::MapGet { map, .. } | Expr::MapValue { map, .. } => {
+                self.map_value_type(map, binding_types)
+            }
+            Expr::Field(name) => self
+                .schema
+                .state
+                .fields
+                .iter()
+                .find(|field| field.name == *name)
+                .map(|field| &field.ty)
+                .cloned(),
+            Expr::Binding(name) => binding_types.get(name).cloned(),
+            _ => None,
+        }
+    }
+
+    fn is_scalar_value_projection(
+        &self,
+        map: &Expr,
+        key: &Expr,
+        binding_types: &BTreeMap<String, TypeRef>,
+    ) -> bool {
+        matches!(key, Expr::String(value) if value == "value")
+            && matches!(
+                self.scalar_expr_type(map, binding_types),
+                Some(
+                    TypeRef::Bool
+                        | TypeRef::U32
+                        | TypeRef::U64
+                        | TypeRef::String
+                        | TypeRef::Enum(_)
+                        | TypeRef::Named(_)
+                )
+            )
+    }
+
+    fn map_value_type(
+        &self,
+        expr: &Expr,
+        binding_types: &BTreeMap<String, TypeRef>,
+    ) -> Option<TypeRef> {
+        match expr {
+            Expr::Field(name) => self
+                .schema
+                .state
+                .fields
+                .iter()
+                .find(|field| field.name == *name)
+                .and_then(|field| match &field.ty {
+                    TypeRef::Map(_, value) => Some((**value).clone()),
+                    _ => None,
+                }),
+            Expr::Binding(name) => binding_types.get(name).and_then(|ty| match ty {
+                TypeRef::Map(_, value) => Some((**value).clone()),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    fn map_absent_value_expr(
+        &self,
+        expr: &Expr,
+        binding_types: &BTreeMap<String, TypeRef>,
+    ) -> String {
+        self.map_value_type(expr, binding_types)
+            .map(|ty| default_absent_map_value_expr(&ty))
+            .unwrap_or_else(|| "None".into())
+    }
+
+    fn is_sequence_expr(&self, expr: &Expr, binding_types: &BTreeMap<String, TypeRef>) -> bool {
+        match expr {
+            Expr::Field(name) => self
+                .schema
+                .state
+                .fields
+                .iter()
+                .find(|field| field.name == *name)
+                .is_some_and(|field| matches!(field.ty, TypeRef::Seq(_))),
+            Expr::Binding(name) => binding_types
+                .get(name)
+                .is_some_and(|ty| matches!(ty, TypeRef::Seq(_))),
+            Expr::SeqLiteral(_) => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+enum CollectionKind {
+    Sequence,
+    Set,
+}
+
+fn infer_collection_kind(
+    expr: &Expr,
+    schema: &MachineSchema,
+    binding_types: &BTreeMap<String, TypeRef>,
+) -> CollectionKind {
+    match expr {
+        Expr::Field(name) => schema
+            .state
+            .fields
+            .iter()
+            .find(|field| field.name == *name)
+            .map(|field| match field.ty {
+                TypeRef::Set(_) => CollectionKind::Set,
+                _ => CollectionKind::Sequence,
+            })
+            .unwrap_or(CollectionKind::Sequence),
+        Expr::Binding(name) => binding_types
+            .get(name)
+            .map(|ty| match ty {
+                TypeRef::Set(_) => CollectionKind::Set,
+                _ => CollectionKind::Sequence,
+            })
+            .unwrap_or(CollectionKind::Sequence),
+        Expr::MapKeys(_) | Expr::EmptySet | Expr::EnumStringSetPayload { .. } => {
+            CollectionKind::Set
+        }
+        _ => CollectionKind::Sequence,
+    }
+}
+
+fn render_sequence_foreach_helper(
+    name: &str,
+    binding: &str,
+    extra_params: &[String],
+    body_expr: &str,
+) -> String {
+    let mut params = vec!["acc".to_owned(), "items".to_owned()];
+    params.extend(extra_params.iter().cloned());
+    let params_str = params.join(", ");
+    let recurse_args = std::iter::once("next_acc".to_owned())
+        .chain(std::iter::once("Tail(items)".to_owned()))
+        .chain(extra_params.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let recursive_args = std::iter::repeat_n("_", params.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        "RECURSIVE {name}({recursive_args})\n{name}({params_str}) == IF Len(items) = 0 THEN acc ELSE LET {binding} == Head(items) IN LET next_acc == {body_expr} IN {name}({recurse_args})"
+    )
+}
+
+fn render_set_foreach_helper(
+    name: &str,
+    binding: &str,
+    extra_params: &[String],
+    body_expr: &str,
+) -> String {
+    let mut params = vec!["acc".to_owned(), "remaining".to_owned()];
+    params.extend(extra_params.iter().cloned());
+    let params_str = params.join(", ");
+    let recurse_args = std::iter::once("next_acc".to_owned())
+        .chain(std::iter::once("remaining \\ {item}".to_owned()))
+        .chain(extra_params.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let recursive_args = std::iter::repeat_n("_", params.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        "RECURSIVE {name}({recursive_args})\n{name}({params_str}) == IF remaining = {{}} THEN acc ELSE LET item == CHOOSE x \\in remaining : TRUE IN LET {binding} == item IN LET next_acc == {body_expr} IN {name}({recurse_args})"
+    )
+}
+
+fn collect_update_fields(updates: &[Update]) -> BTreeSet<String> {
+    let mut fields = BTreeSet::new();
+    for update in updates {
+        match update {
+            Update::Assign { field, .. }
+            | Update::Increment { field, .. }
+            | Update::Decrement { field, .. }
+            | Update::MapInsert { field, .. }
+            | Update::MapIncrement { field, .. }
+            | Update::MapDecrement { field, .. }
+            | Update::MapRemove { field, .. }
+            | Update::SetInsert { field, .. }
+            | Update::SetRemove { field, .. }
+            | Update::SeqAppend { field, .. }
+            | Update::SeqPrepend { field, .. }
+            | Update::SeqPopFront { field }
+            | Update::SeqRemoveValue { field, .. }
+            | Update::SeqRemoveAll { field, .. } => {
+                fields.insert(field.as_str().to_owned());
+            }
+            Update::Conditional {
+                then_updates,
+                else_updates,
+                ..
+            } => {
+                fields.extend(collect_update_fields(then_updates));
+                fields.extend(collect_update_fields(else_updates));
+            }
+            Update::ForEach { updates, .. } => {
+                fields.extend(collect_update_fields(updates));
+            }
+        }
+    }
+    fields
+}
+
+fn collect_update_bindings(updates: &[Update]) -> BTreeSet<String> {
+    let mut bindings = BTreeSet::new();
+    for update in updates {
+        match update {
+            Update::Assign { expr, .. } => collect_expr_bindings(expr, &mut bindings),
+            Update::MapInsert { key, value, .. } => {
+                collect_expr_bindings(key, &mut bindings);
+                collect_expr_bindings(value, &mut bindings);
+            }
+            Update::MapRemove { key, .. } => {
+                collect_expr_bindings(key, &mut bindings);
+            }
+            Update::MapIncrement { key, .. } | Update::MapDecrement { key, .. } => {
+                collect_expr_bindings(key, &mut bindings);
+            }
+            Update::SetInsert { value, .. }
+            | Update::SetRemove { value, .. }
+            | Update::SeqAppend { value, .. }
+            | Update::SeqRemoveValue { value, .. }
+            | Update::SeqPrepend { values: value, .. }
+            | Update::SeqRemoveAll { values: value, .. } => {
+                collect_expr_bindings(value, &mut bindings);
+            }
+            Update::Conditional {
+                condition,
+                then_updates,
+                else_updates,
+            } => {
+                collect_expr_bindings(condition, &mut bindings);
+                bindings.extend(collect_update_bindings(then_updates));
+                bindings.extend(collect_update_bindings(else_updates));
+            }
+            Update::ForEach {
+                binding,
+                over,
+                updates,
+            } => {
+                bindings.insert(binding.clone());
+                collect_expr_bindings(over, &mut bindings);
+                bindings.extend(collect_update_bindings(updates));
+            }
+            Update::Increment { .. } | Update::Decrement { .. } | Update::SeqPopFront { .. } => {}
+        }
+    }
+    bindings
+}
+
+fn collect_update_fields_exprs(updates: &[Update]) -> BTreeSet<String> {
+    let mut fields = BTreeSet::new();
+    for update in updates {
+        match update {
+            Update::Assign { expr, .. } => collect_expr_fields(expr, &mut fields),
+            Update::MapInsert { key, value, .. } => {
+                collect_expr_fields(key, &mut fields);
+                collect_expr_fields(value, &mut fields);
+            }
+            Update::MapRemove { key, .. } => {
+                collect_expr_fields(key, &mut fields);
+            }
+            Update::MapIncrement { key, .. } | Update::MapDecrement { key, .. } => {
+                collect_expr_fields(key, &mut fields);
+            }
+            Update::SetInsert { value, .. }
+            | Update::SetRemove { value, .. }
+            | Update::SeqAppend { value, .. }
+            | Update::SeqRemoveValue { value, .. }
+            | Update::SeqPrepend { values: value, .. }
+            | Update::SeqRemoveAll { values: value, .. } => {
+                collect_expr_fields(value, &mut fields);
+            }
+            Update::Conditional {
+                condition,
+                then_updates,
+                else_updates,
+            } => {
+                collect_expr_fields(condition, &mut fields);
+                fields.extend(collect_update_fields_exprs(then_updates));
+                fields.extend(collect_update_fields_exprs(else_updates));
+            }
+            Update::ForEach { over, updates, .. } => {
+                collect_expr_fields(over, &mut fields);
+                fields.extend(collect_update_fields_exprs(updates));
+            }
+            Update::Increment { .. } | Update::Decrement { .. } | Update::SeqPopFront { .. } => {}
+        }
+    }
+    fields
+}
+
+fn collect_expr_bindings(expr: &Expr, bindings: &mut BTreeSet<String>) {
+    match expr {
+        Expr::Binding(name) => {
+            bindings.insert(name.clone());
+        }
+        Expr::SeqLiteral(items) | Expr::And(items) | Expr::Or(items) => {
+            for item in items {
+                collect_expr_bindings(item, bindings);
+            }
+        }
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_expr_bindings(condition, bindings);
+            collect_expr_bindings(then_expr, bindings);
+            collect_expr_bindings(else_expr, bindings);
+        }
+        Expr::Not(inner)
+        | Expr::SeqElements(inner)
+        | Expr::Len(inner)
+        | Expr::Head(inner)
+        | Expr::MapKeys(inner)
+        | Expr::Some(inner)
+        | Expr::FieldAccess { base: inner, .. }
+        | Expr::EnumVariantIs { value: inner, .. }
+        | Expr::EnumStringSetPayload { value: inner, .. } => collect_expr_bindings(inner, bindings),
+        Expr::Eq(left, right)
+        | Expr::Neq(left, right)
+        | Expr::Add(left, right)
+        | Expr::Sub(left, right)
+        | Expr::Gt(left, right)
+        | Expr::Gte(left, right)
+        | Expr::Lt(left, right)
+        | Expr::Lte(left, right) => {
+            collect_expr_bindings(left, bindings);
+            collect_expr_bindings(right, bindings);
+        }
+        Expr::Contains { collection, value } => {
+            collect_expr_bindings(collection, bindings);
+            collect_expr_bindings(value, bindings);
+        }
+        Expr::Count { collection, value } => {
+            collect_expr_bindings(collection, bindings);
+            collect_expr_bindings(value, bindings);
+        }
+        Expr::MapContainsKey { map, key } => {
+            collect_expr_bindings(map, bindings);
+            collect_expr_bindings(key, bindings);
+        }
+        Expr::SeqStartsWith { seq, prefix } => {
+            collect_expr_bindings(seq, bindings);
+            collect_expr_bindings(prefix, bindings);
+        }
+        Expr::MapGet { map, key } | Expr::MapValue { map, key } => {
+            collect_expr_bindings(map, bindings);
+            collect_expr_bindings(key, bindings);
+        }
+        Expr::MapLiteral(entries) => {
+            for (key, value) in entries {
+                collect_expr_bindings(key, bindings);
+                collect_expr_bindings(value, bindings);
+            }
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_expr_bindings(arg, bindings);
+            }
+        }
+        Expr::Quantified {
+            binding,
+            over,
+            body,
+            ..
+        } => {
+            bindings.insert(binding.clone());
+            collect_expr_bindings(over, bindings);
+            collect_expr_bindings(body, bindings);
+        }
+        Expr::Bool(_)
+        | Expr::U64(_)
+        | Expr::U64Max
+        | Expr::String(_)
+        | Expr::NamedVariant { .. }
+        | Expr::EmptySet
+        | Expr::EmptyMap
+        | Expr::CurrentPhase
+        | Expr::Phase(_)
+        | Expr::Field(_)
+        | Expr::Variant(_)
+        | Expr::None => {}
+    }
+}
+
+fn collect_expr_fields(expr: &Expr, fields: &mut BTreeSet<String>) {
+    match expr {
+        Expr::Field(name) => {
+            fields.insert(name.as_str().to_owned());
+        }
+        Expr::SeqLiteral(items) | Expr::And(items) | Expr::Or(items) => {
+            for item in items {
+                collect_expr_fields(item, fields);
+            }
+        }
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_expr_fields(condition, fields);
+            collect_expr_fields(then_expr, fields);
+            collect_expr_fields(else_expr, fields);
+        }
+        Expr::Not(inner)
+        | Expr::SeqElements(inner)
+        | Expr::Len(inner)
+        | Expr::Head(inner)
+        | Expr::MapKeys(inner)
+        | Expr::Some(inner)
+        | Expr::FieldAccess { base: inner, .. }
+        | Expr::EnumVariantIs { value: inner, .. }
+        | Expr::EnumStringSetPayload { value: inner, .. } => collect_expr_fields(inner, fields),
+        Expr::Eq(left, right)
+        | Expr::Neq(left, right)
+        | Expr::Add(left, right)
+        | Expr::Sub(left, right)
+        | Expr::Gt(left, right)
+        | Expr::Gte(left, right)
+        | Expr::Lt(left, right)
+        | Expr::Lte(left, right) => {
+            collect_expr_fields(left, fields);
+            collect_expr_fields(right, fields);
+        }
+        Expr::Contains { collection, value } => {
+            collect_expr_fields(collection, fields);
+            collect_expr_fields(value, fields);
+        }
+        Expr::Count { collection, value } => {
+            collect_expr_fields(collection, fields);
+            collect_expr_fields(value, fields);
+        }
+        Expr::MapContainsKey { map, key } => {
+            collect_expr_fields(map, fields);
+            collect_expr_fields(key, fields);
+        }
+        Expr::SeqStartsWith { seq, prefix } => {
+            collect_expr_fields(seq, fields);
+            collect_expr_fields(prefix, fields);
+        }
+        Expr::MapGet { map, key } | Expr::MapValue { map, key } => {
+            collect_expr_fields(map, fields);
+            collect_expr_fields(key, fields);
+        }
+        Expr::MapLiteral(entries) => {
+            for (key, value) in entries {
+                collect_expr_fields(key, fields);
+                collect_expr_fields(value, fields);
+            }
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_expr_fields(arg, fields);
+            }
+        }
+        Expr::Quantified { over, body, .. } => {
+            collect_expr_fields(over, fields);
+            collect_expr_fields(body, fields);
+        }
+        Expr::Bool(_)
+        | Expr::U64(_)
+        | Expr::U64Max
+        | Expr::String(_)
+        | Expr::NamedVariant { .. }
+        | Expr::EmptySet
+        | Expr::EmptyMap
+        | Expr::CurrentPhase
+        | Expr::Phase(_)
+        | Expr::Binding(_)
+        | Expr::Variant(_)
+        | Expr::None => {}
+    }
+}
+
+fn union_touched_fields(
+    base: &BTreeMap<String, String>,
+    then_env: &BTreeMap<String, String>,
+    else_env: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    base.keys()
+        .filter(|field| {
+            then_env.get(*field) != base.get(*field) || else_env.get(*field) != base.get(*field)
+        })
+        .cloned()
+        .collect()
+}
+
+fn join_exprs(items: &[String], separator: &str) -> String {
+    if items.is_empty() {
+        return "TRUE".into();
+    }
+    if items.len() == 1 {
+        items[0].clone()
+    } else {
+        format!("({})", items.join(separator))
+    }
+}
+
+/// Render a boolean disjunction as a short-circuiting `IF a THEN TRUE ELSE …`
+/// chain instead of `a \/ b`.
+///
+/// TLC expands an action-level `\/` into a tableau and evaluates *every*
+/// disjunct independently to enumerate successor states. That breaks the
+/// idiomatic optional guard `opt = None \/ opt.value > now`: the second
+/// disjunct's `opt.value > now` is evaluated even when `opt = None`
+/// (`None` still has a `"value"` field equal to the string `"none"`), so TLC
+/// raises `first argument of > should be an integer, but instead it is "none"`.
+/// `IF a THEN TRUE ELSE b` is boolean-equivalent to `a \/ b` but is evaluated
+/// as a single function: the `ELSE` branch is only evaluated when `a` is false,
+/// matching the short-circuit that `/\` already gives conjunctive guards. State
+/// space and enabledness are unchanged. Empty/single disjunctions preserve the
+/// prior `join_exprs` behavior.
+fn render_or_short_circuit(items: &[String]) -> String {
+    match items {
+        [] => "TRUE".into(),
+        [single] => single.clone(),
+        [first, rest @ ..] => {
+            format!(
+                "(IF {first} THEN TRUE ELSE {})",
+                render_or_short_circuit(rest)
+            )
+        }
+    }
+}
+
+fn default_state_init_expr(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Bool => "FALSE".into(),
+        TypeRef::U32 | TypeRef::U64 => "0".into(),
+        TypeRef::String => tla_string(""),
+        TypeRef::Named(name) => tla_string(format!("{}_default", tla_ident(name).to_lowercase())),
+        TypeRef::Enum(name) => tla_string(format!("{}_default", tla_ident(name).to_lowercase())),
+        TypeRef::Option(_) => "None".into(),
+        TypeRef::Set(_) => "{}".into(),
+        TypeRef::Seq(_) => "<<>>".into(),
+        TypeRef::Map(_, _) => "[x \\in {} |-> None]".into(),
+    }
+}
+
+fn default_absent_map_value_expr(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Bool => "FALSE".into(),
+        TypeRef::U32 | TypeRef::U64 => "0".into(),
+        TypeRef::String | TypeRef::Named(_) | TypeRef::Enum(_) => tla_string("None"),
+        TypeRef::Option(_) => "None".into(),
+        TypeRef::Set(_) => "{}".into(),
+        TypeRef::Seq(_) => "<<>>".into(),
+        TypeRef::Map(_, _) => "[x \\in {} |-> None]".into(),
+    }
+}
+
+fn render_type_ref(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Bool => "Bool".into(),
+        TypeRef::U32 => "u32".into(),
+        TypeRef::U64 => "u64".into(),
+        TypeRef::String => "String".into(),
+        TypeRef::Named(name) => name.as_str().to_owned(),
+        TypeRef::Enum(name) => name.as_str().to_owned(),
+        TypeRef::Option(inner) => format!("Option<{}>", render_type_ref(inner)),
+        TypeRef::Set(inner) => format!("Set<{}>", render_type_ref(inner)),
+        TypeRef::Seq(inner) => format!("Seq<{}>", render_type_ref(inner)),
+        TypeRef::Map(key, value) => {
+            format!("Map<{}, {}>", render_type_ref(key), render_type_ref(value))
+        }
+    }
+}
+
+fn render_route_delivery(route: &meerkat_machine_schema::Route) -> &'static str {
+    match route.delivery {
+        RouteDelivery::Immediate => "Immediate",
+        RouteDelivery::Enqueue => "Enqueue",
+    }
+}
+
+fn render_scheduler_rule(rule: &SchedulerRule) -> String {
+    match rule {
+        SchedulerRule::PreemptWhenReady { higher, lower } => {
+            format!("PreemptWhenReady({higher}, {lower})")
+        }
+    }
+}
+
+fn render_scheduler_rule_tuple(rule: &SchedulerRule) -> String {
+    match rule {
+        SchedulerRule::PreemptWhenReady { higher, lower } => {
+            format!(
+                "<<{}, {}, {}>>",
+                tla_string("PreemptWhenReady"),
+                tla_string(higher),
+                tla_string(lower)
+            )
+        }
+    }
+}
+
+fn render_scheduler_trigger_formula(rule: &SchedulerRule) -> String {
+    match rule {
+        SchedulerRule::PreemptWhenReady { higher, lower } => format!(
+            "/\\ {} \\in PendingActors /\\ {} \\in PendingActors",
+            tla_string(higher),
+            tla_string(lower)
+        ),
+    }
+}
+
+fn render_composition_invariant_formula(
+    schema: &CompositionSchema,
+    kind: &CompositionInvariantKind,
+) -> String {
+    match kind {
+        CompositionInvariantKind::RoutePresent {
+            from_machine,
+            effect_variant,
+            to_machine,
+            input_variant,
+        } => format!(
+            "\\E route_name \\in RouteNames : /\\ RouteSource(route_name) = {} /\\ RouteEffect(route_name) = {} /\\ RouteTargetMachine(route_name) = {} /\\ RouteTargetInput(route_name) = {}",
+            tla_string(from_machine),
+            tla_string(effect_variant),
+            tla_string(to_machine),
+            tla_string(input_variant)
+        ),
+        CompositionInvariantKind::ObservedInputOriginatesFromEffect {
+            to_machine,
+            input_variant,
+            from_machine,
+            effect_variant,
+        } => format!(
+            "\\A input_packet \\in observed_inputs : ((input_packet.machine = {} /\\ input_packet.variant = {}) => (/\\ input_packet.source_kind = \"route\" /\\ input_packet.source_machine = {} /\\ input_packet.source_effect = {} /\\ \\E effect_packet \\in emitted_effects : /\\ effect_packet.machine = {} /\\ effect_packet.variant = {} /\\ effect_packet.effect_id = input_packet.effect_id /\\ \\E route_packet \\in RoutePackets : /\\ route_packet.route = input_packet.source_route /\\ route_packet.source_machine = {} /\\ route_packet.effect = {} /\\ route_packet.target_machine = {} /\\ route_packet.target_input = {} /\\ route_packet.effect_id = input_packet.effect_id /\\ route_packet.payload = input_packet.payload))",
+            tla_string(to_machine),
+            tla_string(input_variant),
+            tla_string(from_machine),
+            tla_string(effect_variant),
+            tla_string(from_machine),
+            tla_string(effect_variant),
+            tla_string(from_machine),
+            tla_string(effect_variant),
+            tla_string(to_machine),
+            tla_string(input_variant)
+        ),
+        CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+            route_name,
+            to_machine,
+            input_variant,
+            from_machine,
+            effect_variant,
+        } => format!(
+            "\\A input_packet \\in observed_inputs : ((input_packet.machine = {} /\\ input_packet.variant = {} /\\ input_packet.source_route = {}) => (/\\ input_packet.source_kind = \"route\" /\\ input_packet.source_machine = {} /\\ input_packet.source_effect = {} /\\ \\E effect_packet \\in emitted_effects : /\\ effect_packet.machine = {} /\\ effect_packet.variant = {} /\\ effect_packet.effect_id = input_packet.effect_id /\\ \\E route_packet \\in RoutePackets : /\\ route_packet.route = {} /\\ route_packet.source_machine = {} /\\ route_packet.effect = {} /\\ route_packet.target_machine = {} /\\ route_packet.target_input = {} /\\ route_packet.effect_id = input_packet.effect_id /\\ route_packet.payload = input_packet.payload))",
+            tla_string(to_machine),
+            tla_string(input_variant),
+            tla_string(route_name),
+            tla_string(from_machine),
+            tla_string(effect_variant),
+            tla_string(from_machine),
+            tla_string(effect_variant),
+            tla_string(route_name),
+            tla_string(from_machine),
+            tla_string(effect_variant),
+            tla_string(to_machine),
+            tla_string(input_variant)
+        ),
+        CompositionInvariantKind::ActorPriorityPresent { higher, lower } => format!(
+            "<<{}, {}>> \\in ActorPriorities",
+            tla_string(higher),
+            tla_string(lower)
+        ),
+        CompositionInvariantKind::SchedulerRulePresent { rule } => {
+            format!("{} \\in SchedulerRules", render_scheduler_rule_tuple(rule))
+        }
+        CompositionInvariantKind::OutcomeHandled {
+            from_machine,
+            effect_variant,
+            required_targets,
+        } => {
+            let required = required_targets
+                .iter()
+                .enumerate()
+                .map(|(idx, target)| {
+                    let binding = format!("route_packet_{idx}");
+                    let input_binding = format!("input_packet_{idx}");
+                    format!(
+                        "\\E {binding} \\in RoutePackets : /\\ {binding}.source_machine = {} /\\ {binding}.effect = {} /\\ {binding}.target_machine = {} /\\ {binding}.target_input = {} /\\ {binding}.effect_id = effect_packet.effect_id /\\ IF RouteDeliveryKind({binding}.route) = \"Immediate\" THEN \\E {input_binding} \\in observed_inputs : /\\ {input_binding}.machine = {} /\\ {input_binding}.variant = {} /\\ {input_binding}.source_kind = \"route\" /\\ {input_binding}.source_route = {binding}.route /\\ {input_binding}.source_machine = {} /\\ {input_binding}.source_effect = {} /\\ {input_binding}.effect_id = effect_packet.effect_id /\\ {input_binding}.payload = {binding}.payload ELSE TRUE",
+                        tla_string(from_machine),
+                        tla_string(effect_variant),
+                        tla_string(&target.machine),
+                        tla_string(&target.input_variant)
+                        ,
+                        tla_string(&target.machine),
+                        tla_string(&target.input_variant),
+                        tla_string(from_machine),
+                        tla_string(effect_variant)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" /\\ ");
+            let fallback = schema
+                .routes
+                .iter()
+                .filter(|route| {
+                    route.from_machine == *from_machine && route.effect_variant == *effect_variant
+                })
+                .count();
+            if fallback == 0 {
+                "FALSE".into()
+            } else {
+                format!(
+                    "\\A effect_packet \\in emitted_effects : ((effect_packet.machine = {} /\\ effect_packet.variant = {}) => ({}))",
+                    tla_string(from_machine),
+                    tla_string(effect_variant),
+                    required
+                )
+            }
+        }
+        CompositionInvariantKind::HandoffProtocolCovered { .. } => {
+            // Structural invariant — validated at schema level, always TRUE in TLA+.
+            "TRUE".into()
+        }
+    }
+}
+
+fn render_composition_state_constraint(
+    schema: &CompositionSchema,
+    limits: &CompositionStateLimits,
+    compiler: &CompositionTlaCompiler<'_>,
+) -> String {
+    let limits = effective_composition_state_limits(limits, None);
+    let mut clauses = vec![
+        format!("model_step_count <= {}", limits.step_limit),
+        format!("Len(pending_inputs) <= {}", limits.pending_input_limit),
+        format!(
+            "Cardinality(observed_inputs) <= {}",
+            limits.pending_input_limit + limits.delivered_route_limit + 2
+        ),
+        format!("Len(pending_routes) <= {}", limits.pending_route_limit),
+        format!(
+            "Cardinality(delivered_routes) <= {}",
+            limits.delivered_route_limit
+        ),
+        format!(
+            "Cardinality(emitted_effects) <= {}",
+            limits.emitted_effect_limit
+        ),
+        format!("Cardinality(observed_transitions) <= {}", limits.step_limit),
+    ];
+
+    for instance in &schema.machines {
+        let machine = compiler.machine(instance.instance_id.as_str());
+        for field in &machine.state.fields {
+            let field_var = compiler.field_var(instance.instance_id.as_str(), field.name.as_str());
+            match &field.ty {
+                TypeRef::Seq(_) => {
+                    clauses.push(format!("Len({field_var}) <= {}", limits.seq_limit))
+                }
+                TypeRef::Set(_) => {
+                    clauses.push(format!("Cardinality({field_var}) <= {}", limits.set_limit))
+                }
+                TypeRef::Map(_, _) => clauses.push(format!(
+                    "Cardinality(DOMAIN {field_var}) <= {}",
+                    limits.map_limit
+                )),
+                _ => {}
+            }
+        }
+    }
+
+    format!("/\\ {}", clauses.join(" /\\ "))
+}
+
+fn effective_composition_state_limits(
+    limits: &CompositionStateLimits,
+    witness: Option<&CompositionWitness>,
+) -> CompositionStateLimits {
+    let mut effective = limits.clone();
+    if let Some(witness) = witness {
+        let minimum_step_limit =
+            (witness.preload_inputs.len() + witness.expected_transitions.len()) as u32;
+        effective.step_limit = effective.step_limit.max(minimum_step_limit);
+        effective.delivered_route_limit = effective
+            .delivered_route_limit
+            .max(witness.expected_routes.len() as u32);
+        effective.emitted_effect_limit = effective
+            .emitted_effect_limit
+            .max(witness.expected_transitions.len() as u32);
+        effective.pending_input_limit = effective.pending_input_limit.max(1);
+    }
+    effective
+}
+
+fn composition_deep_state_limits(schema: &CompositionSchema) -> CompositionStateLimits {
+    let mut deep = CompositionStateLimits::deep_defaults();
+    if let Some(ci) = &schema.ci_limits {
+        deep.step_limit = deep.step_limit.max(ci.step_limit);
+        deep.pending_input_limit = deep.pending_input_limit.max(ci.pending_input_limit);
+        deep.pending_route_limit = deep.pending_route_limit.max(ci.pending_route_limit);
+        deep.delivered_route_limit = deep.delivered_route_limit.max(ci.delivered_route_limit);
+        deep.emitted_effect_limit = deep.emitted_effect_limit.max(ci.emitted_effect_limit);
+        deep.seq_limit = deep.seq_limit.max(ci.seq_limit);
+        deep.set_limit = deep.set_limit.max(ci.set_limit);
+        deep.map_limit = deep.map_limit.max(ci.map_limit);
+    }
+    deep
+}
+
+fn render_machine_state_constraint(schema: &MachineSchema, deep: bool) -> String {
+    let step_limit = if deep {
+        8
+    } else {
+        schema.ci_step_limit.unwrap_or(6) as usize
+    };
+    let seq_limit = if deep { 2 } else { 1 };
+    let set_limit = if deep { 2 } else { 1 };
+    let map_limit = if deep { 2 } else { 1 };
+    let (step_limit, seq_limit, set_limit, map_limit) =
+        if !deep && let Some(model) = &schema.tlc_model {
+            let limits = &model.ci_limits;
+            (
+                limits.step_limit as usize,
+                limits.seq_limit as usize,
+                limits.set_limit as usize,
+                limits.map_limit as usize,
+            )
+        } else {
+            (step_limit, seq_limit, set_limit, map_limit)
+        };
+    let mut clauses = vec![format!("model_step_count <= {step_limit}")];
+
+    for field in &schema.state.fields {
+        match &field.ty {
+            TypeRef::Seq(_) => {
+                clauses.push(format!("Len({}) <= {seq_limit}", tla_ident(&field.name)))
+            }
+            TypeRef::Set(_) => clauses.push(format!(
+                "Cardinality({}) <= {set_limit}",
+                tla_ident(&field.name)
+            )),
+            TypeRef::Map(_, _) => clauses.push(format!(
+                "Cardinality(DOMAIN {}) <= {map_limit}",
+                tla_ident(&field.name)
+            )),
+            _ => {}
+        }
+    }
+
+    if clauses.is_empty() {
+        "TRUE".into()
+    } else {
+        format!("/\\ {}", clauses.join(" /\\ "))
+    }
+}
+
+/// Default arm for a generated composition `CASE` operator.
+///
+/// Route-component lookups (`RouteSource`, `RouteEffect`, …) are validated
+/// up-front by [`CompositionTlaCompiler::validate_routes`], so the historical
+/// `OTHER -> "unknown_*"` arm is provably unreachable for any real route name.
+/// Emitting that sentinel was a silent catch-all that could launder an
+/// undeclared route component into a passing model. Such lookups now use
+/// [`CaseDefault::FailClosed`]: the `OTHER` arm is dropped entirely so an
+/// unmatched route name surfaces as a TLC error instead of a fabricated value,
+/// and the renderer fails closed at codegen time if a route component cannot
+/// be resolved.
+///
+/// Genuinely closed enumerations (`RouteTargetKind`, `RouteDeliveryKind`) keep
+/// a total literal fallback via [`CaseDefault::ClosedEnum`]; every input maps
+/// to a finite, exhaustive enum, so the literal is a sound total default rather
+/// than a sentinel standing in for an undeclared component.
+enum CaseDefault {
+    /// Total literal fallback over a closed enumeration domain.
+    ClosedEnum(String),
+    /// Fail-closed route-component lookup: no `OTHER` sentinel is emitted.
+    ///
+    /// `require_mapping` is `true` for operators whose domain must be
+    /// non-empty for a well-formed composition (e.g. `ActorOfMachine`, which
+    /// maps over declared machine instances): an empty mapping is then a hard
+    /// codegen error. It is `false` for operators keyed on routes, since a
+    /// protocol-only composition legitimately declares zero routes — the
+    /// operator is structurally defined but never evaluated.
+    FailClosed {
+        component: &'static str,
+        require_mapping: bool,
+    },
+}
+
+fn render_composition_case_fn(
+    out: &mut String,
+    composition: &str,
+    fn_name: &str,
+    param: &str,
+    mappings: Vec<(&str, String)>,
+    default: CaseDefault,
+) -> std::result::Result<(), CompositionTlaError> {
+    writeln!(out, "{fn_name}({param}) ==");
+    if mappings.is_empty() {
+        // No keys to map. For a closed-enum operator the literal fallback is
+        // the operator body. For a fail-closed route-component operator the
+        // composition declares no routes, so the operator is structurally
+        // defined but unreachable; emitting the bare error label as a string
+        // makes any accidental evaluation explode in TLC rather than yield a
+        // plausible-looking value.
+        let body = match &default {
+            CaseDefault::ClosedEnum(expr) => expr.clone(),
+            CaseDefault::FailClosed {
+                component,
+                require_mapping,
+            } => {
+                if *require_mapping {
+                    return Err(CompositionTlaError::UnknownRouteComponent {
+                        composition: composition.to_owned(),
+                        component,
+                    });
+                }
+                tla_string(format!("unresolved_{component}"))
+            }
+        };
+        pushln!(out, "    {}", body);
+        pushln!(out);
+        return Ok(());
+    }
+
+    let mut first = true;
+    for (key, value) in mappings {
+        if first {
+            pushln!(out, "    CASE {} = {} -> {}", param, tla_string(key), value);
+            first = false;
+        } else {
+            writeln!(out, "      [] {} = {} -> {}", param, tla_string(key), value);
+        }
+    }
+    match default {
+        CaseDefault::ClosedEnum(expr) => {
+            writeln!(out, "      [] OTHER -> {}", expr);
+        }
+        CaseDefault::FailClosed { .. } => {
+            // validate_routes() guarantees the CASE arms cover every declared
+            // route, so an OTHER arm here would be a silent catch-all over an
+            // undeclared route component. Drop it: an unmatched route name now
+            // becomes a TLC evaluation error (fail closed) instead of a
+            // fabricated sentinel.
+        }
+    }
+    pushln!(out);
+    Ok(())
+}
+
+fn tla_ident(value: impl AsRef<str>) -> String {
+    value
+        .as_ref()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
+}
+
+fn tla_string(value: impl AsRef<str>) -> String {
+    format!("\"{}\"", value.as_ref().replace('"', "\\\""))
+}
+
+/// Wrap a rendered TLA+ expression in parentheses unless it is already an
+/// atom (an identifier, field path, number or string, optionally applied with balanced
+/// `(...)`/`[...]` suffixes, or one parenthesized group), so it can be spliced
+/// as an operand without TLA+ operator precedence reaching into it.
+fn tla_delimited(expr: &str) -> String {
+    if tla_is_atom(expr) {
+        expr.to_owned()
+    } else {
+        format!("({expr})")
+    }
+}
+
+fn tla_is_atom(expr: &str) -> bool {
+    let bytes = expr.as_bytes();
+    let mut index = 0;
+    match bytes.first() {
+        Some(b'(') => {}
+        Some(b'"') => {
+            index = 1;
+            while index < bytes.len() && bytes[index] != b'"' {
+                index += 1;
+            }
+            if index >= bytes.len() {
+                return false;
+            }
+            index += 1;
+        }
+        Some(byte) if byte.is_ascii_alphanumeric() || *byte == b'_' => {
+            // Identifiers and record field paths (`packet.payload.run_id`):
+            // field access binds tighter than every operator.
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric()
+                    || bytes[index] == b'_'
+                    || bytes[index] == b'.')
+            {
+                index += 1;
+            }
+        }
+        _ => return false,
+    }
+    // Zero or more balanced `(...)` / `[...]` groups, with nothing between.
+    while index < bytes.len() {
+        let (open, close) = match bytes[index] {
+            b'(' => (b'(', b')'),
+            b'[' => (b'[', b']'),
+            _ => return false,
+        };
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut end = None;
+        for (offset, byte) in bytes[index..].iter().enumerate() {
+            match *byte {
+                b'"' => in_string = !in_string,
+                b if b == open && !in_string => depth += 1,
+                b if b == close && !in_string => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(index + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match end {
+            Some(end) => index = end + 1,
+            None => return false,
+        }
+    }
+    true
+}
+
+/// The input variant a transition is triggered by, if it is input-triggered.
+fn trigger_input_variant(transition: &TransitionSchema) -> Option<&str> {
+    match &transition.on {
+        TriggerMatch::Input { variant, .. } => Some(variant.as_str()),
+        _ => None,
+    }
+}
+
+/// The default unsigned domain extended with declared additional values.
+fn additional_values_domain(default: &str, values: &BTreeSet<u64>) -> String {
+    let values = values
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("({default} \\cup {{{values}}})")
+}

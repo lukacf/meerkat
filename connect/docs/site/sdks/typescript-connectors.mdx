@@ -1,0 +1,67 @@
+---
+title: "TypeScript service operations"
+description: "Current Node operation methods, selection contexts and conservative write outcomes."
+icon: "plug"
+---
+
+**Current local source.** Each operation class takes an explicit host-selected context and optional limits. Import from the exact `@rkat/toolkit/connectors/...` subpath. [Transport ownership](/sdks/typescript#transport-contract) applies to every connector.
+
+| Subpath | Class | Context |
+| --- | --- | --- |
+| `home-assistant` | `HomeAssistantOperations` | `baseUrl`, `fetch` |
+| `gmail` | `GmailOperations` | `baseUrl`, `userId`, `fetch` |
+| `google-calendar` | `GoogleCalendarOperations` | `baseUrl`, `calendarId`, `fetch` |
+| `slack` | `SlackOperations` | `baseUrl`, `fetch` |
+
+There is no TypeScript Google Drive export. Python and TypeScript are separate supported profiles; do not assume every method exists in both.
+
+## Home Assistant
+
+`getState(entityId, options?)`, `listServices(options?)` and `callService(domain, service, options?)` are the current methods. The TypeScript profile does not expose Python's state-list or camera-image methods.
+
+For a service write, `options.data` is the explicit JSON payload and `returnResponse` chooses the response form. The result separates changed states and optional service response. A requested service response must be an object or null; a top-level false value is invalid, while nested false values are preserved. A successful provider receipt does not prove physical device state.
+
+## Gmail
+
+`listMessagesPage(options?)`, `getMessage(messageId, options?)` and `sendRaw(mime, options?)` provide one-page listing, exact message reads and one send of supplied `Uint8Array` MIME bytes.
+
+The list options include query, labels, page token, result limit and spam/trash selection. Read formats include `full`, `metadata`, `minimal` and `raw`. The caller decides whether another page or attachment operation is needed.
+
+The current TypeScript profile has no draft creation, label modification, attachment retrieval, message-formatting helpers or Python-style `thread_id` send option. Preserve exact recipient/MIME approval in the host before calling `sendRaw`.
+
+## Google Calendar
+
+```ts
+import { GoogleCalendarOperations } from "@rkat/toolkit/connectors/google-calendar";
+import type { GoogleCalendarContext } from "@rkat/toolkit/connectors/google-calendar";
+
+declare const selectedCalendar: GoogleCalendarContext;
+const calendar = new GoogleCalendarOperations(selectedCalendar);
+const page = await calendar.listEventsPage({
+  timeMin: "2026-10-01T00:00:00+02:00",
+  timeMax: "2026-10-08T00:00:00+02:00",
+  singleEvents: true,
+  orderBy: "startTime",
+  maxResults: 250,
+});
+```
+
+Other methods are `getEvent`, `insertEvent`, `patchEvent` and `deleteEvent`. Patch/delete accept `expectedEtag` for an exact conditional operation. Missing ETag is an explicitly unconditional choice; HTTP 412 never causes an automatic refresh and overwrite.
+
+Event bodies preserve omission, null, false and empty values. List pages preserve opaque tokens and do not traverse them. Sync, other Calendar APIs, notification/partial-response options and arbitrary provider parameters remain outside this profile.
+
+## Slack
+
+`authTest`, `listConversationsPage`, `getConversation`, `historyPage` and `repliesPage` expose explicit provider observations. IDs remain exact; message timestamps are decimal strings. Provider account observations must be checked against the host's independent selection.
+
+`readInterval(channel, options)` accepts `start`, `end`, `rootOldest`, `maxRequests`, `maxMessages`, optional `pageLimit`, `includeAllMetadata` and `signal`. It interleaves history/thread traversal with fixed bounds and returns occurrences, chain results and coverage gaps. Exhausted visible chains are not proof of complete historical coverage.
+
+There is no service send or frontend export in this Node operation package. The Python Slack frontend adapter is a separate surface.
+
+## Errors
+
+Home Assistant, Gmail and Calendar expose typed errors with `kind`, `writeOutcome` and selected HTTP/retry metadata. Failed entered writes conservatively remain `unknown`. Slack exposes read-error categories plus bounded provider/retry metadata. Cancellation has a typed rejection for each profile.
+
+No error, timeout or Retry-After value authorizes replay. The host's existing business effect owner decides reconciliation and any later explicit attempt.
+
+Detailed option names and exact method signatures remain in `sdk/typescript/src/connectors/` and the generated declarations of the selected artifact.

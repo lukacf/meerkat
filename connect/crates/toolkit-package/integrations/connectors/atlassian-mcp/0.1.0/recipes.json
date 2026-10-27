@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "maintainer": "meerkat-toolkit",
+  "reviewed_at_unix_ms": 1790773043743,
+  "sources": [
+    {
+      "id": "atlassian",
+      "url": "https://developer.atlassian.com/cloud/rovo-mcp/",
+      "observed_sha256": "1ca25b2ad2304b8ad2e2ef0c64da35442a49185972d8342c442eacf4cf6dcc0d",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Provider documentation and hosted service retain their own terms. No implementation is copied."
+    }
+  ],
+  "recipes": [
+    {
+      "strategy": "hosted",
+      "export": "atlassian-mcp.service",
+      "role": "service_connector",
+      "prerequisites": [
+        {
+          "kind": "account",
+          "instruction": "An Atlassian Cloud account with access to the selected site and products."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "Host-owned OAuth or approved API-token configuration; inspect current provider/client compatibility."
+        },
+        {
+          "kind": "administrator",
+          "instruction": "Check site access policy and applicable organization credit or usage limits."
+        }
+      ],
+      "plan": {
+        "kind": "remote_mcp",
+        "server": "atlassian-mcp",
+        "publisher": "atlassian",
+        "documented_api_version": "v2",
+        "read_only": false,
+        "read_only_evidence": null
+      }
+    }
+  ]
+}

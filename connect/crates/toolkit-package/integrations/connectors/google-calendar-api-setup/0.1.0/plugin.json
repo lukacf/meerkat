@@ -1,0 +1,70 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "google-calendar-api-setup",
+  "version": "0.1.0",
+  "description": "Guidance-only setup recipe with explicit source observations and newcomer prerequisites.",
+  "author": {
+    "name": "Meerkat Toolkit"
+  },
+  "license": "MIT OR Apache-2.0",
+  "extensions": {
+    "ai.rkat.toolkit": {
+      "schema_version": 1,
+      "identity": {
+        "publisher": "meerkat-toolkit",
+        "name": "google-calendar-api-setup",
+        "version": "0.1.0"
+      },
+      "display_name": "Google Calendar API newcomer setup",
+      "description": "Guidance-only setup recipe with explicit source observations and newcomer prerequisites.",
+      "provenance": {
+        "source": "https://developers.google.com/workspace/calendar/api/quickstart/python",
+        "source_revision": "sha256:338a537bf3ba937a7cd2f269f8bf1db13f755cba20e457ed1ef66dec83979a00",
+        "license": "MIT OR Apache-2.0 for Toolkit-authored recipe metadata only. Provider documentation and hosted service retain their own terms. No implementation is copied.",
+        "notices": [
+          "This package is authored by Meerkat Toolkit, not by the provider.",
+          "No upstream implementation is vendored. Hosted endpoints are mutable services, not pinned executable artifacts.",
+          "Offline recipe validation does not establish installation, authentication, readiness or supported live operations."
+        ],
+        "local_patches": []
+      },
+      "strategies": [
+        {
+          "id": "setup",
+          "kind": "configuration_recipe",
+          "instructions": "The official Python quickstart requires Calendar API enablement, consent configuration and OAuth client credentials. Select the intended calendars and least required scopes with the host owner. Package a maintained connector separately. Preserve application calendar restrictions and returned-version write receipts when migrating PairedHost; the generic API route cannot bypass them.",
+          "sources": [
+            "https://developers.google.com/workspace/calendar/api/quickstart/python"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "No Calendar implementation artifact or credential binding is retained.",
+            "Requested operation schemas, production OAuth route and application migration constraints remain unresolved."
+          ]
+        }
+      ],
+      "known_exports": [
+        {
+          "id": "google-calendar-api-setup.service",
+          "role": "service_connector",
+          "description": "Google Calendar API newcomer setup; only individually selected and owner-verified capabilities may be bound."
+        }
+      ],
+      "assessments": [
+        {
+          "status": "experimental",
+          "scope": "Retained recipe and source inspection only. Live operation and deployment conformance are unverified.",
+          "source_revision": "sha256:338a537bf3ba937a7cd2f269f8bf1db13f755cba20e457ed1ef66dec83979a00",
+          "assessed_at_unix_ms": 1790773045898,
+          "evidence": [
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "google-calendar",
+              "revision": "sha256:338a537bf3ba937a7cd2f269f8bf1db13f755cba20e457ed1ef66dec83979a00"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

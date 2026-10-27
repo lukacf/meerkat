@@ -1,0 +1,154 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "slack-mcp-setup",
+  "version": "0.3.0",
+  "description": "Agent-selected Slack service setup guidance with Python and TypeScript identity observation, conversation discovery, history and replies; host bindings remain required.",
+  "author": {
+    "name": "Meerkat Toolkit"
+  },
+  "license": "MIT OR Apache-2.0",
+  "extensions": {
+    "ai.rkat.toolkit": {
+      "schema_version": 1,
+      "identity": {
+        "publisher": "meerkat-toolkit",
+        "name": "slack-mcp-setup",
+        "version": "0.3.0"
+      },
+      "display_name": "Slack: provider MCP or Toolkit Python/TypeScript operations",
+      "description": "Agent-selected Slack service setup guidance with Python and TypeScript identity observation, conversation discovery, history and replies; host bindings remain required.",
+      "provenance": {
+        "source": "https://docs.slack.dev/ai/slack-mcp-server/",
+        "source_revision": "sha256:41ddbf9df58e7d74d9ce3710259754868a0c55df7be61433bd99c59a95f6c45f",
+        "license": "MIT OR Apache-2.0 for Toolkit-authored metadata and operation code. Slack documentation and hosted services retain their own terms. No provider implementation is copied.",
+        "notices": [
+          "Authored by Meerkat Toolkit, not Slack. Source hashes identify observed documentation bytes, not a deployed implementation.",
+          "This additive version preserves 0.1.0, 0.2.0 and slack-mcp-setup.service. Selection requires an exact version and library digest; there is no implicit upgrade or transport fallback.",
+          "Neither route creates a Slack frontend, credentials, grants or an active service export. Local protocol tests are not live provider or complete-retrieval evidence."
+        ],
+        "local_patches": []
+      },
+      "strategies": [
+        {
+          "id": "provider-mcp-setup",
+          "kind": "remote_mcp",
+          "instructions": "Explicitly choose the Slack-hosted MCP setup route. Read this version's SUPPORT.md and provider registration instructions. The documented endpoint is https://mcp.slack.com/mcp using Streamable HTTP, with a fixed eligible Slack app and user OAuth; dynamic client registration is unavailable. Obtain current tool schemas and bind only selected operations through the existing host owners. Report denial or missing prerequisites; do not switch to REST automatically.",
+          "sources": [
+            "https://docs.slack.dev/ai/slack-mcp-server/",
+            "https://docs.slack.dev/ai/slack-mcp-server/connect-to-harnesses/",
+            "https://docs.slack.dev/authentication/installing-with-oauth/"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "No host app registration, callback, selected account or credential binding is supplied.",
+            "No live tool/schema, role readiness, activation, isolation or revocation receipt is retained. This strategy remains guidance-only despite the documented endpoint."
+          ]
+        },
+        {
+          "id": "toolkit-rest-guidance",
+          "kind": "configuration_recipe",
+          "instructions": "Explicitly choose the local Python or TypeScript SlackOperations library and exact verified artifact in SUPPORT.md. Both provide five one-request operations: auth.test, conversations.list, conversations.info, conversations.history and conversations.replies. Python methods are auth_test, list_conversations_page, get_conversation, history_page and replies_page. TypeScript methods are authTest, listConversationsPage, getConversation, historyPage and repliesPage. The existing host supplies the selected credential, API base, account/resource authority and transport lifetime. Compare auth_test/authTest team_id and user_id against independently selected host identity; a supplied team selector is not identity proof. The agent chooses conversation types, explicit pages, exact conversation IDs, interval and thread coverage. Preserve cursors, timestamps and unknown fields. Perform a policy-permitted selected-resource read before requesting the existing owner to attest that operation binding. Report mismatch, missing access, unsupported response, rate limit or unavailable data to that owner; never repair identity by switching credentials. Publish only after existing host activation/authentication owners bind the selected operations. This does not create a frontend, grant, complete weekly report or automatic fallback from MCP.",
+          "sources": [
+            "https://docs.slack.dev/reference/methods/conversations.history/",
+            "https://docs.slack.dev/reference/methods/conversations.replies/",
+            "https://docs.slack.dev/authentication/installing-with-oauth/",
+            "https://docs.slack.dev/apis/web-api/pagination/",
+            "https://docs.slack.dev/apis/web-api/rate-limits/",
+            "https://docs.slack.dev/authentication/tokens/",
+            "https://docs.slack.dev/reference/methods/auth.test/",
+            "https://docs.slack.dev/reference/methods/conversations.list/",
+            "https://docs.slack.dev/reference/methods/conversations.info/"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "Python source and a private wheel, and TypeScript source and a private npm archive, have bounded installed proof. Neither package is claimed publicly released. Select exact bytes; package version 0.1.0 alone does not identify this revision.",
+            "The existing credential owner must supply registration, human authorization when needed, token lifecycle and independently selected account/resource binding. No credential belongs in agent-visible recipe fields.",
+            "Explicit discovery pages are implemented; automatic name/intent resolution, pagination, thread expansion, message search/send and complete date-range retrieval are not implemented by these operations."
+          ]
+        }
+      ],
+      "known_exports": [
+        {
+          "id": "slack-mcp-setup.service",
+          "role": "service_connector",
+          "description": "Explicitly selected Slack account operations; each published operation still requires its host-owned schema, authorization and lifecycle binding."
+        }
+      ],
+      "assessments": [
+        {
+          "status": "experimental",
+          "scope": "Experimental setup guidance with exact public documentation observations and private Python/TypeScript installed operation proofs. Live Slack, current native activation and complete weekly retrieval remain unverified.",
+          "source_revision": "sha256:41ddbf9df58e7d74d9ce3710259754868a0c55df7be61433bd99c59a95f6c45f",
+          "assessed_at_unix_ms": 1790926361980,
+          "evidence": [
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "slack-mcp",
+              "revision": "sha256:41ddbf9df58e7d74d9ce3710259754868a0c55df7be61433bd99c59a95f6c45f"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "slack-mcp-harness",
+              "revision": "sha256:d35923cf92749bef789dde46318ddadeb069d30b5de7f4c70501821c1591a70f"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "slack-history",
+              "revision": "sha256:ec35862f8bcbac0ecd83774818fb70e01722155198d2d7b10c4864004143f187"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "slack-replies",
+              "revision": "sha256:7680fa89e8d568972b0eeca52ec3737684f5f9a1e3097ccbee216010119a92ad"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "slack-oauth",
+              "revision": "sha256:3a627782b404ceca9472b50fa445e6aa3598dcd7411bfa8ffea2c4fcc4a46cc6"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "slack-pagination",
+              "revision": "sha256:134444c44c71921b6b85777d4c8bbdec1cc91959ce0274fc7326a42f01fe55b3"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "slack-rate-limits",
+              "revision": "sha256:dc19afc198afb353ba3b3bd3b61978cc1beba4bb39fde14f9f9a38f927136b08"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "slack-tokens",
+              "revision": "sha256:e6fc1fbfe713c2b2f0f39cce18d0b5a81e11b6b0db18355674f5f3482e35bc92"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "slack-auth-test",
+              "revision": "sha256:cd4842e3295eb63fe3d2f25080e415bd86cbd076f6a94c4cadde78057ff1d2b7"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "slack-conversations-list",
+              "revision": "sha256:762f4b7c68cff7124c6f790c9c9684964ea51d1283e2c25c890749c9ba441ea3"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "slack-conversations-info",
+              "revision": "sha256:1d025fbdc840ea8f6f67a15d0cbf9832f285754aa1bbe77a22412b635ca9b93c"
+            },
+            {
+              "owner": "toolkit-root-installed-review",
+              "record": "slack-python-discovery-installed",
+              "revision": "sha256:b2dc76a8cb92c6fcaf10817bc912e05686b9bf9d6a645df06b49e0c2f7453dc6"
+            },
+            {
+              "owner": "toolkit-root-installed-review",
+              "record": "slack-typescript-discovery-installed",
+              "revision": "sha256:1f1aba3618fe813a89898e7a490531ab4279cafeefb270c86e2c331e89e555cf"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

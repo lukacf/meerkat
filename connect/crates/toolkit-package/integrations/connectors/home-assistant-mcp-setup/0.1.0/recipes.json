@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "maintainer": "meerkat-toolkit",
+  "reviewed_at_unix_ms": 1790773044140,
+  "sources": [
+    {
+      "id": "home-assistant",
+      "url": "https://www.home-assistant.io/integrations/mcp_server/",
+      "observed_sha256": "bc0aa96545363e57d8fc832f07fecbf7bd781e960b56fec215a089acc98ec88e",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Provider documentation and hosted service retain their own terms. No implementation is copied."
+    }
+  ],
+  "recipes": [
+    {
+      "strategy": "setup",
+      "export": "home-assistant-mcp-setup.service",
+      "role": "service_connector",
+      "prerequisites": [
+        {
+          "kind": "host_deployment",
+          "instruction": "A reachable Home Assistant instance with MCP Server configured and explicit exposed entities."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "Compatible host OAuth client identity or protected token binding for this instance."
+        }
+      ],
+      "plan": {
+        "kind": "guidance_only",
+        "blockers": [
+          "The user-specific instance endpoint, TLS/network route and account are not selected.",
+          "Actual entity/operation schemas and device-effect authority require host verification."
+        ]
+      }
+    }
+  ]
+}

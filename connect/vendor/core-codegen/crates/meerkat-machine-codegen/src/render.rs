@@ -1,0 +1,2676 @@
+use std::fmt::Write;
+
+fn push_fmt(out: &mut String, args: std::fmt::Arguments<'_>) {
+    let _ignored = out.write_fmt(args);
+}
+
+fn push_line(out: &mut String, args: std::fmt::Arguments<'_>) {
+    push_fmt(out, args);
+    out.push('\n');
+}
+
+macro_rules! pushln {
+    ($out:expr) => {{
+        $out.push('\n');
+    }};
+    ($out:expr, $($arg:tt)*) => {{
+        push_line($out, format_args!($($arg)*));
+    }};
+}
+
+#[cfg(not(test))]
+use meerkat_machine_schema::{
+    CompositionCoverageManifest, CompositionInvariantKind, CompositionSchema, CoverageAnchor,
+    CoverageSchemaTarget, MachineCoverageManifest, RouteDelivery, RouteTargetKind, SchedulerRule,
+    SemanticCoverageEntry,
+};
+use meerkat_machine_schema::{
+    EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema, Guard, HelperSchema, MachineSchema,
+    Quantifier, TransitionSchema, TypeRef, Update, VariantSchema,
+};
+
+#[cfg(not(test))]
+pub const GENERATED_COVERAGE_START: &str = "<!-- GENERATED_COVERAGE_START -->";
+#[cfg(not(test))]
+pub const GENERATED_COVERAGE_END: &str = "<!-- GENERATED_COVERAGE_END -->";
+
+pub fn render_machine_module(schema: &MachineSchema) -> String {
+    let mut out = String::new();
+    let module_name = format!("Machine_{}", tla_ident(&schema.machine));
+
+    pushln!(&mut out, "---- MODULE {module_name} ----");
+    pushln!(
+        &mut out,
+        "(* machine = {} ; version = {} *)",
+        schema.machine,
+        schema.version
+    );
+    pushln!(
+        &mut out,
+        "(* rust = {}::{} *)",
+        schema.rust.crate_name,
+        schema.rust.module
+    );
+    out.push('\n');
+
+    pushln!(&mut out, "STATE");
+    pushln!(
+        &mut out,
+        "  phase : {}",
+        render_enum_variants_inline(&schema.state.phase)
+    );
+    for field in &schema.state.fields {
+        pushln!(
+            &mut out,
+            "  {} : {}",
+            field.name,
+            render_type_ref(&field.ty)
+        );
+    }
+    out.push('\n');
+
+    pushln!(&mut out, "INIT");
+    pushln!(
+        &mut out,
+        "  phase = {}",
+        tla_string(&schema.state.init.phase)
+    );
+    for field in &schema.state.init.fields {
+        render_field_init(&mut out, field);
+    }
+    if !schema.state.terminal_phases.is_empty() {
+        pushln!(
+            &mut out,
+            "  terminal_phases = {}",
+            render_string_list(&schema.state.terminal_phases)
+        );
+    }
+    out.push('\n');
+
+    render_enum_section(&mut out, "INPUTS", &schema.inputs);
+    render_enum_section(&mut out, "SIGNALS", &schema.signals);
+    render_enum_section(&mut out, "EFFECTS", &schema.effects);
+
+    render_helpers_section(&mut out, "HELPERS", &schema.helpers);
+    render_helpers_section(&mut out, "DERIVED", &schema.derived);
+    render_invariants_section(&mut out, schema);
+    render_transitions_section(&mut out, schema);
+
+    pushln!(&mut out, "====");
+    out
+}
+
+#[cfg(not(test))]
+pub fn render_composition_module(schema: &CompositionSchema) -> String {
+    let mut out = String::new();
+    let module_name = format!("Composition_{}", tla_ident(&schema.name));
+
+    pushln!(&mut out, "---- MODULE {module_name} ----");
+    pushln!(&mut out, "(* composition = {} *)", schema.name);
+    out.push('\n');
+
+    pushln!(&mut out, "MACHINES");
+    for machine in &schema.machines {
+        pushln!(
+            &mut out,
+            "  {} : {} @ actor {}",
+            machine.instance_id,
+            machine.machine_name,
+            machine.actor
+        );
+    }
+    out.push('\n');
+
+    pushln!(&mut out, "ROUTES");
+    for route in &schema.routes {
+        pushln!(
+            &mut out,
+            "  {} == {}.{} -> {}.{} ({}) [{}]",
+            route.name,
+            route.from_machine,
+            route.effect_variant,
+            route.to.machine,
+            route.to.input_variant,
+            match route.to.kind {
+                RouteTargetKind::Input => "Input",
+                RouteTargetKind::Signal => "Signal",
+            },
+            render_route_delivery(&route.delivery)
+        );
+        if !route.bindings.is_empty() {
+            pushln!(&mut out, "    bindings = {}", render_route_bindings(route));
+        }
+    }
+    out.push('\n');
+
+    pushln!(&mut out, "TARGET_SELECTORS");
+    for selector in &schema.route_target_selectors {
+        pushln!(
+            &mut out,
+            "  {} selects {} from {:?}",
+            selector.route_name,
+            selector.selector_field,
+            selector.source
+        );
+    }
+    out.push('\n');
+
+    pushln!(&mut out, "DRIVER");
+    match &schema.driver {
+        Some(driver) => {
+            pushln!(
+                &mut out,
+                "  {} ({} @ {})",
+                driver.name,
+                driver.rust.driver_type,
+                driver.rust.module_path
+            );
+            for watched in &driver.watched_effects {
+                pushln!(
+                    &mut out,
+                    "    watches {}::{}",
+                    watched.producer_instance,
+                    watched.effect_variant
+                );
+            }
+            for dispatch in &driver.dispatch_routes {
+                pushln!(
+                    &mut out,
+                    "    dispatches {} -> {}::{} ({:?})",
+                    dispatch.name,
+                    dispatch.target_instance,
+                    dispatch.input_variant,
+                    dispatch.target_kind
+                );
+            }
+            for closure in &driver.refusal_closures {
+                pushln!(
+                    &mut out,
+                    "    closes refusal {} -> {}::{}",
+                    closure.dispatch_route,
+                    closure.feedback_instance,
+                    closure.feedback_input
+                );
+            }
+        }
+        None => pushln!(&mut out, "  (none)"),
+    }
+    out.push('\n');
+
+    pushln!(&mut out, "TRANSACTION_PLANS");
+    for plan in &schema.transaction_plans {
+        pushln!(
+            &mut out,
+            "  {} == {} via {}",
+            plan.name,
+            plan.trigger,
+            plan.store_primitive
+        );
+    }
+    out.push('\n');
+
+    pushln!(&mut out, "ACTOR_PRIORITIES");
+    for priority in &schema.actor_priorities {
+        pushln!(
+            &mut out,
+            "  {} > {} ; {}",
+            priority.higher,
+            priority.lower,
+            priority.reason
+        );
+    }
+    out.push('\n');
+
+    pushln!(&mut out, "SCHEDULER_RULES");
+    for rule in &schema.scheduler_rules {
+        pushln!(&mut out, "  {}", render_scheduler_rule(rule));
+    }
+    out.push('\n');
+
+    pushln!(&mut out, "INVARIANTS");
+    for invariant in &schema.invariants {
+        pushln!(
+            &mut out,
+            "  {} == {}",
+            invariant.name,
+            render_composition_invariant_kind(&invariant.kind)
+        );
+        pushln!(
+            &mut out,
+            "    statement = {}",
+            tla_string(&invariant.statement)
+        );
+    }
+
+    pushln!(&mut out, "====");
+    out
+}
+
+/// Render one coverage anchor as a generated-docs bullet, surfacing its typed
+/// schema target so artifact drift is visible to the rerun-and-diff gate.
+#[cfg(not(test))]
+fn render_coverage_anchor_bullet(anchor: &CoverageAnchor) -> String {
+    let target = match &anchor.target {
+        CoverageSchemaTarget::Machine(machine) => format!("machine `{machine}`"),
+        CoverageSchemaTarget::Route(route) => format!("route `{route}`"),
+    };
+    format!(
+        "- `{}` ({}): `{}` — {}",
+        anchor.id,
+        target,
+        anchor.symbol.as_str(),
+        anchor.note
+    )
+}
+
+#[cfg(not(test))]
+pub fn render_machine_mapping_coverage(
+    schema: &MachineSchema,
+    coverage: &MachineCoverageManifest,
+) -> String {
+    let mut out = String::new();
+
+    pushln!(&mut out, "## Generated Coverage");
+    pushln!(
+        &mut out,
+        "This section is generated from the Rust machine catalog. Do not edit it by hand."
+    );
+    out.push('\n');
+
+    pushln!(&mut out, "### Machine");
+    pushln!(&mut out, "- `{}`", schema.machine);
+    out.push('\n');
+
+    pushln!(&mut out, "### Code Anchors");
+    for anchor in &coverage.code_anchors {
+        pushln!(&mut out, "{}", render_coverage_anchor_bullet(anchor));
+    }
+    out.push('\n');
+
+    pushln!(&mut out, "### Scenarios");
+    for scenario in &coverage.scenarios {
+        pushln!(&mut out, "- `{}` — {}", scenario.id, scenario.summary);
+    }
+    out.push('\n');
+
+    render_semantic_mapping_section(&mut out, "Transitions", &coverage.transition_coverage);
+    render_semantic_mapping_section(&mut out, "Effects", &coverage.effect_coverage);
+    render_semantic_mapping_section(&mut out, "Invariants", &coverage.invariant_coverage);
+
+    out
+}
+
+#[cfg(not(test))]
+pub fn render_composition_mapping_coverage(
+    schema: &CompositionSchema,
+    coverage: &CompositionCoverageManifest,
+) -> String {
+    let mut out = String::new();
+
+    pushln!(&mut out, "## Generated Coverage");
+    pushln!(
+        &mut out,
+        "This section is generated from the Rust composition catalog. Do not edit it by hand."
+    );
+    out.push('\n');
+
+    pushln!(&mut out, "### Composition");
+    pushln!(&mut out, "- `{}`", schema.name);
+    out.push('\n');
+
+    pushln!(&mut out, "### Code Anchors");
+    for anchor in &coverage.code_anchors {
+        pushln!(&mut out, "{}", render_coverage_anchor_bullet(anchor));
+    }
+    out.push('\n');
+
+    pushln!(&mut out, "### Scenarios");
+    for scenario in &coverage.scenarios {
+        pushln!(&mut out, "- `{}` — {}", scenario.id, scenario.summary);
+    }
+    out.push('\n');
+
+    render_semantic_mapping_section(&mut out, "Routes", &coverage.route_coverage);
+    render_semantic_mapping_section(
+        &mut out,
+        "Scheduler Rules",
+        &coverage.scheduler_rule_coverage,
+    );
+    render_semantic_mapping_section(&mut out, "Invariants", &coverage.invariant_coverage);
+
+    out
+}
+
+#[cfg(not(test))]
+pub fn render_machine_kernel_module(
+    schema: &MachineSchema,
+) -> Result<String, MachineKernelRenderError> {
+    render_canonical_stub_modeled_module(schema)
+}
+
+#[cfg(not(test))]
+#[derive(Debug, thiserror::Error)]
+pub enum MachineKernelRenderError {
+    #[error(
+        "MeerkatMachine public TransitionId tail names missing schema transition `{transition}`"
+    )]
+    MissingPublicTransitionTail { transition: String },
+    #[error(
+        "MeerkatMachine public TransitionId tail must name unique schema transitions: rendered {rendered}, schema has {schema}"
+    )]
+    NonUniquePublicTransitionTail { rendered: usize, schema: usize },
+}
+
+// Rust enum order is a public compatibility surface, while transition schema
+// order is a runtime semantic surface: the production proc-macro dispatcher
+// preserves declaration order when it builds same-trigger first-match chains.
+// Keep additions that landed inside the MeerkatMachine transition catalog in
+// this append-only emission tail instead of moving their transition bodies.
+#[cfg(not(test))]
+const MEERKAT_TRANSITION_ENUM_TAIL: &[&str] = &[
+    "RegisterSessionRefusedUnregisterDrainingIdle",
+    "RegisterSessionRefusedUnregisterDrainingAttached",
+    "RegisterSessionRefusedUnregisterDrainingRunning",
+    "RegisterSessionRefusedUnregisterDrainingRetired",
+    "RegisterSessionRefusedUnregisterDrainingStopped",
+    "ClassifyRecoveredTerminalCompletionBatchRecoverInitializing",
+    "ClassifyRecoveredTerminalCompletionBatchRecoverIdle",
+    "ClassifyRecoveredTerminalCompletionBatchRecoverAttached",
+    "ClassifyRecoveredTerminalCompletionBatchRecoverRunning",
+    "ClassifyRecoveredTerminalCompletionBatchRecoverRetired",
+    "ClassifyRecoveredTerminalCompletionBatchRecoverStopped",
+    "ClassifyRecoveredTerminalCompletionBatchDiscardUnrecoverableInitializing",
+    "ClassifyRecoveredTerminalCompletionBatchDiscardUnrecoverableIdle",
+    "ClassifyRecoveredTerminalCompletionBatchDiscardUnrecoverableAttached",
+    "ClassifyRecoveredTerminalCompletionBatchDiscardUnrecoverableRunning",
+    "ClassifyRecoveredTerminalCompletionBatchDiscardUnrecoverableRetired",
+    "ClassifyRecoveredTerminalCompletionBatchDiscardUnrecoverableStopped",
+    "ClassifyRecoveredTerminalCompletionBatchBlockedInitializing",
+    "ClassifyRecoveredTerminalCompletionBatchBlockedIdle",
+    "ClassifyRecoveredTerminalCompletionBatchBlockedAttached",
+    "ClassifyRecoveredTerminalCompletionBatchBlockedRunning",
+    "ClassifyRecoveredTerminalCompletionBatchBlockedRetired",
+    "ClassifyRecoveredTerminalCompletionBatchBlockedStopped",
+    "DeclareRecoveredTerminalCompletionUnrecoverableInitializing",
+    "DeclareRecoveredTerminalCompletionUnrecoverableIdle",
+    "DeclareRecoveredTerminalCompletionUnrecoverableAttached",
+    "DeclareRecoveredTerminalCompletionUnrecoverableRunning",
+    "DeclareRecoveredTerminalCompletionUnrecoverableRetired",
+    "DeclareRecoveredTerminalCompletionUnrecoverableStopped",
+    "PrepareIdleRetainingUnsettledCompletion",
+    "PrepareAttachedRetainingUnsettledCompletion",
+    "DrainQueuedRunRetiredRetainingUnsettledCompletion",
+];
+
+#[cfg(not(test))]
+fn transitions_in_public_enum_order(
+    schema: &MachineSchema,
+) -> Result<Vec<&TransitionSchema>, MachineKernelRenderError> {
+    if schema.machine.as_ref() != "MeerkatMachine" {
+        return Ok(schema.transitions.iter().collect());
+    }
+
+    let mut compatibility_tail = Vec::with_capacity(MEERKAT_TRANSITION_ENUM_TAIL.len());
+    for expected_name in MEERKAT_TRANSITION_ENUM_TAIL {
+        let transition = schema
+            .transitions
+            .iter()
+            .find(|transition| transition.name.as_ref() == *expected_name)
+            .ok_or_else(|| MachineKernelRenderError::MissingPublicTransitionTail {
+                transition: (*expected_name).to_owned(),
+            })?;
+        compatibility_tail.push(transition);
+    }
+    let input_position = |transition: &TransitionSchema| match &transition.on {
+        meerkat_machine_schema::TriggerMatch::Input { variant, .. } => schema
+            .inputs
+            .variants
+            .iter()
+            .position(|input| input.name.as_str() == variant.as_str()),
+        meerkat_machine_schema::TriggerMatch::Signal { .. } => None,
+    };
+    // Inputs appended after the historical compatibility tail must append
+    // their transitions after it too. Derive this boundary from the existing
+    // tail and input declaration order, not a second list of new family names.
+    let compatibility_input_end = compatibility_tail
+        .iter()
+        .filter_map(|transition| input_position(transition))
+        .max();
+    let appended_input_transition = |transition: &TransitionSchema| {
+        compatibility_input_end
+            .zip(input_position(transition))
+            .is_some_and(|(end, position)| position > end)
+    };
+    let mut ordered = Vec::with_capacity(schema.transitions.len());
+    ordered.extend(schema.transitions.iter().filter(|transition| {
+        !MEERKAT_TRANSITION_ENUM_TAIL.contains(&transition.name.as_ref())
+            && !appended_input_transition(transition)
+    }));
+    ordered.extend(compatibility_tail);
+    ordered.extend(
+        schema
+            .transitions
+            .iter()
+            .filter(|transition| appended_input_transition(transition)),
+    );
+    if ordered.len() != schema.transitions.len() {
+        return Err(MachineKernelRenderError::NonUniquePublicTransitionTail {
+            rendered: ordered.len(),
+            schema: schema.transitions.len(),
+        });
+    }
+    Ok(ordered)
+}
+
+#[cfg(not(test))]
+fn render_canonical_stub_modeled_module(
+    schema: &MachineSchema,
+) -> Result<String, MachineKernelRenderError> {
+    let mut out = String::new();
+    let module_name = machine_slug(&schema.machine);
+    let catalog_fn = format!("catalog::dsl::dsl_{module_name}_machine");
+    let has_signals = !schema.signals.variants.is_empty();
+
+    pushln!(
+        &mut out,
+        "// @generated — Generated by `cargo xtask machine-codegen --all`."
+    );
+    pushln!(
+        &mut out,
+        "#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::implicit_clone, clippy::unnecessary_cast, clippy::redundant_clone, clippy::zero_sized_map_values)]"
+    );
+    pushln!(&mut out);
+    pushln!(
+        &mut out,
+        "pub fn schema() -> meerkat_machine_schema::MachineSchema {{"
+    );
+    pushln!(&mut out, "    meerkat_machine_schema::{catalog_fn}()");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+
+    let named_type_aliases = collect_machine_named_types(schema);
+    if !named_type_aliases.is_empty() {
+        for alias in named_type_aliases {
+            if let Some(atom) = lookup_named_type_atom(schema, &alias) {
+                render_named_type_definition(&mut out, &alias, atom);
+            }
+        }
+        pushln!(&mut out);
+    }
+
+    pushln!(&mut out, "pub trait Context {{}}");
+    pushln!(&mut out, "pub struct EmptyContext;");
+    pushln!(&mut out, "impl Context for EmptyContext {{}}");
+    pushln!(&mut out);
+
+    pushln!(&mut out, "#[allow(non_camel_case_types)]");
+    pushln!(
+        &mut out,
+        "#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+    pushln!(&mut out, "pub enum Phase {{");
+    for variant in &schema.state.phase.variants {
+        pushln!(&mut out, "    {},", rust_ident(&variant.name));
+    }
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+
+    render_value_derive(&mut out, "", &schema.state.fields);
+    pushln!(&mut out, "pub struct State {{");
+    pushln!(&mut out, "    pub phase: Phase,");
+    for field in &schema.state.fields {
+        pushln!(
+            &mut out,
+            "    pub {}: {},",
+            rust_field_ident(&field.name),
+            render_rust_type_ref(&field.ty)
+        );
+    }
+    pushln!(&mut out, "}}");
+    render_redacted_debug_impl(&mut out, "", "State", &["phase"], &schema.state.fields);
+    pushln!(&mut out, "impl Default for State {{");
+    pushln!(&mut out, "    fn default() -> Self {{");
+    pushln!(&mut out, "        initial_state()");
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+
+    pushln!(&mut out, "pub mod inputs {{");
+    pushln!(&mut out, "    #[allow(unused_imports)]");
+    pushln!(&mut out, "    use super::*;");
+    for variant in &schema.inputs.variants {
+        render_value_derive(&mut out, "    ", &variant.fields);
+        pushln!(&mut out, "    pub struct {} {{", rust_ident(&variant.name));
+        for field in &variant.fields {
+            pushln!(
+                &mut out,
+                "        pub {}: {},",
+                rust_field_ident(&field.name),
+                render_rust_type_ref(&field.ty)
+            );
+        }
+        pushln!(&mut out, "    }}");
+        render_redacted_debug_impl(
+            &mut out,
+            "    ",
+            &rust_ident(&variant.name),
+            &[],
+            &variant.fields,
+        );
+    }
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(
+        &mut out,
+        "#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+    pushln!(&mut out, "pub enum Input {{");
+    for variant in &schema.inputs.variants {
+        pushln!(
+            &mut out,
+            "    {}(inputs::{}),",
+            rust_ident(&variant.name),
+            rust_ident(&variant.name)
+        );
+    }
+    pushln!(&mut out, "}}");
+    pushln!(&mut out, "impl Input {{");
+    pushln!(&mut out, "    pub fn kind(&self) -> InputKind {{");
+    pushln!(&mut out, "        match self {{");
+    for variant in &schema.inputs.variants {
+        pushln!(
+            &mut out,
+            "            Self::{}(_) => InputKind::{},",
+            rust_ident(&variant.name),
+            rust_ident(&variant.name)
+        );
+    }
+    pushln!(&mut out, "        }}");
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out, "}}");
+    pushln!(
+        &mut out,
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+    pushln!(&mut out, "pub enum InputKind {{");
+    for variant in &schema.inputs.variants {
+        pushln!(&mut out, "    {},", rust_ident(&variant.name));
+    }
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+
+    if has_signals {
+        pushln!(&mut out, "pub mod signals {{");
+        pushln!(&mut out, "    #[allow(unused_imports)]");
+        pushln!(&mut out, "    use super::*;");
+        for variant in &schema.signals.variants {
+            render_value_derive(&mut out, "    ", &variant.fields);
+            pushln!(&mut out, "    pub struct {} {{", rust_ident(&variant.name));
+            for field in &variant.fields {
+                pushln!(
+                    &mut out,
+                    "        pub {}: {},",
+                    rust_field_ident(&field.name),
+                    render_rust_type_ref(&field.ty)
+                );
+            }
+            pushln!(&mut out, "    }}");
+            render_redacted_debug_impl(
+                &mut out,
+                "    ",
+                &rust_ident(&variant.name),
+                &[],
+                &variant.fields,
+            );
+        }
+        pushln!(&mut out, "}}");
+        pushln!(&mut out);
+        pushln!(
+            &mut out,
+            "#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+        );
+        pushln!(&mut out, "pub enum Signal {{");
+        for variant in &schema.signals.variants {
+            pushln!(
+                &mut out,
+                "    {}(signals::{}),",
+                rust_ident(&variant.name),
+                rust_ident(&variant.name)
+            );
+        }
+        pushln!(&mut out, "}}");
+        pushln!(&mut out, "impl Signal {{");
+        pushln!(&mut out, "    pub fn kind(&self) -> SignalKind {{");
+        pushln!(&mut out, "        match self {{");
+        for variant in &schema.signals.variants {
+            pushln!(
+                &mut out,
+                "            Self::{}(_) => SignalKind::{},",
+                rust_ident(&variant.name),
+                rust_ident(&variant.name)
+            );
+        }
+        pushln!(&mut out, "        }}");
+        pushln!(&mut out, "    }}");
+        pushln!(&mut out, "}}");
+        pushln!(
+            &mut out,
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+        );
+        pushln!(&mut out, "pub enum SignalKind {{");
+        for variant in &schema.signals.variants {
+            pushln!(&mut out, "    {},", rust_ident(&variant.name));
+        }
+        pushln!(&mut out, "}}");
+        pushln!(&mut out);
+    }
+
+    pushln!(&mut out, "pub mod effects {{");
+    pushln!(&mut out, "    #[allow(unused_imports)]");
+    pushln!(&mut out, "    use super::*;");
+    for variant in &schema.effects.variants {
+        render_value_derive(&mut out, "    ", &variant.fields);
+        pushln!(&mut out, "    pub struct {} {{", rust_ident(&variant.name));
+        for field in &variant.fields {
+            pushln!(
+                &mut out,
+                "        pub {}: {},",
+                rust_field_ident(&field.name),
+                render_rust_type_ref(&field.ty)
+            );
+        }
+        pushln!(&mut out, "    }}");
+        render_redacted_debug_impl(
+            &mut out,
+            "    ",
+            &rust_ident(&variant.name),
+            &[],
+            &variant.fields,
+        );
+    }
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(
+        &mut out,
+        "#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+    pushln!(&mut out, "pub enum Effect {{");
+    for variant in &schema.effects.variants {
+        pushln!(
+            &mut out,
+            "    {}(effects::{}),",
+            rust_ident(&variant.name),
+            rust_ident(&variant.name)
+        );
+    }
+    pushln!(&mut out, "}}");
+    pushln!(
+        &mut out,
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+    pushln!(&mut out, "pub enum EffectKind {{");
+    for variant in &schema.effects.variants {
+        pushln!(&mut out, "    {},", rust_ident(&variant.name));
+    }
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+
+    render_command_capability_section(&mut out, schema);
+
+    pushln!(&mut out, "#[allow(non_camel_case_types)]");
+    pushln!(
+        &mut out,
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+    pushln!(&mut out, "pub enum TransitionId {{");
+    for transition in transitions_in_public_enum_order(schema)? {
+        pushln!(&mut out, "    {},", rust_ident(&transition.name));
+    }
+    pushln!(&mut out, "}}");
+    pushln!(&mut out, "#[allow(non_camel_case_types)]");
+    pushln!(
+        &mut out,
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+    pushln!(&mut out, "pub enum GuardId {{");
+    pushln!(&mut out, "    None,");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out, "#[allow(non_camel_case_types)]");
+    pushln!(
+        &mut out,
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+    pushln!(&mut out, "pub enum HelperId {{");
+    pushln!(&mut out, "    None,");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(
+        &mut out,
+        "#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+    pushln!(&mut out, "pub struct GuardRejection {{");
+    pushln!(&mut out, "    pub transition_id: TransitionId,");
+    pushln!(&mut out, "    pub guard_id: GuardId,");
+    pushln!(&mut out, "}}");
+    pushln!(
+        &mut out,
+        "#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+    pushln!(&mut out, "pub enum TriggerDiscriminant {{");
+    pushln!(&mut out, "    Input(InputKind),");
+    if has_signals {
+        pushln!(&mut out, "    Signal(SignalKind),");
+    }
+    pushln!(&mut out, "}}");
+    pushln!(
+        &mut out,
+        "#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+    pushln!(&mut out, "pub enum TransitionRefusal {{");
+    pushln!(
+        &mut out,
+        "    NoMatchingTransition {{ phase: Phase, trigger: TriggerDiscriminant }},"
+    );
+    pushln!(
+        &mut out,
+        "    GuardRejected {{ rejections: Vec<GuardRejection> }},"
+    );
+    pushln!(
+        &mut out,
+        "    AmbiguousTransition {{ transitions: Vec<TransitionId> }},"
+    );
+    pushln!(&mut out, "}}");
+    pushln!(
+        &mut out,
+        "#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+    pushln!(&mut out, "pub enum KernelError {{");
+    pushln!(
+        &mut out,
+        "    ContextViolation {{ transition_id: TransitionId, detail: String }},"
+    );
+    pushln!(
+        &mut out,
+        "    HelperEvaluation {{ helper_id: HelperId, detail: String }},"
+    );
+    pushln!(&mut out, "    CodegenInvariant {{ detail: String }},");
+    pushln!(&mut out, "}}");
+    pushln!(
+        &mut out,
+        "#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+    pushln!(&mut out, "pub enum TransitionError {{");
+    pushln!(&mut out, "    Refusal(TransitionRefusal),");
+    pushln!(&mut out, "    Kernel(KernelError),");
+    pushln!(&mut out, "}}");
+    pushln!(
+        &mut out,
+        "#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+    pushln!(&mut out, "pub struct Outcome {{");
+    pushln!(&mut out, "    pub transition_id: TransitionId,");
+    pushln!(&mut out, "    pub next_state: State,");
+    pushln!(&mut out, "    pub effects: Vec<Effect>,");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(&mut out, "pub mod helpers {{");
+    pushln!(&mut out, "    #[allow(unused_imports)]");
+    pushln!(&mut out, "    use super::*;");
+    pushln!(
+        &mut out,
+        "    pub fn none<C: Context>(_: &State, context: &C) -> Result<(), KernelError> {{"
+    );
+    pushln!(&mut out, "        let _ = context;");
+    pushln!(&mut out, "        Ok(())");
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+
+    let init_phase = rust_ident(schema.state.init.phase.as_str());
+    pushln!(&mut out, "pub fn initial_state() -> State {{");
+    pushln!(&mut out, "    State {{");
+    pushln!(&mut out, "        phase: Phase::{init_phase},");
+    for field in &schema.state.fields {
+        let init_expr = schema
+            .state
+            .init
+            .fields
+            .iter()
+            .find(|item| item.field == field.name)
+            .map(|item| rust_initial_value_expr(&item.expr, &field.ty))
+            .unwrap_or_else(|| direct_default_value_expr(&field.ty));
+        pushln!(
+            &mut out,
+            "        {}: {},",
+            rust_field_ident(&field.name),
+            init_expr
+        );
+    }
+    pushln!(&mut out, "    }}");
+    pushln!(&mut out, "}}");
+    Ok(out)
+}
+
+#[cfg(not(test))]
+fn render_command_capability_section(out: &mut String, schema: &MachineSchema) {
+    if schema.command_plans.is_empty() {
+        return;
+    }
+
+    pushln!(out, "pub mod command_capabilities {{");
+    pushln!(out, "    mod private {{");
+    pushln!(out, "        #[derive(Debug, PartialEq, Eq)]");
+    pushln!(out, "        pub struct Sealed;");
+    pushln!(out, "    }}");
+    pushln!(out);
+
+    pushln!(out, "    #[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    pushln!(out, "    pub enum CommandPlanKind {{");
+    for plan in &schema.command_plans {
+        pushln!(out, "        {},", rust_ident(&plan.name));
+    }
+    pushln!(out, "    }}");
+    pushln!(out);
+    pushln!(out, "    impl CommandPlanKind {{");
+    pushln!(out, "        #[must_use]");
+    pushln!(out, "        pub const fn as_str(self) -> &'static str {{");
+    pushln!(out, "            match self {{");
+    for plan in &schema.command_plans {
+        pushln!(
+            out,
+            "                Self::{} => {:?},",
+            rust_ident(&plan.name),
+            plan.name
+        );
+    }
+    pushln!(out, "            }}");
+    pushln!(out, "        }}");
+    pushln!(out, "    }}");
+    pushln!(out);
+
+    if schema
+        .command_plans
+        .iter()
+        .any(|plan| plan.authority_type == "AuthorizedRuntimeLoopBatch")
+    {
+        pushln!(out, "    #[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+        pushln!(out, "    pub enum RuntimeLoopBatchSource {{");
+        pushln!(out, "        Queue,");
+        pushln!(out, "        Steer,");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(
+            out,
+            "    #[must_use = \"generated runtime-loop batch plan must be consumed by exact dequeue/stage realization\"]"
+        );
+        pushln!(out, "    #[derive(Debug, PartialEq, Eq)]");
+        pushln!(out, "    pub struct RuntimeLoopBatchPlan {{");
+        pushln!(out, "        batch_capability: AuthorizedRuntimeLoopBatch,");
+        pushln!(out, "        input_ids: Vec<String>,");
+        pushln!(out, "        source: RuntimeLoopBatchSource,");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(
+            out,
+            "    #[must_use = \"generated stage-for-run plan must be consumed by exact stage realization\"]"
+        );
+        pushln!(out, "    #[derive(Debug, PartialEq, Eq)]");
+        pushln!(out, "    pub struct StageForRunPlan {{");
+        pushln!(out, "        stage_capability: AuthorizedStageForRun,");
+        pushln!(out, "        input_ids: Vec<String>,");
+        pushln!(out, "        source: RuntimeLoopBatchSource,");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    impl RuntimeLoopBatchPlan {{");
+        pushln!(out, "        #[must_use]");
+        pushln!(out, "        pub fn input_ids(&self) -> &[String] {{");
+        pushln!(out, "            &self.input_ids");
+        pushln!(out, "        }}");
+        pushln!(out);
+        pushln!(out, "        #[must_use]");
+        pushln!(
+            out,
+            "        pub const fn source(&self) -> RuntimeLoopBatchSource {{"
+        );
+        pushln!(out, "            self.source");
+        pushln!(out, "        }}");
+        pushln!(out);
+        pushln!(
+            out,
+            "        pub fn into_parts(self) -> (AuthorizedRuntimeLoopBatch, Vec<String>, RuntimeLoopBatchSource) {{"
+        );
+        pushln!(
+            out,
+            "            (self.batch_capability, self.input_ids, self.source)"
+        );
+        pushln!(out, "        }}");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    impl StageForRunPlan {{");
+        pushln!(out, "        #[must_use]");
+        pushln!(out, "        pub fn input_ids(&self) -> &[String] {{");
+        pushln!(out, "            &self.input_ids");
+        pushln!(out, "        }}");
+        pushln!(out);
+        pushln!(out, "        #[must_use]");
+        pushln!(
+            out,
+            "        pub const fn source(&self) -> RuntimeLoopBatchSource {{"
+        );
+        pushln!(out, "            self.source");
+        pushln!(out, "        }}");
+        pushln!(out);
+        pushln!(
+            out,
+            "        pub fn into_parts(self) -> (AuthorizedStageForRun, Vec<String>, RuntimeLoopBatchSource) {{"
+        );
+        pushln!(
+            out,
+            "            (self.stage_capability, self.input_ids, self.source)"
+        );
+        pushln!(out, "        }}");
+        pushln!(out, "    }}");
+        pushln!(out);
+    }
+
+    for plan in &schema.command_plans {
+        let type_name = rust_ident(&plan.authority_type);
+        let kind_name = rust_ident(&plan.name);
+        pushln!(
+            out,
+            "    #[must_use = {:?}]",
+            format!(
+                "generated command capability `{}` must be consumed by the shell action it authorizes",
+                plan.authority_type
+            )
+        );
+        pushln!(out, "    #[derive(Debug, PartialEq, Eq)]");
+        pushln!(out, "    pub struct {type_name} {{");
+        pushln!(out, "        _sealed: private::Sealed,");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    impl {type_name} {{");
+        pushln!(out, "        #[doc(hidden)]");
+        pushln!(out, "        #[allow(dead_code)]");
+        pushln!(
+            out,
+            "        pub(crate) fn mint_from_generated_command_plan() -> Self {{"
+        );
+        pushln!(out, "            Self {{ _sealed: private::Sealed }}");
+        pushln!(out, "        }}");
+        pushln!(out);
+        pushln!(out, "        #[must_use]");
+        pushln!(
+            out,
+            "        pub const fn plan(&self) -> CommandPlanKind {{"
+        );
+        pushln!(out, "            CommandPlanKind::{kind_name}");
+        pushln!(out, "        }}");
+        pushln!(out, "    }}");
+        pushln!(out);
+    }
+
+    if schema
+        .command_plans
+        .iter()
+        .any(|plan| plan.authority_type == "AuthorizedRuntimeLoopBatch")
+    {
+        pushln!(out, "    impl AuthorizedRuntimeLoopBatch {{");
+        pushln!(out, "        #[must_use]");
+        pushln!(
+            out,
+            "        pub fn authorize_runtime_loop_batch_from_state(state: &super::State) -> Option<RuntimeLoopBatchPlan> {{"
+        );
+        pushln!(
+            out,
+            "            runtime_loop_batch_from_state(state, super::InputLane::Steer, RuntimeLoopBatchSource::Steer)"
+        );
+        pushln!(
+            out,
+            "                .or_else(|| runtime_loop_batch_from_state(state, super::InputLane::Queue, RuntimeLoopBatchSource::Queue))"
+        );
+        pushln!(out, "        }}");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    impl AuthorizedStageForRun {{");
+        pushln!(out, "        #[must_use]");
+        pushln!(
+            out,
+            "        pub fn authorize_stage_for_run_from_state(state: &super::State, input_ids: &[String], run_id: &super::RunId, source: RuntimeLoopBatchSource) -> Option<StageForRunPlan> {{"
+        );
+        pushln!(
+            out,
+            "            runtime_stage_for_run_from_state(state, input_ids, run_id, source)"
+        );
+        pushln!(out, "        }}");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    fn runtime_loop_batch_from_state(");
+        pushln!(out, "        state: &super::State,");
+        pushln!(out, "        lane: super::InputLane,");
+        pushln!(out, "        source: RuntimeLoopBatchSource,");
+        pushln!(out, "    ) -> Option<RuntimeLoopBatchPlan> {{");
+        pushln!(
+            out,
+            "        let ordered = ordered_queued_lane_inputs(state, lane)?;"
+        );
+        pushln!(out, "        let first = ordered.first()?;");
+        pushln!(
+            out,
+            "        // AppendContentAndRun owns exactly one SystemNotice per run."
+        );
+        pushln!(
+            out,
+            "        let selected = if state.input_runtime_peer_response_terminal_apply_intent.get(first) == Some(&super::RecoveredPeerResponseTerminalApplyIntent::AppendContentAndRun) {{"
+        );
+        pushln!(out, "            vec![first.clone()]");
+        pushln!(out, "        }} else {{");
+        pushln!(out, "            match source {{");
+        pushln!(
+            out,
+            "                RuntimeLoopBatchSource::Steer => select_steer_batch(state, &ordered, first),"
+        );
+        pushln!(
+            out,
+            "                RuntimeLoopBatchSource::Queue => select_queue_batch(state, &ordered, first),"
+        );
+        pushln!(out, "            }}");
+        pushln!(out, "        }};");
+        pushln!(out, "        if selected.is_empty() {{");
+        pushln!(out, "            None");
+        pushln!(out, "        }} else {{");
+        pushln!(out, "            Some(RuntimeLoopBatchPlan {{");
+        pushln!(
+            out,
+            "                batch_capability: AuthorizedRuntimeLoopBatch::mint_from_generated_command_plan(),"
+        );
+        pushln!(out, "                input_ids: selected,");
+        pushln!(out, "                source,");
+        pushln!(out, "            }})");
+        pushln!(out, "        }}");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    fn runtime_stage_for_run_from_state(");
+        pushln!(out, "        state: &super::State,");
+        pushln!(out, "        input_ids: &[String],");
+        pushln!(out, "        run_id: &super::RunId,");
+        pushln!(out, "        source: RuntimeLoopBatchSource,");
+        pushln!(out, "    ) -> Option<StageForRunPlan> {{");
+        pushln!(out, "        if input_ids.is_empty() {{");
+        pushln!(out, "            return None;");
+        pushln!(out, "        }}");
+        pushln!(
+            out,
+            "        // A separately requested stage must preserve terminal-response cardinality."
+        );
+        pushln!(
+            out,
+            "        if input_ids.len() > 1 && input_ids.iter().any(|input_id| state.input_runtime_peer_response_terminal_apply_intent.get(input_id) == Some(&super::RecoveredPeerResponseTerminalApplyIntent::AppendContentAndRun)) {{"
+        );
+        pushln!(out, "            return None;");
+        pushln!(out, "        }}");
+        pushln!(
+            out,
+            "        if state.current_run_id.as_ref() != Some(run_id) {{"
+        );
+        pushln!(out, "            return None;");
+        pushln!(out, "        }}");
+        pushln!(out, "        let expected_lane = match source {{");
+        pushln!(
+            out,
+            "            RuntimeLoopBatchSource::Queue => super::InputLane::Queue,"
+        );
+        pushln!(
+            out,
+            "            RuntimeLoopBatchSource::Steer => super::InputLane::Steer,"
+        );
+        pushln!(out, "        }};");
+        pushln!(out, "        for input_id in input_ids {{");
+        pushln!(
+            out,
+            "            if state.input_phases.get(input_id) != Some(&super::InputPhase::Queued) {{"
+        );
+        pushln!(out, "                return None;");
+        pushln!(out, "            }}");
+        pushln!(
+            out,
+            "            if state.input_lane.get(input_id) != Some(&expected_lane) {{"
+        );
+        pushln!(out, "                return None;");
+        pushln!(out, "            }}");
+        pushln!(
+            out,
+            "            if !state.input_admission_seq.contains_key(input_id) {{"
+        );
+        pushln!(out, "                return None;");
+        pushln!(out, "            }}");
+        pushln!(
+            out,
+            "            if !state.input_recovery_lanes.contains_key(input_id) {{"
+        );
+        pushln!(out, "                return None;");
+        pushln!(out, "            }}");
+        pushln!(
+            out,
+            "            if state.input_run_associations.contains_key(input_id) {{"
+        );
+        pushln!(out, "                return None;");
+        pushln!(out, "            }}");
+        pushln!(out, "        }}");
+        pushln!(out, "        Some(StageForRunPlan {{");
+        pushln!(
+            out,
+            "            stage_capability: AuthorizedStageForRun::mint_from_generated_command_plan(),"
+        );
+        pushln!(out, "            input_ids: input_ids.to_vec(),");
+        pushln!(out, "            source,");
+        pushln!(out, "        }})");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    fn ordered_queued_lane_inputs(");
+        pushln!(out, "        state: &super::State,");
+        pushln!(out, "        lane: super::InputLane,");
+        pushln!(out, "    ) -> Option<Vec<String>> {{");
+        pushln!(out, "        let mut ordered = Vec::new();");
+        pushln!(
+            out,
+            "        for (input_id, input_lane) in &state.input_lane {{"
+        );
+        pushln!(out, "            if *input_lane != lane {{");
+        pushln!(out, "                continue;");
+        pushln!(out, "            }}");
+        pushln!(
+            out,
+            "            if state.input_phases.get(input_id) != Some(&super::InputPhase::Queued) {{"
+        );
+        pushln!(out, "                return None;");
+        pushln!(out, "            }}");
+        pushln!(
+            out,
+            "            let sequence = *state.input_admission_seq.get(input_id)?;"
+        );
+        pushln!(
+            out,
+            "            ordered.push((sequence, input_id.clone()));"
+        );
+        pushln!(out, "        }}");
+        pushln!(
+            out,
+            "        ordered.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));"
+        );
+        pushln!(
+            out,
+            "        Some(ordered.into_iter().map(|(_, input_id)| input_id).collect())"
+        );
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    fn select_steer_batch(");
+        pushln!(out, "        state: &super::State,");
+        pushln!(out, "        ordered: &[String],");
+        pushln!(out, "        first: &String,");
+        pushln!(out, "    ) -> Vec<String> {{");
+        pushln!(
+            out,
+            "        let Some(target_boundary) = state.input_runtime_boundary.get(first).copied() else {{"
+        );
+        pushln!(out, "            return vec![first.clone()];");
+        pushln!(out, "        }};");
+        pushln!(
+            out,
+            "        let Some(target_execution_kind) = state.input_runtime_execution_kind.get(first).copied() else {{"
+        );
+        pushln!(out, "            return vec![first.clone()];");
+        pushln!(out, "        }};");
+        pushln!(out, "        let target_terminal_intent = state");
+        pushln!(
+            out,
+            "            .input_runtime_peer_response_terminal_apply_intent"
+        );
+        pushln!(out, "            .get(first)");
+        pushln!(out, "            .copied();");
+        pushln!(out, "        ordered");
+        pushln!(out, "            .iter()");
+        pushln!(out, "            .take_while(|input_id| {{");
+        pushln!(
+            out,
+            "                state.input_runtime_boundary.get(*input_id).copied() == Some(target_boundary)"
+        );
+        pushln!(
+            out,
+            "                    && state.input_runtime_execution_kind.get(*input_id).copied()"
+        );
+        pushln!(
+            out,
+            "                        == Some(target_execution_kind)"
+        );
+        pushln!(out, "                    && state");
+        pushln!(
+            out,
+            "                        .input_runtime_peer_response_terminal_apply_intent"
+        );
+        pushln!(out, "                        .get(*input_id)");
+        pushln!(out, "                        .copied()");
+        pushln!(out, "                        == target_terminal_intent");
+        pushln!(out, "            }})");
+        pushln!(out, "            .cloned()");
+        pushln!(out, "            .collect()");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    fn select_queue_batch(");
+        pushln!(out, "        state: &super::State,");
+        pushln!(out, "        ordered: &[String],");
+        pushln!(out, "        first: &String,");
+        pushln!(out, "    ) -> Vec<String> {{");
+        pushln!(
+            out,
+            "        let Some(target_execution_kind) = state.input_runtime_execution_kind.get(first).copied() else {{"
+        );
+        pushln!(out, "            return vec![first.clone()];");
+        pushln!(out, "        }};");
+        pushln!(out, "        let target_terminal_intent = state");
+        pushln!(
+            out,
+            "            .input_runtime_peer_response_terminal_apply_intent"
+        );
+        pushln!(out, "            .get(first)");
+        pushln!(out, "            .copied();");
+        pushln!(
+            out,
+            "        let Some(driver_is_prompt) = state.input_is_prompt.get(first).copied() else {{"
+        );
+        pushln!(out, "            return vec![first.clone()];");
+        pushln!(out, "        }};");
+        pushln!(out, "        let mut selected = Vec::new();");
+        pushln!(out, "        for input_id in ordered {{");
+        pushln!(
+            out,
+            "            if state.input_runtime_execution_kind.get(input_id).copied()"
+        );
+        pushln!(out, "                != Some(target_execution_kind)");
+        pushln!(out, "                || state");
+        pushln!(
+            out,
+            "                    .input_runtime_peer_response_terminal_apply_intent"
+        );
+        pushln!(out, "                    .get(input_id)");
+        pushln!(out, "                    .copied()");
+        pushln!(out, "                    != target_terminal_intent");
+        pushln!(out, "            {{");
+        pushln!(out, "                break;");
+        pushln!(out, "            }}");
+        pushln!(
+            out,
+            "            let Some(is_prompt) = state.input_is_prompt.get(input_id).copied() else {{"
+        );
+        pushln!(out, "                break;");
+        pushln!(out, "            }};");
+        pushln!(out, "            if !driver_is_prompt && is_prompt {{");
+        pushln!(out, "                break;");
+        pushln!(out, "            }}");
+        pushln!(out, "            selected.push(input_id.clone());");
+        pushln!(out, "            if is_prompt || driver_is_prompt {{");
+        pushln!(out, "                break;");
+        pushln!(out, "            }}");
+        pushln!(out, "        }}");
+        pushln!(out, "        selected");
+        pushln!(out, "    }}");
+        pushln!(out);
+    }
+    pushln!(out, "}}");
+    pushln!(out);
+}
+
+#[cfg(not(test))]
+fn direct_default_value_expr(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Bool => "false".to_string(),
+        TypeRef::U32 | TypeRef::U64 => "0".to_string(),
+        TypeRef::String => "String::new()".to_string(),
+        TypeRef::Named(name) => format!("{}::default()", rust_ident(name.as_str())),
+        TypeRef::Enum(name) => format!("{}::default()", rust_ident(name.as_str())),
+        TypeRef::Option(_) => "None".to_string(),
+        TypeRef::Set(_) => "Default::default()".to_string(),
+        TypeRef::Seq(_) => "Vec::new()".to_string(),
+        TypeRef::Map(_, _) => "Default::default()".to_string(),
+    }
+}
+
+#[cfg(not(test))]
+fn rust_initial_value_expr(expr: &Expr, ty: &TypeRef) -> String {
+    match expr {
+        Expr::Bool(value) => value.to_string(),
+        Expr::U64(value) => value.to_string(),
+        Expr::U64Max => "u64::MAX".to_string(),
+        Expr::String(value) => match ty {
+            TypeRef::Named(name) => {
+                format!("{}({value:?}.to_string())", rust_ident(name.as_str()))
+            }
+            _ => format!("{value:?}.to_string()"),
+        },
+        Expr::NamedVariant { enum_name, variant } => {
+            format!(
+                "{}::{}",
+                rust_ident(enum_name.as_str()),
+                rust_ident(variant.as_str())
+            )
+        }
+        Expr::EmptySet | Expr::EmptyMap => direct_default_value_expr(ty),
+        Expr::SeqLiteral(items) => {
+            let inner = match ty {
+                TypeRef::Seq(inner) => inner.as_ref(),
+                other => other,
+            };
+            format!(
+                "vec![{}]",
+                items
+                    .iter()
+                    .map(|item| rust_initial_value_expr(item, inner))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+        Expr::None => "None".to_string(),
+        Expr::Some(inner) => {
+            let inner_ty = match ty {
+                TypeRef::Option(inner_ty) => inner_ty.as_ref(),
+                other => other,
+            };
+            format!("Some({})", rust_initial_value_expr(inner, inner_ty))
+        }
+        Expr::Phase(value) => format!("Phase::{}", rust_ident(value.as_str())),
+        other => {
+            let message =
+                format!("unsupported generated kernel state initializer expression: {other:?}");
+            format!("{{ compile_error!({message:?}); Default::default() }}")
+        }
+    }
+}
+
+#[cfg(not(test))]
+pub fn render_generated_kernel_mod(schemas: &[MachineSchema]) -> String {
+    let mut out = String::new();
+    pushln!(
+        &mut out,
+        "// @generated — Generated by `cargo xtask machine-codegen --all`."
+    );
+    let mut module_slugs: Vec<_> = schemas
+        .iter()
+        .map(|schema| machine_slug(&schema.machine))
+        .collect();
+    module_slugs.sort();
+    for slug in module_slugs {
+        pushln!(&mut out, "pub mod {slug};");
+    }
+    out
+}
+
+#[cfg(not(test))]
+fn render_semantic_mapping_section(
+    out: &mut String,
+    heading: &str,
+    entries: &[SemanticCoverageEntry],
+) {
+    pushln!(out, "### {heading}");
+    if entries.is_empty() {
+        pushln!(out, "- `(none)`");
+        out.push('\n');
+        return;
+    }
+
+    for entry in entries {
+        pushln!(out, "- `{}`", entry.name);
+        pushln!(
+            out,
+            "  - anchors: {}",
+            render_semantic_id_list(&entry.anchor_ids)
+        );
+        pushln!(
+            out,
+            "  - scenarios: {}",
+            render_semantic_id_list(&entry.scenario_ids)
+        );
+    }
+    out.push('\n');
+}
+
+/// Render a semantic id list; an empty list is an honest UNCLAIMED verdict
+/// under full-containment matching, not a rendering omission.
+#[cfg(not(test))]
+fn render_semantic_id_list(ids: &[String]) -> String {
+    if ids.is_empty() {
+        return "(unclaimed)".to_owned();
+    }
+    ids.iter()
+        .map(|id| format!("`{id}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[cfg(not(test))]
+fn machine_slug(machine_name: impl AsRef<str>) -> String {
+    let machine_name = machine_name.as_ref();
+    let trimmed = machine_name.strip_suffix("Machine").unwrap_or(machine_name);
+    to_snake_case(trimmed)
+}
+
+#[cfg(not(test))]
+fn to_snake_case(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_is_sep = true;
+
+    for ch in value.chars() {
+        if ch == '_' || ch == '-' || ch == ' ' {
+            if !previous_is_sep {
+                out.push('_');
+                previous_is_sep = true;
+            }
+            continue;
+        }
+
+        if ch.is_ascii_uppercase() {
+            if !out.is_empty() && !previous_is_sep {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            previous_is_sep = false;
+        } else {
+            out.push(ch.to_ascii_lowercase());
+            previous_is_sep = false;
+        }
+    }
+
+    out.trim_matches('_').to_owned()
+}
+
+#[cfg(not(test))]
+pub fn merge_mapping_document(existing: Option<&str>, title: &str, generated: &str) -> String {
+    let generated_block =
+        format!("{GENERATED_COVERAGE_START}\n{generated}\n{GENERATED_COVERAGE_END}\n");
+
+    if let Some(existing) = existing {
+        if let Some(start) = existing.find(GENERATED_COVERAGE_START) {
+            if let Some(end) = existing.find(GENERATED_COVERAGE_END) {
+                let end_idx = end + GENERATED_COVERAGE_END.len();
+                let before = existing[..start].trim_end();
+                let after = existing[end_idx..].trim_start();
+                return if after.is_empty() {
+                    format!("{before}\n\n{generated_block}")
+                } else {
+                    format!("{before}\n\n{generated_block}\n{after}")
+                };
+            }
+        }
+
+        let trimmed = existing.trim_end();
+        if trimmed.is_empty() {
+            return generated_block;
+        }
+        return format!("{trimmed}\n\n{generated_block}");
+    }
+
+    format!("# {title} Mapping Note\n\n{generated_block}")
+}
+
+fn render_enum_section(out: &mut String, label: &str, schema: &EnumSchema) {
+    pushln!(out, "{label}");
+    pushln!(
+        out,
+        "  {} = {}",
+        schema.name,
+        render_enum_variants_inline(schema)
+    );
+    for variant in &schema.variants {
+        pushln!(
+            out,
+            "  {} == {}",
+            variant.name,
+            render_variant_fields(variant)
+        );
+    }
+    out.push('\n');
+}
+
+fn render_helpers_section(out: &mut String, label: &str, helpers: &[HelperSchema]) {
+    if helpers.is_empty() {
+        return;
+    }
+    pushln!(out, "{label}");
+    for helper in helpers {
+        pushln!(
+            out,
+            "  {}({}) : {}",
+            helper.name,
+            render_fields(&helper.params),
+            render_type_ref(&helper.returns)
+        );
+        pushln!(out, "    == {}", render_expr(&helper.body));
+    }
+    out.push('\n');
+}
+
+fn render_invariants_section(out: &mut String, schema: &MachineSchema) {
+    pushln!(out, "INVARIANTS");
+    for invariant in &schema.invariants {
+        pushln!(
+            out,
+            "  {} == {}",
+            invariant.name,
+            render_expr(&invariant.expr)
+        );
+    }
+    out.push('\n');
+}
+
+fn render_transitions_section(out: &mut String, schema: &MachineSchema) {
+    pushln!(out, "TRANSITIONS");
+    for transition in &schema.transitions {
+        render_transition(out, transition);
+    }
+    out.push('\n');
+}
+
+fn render_transition(out: &mut String, transition: &TransitionSchema) {
+    pushln!(out, "  {}", transition.name);
+    pushln!(out, "    from = {}", render_string_list(&transition.from));
+    pushln!(
+        out,
+        "    on = {}({})",
+        transition.on.variant_str(),
+        transition
+            .on
+            .bindings()
+            .iter()
+            .map(meerkat_machine_schema::identity::FieldId::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if !transition.guards.is_empty() {
+        pushln!(out, "    guards =");
+        for guard in &transition.guards {
+            render_guard(out, guard);
+        }
+    }
+    if !transition.updates.is_empty() {
+        pushln!(out, "    updates =");
+        for update in &transition.updates {
+            pushln!(out, "      - {}", render_update(update));
+        }
+    }
+    pushln!(out, "    to = {}", tla_string(&transition.to));
+    if !transition.emit.is_empty() {
+        pushln!(out, "    emit =");
+        for effect in &transition.emit {
+            pushln!(out, "      - {}", render_effect_emit(effect));
+        }
+    }
+}
+
+fn render_guard(out: &mut String, guard: &Guard) {
+    pushln!(
+        out,
+        "      - {} == {}",
+        guard.name,
+        render_expr(&guard.expr)
+    );
+}
+
+fn render_field_init(out: &mut String, field: &FieldInit) {
+    pushln!(out, "  {} = {}", field.field, render_expr(&field.expr));
+}
+
+fn render_variant_fields(variant: &VariantSchema) -> String {
+    if variant.fields.is_empty() {
+        "[]".to_owned()
+    } else {
+        format!("[{}]", render_fields(&variant.fields))
+    }
+}
+
+fn render_fields(fields: &[FieldSchema]) -> String {
+    fields
+        .iter()
+        .map(|field| format!("{}: {}", field.name, render_type_ref(&field.ty)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_update(update: &Update) -> String {
+    match update {
+        Update::Assign { field, expr } => format!("{field}' = {}", render_expr(expr)),
+        Update::Increment { field, amount } => format!("{field}' = {field} + {amount}"),
+        Update::Decrement { field, amount } => format!("{field}' = {field} - {amount}"),
+        Update::MapInsert { field, key, value } => {
+            format!(
+                "{field}' = [ {field} EXCEPT ![{}] = {} ]",
+                render_expr(key),
+                render_expr(value)
+            )
+        }
+        Update::MapRemove { field, key } => {
+            format!("{field}' = MapRemove({field}, {})", render_expr(key))
+        }
+        Update::MapIncrement { field, key, amount } => {
+            format!(
+                "{field}' = [ {field} EXCEPT ![{}] = @ + {amount} ]",
+                render_expr(key)
+            )
+        }
+        Update::MapDecrement { field, key, amount } => {
+            format!(
+                "{field}' = [ {field} EXCEPT ![{}] = @ - {amount} ]",
+                render_expr(key)
+            )
+        }
+        Update::SetInsert { field, value } => {
+            format!("{field}' = {field} \\cup {{ {} }}", render_expr(value))
+        }
+        Update::SetRemove { field, value } => {
+            format!("{field}' = {field} \\ {{ {} }}", render_expr(value))
+        }
+        Update::SeqAppend { field, value } => {
+            format!("{field}' = Append({field}, {})", render_expr(value))
+        }
+        Update::SeqPrepend { field, values } => {
+            format!("{field}' = {} \\o {field}", render_expr(values))
+        }
+        Update::SeqPopFront { field } => {
+            format!("{field}' = Tail({field})")
+        }
+        Update::SeqRemoveValue { field, value } => {
+            format!("{field}' = SeqRemove({field}, {})", render_expr(value))
+        }
+        Update::SeqRemoveAll { field, values } => {
+            format!("{field}' = SeqRemoveAll({field}, {})", render_expr(values))
+        }
+        Update::ForEach {
+            binding,
+            over,
+            updates,
+        } => {
+            let body = updates
+                .iter()
+                .map(render_update)
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!("ForEach({binding} \\in {}) {{ {body} }}", render_expr(over))
+        }
+        Update::Conditional {
+            condition,
+            then_updates,
+            else_updates,
+        } => {
+            let then_body = then_updates
+                .iter()
+                .map(render_update)
+                .collect::<Vec<_>>()
+                .join("; ");
+            let else_body = else_updates
+                .iter()
+                .map(render_update)
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!(
+                "If ({}) {{ {} }} Else {{ {} }}",
+                render_expr(condition),
+                then_body,
+                else_body
+            )
+        }
+    }
+}
+
+fn render_effect_emit(effect: &EffectEmit) -> String {
+    if effect.fields.is_empty() {
+        effect.variant.as_str().to_owned()
+    } else {
+        let fields = effect
+            .fields
+            .iter()
+            .map(|(name, expr)| format!("{name} |-> {}", render_expr(expr)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{}([{}])", effect.variant, fields)
+    }
+}
+
+/// Test hook for the expression renderer (#1811 map-literal rendering).
+#[cfg(test)]
+pub(crate) fn render_expr_for_tests(expr: &Expr) -> String {
+    render_expr(expr)
+}
+
+fn render_expr(expr: &Expr) -> String {
+    match expr {
+        Expr::Bool(value) => value.to_string().to_uppercase(),
+        Expr::U64(value) => value.to_string(),
+        Expr::U64Max => "u64::MAX".to_string(),
+        Expr::String(value) => tla_string(value),
+        Expr::NamedVariant { enum_name, variant } => tla_string(known_enum_variant_wire_label(
+            enum_name.as_str(),
+            variant.as_str(),
+        )),
+        Expr::FieldAccess { base, field } => {
+            format!("{}.{}", render_expr(base), field.as_str())
+        }
+        Expr::EnumVariantIs { value, variant, .. } => {
+            format!(
+                "{}.tag = {}",
+                render_expr(value),
+                tla_string(variant.as_str())
+            )
+        }
+        Expr::EnumStringSetPayload {
+            value,
+            variant,
+            field,
+            ..
+        } => format!(
+            "IF {}.tag = {} THEN {}.{} ELSE {{}}",
+            render_expr(value),
+            tla_string(variant.as_str()),
+            render_expr(value),
+            field.as_str()
+        ),
+        Expr::EmptySet => "{}".to_owned(),
+        Expr::EmptyMap => "[x \\in {} |-> None]".to_owned(),
+        Expr::SeqLiteral(items) => format!(
+            "<<{}>>",
+            items.iter().map(render_expr).collect::<Vec<_>>().join(", ")
+        ),
+        Expr::CurrentPhase => "phase".to_owned(),
+        Expr::Phase(value) => tla_string(value),
+        Expr::Field(name) => name.as_str().to_owned(),
+        Expr::Binding(name) => name.clone(),
+        Expr::Variant(name) => name.clone(),
+        Expr::None => "None".to_owned(),
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => format!(
+            "IF {} THEN {} ELSE {}",
+            render_expr(condition),
+            render_expr(then_expr),
+            render_expr(else_expr)
+        ),
+        Expr::Not(inner) => format!("~({})", render_expr(inner)),
+        Expr::And(items) => join_exprs(items, " /\\ "),
+        Expr::Or(items) => join_exprs(items, " \\/ "),
+        Expr::Eq(left, right) => format!("{} = {}", render_expr(left), render_expr(right)),
+        Expr::Neq(left, right) => format!("{} # {}", render_expr(left), render_expr(right)),
+        Expr::Add(left, right) => format!("{} + {}", render_expr(left), render_expr(right)),
+        Expr::Sub(left, right) => format!("{} - {}", render_expr(left), render_expr(right)),
+        Expr::Gt(left, right) => format!("{} > {}", render_expr(left), render_expr(right)),
+        Expr::Gte(left, right) => format!("{} >= {}", render_expr(left), render_expr(right)),
+        Expr::Lt(left, right) => format!("{} < {}", render_expr(left), render_expr(right)),
+        Expr::Lte(left, right) => format!("{} <= {}", render_expr(left), render_expr(right)),
+        Expr::Contains { collection, value } => {
+            format!("{} \\in {}", render_expr(value), render_expr(collection))
+        }
+        Expr::MapContainsKey { map, key } => {
+            format!("{} \\in DOMAIN {}", render_expr(key), render_expr(map))
+        }
+        Expr::SeqStartsWith { seq, prefix } => {
+            format!("StartsWith({}, {})", render_expr(seq), render_expr(prefix))
+        }
+        Expr::SeqElements(inner) => format!("SeqElements({})", render_expr(inner)),
+        Expr::Len(inner) => format!("Len({})", render_expr(inner)),
+        Expr::Count { collection, value } => {
+            format!("Count({}, {})", render_expr(collection), render_expr(value))
+        }
+        Expr::Head(inner) => format!("Head({})", render_expr(inner)),
+        Expr::MapKeys(inner) => format!("DOMAIN {}", render_expr(inner)),
+        Expr::MapGet { map, key } | Expr::MapValue { map, key } => {
+            format!("{}[{}]", render_expr(map), render_expr(key))
+        }
+        Expr::MapLiteral(entries) => format!(
+            "({})",
+            entries
+                .iter()
+                .map(|(key, value)| format!("{} :> {}", render_expr(key), render_expr(value)))
+                .collect::<Vec<_>>()
+                .join(" @@ ")
+        ),
+        Expr::Some(inner) => format!("Some({})", render_expr(inner)),
+        Expr::Call { helper, args } => format!(
+            "{}({})",
+            helper,
+            args.iter().map(render_expr).collect::<Vec<_>>().join(", ")
+        ),
+        Expr::Quantified {
+            quantifier,
+            binding,
+            over,
+            body,
+        } => {
+            let keyword = match quantifier {
+                Quantifier::Any => "\\E",
+                Quantifier::All => "\\A",
+            };
+            format!(
+                "({} {} \\in {} : {})",
+                keyword,
+                binding,
+                render_expr(over),
+                render_expr(body)
+            )
+        }
+    }
+}
+
+fn join_exprs(items: &[Expr], separator: &str) -> String {
+    if items.is_empty() {
+        return "TRUE".to_owned();
+    }
+    items
+        .iter()
+        .map(render_expr)
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+fn render_type_ref(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Bool => "Bool".to_owned(),
+        TypeRef::U32 => "Nat".to_owned(),
+        TypeRef::U64 => "Nat".to_owned(),
+        TypeRef::String => "String".to_owned(),
+        TypeRef::Named(name) => name.as_str().to_owned(),
+        TypeRef::Enum(name) => name.as_str().to_owned(),
+        TypeRef::Option(inner) => format!("Option({})", render_type_ref(inner)),
+        TypeRef::Set(inner) => format!("Set({})", render_type_ref(inner)),
+        TypeRef::Seq(inner) => format!("Seq({})", render_type_ref(inner)),
+        TypeRef::Map(key, value) => {
+            format!("Map({}, {})", render_type_ref(key), render_type_ref(value))
+        }
+    }
+}
+
+/// Emit the derive line for a generated value struct. A struct with a
+/// `#[redacted]` field gets a hand-written `Debug` from
+/// [`render_redacted_debug_impl`] instead of the derived one.
+#[cfg(not(test))]
+fn render_value_derive(out: &mut String, indent: &str, fields: &[FieldSchema]) {
+    let debug = if has_redacted_field(fields) {
+        ""
+    } else {
+        "Debug, "
+    };
+    pushln!(
+        out,
+        "{indent}#[derive({debug}Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]"
+    );
+}
+
+#[cfg(not(test))]
+fn has_redacted_field(fields: &[FieldSchema]) -> bool {
+    fields
+        .iter()
+        .any(|field| field.disclosure == meerkat_machine_schema::FieldDisclosure::Redacted)
+}
+
+/// Emit `Debug` for a value struct that has `#[redacted]` fields: visible
+/// fields print normally, a redacted field prints presence (option), entry
+/// count (collection) or `"<redacted>"`, never its value.
+#[cfg(not(test))]
+fn render_redacted_debug_impl(
+    out: &mut String,
+    indent: &str,
+    type_name: &str,
+    leading_visible: &[&str],
+    fields: &[FieldSchema],
+) {
+    if !has_redacted_field(fields) {
+        return;
+    }
+    pushln!(out, "{indent}impl std::fmt::Debug for {type_name} {{");
+    pushln!(
+        out,
+        "{indent}    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
+    );
+    pushln!(out, "{indent}        f.debug_struct(\"{type_name}\")");
+    for name in leading_visible {
+        pushln!(out, "{indent}            .field(\"{name}\", &self.{name})");
+    }
+    for field in fields {
+        let label = field.name.as_str();
+        let access = format!("self.{}", rust_field_ident(&field.name));
+        let value = match (field.disclosure, &field.ty) {
+            // Paths stay qualified: these helpers are compiled out of test builds.
+            (meerkat_machine_schema::FieldDisclosure::Visible, _) => format!("&{access}"),
+            (meerkat_machine_schema::FieldDisclosure::Redacted, TypeRef::Option(_)) => {
+                format!("&{access}.as_ref().map(|_| \"<redacted>\")")
+            }
+            (
+                meerkat_machine_schema::FieldDisclosure::Redacted,
+                TypeRef::Set(_) | TypeRef::Seq(_) | TypeRef::Map(_, _),
+            ) => {
+                format!("&format_args!(\"<redacted; {{}} entries>\", {access}.len())")
+            }
+            (
+                meerkat_machine_schema::FieldDisclosure::Redacted,
+                TypeRef::Bool
+                | TypeRef::U32
+                | TypeRef::U64
+                | TypeRef::String
+                | TypeRef::Named(_)
+                | TypeRef::Enum(_),
+            ) => "&\"<redacted>\"".to_owned(),
+        };
+        pushln!(out, "{indent}            .field(\"{label}\", {value})");
+    }
+    pushln!(out, "{indent}            .finish()");
+    pushln!(out, "{indent}    }}");
+    pushln!(out, "{indent}}}");
+}
+
+#[cfg(not(test))]
+fn render_rust_type_ref(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Bool => "bool".to_owned(),
+        TypeRef::U32 => "u32".to_owned(),
+        TypeRef::U64 => "u64".to_owned(),
+        TypeRef::String => "String".to_owned(),
+        TypeRef::Named(name) => rust_ident(name),
+        TypeRef::Enum(name) => rust_ident(name),
+        TypeRef::Option(inner) => format!("Option<{}>", render_rust_type_ref(inner)),
+        TypeRef::Set(inner) => {
+            format!(
+                "std::collections::BTreeSet<{}>",
+                render_rust_type_ref(inner)
+            )
+        }
+        TypeRef::Seq(inner) => format!("Vec<{}>", render_rust_type_ref(inner)),
+        TypeRef::Map(key, value) => format!(
+            "std::collections::BTreeMap<{}, {}>",
+            render_rust_type_ref(key),
+            render_rust_type_ref(value)
+        ),
+    }
+}
+
+#[cfg(not(test))]
+fn collect_machine_named_types(schema: &MachineSchema) -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+
+    for field in &schema.state.fields {
+        collect_named_types_from_type_ref(&field.ty, &mut names);
+    }
+    for variant in &schema.inputs.variants {
+        for field in &variant.fields {
+            collect_named_types_from_type_ref(&field.ty, &mut names);
+        }
+    }
+    for variant in &schema.signals.variants {
+        for field in &variant.fields {
+            collect_named_types_from_type_ref(&field.ty, &mut names);
+        }
+    }
+    for variant in &schema.effects.variants {
+        for field in &variant.fields {
+            collect_named_types_from_type_ref(&field.ty, &mut names);
+        }
+    }
+    for helper in schema.helpers.iter().chain(schema.derived.iter()) {
+        for field in &helper.params {
+            collect_named_types_from_type_ref(&field.ty, &mut names);
+        }
+        collect_named_types_from_type_ref(&helper.returns, &mut names);
+    }
+
+    names.into_iter().collect()
+}
+
+#[cfg(not(test))]
+fn collect_named_types_from_type_ref(ty: &TypeRef, names: &mut std::collections::BTreeSet<String>) {
+    match ty {
+        TypeRef::Named(name) => {
+            names.insert(rust_ident(name));
+        }
+        TypeRef::Enum(name) => {
+            names.insert(rust_ident(name));
+        }
+        TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
+            collect_named_types_from_type_ref(inner, names);
+        }
+        TypeRef::Map(key, value) => {
+            collect_named_types_from_type_ref(key, names);
+            collect_named_types_from_type_ref(value, names);
+        }
+        TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::String => {}
+    }
+}
+
+/// Render the Rust-code text for a [`RustTypeAtom`] — what appears on the
+/// right-hand side of a `pub type Alias = ...;` declaration or the
+/// return position of a default-value helper.
+#[cfg(not(test))]
+fn render_rust_type_atom(atom: &meerkat_machine_schema::RustTypeAtom) -> String {
+    use meerkat_machine_schema::RustTypeAtom;
+    match atom {
+        RustTypeAtom::U8 => "u8".to_string(),
+        RustTypeAtom::U16 => "u16".to_string(),
+        RustTypeAtom::U32 => "u32".to_string(),
+        RustTypeAtom::U64 => "u64".to_string(),
+        RustTypeAtom::Bool => "bool".to_string(),
+        RustTypeAtom::String => "String".to_string(),
+        RustTypeAtom::StringEnum { .. } => "String".to_string(),
+        RustTypeAtom::TypePath(path)
+        | RustTypeAtom::TypePathFieldPresenceSet { path, .. }
+        | RustTypeAtom::TypePathStruct { path, .. }
+        | RustTypeAtom::TypePathEnum { path, .. } => path
+            .strip_prefix("crate::catalog::")
+            .map(|suffix| format!("meerkat_machine_schema::catalog::{suffix}"))
+            .unwrap_or_else(|| path.clone()),
+    }
+}
+
+#[cfg(not(test))]
+fn render_named_type_definition(
+    out: &mut String,
+    name: &str,
+    atom: &meerkat_machine_schema::RustTypeAtom,
+) {
+    use meerkat_machine_schema::RustTypeAtom;
+
+    let rust_name = rust_ident(name);
+    match atom {
+        RustTypeAtom::TypePath(_)
+        | RustTypeAtom::TypePathFieldPresenceSet { .. }
+        | RustTypeAtom::TypePathStruct { .. }
+        | RustTypeAtom::TypePathEnum { .. } => {
+            pushln!(
+                out,
+                "pub type {} = {};",
+                rust_name,
+                render_rust_type_atom(atom)
+            );
+        }
+        RustTypeAtom::String => {
+            pushln!(
+                out,
+                "#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]"
+            );
+            pushln!(out, "pub struct {}(pub String);", rust_name);
+            pushln!(out, "impl From<String> for {} {{", rust_name);
+            pushln!(out, "    fn from(value: String) -> Self {{ Self(value) }}");
+            pushln!(out, "}}");
+            pushln!(out, "impl From<&str> for {} {{", rust_name);
+            pushln!(
+                out,
+                "    fn from(value: &str) -> Self {{ Self(value.to_owned()) }}"
+            );
+            pushln!(out, "}}");
+            pushln!(out, "impl std::fmt::Display for {} {{", rust_name);
+            pushln!(
+                out,
+                "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ f.write_str(&self.0) }}"
+            );
+            pushln!(out, "}}");
+        }
+        RustTypeAtom::StringEnum { variants } => {
+            if let Some((first, second, ident)) = string_enum_variant_ident_collision(variants) {
+                pushln!(
+                    out,
+                    "compile_error!(\"string enum {} variants `{}` and `{}` sanitize to duplicate Rust identifier `{}`\");",
+                    rust_name,
+                    first,
+                    second,
+                    ident
+                );
+                return;
+            }
+            pushln!(out, "#[allow(non_camel_case_types)]");
+            pushln!(
+                out,
+                "#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]"
+            );
+            pushln!(out, "pub enum {} {{", rust_name);
+            for (index, variant) in variants.iter().enumerate() {
+                if index == 0 {
+                    pushln!(out, "    #[default]");
+                }
+                let wire_label = known_enum_variant_wire_label(&rust_name, variant.as_str());
+                pushln!(out, "    #[serde(rename = {})]", tla_string(wire_label));
+                pushln!(out, "    {},", rust_ident(variant.as_str()));
+            }
+            pushln!(out, "}}");
+            pushln!(out, "impl {} {{", rust_name);
+            pushln!(out, "    pub fn as_str(&self) -> &'static str {{");
+            pushln!(out, "        match self {{");
+            for variant in variants {
+                let wire_expr = known_enum_variant_wire_expr(&rust_name, variant.as_str());
+                pushln!(
+                    out,
+                    "            Self::{} => {},",
+                    rust_ident(variant.as_str()),
+                    wire_expr
+                );
+            }
+            pushln!(out, "        }}");
+            pushln!(out, "    }}");
+            pushln!(out, "}}");
+            pushln!(out, "impl std::convert::TryFrom<&str> for {} {{", rust_name);
+            pushln!(out, "    type Error = String;");
+            pushln!(
+                out,
+                "    fn try_from(value: &str) -> Result<Self, Self::Error> {{"
+            );
+            pushln!(out, "        match value {{");
+            for variant in variants {
+                let wire_label = known_enum_variant_wire_label(&rust_name, variant.as_str());
+                pushln!(
+                    out,
+                    "            \"{}\" => Ok(Self::{}),",
+                    wire_label,
+                    rust_ident(variant.as_str())
+                );
+            }
+            pushln!(
+                out,
+                "            other => Err(format!(\"invalid {} value `{{other}}`\")),",
+                rust_name
+            );
+            pushln!(out, "        }}");
+            pushln!(out, "    }}");
+            pushln!(out, "}}");
+            pushln!(
+                out,
+                "impl std::convert::TryFrom<String> for {} {{",
+                rust_name
+            );
+            pushln!(out, "    type Error = String;");
+            pushln!(
+                out,
+                "    fn try_from(value: String) -> Result<Self, Self::Error> {{ Self::try_from(value.as_str()) }}"
+            );
+            pushln!(out, "}}");
+            pushln!(out, "impl std::fmt::Display for {} {{", rust_name);
+            pushln!(
+                out,
+                "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ f.write_str(self.as_str()) }}"
+            );
+            pushln!(out, "}}");
+        }
+        RustTypeAtom::Bool
+        | RustTypeAtom::U8
+        | RustTypeAtom::U16
+        | RustTypeAtom::U32
+        | RustTypeAtom::U64 => {
+            let inner = render_rust_type_atom(atom);
+            pushln!(
+                out,
+                "#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]"
+            );
+            pushln!(out, "pub struct {}(pub {});", rust_name, inner);
+            pushln!(out, "impl From<{}> for {} {{", inner, rust_name);
+            pushln!(
+                out,
+                "    fn from(value: {}) -> Self {{ Self(value) }}",
+                inner
+            );
+            pushln!(out, "}}");
+            pushln!(out, "impl std::fmt::Display for {} {{", rust_name);
+            pushln!(
+                out,
+                "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ write!(f, \"{{}}\", self.0) }}"
+            );
+            pushln!(out, "}}");
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn string_enum_variant_ident_collision<T: AsRef<str>>(
+    variants: &[T],
+) -> Option<(String, String, String)> {
+    let mut seen: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for variant in variants {
+        let raw = variant.as_ref();
+        let ident = rust_ident(raw);
+        if let Some(first) = seen.get(&ident) {
+            return Some((first.clone(), raw.to_owned(), ident));
+        }
+        seen.insert(ident, raw.to_owned());
+    }
+    None
+}
+
+/// Look up the authoritative Rust atom for a `TypeRef::Named` slug.
+///
+#[cfg(not(test))]
+fn lookup_named_type_atom<'a>(
+    schema: &'a MachineSchema,
+    name: &str,
+) -> Option<&'a meerkat_machine_schema::RustTypeAtom> {
+    schema
+        .named_types
+        .iter()
+        .find(|binding| binding.name.as_str() == name)
+        .map(|binding| &binding.rust)
+}
+
+#[cfg(not(test))]
+fn rust_ident(value: impl AsRef<str>) -> String {
+    value
+        .as_ref()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
+}
+
+fn known_enum_variant_wire_label(enum_name: &str, variant: &str) -> String {
+    if enum_name == meerkat_core::turn_execution_authority::ContentShape::SCHEMA_TYPE_NAME
+        && let Some(shape) =
+            meerkat_core::turn_execution_authority::ContentShape::from_schema_variant(variant)
+    {
+        return shape.as_str().to_owned();
+    }
+
+    variant.to_owned()
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn known_enum_variant_wire_expr(enum_name: &str, variant: &str) -> String {
+    if enum_name == meerkat_core::turn_execution_authority::ContentShape::SCHEMA_TYPE_NAME
+        && let Some(shape) =
+            meerkat_core::turn_execution_authority::ContentShape::from_schema_variant(variant)
+    {
+        return format!(
+            "meerkat_core::turn_execution_authority::ContentShape::{}.as_str()",
+            shape.schema_variant()
+        );
+    }
+
+    tla_string(variant)
+}
+
+#[cfg(not(test))]
+fn rust_field_ident(value: impl AsRef<str>) -> String {
+    rust_ident(value)
+}
+
+#[cfg(not(test))]
+#[allow(dead_code)]
+fn rust_fn_ident(value: &str) -> String {
+    simple_snake_case(value)
+}
+
+#[cfg(not(test))]
+#[allow(dead_code)]
+fn simple_snake_case(value: &str) -> String {
+    let mut out = String::new();
+    for (idx, ch) in value.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if idx != 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out
+}
+
+fn render_enum_variants_inline(schema: &EnumSchema) -> String {
+    let variants = schema
+        .variants
+        .iter()
+        .map(|variant| tla_string(&variant.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{variants}}}")
+}
+
+fn render_string_list<S: AsRef<str>>(items: &[S]) -> String {
+    let rendered = items.iter().map(tla_string).collect::<Vec<_>>().join(", ");
+    format!("<<{rendered}>>")
+}
+
+#[cfg(not(test))]
+fn render_route_delivery(delivery: &RouteDelivery) -> &'static str {
+    match delivery {
+        RouteDelivery::Immediate => "Immediate",
+        RouteDelivery::Enqueue => "Enqueue",
+    }
+}
+
+#[cfg(not(test))]
+fn render_route_bindings(route: &meerkat_machine_schema::Route) -> String {
+    route
+        .bindings
+        .iter()
+        .map(|binding| match &binding.source {
+            meerkat_machine_schema::RouteBindingSource::Field {
+                from_field,
+                allow_named_alias,
+            } => {
+                if *allow_named_alias {
+                    format!("{from_field} ~> {}", binding.to_field)
+                } else {
+                    format!("{from_field} -> {}", binding.to_field)
+                }
+            }
+            meerkat_machine_schema::RouteBindingSource::Literal(expr) => {
+                format!("{} := {}", binding.to_field, render_expr(expr))
+            }
+            meerkat_machine_schema::RouteBindingSource::OwnerProvided => {
+                format!("{} := <owner-provided>", binding.to_field)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[cfg(not(test))]
+fn render_scheduler_rule(rule: &SchedulerRule) -> String {
+    match rule {
+        SchedulerRule::PreemptWhenReady { higher, lower } => {
+            format!("PreemptWhenReady({}, {})", higher, lower)
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn render_composition_invariant_kind(kind: &CompositionInvariantKind) -> String {
+    match kind {
+        CompositionInvariantKind::RoutePresent {
+            from_machine,
+            effect_variant,
+            to_machine,
+            input_variant,
+        } => format!(
+            "RoutePresent({}, {}, {}, {})",
+            from_machine, effect_variant, to_machine, input_variant
+        ),
+        CompositionInvariantKind::ActorPriorityPresent { higher, lower } => {
+            format!("ActorPriorityPresent({}, {})", higher, lower)
+        }
+        CompositionInvariantKind::ObservedInputOriginatesFromEffect {
+            to_machine,
+            input_variant,
+            from_machine,
+            effect_variant,
+        } => format!(
+            "ObservedInputOriginatesFromEffect({}, {}, {}, {})",
+            to_machine, input_variant, from_machine, effect_variant
+        ),
+        CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+            route_name,
+            to_machine,
+            input_variant,
+            from_machine,
+            effect_variant,
+        } => format!(
+            "ObservedRouteInputOriginatesFromEffect({}, {}, {}, {}, {})",
+            route_name, to_machine, input_variant, from_machine, effect_variant
+        ),
+        CompositionInvariantKind::SchedulerRulePresent { rule } => {
+            format!("SchedulerRulePresent({})", render_scheduler_rule(rule))
+        }
+        CompositionInvariantKind::OutcomeHandled {
+            from_machine,
+            effect_variant,
+            required_targets,
+        } => format!(
+            "OutcomeHandled({}, {}, {})",
+            from_machine,
+            effect_variant,
+            required_targets
+                .iter()
+                .map(|target| format!("{}.{}", target.machine, target.input_variant))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ),
+        CompositionInvariantKind::HandoffProtocolCovered {
+            producer_instance,
+            effect_variant,
+            protocol_name,
+        } => format!(
+            "HandoffProtocolCovered({}, {}, {})",
+            producer_instance, effect_variant, protocol_name
+        ),
+    }
+}
+
+fn tla_ident(value: impl AsRef<str>) -> String {
+    value
+        .as_ref()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
+}
+
+fn tla_string(value: impl AsRef<str>) -> String {
+    format!("\"{}\"", value.as_ref().replace('"', "\\\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_machine_module;
+    use meerkat_machine_schema::identity::{
+        EffectVariantId, EnumVariantId, FieldId, InputVariantId, MachineId, PhaseId, TransitionId,
+    };
+    use meerkat_machine_schema::{
+        EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema, InitSchema, MachineSchema,
+        RustBinding, StateSchema, TransitionSchema, TriggerMatch, TypeRef, Update, VariantSchema,
+    };
+
+    fn vid(s: &str) -> EnumVariantId {
+        EnumVariantId::parse(s).expect("valid enum variant slug")
+    }
+
+    fn fid(s: &str) -> FieldId {
+        FieldId::parse(s).expect("valid field slug")
+    }
+
+    fn pid(s: &str) -> PhaseId {
+        PhaseId::parse(s).expect("valid phase slug")
+    }
+
+    fn tid(s: &str) -> TransitionId {
+        TransitionId::parse(s).expect("valid transition slug")
+    }
+
+    fn ivid(s: &str) -> InputVariantId {
+        InputVariantId::parse(s).expect("valid input variant slug")
+    }
+
+    fn eid(s: &str) -> EffectVariantId {
+        EffectVariantId::parse(s).expect("valid effect variant slug")
+    }
+
+    fn turn_execution_fixture() -> MachineSchema {
+        MachineSchema {
+            machine: MachineId::parse("TurnExecutionMachine").expect("valid machine slug"),
+            version: 1,
+            rust: RustBinding {
+                crate_name: "meerkat-core".to_owned(),
+                module: "agent::turn_execution".to_owned(),
+            },
+            state: StateSchema {
+                phase: EnumSchema {
+                    name: "TurnExecutionPhase".to_owned(),
+                    variants: vec![
+                        VariantSchema {
+                            name: vid("Idle"),
+                            fields: vec![],
+                        },
+                        VariantSchema {
+                            name: vid("Running"),
+                            fields: vec![],
+                        },
+                        VariantSchema {
+                            name: vid("AwaitingBoundary"),
+                            fields: vec![],
+                        },
+                        VariantSchema {
+                            name: vid("Cancelled"),
+                            fields: vec![],
+                        },
+                    ],
+                },
+                fields: vec![FieldSchema {
+                    name: fid("boundary_count"),
+                    ty: TypeRef::U64,
+                    disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
+                }],
+                init: InitSchema {
+                    phase: pid("Idle"),
+                    fields: vec![FieldInit {
+                        field: fid("boundary_count"),
+                        expr: Expr::U64(0),
+                    }],
+                },
+                terminal_phases: vec![pid("Cancelled")],
+            },
+            inputs: EnumSchema {
+                name: "TurnExecutionInput".to_owned(),
+                variants: vec![
+                    VariantSchema {
+                        name: vid("StartConversationRun"),
+                        fields: vec![FieldSchema {
+                            name: fid("run_id"),
+                            ty: TypeRef::String,
+                            disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
+                        }],
+                    },
+                    VariantSchema {
+                        name: vid("PrimitiveAppliedConversationTurn"),
+                        fields: vec![FieldSchema {
+                            name: fid("run_id"),
+                            ty: TypeRef::String,
+                            disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
+                        }],
+                    },
+                    VariantSchema {
+                        name: vid("BoundaryComplete"),
+                        fields: vec![],
+                    },
+                    VariantSchema {
+                        name: vid("AcknowledgeTerminalFromCancelled"),
+                        fields: vec![],
+                    },
+                ],
+            },
+            surface_only_inputs: vec![],
+            runtime_internal_inputs: vec![],
+            tlc_representative_inputs: vec![],
+            signals: EnumSchema {
+                name: "TurnExecutionSignal".to_owned(),
+                variants: vec![],
+            },
+            effects: EnumSchema {
+                name: "TurnExecutionEffect".to_owned(),
+                variants: vec![VariantSchema {
+                    name: vid("BoundaryApplied"),
+                    fields: vec![
+                        FieldSchema {
+                            name: fid("run_id"),
+                            ty: TypeRef::String,
+                            disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
+                        },
+                        FieldSchema {
+                            name: fid("boundary_sequence"),
+                            ty: TypeRef::U64,
+                            disclosure: meerkat_machine_schema::FieldDisclosure::Visible,
+                        },
+                    ],
+                }],
+            },
+            helpers: vec![],
+            derived: vec![],
+            command_plans: vec![],
+            invariants: vec![],
+            transitions: vec![
+                TransitionSchema {
+                    name: tid("StartConversationRun"),
+                    from: vec![pid("Idle")],
+                    on: TriggerMatch::Input {
+                        variant: ivid("StartConversationRun"),
+                        bindings: vec![fid("run_id")],
+                    },
+                    guards: vec![],
+                    updates: vec![],
+                    to: pid("Running"),
+                    emit: vec![],
+                },
+                TransitionSchema {
+                    name: tid("PrimitiveAppliedConversationTurn"),
+                    from: vec![pid("Running")],
+                    on: TriggerMatch::Input {
+                        variant: ivid("PrimitiveAppliedConversationTurn"),
+                        bindings: vec![fid("run_id")],
+                    },
+                    guards: vec![],
+                    updates: vec![Update::Increment {
+                        field: fid("boundary_count"),
+                        amount: 1,
+                    }],
+                    to: pid("AwaitingBoundary"),
+                    emit: vec![EffectEmit {
+                        variant: eid("BoundaryApplied"),
+                        fields: [
+                            (fid("run_id"), Expr::Binding("run_id".to_owned())),
+                            (
+                                fid("boundary_sequence"),
+                                Expr::Add(
+                                    Box::new(Expr::Field(fid("boundary_count"))),
+                                    Box::new(Expr::U64(1)),
+                                ),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    }],
+                },
+                TransitionSchema {
+                    name: tid("BoundaryComplete"),
+                    from: vec![pid("AwaitingBoundary")],
+                    on: TriggerMatch::Input {
+                        variant: ivid("BoundaryComplete"),
+                        bindings: vec![],
+                    },
+                    guards: vec![],
+                    updates: vec![],
+                    to: pid("Cancelled"),
+                    emit: vec![],
+                },
+                TransitionSchema {
+                    name: tid("AcknowledgeTerminalFromCancelled"),
+                    from: vec![pid("Cancelled")],
+                    on: TriggerMatch::Input {
+                        variant: ivid("AcknowledgeTerminalFromCancelled"),
+                        bindings: vec![],
+                    },
+                    guards: vec![],
+                    updates: vec![],
+                    to: pid("Cancelled"),
+                    emit: vec![],
+                },
+            ],
+            ci_step_limit: None,
+            tlc_model: None,
+            deep_domain_overrides: Default::default(),
+            input_field_domains: Default::default(),
+            effect_dispositions: vec![],
+            named_types: vec![],
+        }
+    }
+
+    #[test]
+    fn renders_turn_execution_with_boundary_and_terminal_transitions() {
+        let rendered = render_machine_module(&turn_execution_fixture());
+
+        assert!(rendered.contains("TRANSITIONS\n  StartConversationRun"));
+        assert!(rendered.contains("PrimitiveAppliedConversationTurn"));
+        assert!(rendered.contains("BoundaryComplete"));
+        assert!(rendered.contains("AcknowledgeTerminalFromCancelled"));
+        assert!(rendered.contains(
+            "BoundaryApplied([run_id |-> run_id, boundary_sequence |-> boundary_count + 1])"
+        ));
+    }
+}

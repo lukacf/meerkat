@@ -1,0 +1,69 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "notion-mcp",
+  "version": "0.1.0",
+  "description": "Retained remote MCP recipe with explicit source observations and newcomer prerequisites.",
+  "author": {
+    "name": "Meerkat Toolkit"
+  },
+  "license": "MIT OR Apache-2.0",
+  "extensions": {
+    "ai.rkat.toolkit": {
+      "schema_version": 1,
+      "identity": {
+        "publisher": "meerkat-toolkit",
+        "name": "notion-mcp",
+        "version": "0.1.0"
+      },
+      "display_name": "Notion hosted MCP",
+      "description": "Retained remote MCP recipe with explicit source observations and newcomer prerequisites.",
+      "provenance": {
+        "source": "https://developers.notion.com/guides/mcp/get-started-with-mcp",
+        "source_revision": "sha256:542730696eb3c918f672473b938c63e9b400bf975683f6712dc2cccc53a96640",
+        "license": "MIT OR Apache-2.0 for Toolkit-authored recipe metadata only. Provider documentation and hosted service retain their own terms. No implementation is copied.",
+        "notices": [
+          "This package is authored by Meerkat Toolkit, not by the provider.",
+          "No upstream implementation is vendored. Hosted endpoints are mutable services, not pinned executable artifacts.",
+          "Offline recipe validation does not establish installation, authentication, readiness or supported live operations."
+        ],
+        "local_patches": []
+      },
+      "strategies": [
+        {
+          "id": "hosted",
+          "kind": "remote_mcp",
+          "instructions": "Use the maintained hosted endpoint and its interactive OAuth flow. Confirm workspace permissions and the selected accessible content. Inspect current tool schemas and classify requested reads and writes separately. The deprecated local notion-mcp-server is not an equivalent maintained replacement.",
+          "sources": [
+            "https://developers.notion.com/guides/mcp/get-started-with-mcp"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "Current endpoint schema, account identity, effective grants and owner verification must be supplied at selection time."
+          ]
+        }
+      ],
+      "known_exports": [
+        {
+          "id": "notion-mcp.service",
+          "role": "service_connector",
+          "description": "Notion hosted MCP; only individually selected and owner-verified capabilities may be bound."
+        }
+      ],
+      "assessments": [
+        {
+          "status": "experimental",
+          "scope": "Retained recipe and source inspection only. Live operation and deployment conformance are unverified.",
+          "source_revision": "sha256:542730696eb3c918f672473b938c63e9b400bf975683f6712dc2cccc53a96640",
+          "assessed_at_unix_ms": 1790772920827,
+          "evidence": [
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "notion",
+              "revision": "sha256:542730696eb3c918f672473b938c63e9b400bf975683f6712dc2cccc53a96640"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

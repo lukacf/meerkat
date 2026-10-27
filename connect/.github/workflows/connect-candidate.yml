@@ -1,0 +1,138 @@
+name: Connect native candidate
+
+# Draft: candidate construction only. No push/tag trigger or publication job.
+# Core/Meta 0.9.4 and Connect's independently selected version are checked by
+# the producer. Unbound or historical inputs refuse before a native build.
+"on":
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Native target (dispatch each target independently)
+        required: true
+        type: choice
+        options:
+          - linux-x86_64
+          - macos-arm64
+      source_sha:
+        description: Exact dispatched Connect commit (40 lowercase hex)
+        required: true
+        type: string
+      inputs_sha256:
+        description: SHA-256 of the selected target's release input JSON at that commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connect-candidate-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and verify ${{ inputs.target }}
+    runs-on: ${{ inputs.target == 'macos-arm64' && 'macos-15' || 'ubuntu-24.04' }}
+    timeout-minutes: 120
+    env:
+      CONNECT_TARGET: ${{ inputs.target }}
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - name: Checkout the dispatched source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Select Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Check native host, source, versions and complete input selection
+        env:
+          CONNECT_SOURCE_SHA: ${{ inputs.source_sha }}
+          CONNECT_INPUTS_SHA256: ${{ inputs.inputs_sha256 }}
+        run: python3 scripts/connect-candidate.py preflight
+      - name: Prepare Linux build tools
+        if: inputs.target == 'linux-x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential pkg-config libssl-dev zstd
+      - name: Prepare macOS build tools
+        if: inputs.target == 'macos-arm64'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: |
+          xcode-select --print-path
+          brew install pkg-config openssl@3 zstd
+          printf 'OPENSSL_DIR=%s\n' "$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+      - name: Select Rust
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal
+      # No restored Cargo/target cache, credentials, private inputs or prebuilt
+      # native executable. Native/product code runs without OIDC permissions.
+      - name: Emit actual build, installed verification and selection
+        env:
+          CONNECT_SOURCE_SHA: ${{ inputs.source_sha }}
+          CONNECT_INPUTS_SHA256: ${{ inputs.inputs_sha256 }}
+          XDG_CACHE_HOME: ${{ runner.temp }}/connect-cargo-cache
+          RUST_LANE_ID: connect-release-${{ github.run_id }}-${{ github.run_attempt }}
+          CARGO_INCREMENTAL: '0'
+          CARGO_TERM_COLOR: never
+        run: python3 scripts/connect-candidate.py build
+      - name: Upload exact candidate closure
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: connect-${{ inputs.target }}-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/*
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+  attest:
+    name: Attest original candidate bytes
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CONNECT_TARGET: ${{ inputs.target }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout the same workflow source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      # This step only downloads/hashes bounded files. It never unpacks or
+      # executes the product closure and does not rebuild the candidate.
+      - name: Fetch this job's immutable artifact by ID and digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONNECT_SOURCE_SHA: ${{ inputs.source_sha }}
+          CONNECT_INPUTS_SHA256: ${{ inputs.inputs_sha256 }}
+          CONNECT_ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          CONNECT_ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+        run: python3 scripts/connect-candidate.py fetch-built
+      - name: Attest candidate closure and manifest
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: dist/*
+      - name: Retain the original attestation bundle
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+        run: cp -- "$BUNDLE_PATH" "dist/connect-${CONNECT_TARGET}-provenance.jsonl"
+      - name: Upload attested candidate without publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: connect-${{ inputs.target }}-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/*
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90

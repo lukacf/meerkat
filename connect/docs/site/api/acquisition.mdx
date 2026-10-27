@@ -1,0 +1,69 @@
+---
+title: "find_and_install"
+description: "Submit an integration request through an application's native setup owner."
+icon: "download"
+---
+
+Use `find_and_install` through an enrolled native setup owner. The owner authenticates the invocation, admits or recovers the setup operation and advances the helper. Direct `FindAndInstallTool::new` construction does not supply that binding.
+
+## Optional local archive inspection
+
+The current [library edition](/library/local-install) can expose
+`setup_inspect_acquired` when the host selects `--enable-acquired-inspection`.
+By default it reads the primary archive of a successful Python or Node acquisition
+in that live setup session. Bind the exact `job_id` and `receipt_sha256`; use
+`after: null` to list members, then an exact `member` with `offset: 0` to read
+text. Follow returned cursors for additional pages. Listing returns at most 64
+members; text reads return at most 32 KiB from eligible UTF-8 members up to 1 MiB.
+
+**Unreleased dependency inspection:** Where the advertised tool schema includes
+`archive_sha256`, select a retained dependency by its exact digest in that job's
+`artifacts` array. Omitting it preserves primary inspection. This reads source
+without executing package code or proving runtime compatibility.
+
+The agent uses the inspected content to choose its entrypoint and prepare metadata. Recovery mode provides retained request readback.
+
+## Input
+
+The source definition preserves the user's request without asking the original agent to preselect an integration. The strict schema accepts only these content fields:
+
+<ParamField body="request" type="string" required>
+  The complete nonempty original request, including constraints and ambiguity.
+</ParamField>
+<ParamField body="user_context" type="array">
+  Up to 256 strings or exact context references containing `owner`, `id`, `revision` and `content_digest`.
+</ParamField>
+<ParamField body="caller_observations" type="array">
+  Up to 256 strings containing the calling agent's labeled observations.
+</ParamField>
+
+Example request:
+
+```json
+{
+  "request": "Read last week's launch updates in Slack and email me a summary.",
+  "user_context": ["Use the workspace and work address selected in this task."],
+  "caller_observations": ["The current agent has no Slack read operation."]
+}
+```
+
+Unknown fields are rejected. Model arguments do not supply authority, target agent, account, package, backend, correlation or continuation routing. Context references are content identities; they do not grant access to their contents.
+
+## Setup observations and continuation
+
+The enrolled path returns the operation identity, revision, acquisition phase and whether admission created it. Its typed worker observation distinguishes pending work, retry-safe work, dispatch-budget exhaustion, refused dispatch, admitted input, unresolved admission, unavailable native outcomes and a terminal acquisition. Admitted input includes its deduplication and source-settlement observations. These are setup handoff observations, not proof of installation, live service readiness or the user's task result. Any completion text reports only that the approved follow-up instruction was admitted.
+
+The setup helper interprets the request and proposes an integration. The host binds that work to the original request, account and continuation. Service operations and frontend interactions retain separate outcomes.
+
+The [package installers](/acquisition/local-install) consume the selected `IntegrationPackage` and `ActivationManifest`. The host supplies trusted executables and approves the installation, credentials and runtime attachment.
+
+A bare configuration exposes the whole MCP endpoint. Native protected attachment
+can separately enforce the host-approved subset of exact tool names; a package's
+read declaration does not grant that access. Query semantics, startup effects
+and filesystem confinement require their own assessment and controls.
+
+The intended setup workflow delegates interpretation to setup agents and returns separately verified role outcomes or a durable pending operation. Its owners must authenticate the real invocation, preserve request custody, commit setup work, activate at the supported runtime boundary and resume the original task.
+
+An admission acknowledgment remains distinct from worker launch, setup completion, live service readiness and business-task completion. A timeout can race a durable commit, so recovery must observe the exact existing operation through its owner.
+
+See [host composition](/guides/host-composition) for the native application APIs.

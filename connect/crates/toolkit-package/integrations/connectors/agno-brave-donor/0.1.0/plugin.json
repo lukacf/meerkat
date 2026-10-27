@@ -1,0 +1,76 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "agno-brave-donor",
+  "version": "0.1.0",
+  "description": "Guidance-only setup recipe with explicit source observations and newcomer prerequisites.",
+  "author": {
+    "name": "Meerkat Toolkit"
+  },
+  "license": "MIT OR Apache-2.0",
+  "extensions": {
+    "ai.rkat.toolkit": {
+      "schema_version": 1,
+      "identity": {
+        "publisher": "meerkat-toolkit",
+        "name": "agno-brave-donor",
+        "version": "0.1.0"
+      },
+      "display_name": "Agno Brave Search donor recipe",
+      "description": "Guidance-only setup recipe with explicit source observations and newcomer prerequisites.",
+      "provenance": {
+        "source": "https://raw.githubusercontent.com/agno-agi/agno/8c3d8ec52b4a13c410fca97d07fbd507790cf29a/libs/agno/agno/tools/bravesearch.py",
+        "source_revision": "sha256:f2a2f99c8160dfd7330a8bfdfe89e99349ead134bc9d654d136485df7d4a2d0c",
+        "license": "MIT OR Apache-2.0 for Toolkit-authored recipe metadata only. Apache-2.0 for the inspected repository; dependency and distribution licenses need separate review before packaging. No source is copied.",
+        "notices": [
+          "This package is authored by Meerkat Toolkit, not by the provider.",
+          "No upstream implementation is vendored. Hosted endpoints are mutable services, not pinned executable artifacts.",
+          "Offline recipe validation does not establish installation, authentication, readiness or supported live operations."
+        ],
+        "local_patches": []
+      },
+      "strategies": [
+        {
+          "id": "setup",
+          "kind": "native_adapter",
+          "instructions": "The pinned Apache-2.0 Agno BraveSearchTools donor wraps brave-search and inherits Toolkit registration. Its constructor falls back to ambient BRAVE_API_KEY and creates its own client. Extract only service behavior: replace ambient credentials and framework registration with explicit host bindings, preserve query/result limits and errors, and retain attribution. No donor code is included or executable here.",
+          "sources": [
+            "https://raw.githubusercontent.com/agno-agi/agno/8c3d8ec52b4a13c410fca97d07fbd507790cf29a/libs/agno/agno/tools/bravesearch.py",
+            "https://raw.githubusercontent.com/agno-agi/agno/8c3d8ec52b4a13c410fca97d07fbd507790cf29a/LICENSE"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "No extracted adapter artifact exists in this bundle.",
+            "Framework/ambient-credential dependencies and result/error conformance have not been replaced or validated."
+          ]
+        }
+      ],
+      "known_exports": [
+        {
+          "id": "agno-brave-donor.service",
+          "role": "service_connector",
+          "description": "Agno Brave Search donor recipe; only individually selected and owner-verified capabilities may be bound."
+        }
+      ],
+      "assessments": [
+        {
+          "status": "experimental",
+          "scope": "Retained recipe and source inspection only. Live operation and deployment conformance are unverified.",
+          "source_revision": "sha256:f2a2f99c8160dfd7330a8bfdfe89e99349ead134bc9d654d136485df7d4a2d0c",
+          "assessed_at_unix_ms": 1790772922490,
+          "evidence": [
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "agno-brave",
+              "revision": "sha256:f2a2f99c8160dfd7330a8bfdfe89e99349ead134bc9d654d136485df7d4a2d0c"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "agno-license",
+              "revision": "sha256:7504bf0fe32a486487ec309d5ef30597ca87d2508450be380f6ef4772c3371ca"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

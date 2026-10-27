@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Set up an integration - Meerkat Toolkit</title>
+    <link rel="stylesheet" href="/style.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to setup</a>
+    <header class="page-header">
+      <div class="brand">Meerkat Toolkit <span class="tag">Local setup</span></div>
+      <h1>Set up an integration</h1>
+      <p>Explore the integration catalog and choose Set up this option when available, or select a library and exact installed profile manually.</p>
+    </header>
+    <main id="main" tabindex="-1">
+      <div class="connection-bar">
+        <p id="connection-status" role="status" aria-live="polite">Connecting to the local setup host...</p>
+        <button id="refresh" type="button">Refresh status</button>
+      </div>
+      <div id="problem" class="notice error" role="alert" hidden></div>
+
+      <section id="catalog-panel" class="step" aria-labelledby="catalog-heading">
+        <h2 id="catalog-heading">Explore integrations</h2>
+        <p>Select an integration to see its setup choices. Browsing does not start setup or grant account access.</p>
+        <p id="catalog-status" role="status" aria-live="polite">Waiting for catalog availability...</p>
+        <div id="catalog-controls" hidden>
+          <div class="field"><label for="catalog-filter">Filter names and descriptions</label><input id="catalog-filter" type="search" maxlength="256" autocomplete="off"></div>
+          <div class="field"><label for="catalog-choice">Catalog entry</label><select id="catalog-choice" size="7" aria-describedby="catalog-status"></select></div>
+          <button id="catalog-entry-retry" type="button" aria-describedby="catalog-status" aria-disabled="true" hidden>Retry entry details</button>
+        </div>
+        <div id="catalog-detail" hidden>
+          <h3 id="catalog-title" tabindex="-1"></h3>
+          <p id="catalog-description"></p>
+          <h4>Choose a setup option</h4>
+          <div id="catalog-strategies"></div>
+          <p id="catalog-next" class="notice"></p>
+          <details id="catalog-technical">
+            <summary>Technical details, instructions and sources</summary>
+            <h4>Original catalog description</h4>
+            <p id="catalog-source-description"></p>
+            <p id="catalog-identity" class="digest"></p>
+            <div id="catalog-strategy-details"></div>
+            <details><summary>Exact catalog record and provenance</summary><pre id="catalog-record" tabindex="0"></pre></details>
+            <p id="catalog-binding" class="digest"></p>
+          </details>
+        </div>
+      </section>
+
+      <section id="prior-panel" class="step" aria-labelledby="prior-heading" hidden>
+        <h2 id="prior-heading">Reuse prior configuration</h2>
+        <p id="prior-summary"></p>
+        <p>This host-selected request is historical input, not proof of a successful installation or account access. Reuse opens the exact same profile in this bundle; review its current requirements and choose operations again. Any installation creates a separate new consumer.</p>
+        <button id="reuse-prior" type="button">Reuse prior configuration</button>
+      </section>
+
+      <section class="step" aria-labelledby="choose-heading">
+        <div class="step-heading"><span class="step-number" aria-hidden="true">1</span><h2 id="choose-heading">Choose a library and profile</h2></div>
+        <p>The host supplies the available libraries and chooses new installation directories. Nothing is installed by browsing this page.</p>
+        <div class="choice-row">
+          <div class="field"><label for="family">Library</label><select id="family" disabled><option value="">Choose a library</option></select></div>
+          <div class="field"><label for="profile">Exact profile</label><select id="profile" aria-describedby="profile-status" disabled><option value="">Prepare a library first</option></select></div>
+        </div>
+        <div class="actions"><button id="show-profile" type="button" aria-disabled="true" aria-describedby="profile-status">Show profile settings</button><p id="profile-status" role="status" aria-live="polite">Choose a library and profile to view its settings.</p></div>
+        <div id="preparation" hidden>
+          <p id="preparation-description"></p>
+          <button id="prepare" type="button">Prepare this library</button>
+          <p class="hint">Library preparation installs an inspection environment using the selected offline bundle. Official GitHub preparation reads its pinned metadata only. It does not connect an account or run a provider operation.</p>
+        </div>
+      </section>
+
+      <section id="configuration" class="step" aria-labelledby="configure-heading" hidden>
+        <div class="step-heading"><span class="step-number" aria-hidden="true">2</span><h2 id="configure-heading" tabindex="-1">Configure the selected profile</h2></div>
+        <p id="profile-description" class="profile-description"></p>
+        <div class="notice"><strong>Credential reference names only.</strong> Enter the name of an environment variable, never its secret value. Your host supplies the credential when it launches the consumer.</div>
+        <div class="guidance-grid">
+          <details open><summary>Preparation and prerequisites</summary><ul id="prerequisites"></ul></details>
+          <details open><summary>Details still to resolve</summary><ul id="unresolved"></ul></details>
+        </div>
+        <details id="configuration-reference"><summary>Configuration reference</summary><pre id="reference-text" tabindex="0" aria-label="Bundled configuration reference"></pre></details>
+        <section id="prior-review" class="notice" aria-labelledby="prior-review-heading" hidden>
+          <h3 id="prior-review-heading">Review the historical selection</h3>
+          <p>Names and current types can be compared; old operation effects and field sensitivity were not recorded. Current validation is required.</p>
+          <p id="prior-operations"></p>
+          <ul id="prior-unapplied"></ul>
+          <p id="prior-review-status" role="status"></p>
+        </section>
+        <form id="configuration-form">
+          <fieldset id="operations-fieldset"><legend>Choose operations</legend><p class="hint">Select each operation explicitly. An available write operation is not permission to perform it.</p><div id="operations"></div></fieldset>
+          <fieldset id="fields-fieldset"><legend>Configuration</legend><div id="fields" class="fields-grid"></div></fieldset>
+          <p id="help-scope" class="hint"></p>
+          <div class="actions"><button id="validate" type="submit">Validate configuration</button><p id="validation-status" role="status" aria-live="polite"></p></div>
+        </form>
+      </section>
+
+      <section id="review" class="step" aria-labelledby="review-heading" hidden>
+        <div class="step-heading"><span class="step-number" aria-hidden="true">3</span><h2 id="review-heading" tabindex="-1">Review and install</h2></div>
+        <p>The selected route's configuration validator accepted this configuration. That does not establish account access, authorization or connectivity.</p>
+        <dl id="review-values" class="review-values"></dl>
+        <p id="configuration-digest" class="digest"></p>
+        <div id="review-credential-references"></div>
+        <p>Install this exact selection into a new directory chosen by the local host. Existing installations are retained.</p>
+        <button id="install" type="button">Install reviewed configuration</button>
+      </section>
+
+      <section id="job-history" class="step" aria-label="Session jobs" hidden>
+        <p id="current-job-status"></p>
+        <label for="job-choice">View a job from this session</label>
+        <select id="job-choice"><option value="">Current job</option></select>
+        <button id="jobs-earlier" type="button" hidden>Load earlier jobs</button>
+        <p class="hint">Viewing an earlier job does not change current work or establish account access.</p>
+      </section>
+
+      <section id="job-panel" class="step" aria-labelledby="job-heading" hidden>
+        <div class="step-heading"><span class="step-number" aria-hidden="true">&#8226;</span><h2 id="job-heading" tabindex="-1">Host progress</h2></div>
+        <p id="job-status" role="status" aria-live="polite"></p>
+        <p id="job-context" class="hint"></p>
+        <button id="stop-job" type="button" hidden disabled>Stop local setup</button>
+        <p id="stop-status" role="status" aria-live="polite"></p>
+        <button id="retry-prepare" type="button" hidden disabled>Try preparation again</button>
+        <p id="retry-prepare-status" role="status" aria-live="polite"></p>
+        <button id="retry-export" type="button" hidden disabled>Try export again</button>
+        <p id="retry-export-status" role="status" aria-live="polite"></p>
+        <button id="retry-selected" type="button" hidden disabled>Review another installation attempt</button>
+        <p id="retry-selected-status" role="status" aria-live="polite"></p>
+        <button id="reconcile" type="button" disabled>Check installation</button>
+        <p id="reconciliation-status" role="status" aria-live="polite"></p>
+        <ul id="reconciliation-limits" class="hint"></ul>
+      </section>
+
+      <section id="recovery-panel" class="step" aria-labelledby="recovery-heading" hidden>
+        <h2 id="recovery-heading">Save setup recovery</h2>
+        <p>Select retained requests to check again in a fresh setup session. This saves references only. Keep the original workspace; saving does not stop work, retry it or confirm its outcome.</p>
+        <p class="hint">To reuse saved settings, ask your setup host to start a fresh setup from this file and the request you choose. Review the settings and choose operations again there.</p>
+        <button id="recovery-add" type="button" disabled>Add to recovery file</button>
+        <p id="recovery-current" class="hint"></p>
+        <ol id="recovery-selection" aria-label="Selected recovery requests"></ol>
+        <button id="recovery-save" type="button" disabled>Save recovery file</button>
+        <p id="recovery-status" role="status" aria-live="polite"></p>
+      </section>
+
+      <section id="selected-retry-review" class="step" aria-labelledby="selected-retry-heading" hidden>
+        <h2 id="selected-retry-heading" tabindex="-1">Review another installation attempt</h2>
+        <p>The earlier installation remains unconfirmed and its files are retained. This proposal uses the same selected package inputs in a fresh directory. Reviewing it does not start installation.</p>
+        <dl id="selected-retry-values" class="review-values"></dl>
+        <details><summary>Exact input file hashes</summary><dl id="selected-retry-files" class="review-values"></dl></details>
+        <p>Install only if another local software installation is appropriate. This does not connect an account, launch the selected server or repeat a business operation.</p>
+        <button id="install-selected-retry" type="button" disabled>Install reviewed attempt</button>
+      </section>
+
+      <section id="result" class="step" aria-labelledby="result-heading" hidden>
+        <div class="step-heading"><span class="step-number" aria-hidden="true">4</span><h2 id="result-heading" tabindex="-1">Installed MCP configuration</h2></div>
+        <p id="result-description">The host published these actual launch settings. Load them through your MCP client, which owns the process environment and credential injection.</p>
+        <dl id="result-paths" class="review-values"></dl>
+        <div id="result-credential-references"></div>
+        <pre id="mcp-configuration" tabindex="0" aria-label="Actual emitted MCP configuration"></pre>
+        <p id="result-limits" class="notice">Installed software is not a connected account, a native agent binding or a completed user task. Provider authentication and operation approval remain with your host.</p>
+      </section>
+    </main>
+    <footer>Local consumer setup. No provider login or service operation is performed here.</footer>
+  </body>
+</html>

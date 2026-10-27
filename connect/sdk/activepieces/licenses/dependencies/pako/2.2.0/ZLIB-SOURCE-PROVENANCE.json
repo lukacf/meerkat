@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "package": "pako",
+  "version": "2.2.0",
+  "resolved": "https://registry.npmjs.org/pako/-/pako-2.2.0.tgz",
+  "integrity": "sha512-zJq6RP/5q+TO2OpFV3FHzlPnFjmkb7Nc99a5SNjJE+uu/PkpChs+NIZSSzbBoD+6kjiISXjfYdwj1ZRQ81dz/w==",
+  "package_json_sha256": "d9c254197b7c7a1b00eaffb0196f10c3f48061e61d8b6c41dccd3d5d0ab3f1ea",
+  "scope": "Exact unchanged shared Zlib notice from the contributing lib/zlib source files of the locked npm package. It supplements the package root MIT LICENSE; it is not an original top-level package file.",
+  "notice_file": "ZLIB-NOTICE",
+  "notice_sha256": "170d7d544d380b38d5f76ab5eda29475b44ef537f4564163d6d9bece85c51c13",
+  "source_files": [
+    {
+      "path": "lib/zlib/adler32.js",
+      "sha256": "1f181b4365677dcad5bd8fcc4594707171b7317875c50e88054b75d4fa285930",
+      "notice_start_line": 7,
+      "notice_end_line": 24,
+      "notice_sha256": "170d7d544d380b38d5f76ab5eda29475b44ef537f4564163d6d9bece85c51c13"
+    },
+    {
+      "path": "lib/zlib/constants.js",
+      "sha256": "37c65f82b9bacde2bbccc9c980a20dee7e2b7f3658304a30abe1023e02ec407b",
+      "notice_start_line": 3,
+      "notice_end_line": 20,
+      "notice_sha256": "170d7d544d380b38d5f76ab5eda29475b44ef537f4564163d6d9bece85c51c13"
+    },
+    {
+      "path": "lib/zlib/crc32.js",
+      "sha256": "5452655b14329267c4c3fc58c43df53f4e6f5196fde9d2d431b1ad089e5f3742",
+      "notice_start_line": 7,
+      "notice_end_line": 24,
+      "notice_sha256": "170d7d544d380b38d5f76ab5eda29475b44ef537f4564163d6d9bece85c51c13"
+    },
+    {
+      "path": "lib/zlib/deflate.js",
+      "sha256": "54a36e5377a62ce36f4b5a2307f7e55962cc036d7dbc4a355f702f9de069e012",
+      "notice_start_line": 3,
+      "notice_end_line": 20,
+      "notice_sha256": "170d7d544d380b38d5f76ab5eda29475b44ef537f4564163d6d9bece85c51c13"
+    },
+    {
+      "path": "lib/zlib/gzheader.js",
+      "sha256": "8fa0b4995cea477be96b8783a7d6c7cf5fec96765c2108c3bd52e77104bfdbd3",
+      "notice_start_line": 3,
+      "notice_end_line": 20,
+      "notice_sha256": "170d7d544d380b38d5f76ab5eda29475b44ef537f4564163d6d9bece85c51c13"
+    },
+    {
+      "path": "lib/zlib/inffast.js",
+      "sha256": "694b23b4d2c00c9d274274ecf092dc7c0c0c64125d54bda5286baf2711822d00",
+      "notice_start_line": 3,
+      "notice_end_line": 20,
+      "notice_sha256": "170d7d544d380b38d5f76ab5eda29475b44ef537f4564163d6d9bece85c51c13"
+    },
+    {
+      "path": "lib/zlib/inflate.js",
+      "sha256": "644ba56a87938835c844bb5fe13924b124db932780eb61b2a77f3b88dbad78fd",
+      "notice_start_line": 3,
+      "notice_end_line": 20,
+      "notice_sha256": "170d7d544d380b38d5f76ab5eda29475b44ef537f4564163d6d9bece85c51c13"
+    },
+    {
+      "path": "lib/zlib/inftrees.js",
+      "sha256": "d5f36d0cff9fd70ba29408a5d42ff40fbb66955df50bd4e98ab4a4b65ed06c7d",
+      "notice_start_line": 3,
+      "notice_end_line": 20,
+      "notice_sha256": "170d7d544d380b38d5f76ab5eda29475b44ef537f4564163d6d9bece85c51c13"
+    },
+    {
+      "path": "lib/zlib/messages.js",
+      "sha256": "eec5f5d6b8120ada9cd48a3ca0a253c64777906e835477b090e053434d38cf6c",
+      "notice_start_line": 3,
+      "notice_end_line": 20,
+      "notice_sha256": "170d7d544d380b38d5f76ab5eda29475b44ef537f4564163d6d9bece85c51c13"
+    },
+    {
+      "path": "lib/zlib/trees.js",
+      "sha256": "8cebc535d46743de70530f0ac263179154e7297f42d6c8c64b5d25fee22493dd",
+      "notice_start_line": 3,
+      "notice_end_line": 20,
+      "notice_sha256": "170d7d544d380b38d5f76ab5eda29475b44ef537f4564163d6d9bece85c51c13"
+    },
+    {
+      "path": "lib/zlib/zstream.js",
+      "sha256": "5fa10c7a59ca99113cf92d1260e56cbd6282e15afa85dc8a0eb8e8d6d2321298",
+      "notice_start_line": 3,
+      "notice_end_line": 20,
+      "notice_sha256": "170d7d544d380b38d5f76ab5eda29475b44ef537f4564163d6d9bece85c51c13"
+    }
+  ]
+}

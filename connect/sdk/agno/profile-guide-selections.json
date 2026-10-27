@@ -1,0 +1,720 @@
+{
+  "schema_version": 1,
+  "manual_sha256": "f1972e36d4512088615acf979759b6be3e578b09d34e279ceb4cd5dccd0ba741",
+  "manual_source": "Retained accepted meerkat_toolkit_agno/PROFILE-GUIDE.md; one canonical source, no authored replacement manual.",
+  "spans": {
+    "intro": {
+      "start_line": 20,
+      "end_line": 25,
+      "first_line": "`profiles` lists exact supported IDs and selectable operation names.",
+      "last_line": "JSON Schema; the profile sections below describe semantic restrictions and defaults.",
+      "sha256": "b5bd5435b0818e2705fe6f4a1c70167ae75cbb16193cedb6cd56a84fd618a913"
+    },
+    "authority": {
+      "start_line": 37,
+      "end_line": 54,
+      "first_line": "This guidance distinguishes access to the local stdio MCP process from the",
+      "last_line": "the selected toolkit and therefore needs credentials for authenticated profiles.",
+      "sha256": "aeb29fbbf239ca5d240078419ce6327e642f975d597865a917dc245b00fa3061"
+    },
+    "references": {
+      "start_line": 65,
+      "end_line": 73,
+      "first_line": "Each path is an array of literal JSON keys, not a dotted path or expression.",
+      "last_line": "does not bind an account or establish authorization, authentication or readiness.",
+      "sha256": "f70414afed395be525a0d0d35e7fe0b6cbffd14c02e3c557a141a3c501983c4f"
+    },
+    "parser": {
+      "start_line": 107,
+      "end_line": 110,
+      "first_line": "The parser reads at most 64 KiB. It rejects unknown keys, duplicate JSON keys,",
+      "last_line": "the file's values. The accepted profile names are `hackernews`, `pubmed`,",
+      "sha256": "e3b128e94975bc5e3ce60a32abb3248678afca88b977328bfc6675d62f8bc462",
+      "last_line_end": "the file's values."
+    },
+    "limits": {
+      "start_line": 1344,
+      "end_line": 1367,
+      "first_line": "These limits belong to the MCP profile. Calling `profile.adapter.invoke`",
+      "last_line": "selection.",
+      "sha256": "81c299eece681bcb93b50aa6cf2e58fb10109c7aa81e2056cf53d69e889fd3de"
+    },
+    "results": {
+      "start_line": 1371,
+      "end_line": 1424,
+      "first_line": "Successful values are preserved under MCP `structuredContent.value`. A string",
+      "last_line": "completion receipt.",
+      "sha256": "38708403cb7dae836f2cc16d1fa9ed5b412e9a3ad7ec9f71c42c065879c9f009"
+    },
+    "concurrency": {
+      "start_line": 1428,
+      "end_line": 1448,
+      "first_line": "This server supports the asyncio backend only. It offloads synchronous calls",
+      "last_line": "component supplies no durable job or grant authority.",
+      "sha256": "1a64ee423c2db2fe9d7fee96ca494dbfdfe3f815eea286025940e6143a22628e"
+    },
+    "api_key_value": {
+      "start_line": 185,
+      "end_line": 190,
+      "first_line": "The configured variable must exist and contain 1-4096 printable ASCII",
+      "last_line": "no provider request and does not substitute a dummy production key.",
+      "sha256": "ed9cd2bc16408b0dd680e08908e3f274f0cb037b06319da42ebdd6c2fc8470d0"
+    },
+    "hackernews": {
+      "start_line": 79,
+      "end_line": 90,
+      "first_line": "Save a JSON file outside model-writable input. This Hacker News example selects",
+      "last_line": "Use `get_user_details` as an additional selected operation when needed. The",
+      "sha256": "f34232d6cd827f82e4569a250d18d2ca11b0688659213620077518a41b5938a8",
+      "last_line_end": "Use `get_user_details` as an additional selected operation when needed."
+    },
+    "pubmed": {
+      "start_line": 91,
+      "end_line": 105,
+      "first_line": "PubMed configuration requires an explicit operator-supplied contact email;",
+      "last_line": "```",
+      "sha256": "8fb87cdbb99d98cd6e09ef87b028d2633c1a6a421583322370072359e5047752"
+    },
+    "pubmed_email": {
+      "start_line": 149,
+      "end_line": 150,
+      "first_line": "The email check is a bounded format check, not verification of ownership or",
+      "last_line": "deliverability. PubMed receives that configured email in its search request.",
+      "sha256": "a6ac6105f2a00b813179ca3d3e313bf69fb6f288a8004d0cde02559772617b28"
+    },
+    "searxng": {
+      "start_line": 152,
+      "end_line": 162,
+      "first_line": "For SearXNG, select an existing instance whose JSON API is enabled. Replace the",
+      "last_line": "```",
+      "sha256": "8d9446dbd6e15030e69619cefe7b47a9510d9ef4b1e5a167692c305943e27abe"
+    },
+    "tavily": {
+      "start_line": 164,
+      "end_line": 175,
+      "first_line": "Tavily and Financial Datasets take a nonsecret reference to an explicit key",
+      "last_line": "```",
+      "sha256": "106d9480450cd29bbb9f47dc170755ef5e4bd3de690ad416983c8ff27b25b260"
+    },
+    "financial_datasets": {
+      "start_line": 177,
+      "end_line": 196,
+      "first_line": "```json",
+      "last_line": "and account owner's responsibility; loading a key does not establish a grant.",
+      "sha256": "eceb99d348ce5400e746a9108f29cfa156182cdceba3da5b7eadad87a21e8e9c"
+    },
+    "openweather": {
+      "start_line": 198,
+      "end_line": 217,
+      "first_line": "The three new account profiles use the same explicit environment-reference",
+      "last_line": "activation, plan access and billing remain account-owner facts.",
+      "sha256": "fc4b8f274380aee5243543a7b868f1039909a18e5ba354ef69e14af288f7bc9d"
+    },
+    "bitbucket": {
+      "start_line": 219,
+      "end_line": 260,
+      "first_line": "```json",
+      "last_line": "accepted successor artifact; earlier frozen wheels retain their original behavior.",
+      "sha256": "f26341dc2b851b687566d97298d24626b4e308e0292851c51c8eb526d9fcb49c"
+    },
+    "gitlab": {
+      "start_line": 262,
+      "end_line": 283,
+      "first_line": "```json",
+      "last_line": "methods are selected. The donor's async client and runtime are not started.",
+      "sha256": "005c51927e36ac08ba5e557ff63249701567d57a84ae7f2527433379a048b2cd"
+    },
+    "service_transport": {
+      "start_line": 374,
+      "end_line": 390,
+      "first_line": "All five keep their selected Agno operation bodies and response formatting.",
+      "last_line": "image metadata, not image bytes or permission to reuse a photograph.",
+      "sha256": "3f919afdb68bfcd31c799023199bd4442d7aa97bb54f95539cfc031d6ad7cace"
+    },
+    "shopify": {
+      "start_line": 352,
+      "end_line": 372,
+      "first_line": "For example, this Shopify configuration selects product reads:",
+      "last_line": "that specific service. An absent reference never falls back to donor defaults.",
+      "sha256": "81f2a0a424546471e24f9a5dcc838d2a708daff6fa7d8bc49062cd2a84070679"
+    },
+    "research_transport": {
+      "start_line": 394,
+      "end_line": 402,
+      "first_line": "These four donors perform HTTP inside their operation bodies. The component",
+      "last_line": "the five service helpers above. No next-page URL is followed.",
+      "sha256": "2c8793f8c535dc9676b47b0d4bcb550d47047525b40a96a8a2722cd17ad7bce1"
+    },
+    "calcom": {
+      "start_line": 404,
+      "end_line": 450,
+      "first_line": "Cal.com requires a selected API key, explicit numeric event type and IANA",
+      "last_line": "are exposed, and offline contract checks do not establish live account access.",
+      "sha256": "cce612896c4f7997be3051bf059da0a2b5d82e98dd80c0391725eb51f69126ab"
+    },
+    "jina": {
+      "start_line": 452,
+      "end_line": 477,
+      "first_line": "Jina Reader requires an explicit API key and uses fixed `https://r.jina.ai/`",
+      "last_line": "the Toolkit process does not fetch that target directly.",
+      "sha256": "c7a24ff7fe37f5b421888cffe0431d2ebf18ec2b71f6c8dac27d437945662229"
+    },
+    "openrouteservice": {
+      "start_line": 479,
+      "end_line": 495,
+      "first_line": "OpenRouteService uses `\"profile\": \"openrouteservice\"`, operations",
+      "last_line": "distance matrix or public-transit claim.",
+      "sha256": "dffadf361bd758c2e75855b5af54eb9ab1f0f148f5681d46388c0b29e6652384"
+    },
+    "zendesk": {
+      "start_line": 497,
+      "end_line": 527,
+      "first_line": "Zendesk accepts an existing OAuth access token for the selected Help Center:",
+      "last_line": "API or agent frontend is included.",
+      "sha256": "f3c21720ab4bfbd24f7a9e3eee628acef86a388ae63c94c0192d5da9ae943995"
+    },
+    "next_transport": {
+      "start_line": 531,
+      "end_line": 537,
+      "first_line": "These four source profiles use the same selected key reference and owned",
+      "last_line": "The prior 60 runtime constraints remain unchanged.",
+      "sha256": "12247e3a1061a58a3ae945307d07f9639544c46b4ec758887ab03ef36a77bd3c"
+    },
+    "bright_data": {
+      "start_line": 539,
+      "end_line": 567,
+      "first_line": "Bright Data requires the explicitly selected Web Unlocker and SERP zones:",
+      "last_line": "requested target URL or query; the host owns stderr access.",
+      "sha256": "074239d4d4a682275e4e274c196410e9a344dad2674aec353ad4857663a66d44"
+    },
+    "linkup": {
+      "start_line": 569,
+      "end_line": 578,
+      "first_line": "Linkup needs only the common settings; optional configuration chooses",
+      "last_line": "schema, async research job, x402 payment or image download is exposed.",
+      "sha256": "5450e7974179a2c66ca00858aa72bafc2a3def1c91da50b2d8bfe9e6661dbdcf"
+    },
+    "todoist": {
+      "start_line": 580,
+      "end_line": 590,
+      "first_line": "Todoist uses `\"profile\": \"todoist\"`, operations `[\"get_task\"]`, and the",
+      "last_line": "list pagination, project enumeration or writes.",
+      "sha256": "77d65c3cac9d316c452b3cdf9ee2d9e0eff0760fc8f471d2081a263886445e8f"
+    },
+    "zoom": {
+      "start_line": 592,
+      "end_line": 602,
+      "first_line": "Zoom uses `\"profile\": \"zoom\"`, operations `[\"list_meetings\", \"get_meeting\"]`,",
+      "last_line": "ordinary request failures; the host owns any subsequent authentication work.",
+      "sha256": "4c4313e704064d9456700541aa68a11853d9dc50ff59d530ad4ac2837f75b573"
+    },
+    "library_transport": {
+      "start_line": 606,
+      "end_line": 611,
+      "first_line": "These eight profiles run actual SDK operation bodies and response models",
+      "last_line": "All profile failures use the existing redacted MCP error surface.",
+      "sha256": "c0a05cd3c39e594ce6101c95ce8564453d8cc35c956c7584206cde8b96bc7fe9"
+    },
+    "exa": {
+      "start_line": 628,
+      "end_line": 634,
+      "first_line": "Exa inherits `search_exa`; its real SDK constructs search parameters and",
+      "last_line": "generation are included.",
+      "sha256": "4eacc486a56b1107477bdd88bf43d8177efd81d506c75fbbc610c6d149989b29"
+    },
+    "firecrawl": {
+      "start_line": 636,
+      "end_line": 643,
+      "first_line": "Firecrawl inherits both selected operations and uses the real v2 `Document`",
+      "last_line": "produced by that SDK; it is not flattened into an invented response shape.",
+      "sha256": "665cc7262e091eb21285a1e9d496437008fd33ee4f7163365eea15e7038a3503"
+    },
+    "trello": {
+      "start_line": 645,
+      "end_line": 670,
+      "first_line": "Trello requires two distinct selected references:",
+      "last_line": "credential-bearing URLs are omitted from MCP and error logs.",
+      "sha256": "df997f4f2082c73d08efd04e2fa3a54ec2567af8b1acee2bdb57a7da2786771d"
+    },
+    "salesforce": {
+      "start_line": 672,
+      "end_line": 692,
+      "first_line": "Salesforce takes an existing session token and an explicit instance:",
+      "last_line": "write or donor agent instructions are installed.",
+      "sha256": "17b381aef506520f47dd59aebb8834cd750286fbb54bf50b2a6531e58419d520"
+    },
+    "twilio": {
+      "start_line": 694,
+      "end_line": 706,
+      "first_line": "Twilio and Plivo use selected account IDs with their respective auth tokens:",
+      "last_line": "```",
+      "sha256": "ba839bd5252d21edfdbc3e8cfc6b925041ce703617a55e9068f9e62d22111325"
+    },
+    "plivo": {
+      "start_line": 708,
+      "end_line": 718,
+      "first_line": "```json",
+      "last_line": "```",
+      "sha256": "f663985df56c10d73d38c44166847c257dc9b1dd101df26d1c6d74c8b9078b7a"
+    },
+    "twilio_plivo_details": {
+      "start_line": 720,
+      "end_line": 742,
+      "first_line": "The all-zero IDs are placeholders, not verified accounts. Twilio's constructor",
+      "last_line": "messages, places calls, refreshes tokens or follows regional fallbacks.",
+      "sha256": "32261530e5fa35dc162f593b1297ef17463884a631b8d660ac93646e0220d31b"
+    },
+    "webex": {
+      "start_line": 744,
+      "end_line": 750,
+      "first_line": "Webex retains the real `RoomsAPI.list`/`Room` path through the inherited",
+      "last_line": "The host must provide an existing token; consent and refresh remain host work.",
+      "sha256": "7a0f00f6d547e5c8b0d2373b5deaa72f88de539932a0b7c289b99d2c951257b9"
+    },
+    "arxiv": {
+      "start_line": 752,
+      "end_line": 769,
+      "first_line": "arXiv is public and takes only a timeout:",
+      "last_line": "downloaded or parsed, and no download directory is created.",
+      "sha256": "01badecd0b7b9ad0ca2675a94c80e78b8aed2f5c09d0d23261a9071a65659d80"
+    },
+    "http_transport": {
+      "start_line": 778,
+      "end_line": 783,
+      "first_line": "They use the same serialized MCP worker, joined retirement and one owned",
+      "last_line": "request; Wikipedia makes at most five requests per operation.",
+      "sha256": "23d4d6efaaee72ce60a08ad68dec9f488315c0ab1c49915f8484665316901bab"
+    },
+    "reddit": {
+      "start_line": 811,
+      "end_line": 822,
+      "first_line": "Reddit preserves the three actual Agno methods and PRAW's real listing,",
+      "last_line": "allowed-subreddit field as an authorization policy.",
+      "sha256": "63f3a49b51e3245fd5aab75567b86319989f73a3f63987daeb5fc9b93a1dd209"
+    },
+    "x": {
+      "start_line": 824,
+      "end_line": 839,
+      "first_line": "X preserves real Tweepy user/tweet models and parameter preparation. Its",
+      "last_line": "OAuth1 user-context API calls, token refresh and writes are excluded.",
+      "sha256": "6f0ad439e0827a07650ffef00277f79167c9be2085fc56a1acf7de38a2a8bc7d"
+    },
+    "youtube": {
+      "start_line": 841,
+      "end_line": 848,
+      "first_line": "YouTube is an explicit source port of Agno's metadata operation and URL parser.",
+      "last_line": "unused transcript SDK are outside this profile.",
+      "sha256": "f8e246aea436e0e885da6d595105fd913a5d123b6d571b01d8ee378815275040"
+    },
+    "oxylabs": {
+      "start_line": 850,
+      "end_line": 864,
+      "first_line": "Oxylabs executes the original Agno read bodies through the actual Google and",
+      "last_line": "The inherited error helper is narrowed to the existing MCP error convention.",
+      "sha256": "c777184fde906484b9f80a59ab9117c9bdafc26fd9e6c00f9859aa4afedba090"
+    },
+    "wikipedia": {
+      "start_line": 866,
+      "end_line": 888,
+      "first_line": "Wikipedia is an attributable port of Agno's Document projection and",
+      "last_line": "Disambiguation results retain their existing option-list format.",
+      "sha256": "84612df65ad2af189ddff5fbf06a3feb7e460b5f9c9ae8db6d41f828c766d21b"
+    },
+    "aws_lambda_example": {
+      "start_line": 794,
+      "end_line": 809,
+      "first_line": "For example, a selected AWS profile references credentials without embedding",
+      "last_line": "```",
+      "sha256": "f52333cd20c2e25ca62115af3145d2ee9c261bb3ac9e94cd4971498146949b7f"
+    },
+    "aws_lambda": {
+      "start_line": 890,
+      "end_line": 900,
+      "first_line": "AWS Lambda executes the original list formatter and real botocore service",
+      "last_line": "China, FIPS/custom endpoints and aliases. Function invocation is not exposed.",
+      "sha256": "d84dede988fb856f9bee064a6e2f47c171d3b4bd0e0be606eec3d19997ae04eb"
+    },
+    "postgres": {
+      "start_line": 908,
+      "end_line": 989,
+      "first_line": "### PostgreSQL metadata over a selected local Unix socket",
+      "last_line": "user database, remote account, native host or deployed service.",
+      "sha256": "e7cda8880ea32e1db0a5cd073ab3bbe9c35b466f19eaf8ff9c9451db5e3ec642"
+    },
+    "profile_limits": {
+      "start_line": 1344,
+      "end_line": 1345,
+      "first_line": "These limits belong to the MCP profile. Calling `profile.adapter.invoke`",
+      "last_line": "directly uses the generic bridge's original schema, not the extra MCP limits.",
+      "sha256": "c67168c3d01bf4ed8ab90894a9e4d0df13ed64fd08824e600fd21e21a749858f"
+    },
+    "plain_results": {
+      "start_line": 1371,
+      "end_line": 1373,
+      "first_line": "Successful values are preserved under MCP `structuredContent.value`. A string",
+      "last_line": "encoded strings, which callers may parse for fields. OpenRouteService returns",
+      "sha256": "510cf1df76d37906b0d5da1ba95d4f41fa1bcbbf819138ab75533b9f20f89690",
+      "last_line_end": "encoded strings, which callers may parse for fields."
+    },
+    "generic_failures": {
+      "start_line": 1418,
+      "end_line": 1424,
+      "first_line": "Other bridge failures use a bounded `error` object with `kind`, `effect`,",
+      "last_line": "completion receipt.",
+      "sha256": "90a05e286ab5baa9cca63d0ba0c0f625357c41ff1e5434de455da728b310cd28"
+    },
+    "generic_worker": {
+      "start_line": 1428,
+      "end_line": 1429,
+      "first_line": "This server supports the asyncio backend only. It offloads synchronous calls",
+      "last_line": "to a worker and serializes them per server. The reviewed profiles use per-call",
+      "sha256": "d25fecb9fbd05bf5ada777db8ae64d163234fa88ffaa354934679c0b310873d8",
+      "last_line_end": "to a worker and serializes them per server."
+    },
+    "joined_worker": {
+      "start_line": 1436,
+      "end_line": 1448,
+      "first_line": "A canceled call waiting for the lock does not enter the upstream function.",
+      "last_line": "component supplies no durable job or grant authority.",
+      "sha256": "9b82e1c2bfa9e234932c3b1311a8395af55158657df2abf9b363cf640736818a"
+    },
+    "fixed_factories": {
+      "start_line": 116,
+      "end_line": 116,
+      "first_line": "there is no arbitrary module or factory string.",
+      "last_line": "there is no arbitrary module or factory string.",
+      "sha256": "79dd84792da2a756c3959f748197f4c3b52e33ba4712cde72d0cd8cc6a34fe24"
+    },
+    "public_transport": {
+      "start_line": 309,
+      "end_line": 315,
+      "first_line": "Hacker News, PubMed and SearXNG perform public reads and require no provider",
+      "last_line": "upstream logs.",
+      "sha256": "603c4cbcb0e66ab8abbc04fa071770e47c94754ed1ced4e9461bb6dac2a59424"
+    },
+    "key_transport": {
+      "start_line": 317,
+      "end_line": 327,
+      "first_line": "Tavily owns its actual upstream SDK client. The profile configures that",
+      "last_line": "required. The CLI closes owned sessions after its worker/server has joined.",
+      "sha256": "4b2e63e120f9cb9880d8ad0ebdf23e6871bdb1de454c69387475c8f0309bfe0d"
+    },
+    "account_transport": {
+      "start_line": 329,
+      "end_line": 339,
+      "first_line": "OpenWeather and Bitbucket use the same borrowed-session helper pattern and",
+      "last_line": "the adapted request helper; the host must manage stderr accordingly.",
+      "sha256": "b1a87fe6637fcd78bdf3e1a54233d340477636a3655d42597935fb9288b60160"
+    },
+    "host_stdio": {
+      "start_line": 302,
+      "end_line": 307,
+      "first_line": "Use an absolute interpreter path in the host configuration, such as",
+      "last_line": "2.2. Do not add shell pipelines or banners to the transport command.",
+      "sha256": "de7af95177629672f852f1243f95816939442c0088dc393f68536320a597ec43"
+    }
+  },
+  "common_before": [
+    "intro",
+    "authority",
+    "references",
+    "parser",
+    "fixed_factories",
+    "host_stdio"
+  ],
+  "common_after": [
+    "limits",
+    "results",
+    "concurrency"
+  ],
+  "credential_value_span": "api_key_value",
+  "settings_table": {
+    "header": "| Setting | Required or default | Accepted values |",
+    "separator": "| --- | --- | --- |",
+    "start_line": 120,
+    "end_line": 147
+  },
+  "operations_table": {
+    "header": "| Profile and operation | MCP input limits | Provider behavior |",
+    "separator": "| --- | --- | --- |",
+    "start_line": 1293,
+    "end_line": 1342
+  },
+  "profiles": {
+    "hackernews": {
+      "operation_label": "Hacker News",
+      "spans": [
+        "hackernews",
+        "public_transport"
+      ]
+    },
+    "pubmed": {
+      "operation_label": "PubMed",
+      "spans": [
+        "pubmed",
+        "pubmed_email",
+        "public_transport"
+      ]
+    },
+    "searxng": {
+      "operation_label": "SearXNG",
+      "spans": [
+        "searxng",
+        "public_transport"
+      ]
+    },
+    "tavily": {
+      "operation_label": "Tavily",
+      "spans": [
+        "tavily",
+        "key_transport"
+      ]
+    },
+    "financial-datasets": {
+      "operation_label": "Financial Datasets",
+      "spans": [
+        "financial_datasets",
+        "key_transport"
+      ]
+    },
+    "openweather": {
+      "operation_label": "OpenWeather",
+      "spans": [
+        "openweather",
+        "account_transport"
+      ]
+    },
+    "bitbucket": {
+      "operation_label": "Bitbucket",
+      "spans": [
+        "bitbucket",
+        "account_transport"
+      ]
+    },
+    "gitlab": {
+      "operation_label": "GitLab",
+      "spans": [
+        "gitlab",
+        "account_transport"
+      ]
+    },
+    "clickup": {
+      "operation_label": "ClickUp",
+      "spans": [
+        "service_transport"
+      ]
+    },
+    "discord": {
+      "operation_label": "Discord",
+      "spans": [
+        "service_transport"
+      ]
+    },
+    "shopify": {
+      "operation_label": "Shopify",
+      "spans": [
+        "shopify",
+        "service_transport"
+      ]
+    },
+    "spotify": {
+      "operation_label": "Spotify",
+      "spans": [
+        "service_transport"
+      ]
+    },
+    "unsplash": {
+      "operation_label": "Unsplash",
+      "spans": [
+        "service_transport"
+      ]
+    },
+    "calcom": {
+      "operation_label": "Cal.com",
+      "spans": [
+        "research_transport",
+        "calcom"
+      ]
+    },
+    "jina": {
+      "operation_label": "Jina",
+      "spans": [
+        "research_transport",
+        "jina"
+      ]
+    },
+    "openrouteservice": {
+      "operation_label": "OpenRouteService",
+      "spans": [
+        "research_transport",
+        "openrouteservice"
+      ]
+    },
+    "zendesk": {
+      "operation_label": "Zendesk",
+      "spans": [
+        "research_transport",
+        "zendesk"
+      ]
+    },
+    "bright-data": {
+      "operation_label": "Bright Data",
+      "spans": [
+        "next_transport",
+        "bright_data"
+      ]
+    },
+    "linkup": {
+      "operation_label": "Linkup",
+      "spans": [
+        "next_transport",
+        "linkup"
+      ]
+    },
+    "todoist": {
+      "operation_label": "Todoist",
+      "spans": [
+        "next_transport",
+        "todoist"
+      ]
+    },
+    "zoom": {
+      "operation_label": "Zoom",
+      "spans": [
+        "next_transport",
+        "zoom"
+      ]
+    },
+    "exa": {
+      "operation_label": "Exa",
+      "spans": [
+        "library_transport",
+        "exa"
+      ]
+    },
+    "firecrawl": {
+      "operation_label": "Firecrawl",
+      "spans": [
+        "library_transport",
+        "firecrawl"
+      ]
+    },
+    "trello": {
+      "operation_label": "Trello",
+      "spans": [
+        "library_transport",
+        "trello"
+      ]
+    },
+    "salesforce": {
+      "operation_label": "Salesforce",
+      "spans": [
+        "library_transport",
+        "salesforce"
+      ]
+    },
+    "twilio": {
+      "operation_label": "Twilio",
+      "spans": [
+        "library_transport",
+        "twilio",
+        "twilio_plivo_details"
+      ]
+    },
+    "webex": {
+      "operation_label": "Webex",
+      "spans": [
+        "library_transport",
+        "webex"
+      ]
+    },
+    "plivo": {
+      "operation_label": "Plivo",
+      "spans": [
+        "library_transport",
+        "plivo",
+        "twilio_plivo_details"
+      ]
+    },
+    "arxiv": {
+      "operation_label": "arXiv",
+      "spans": [
+        "library_transport",
+        "arxiv"
+      ]
+    },
+    "reddit": {
+      "operation_label": "Reddit",
+      "spans": [
+        "http_transport",
+        "reddit"
+      ]
+    },
+    "x": {
+      "operation_label": "X",
+      "spans": [
+        "http_transport",
+        "x"
+      ]
+    },
+    "youtube": {
+      "operation_label": "YouTube",
+      "spans": [
+        "http_transport",
+        "youtube"
+      ]
+    },
+    "oxylabs": {
+      "operation_label": "Oxylabs",
+      "spans": [
+        "http_transport",
+        "oxylabs"
+      ]
+    },
+    "wikipedia": {
+      "operation_label": "Wikipedia",
+      "spans": [
+        "http_transport",
+        "wikipedia"
+      ]
+    },
+    "aws-lambda": {
+      "operation_label": "AWS Lambda",
+      "spans": [
+        "http_transport",
+        "aws_lambda_example",
+        "aws_lambda"
+      ]
+    },
+    "postgres": {
+      "operation_label": "PostgreSQL",
+      "spans": [
+        "postgres"
+      ],
+      "field_spans": {
+        "socket_directory": "postgres",
+        "port": "postgres",
+        "database": "postgres",
+        "user": "postgres",
+        "password_env": "postgres",
+        "schema": "postgres",
+        "max_rows": "postgres",
+        "timeout": "postgres"
+      },
+      "common_after": [
+        "profile_limits",
+        "plain_results",
+        "generic_failures",
+        "generic_worker",
+        "joined_worker"
+      ]
+    }
+  },
+  "manual_variants": {
+    "c172dea1111ea36a3a4f7e9767c90a55b2e573c1bf69f5afe373f9fb21c07500": {
+      "insertion_before": "The selected MCP tool list preserves each upstream name and input schema,\n",
+      "text": "Each MCP server admits at most four selected calls: one executing and three\nwaiting. Admission precedes argument validation and worker creation. Excess\ncalls return `server_busy`; a call still waiting after 30 seconds returns\n`queue_timeout`. Both refusals have `entered=false`, with `not_started` for a\nwrite. Neither refusal causes an automatic retry. The queue deadline ends\nbefore execution and does not replace the selected provider's operation budget.\nCancellation retains the execution slot until its worker joins. Listing and\nprotocol control remain available while calls wait or execute. Hosts retain\nprofile lifetime and any coordination between separate servers or direct calls.\n\n",
+      "sha256": "e84cdcf68499b05204fc6d0edb22863ad8ea4b6c96ee3d1d6d9a728dd22e62cb"
+    }
+  }
+}

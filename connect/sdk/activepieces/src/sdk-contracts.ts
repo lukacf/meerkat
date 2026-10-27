@@ -1,0 +1,2 @@
+// Exact selected donor GraphQL query; tested against its retained source.
+export const MONDAY_QUERY = "query ($ids: [ID!]) {\n        items(ids: $ids) {\n          id\n          name\n          state\n          created_at\n          updated_at\n          url\n          board { id name }\n          group { id title }\n          parent_item { id }\n          column_values { id type text value }\n        }\n      }";

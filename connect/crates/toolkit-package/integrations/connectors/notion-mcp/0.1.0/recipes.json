@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "maintainer": "meerkat-toolkit",
+  "reviewed_at_unix_ms": 1790772920827,
+  "sources": [
+    {
+      "id": "notion",
+      "url": "https://developers.notion.com/guides/mcp/get-started-with-mcp",
+      "observed_sha256": "542730696eb3c918f672473b938c63e9b400bf975683f6712dc2cccc53a96640",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Provider documentation and hosted service retain their own terms. No implementation is copied."
+    }
+  ],
+  "recipes": [
+    {
+      "strategy": "hosted",
+      "export": "notion-mcp.service",
+      "role": "service_connector",
+      "prerequisites": [
+        {
+          "kind": "account",
+          "instruction": "A Notion account and access to the intended workspace/content."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "Interactive OAuth through the host credential/user-action owner. This source does not provide non-interactive authorization."
+        }
+      ],
+      "plan": {
+        "kind": "remote_mcp",
+        "server": "notion-mcp",
+        "publisher": "notion",
+        "documented_api_version": null,
+        "read_only": false,
+        "read_only_evidence": null
+      }
+    }
+  ]
+}

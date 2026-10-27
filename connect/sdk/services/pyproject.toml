@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools==82.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meerkat-toolkit-services"
+version = "0.1.23"
+description = "Configured Slack, Gmail, Google Calendar and Drive MCP operations and host-only OAuth protocol helpers"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "THIRD_PARTY_NOTICES.md"]
+dependencies = [
+    "mcp==2.2.0",
+    "httpx==0.28.1",
+    "anyio==4.15.1",
+    "jsonschema==4.26.0",
+    "referencing==0.37.0",
+]
+
+[project.optional-dependencies]
+google-oauth = ["google-auth==2.59.1"]
+
+[project.scripts]
+meerkat-toolkit-services-mcp = "meerkat_toolkit_services.adapters.services_mcp:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+meerkat_toolkit_services = ["PACKAGE-SOURCES.json", "GUIDE.md", "SERVICES-HOST-CLIENT.md", "GOOGLE-OAUTH.md", "SLACK-OAUTH.md"]

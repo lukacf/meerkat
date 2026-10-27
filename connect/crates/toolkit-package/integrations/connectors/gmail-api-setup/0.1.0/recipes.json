@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "maintainer": "meerkat-toolkit",
+  "reviewed_at_unix_ms": 1790773045000,
+  "sources": [
+    {
+      "id": "gmail",
+      "url": "https://developers.google.com/workspace/gmail/api/quickstart/python",
+      "observed_sha256": "87c3629cfd64f1fcc44e9bcc03b29895862ff3e9b9de15ff679d6814a1ded738",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Provider documentation and hosted service retain their own terms. No implementation is copied."
+    }
+  ],
+  "recipes": [
+    {
+      "strategy": "setup",
+      "export": "gmail-api-setup.service",
+      "role": "service_connector",
+      "prerequisites": [
+        {
+          "kind": "developer_registration",
+          "instruction": "A Google Cloud project, enabled Gmail API, consent configuration and a suitable OAuth client for the actual host."
+        },
+        {
+          "kind": "account",
+          "instruction": "An eligible Google account and any Workspace administrator permission required for the selected scopes."
+        }
+      ],
+      "plan": {
+        "kind": "guidance_only",
+        "blockers": [
+          "No Gmail implementation artifact is retained; quickstart sample code is not an integration package.",
+          "Production OAuth verification, refresh/revoke handling and requested operations must be resolved."
+        ]
+      }
+    }
+  ]
+}

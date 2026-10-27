@@ -1,0 +1,39 @@
+---
+title: "Browser automation"
+description: "Navigate pages, inspect their structure and interact with forms through MCP."
+icon: "globe"
+---
+
+The browser profile gives agents browser operations through Playwright MCP on macOS. The host supplies Chrome, selects its executable and controls the server's working and output directories.
+
+## Select the profile
+
+Use the `isolated-chrome` profile with its selected Node runtime and browser path. The setup profile installs the server and dependencies from its retained package inputs. The browser runs headless with an isolated context.
+
+## Connect a stdio host
+
+For direct host integration, launch the selected Node executable with:
+
+```text
+/absolute/path/node_modules/@playwright/mcp/cli.js
+--headless --isolated --browser chrome
+--executable-path /absolute/path/to/chrome
+--output-dir /absolute/path/to/output
+--timeout-action 4000 --timeout-navigation 10000
+```
+
+Set the working directory and child environment explicitly. On macOS, use a short, unique `PWTEST_SOCKETS_DIR` when temporary paths would exceed Unix socket limits. Retain the server and browser processes until cleanup completes.
+
+## Give the agent page structure
+
+Navigation and interaction can return a link to a snapshot file. Read that file through the host's permitted output path and present the snapshot to the agent. Use the current snapshot and tool schema for element references.
+
+The agent can then navigate, fill forms, click controls and inspect the resulting page. Apply operation permissions through the host's MCP policy.
+
+## Browser state
+
+`--isolated` starts a separate browser context. Website sign-in and any supplied storage state are managed by the host. Keep browser output, account state and network access within the application's selected scope.
+
+The host owns browser process isolation and network policy. After an action timeout or cancellation, wait for the active work and process cleanup before removing its directories.
+
+See [native MCP integration](/guides/native-mcp) and [host composition](/guides/host-composition).

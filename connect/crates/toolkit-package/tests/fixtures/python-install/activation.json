@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "package": {
+    "publisher": "fixture",
+    "name": "python-server",
+    "version": "0.0.0-fixture"
+  },
+  "package_content_digest": "26818a8963232a3389bf997d9a0ff3cd59952434c64cf646f9d81c71fab23569",
+  "strategy": "python-local",
+  "configuration": {
+    "owner": "fixture/config",
+    "reference": "selected",
+    "revision": "1",
+    "content_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "policy": {
+    "owner": "fixture/policy",
+    "revision": "1",
+    "content_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "components": [
+    {
+      "id": "python-server",
+      "version": "0.0.0-fixture",
+      "source": {
+        "kind": "artifact",
+        "location": "https://example.invalid/fixture_server-1.0-py3-none-any.whl",
+        "content_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+        "dependencies": {
+          "kind": "pinned_closure",
+          "artifacts": {
+            "requirements": "2222222222222222222222222222222222222222222222222222222222222222",
+            "dependency_one-1.0-py3-none-any.whl": "3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        },
+        "entrypoint": {
+          "executable": "fixture_server/__main__.py",
+          "arguments": []
+        }
+      },
+      "runtime": "python",
+      "placement": "local",
+      "lifetime": "request",
+      "activation_scope": {
+        "kind": "independent"
+      },
+      "dependencies": [],
+      "required_contracts": [],
+      "host_services": [],
+      "state": [],
+      "readiness": {
+        "owner": "fixture/mcp-client",
+        "checks": [
+          "initialize-and-list"
+        ]
+      },
+      "shutdown": {
+        "owner": "fixture/mcp-client",
+        "operation": "close-and-join",
+        "maximum_wait_ms": 1000,
+        "timeout": "preserve_uncertainty"
+      },
+      "rollback": {
+        "kind": "owner_reconciliation",
+        "owner": "fixture/operator",
+        "operation": "reconcile"
+      }
+    }
+  ],
+  "exports": [
+    {
+      "role": "service_connector",
+      "id": "service",
+      "components": [
+        "python-server"
+      ],
+      "authentication": {
+        "kind": "none"
+      },
+      "operations": [
+        {
+          "id": "fixture-read",
+          "schema_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+          "declared_effect": "read",
+          "required_authority": [
+            "read"
+          ],
+          "resources": {
+            "kind": "connection_wide"
+          },
+          "result_limits": {
+            "maximum_bytes": 4096,
+            "maximum_items": 10
+          }
+        }
+      ],
+      "events": [],
+      "enforcement_contract": {
+        "name": "fixture/mcp-client-policy",
+        "version": {
+          "major": 1,
+          "minimum_minor": 0
+        }
+      },
+      "diagnostics": "fixture-observe",
+      "cleanup": "fixture-close"
+    }
+  ],
+  "required_contracts": [],
+  "host_services": [],
+  "portable_mcp_entries": [
+    {
+      "name": "fixture-python",
+      "component": "python-server"
+    }
+  ]
+}

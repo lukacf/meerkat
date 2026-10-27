@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "maintainer": "meerkat-toolkit",
+  "reviewed_at_unix_ms": 1790852643258,
+  "sources": [
+    {
+      "id": "calendar-mcp",
+      "url": "https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server",
+      "observed_sha256": "c5958f3dfe6d0f7c295f0ee6464dbc0ac42a5c6f715c71df01cf0b19a610e11a",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose, Apache-2.0 samples, subject to page exceptions; service terms separate. No implementation copied."
+    },
+    {
+      "id": "calendar-preview",
+      "url": "https://developers.google.com/workspace/preview",
+      "observed_sha256": "8fec44d757b15722db67108ad1a71a201f0d7d18de64cacb269189424e737cb7",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose, Apache-2.0 samples, subject to page exceptions; service terms separate. No implementation copied."
+    },
+    {
+      "id": "calendar-security",
+      "url": "https://developers.google.com/workspace/guides/configure-mcp-security",
+      "observed_sha256": "2975b08b8c8df595355221ba8ea003f3b5b8d0511480ef77cbd396d7441d7d7f",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose, Apache-2.0 samples, subject to page exceptions; service terms separate. No implementation copied."
+    },
+    {
+      "id": "calendar-auth",
+      "url": "https://developers.google.com/workspace/calendar/api/auth",
+      "observed_sha256": "4d8340fa2ef8a183b3b4d76c3eaf6b9824a53939229179618ee613a1e1882177",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose, Apache-2.0 samples, subject to page exceptions; service terms separate. No implementation copied."
+    },
+    {
+      "id": "calendar-versions",
+      "url": "https://developers.google.com/workspace/calendar/api/guides/version-resources",
+      "observed_sha256": "fbdc380d349fa4734aeab810f07d470b98b4840b61f0e058ae8287856fc5c47d",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose, Apache-2.0 samples, subject to page exceptions; service terms separate. No implementation copied."
+    }
+  ],
+  "recipes": [
+    {
+      "strategy": "hosted-mcp-preview",
+      "export": "google-calendar-api-setup.service",
+      "role": "service_connector",
+      "prerequisites": [
+        {
+          "kind": "account",
+          "instruction": "Confirm the selected Google account, Workspace Developer Preview membership and enrolled Google Cloud project. Preview features are not for public applications before general availability; access outside the domain/company requires any explicit permission offered and granted by Google. This catalog does not establish eligibility or permission."
+        },
+        {
+          "kind": "developer_registration",
+          "instruction": "Enable calendar-json.googleapis.com and calendarmcp.googleapis.com in the selected project. Configure consent, audience/test users and a host-appropriate OAuth client with the actual redirect URI, not a copied example redirect."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "The guide sample scopes are https://www.googleapis.com/auth/calendar.calendarlist.readonly, https://www.googleapis.com/auth/calendar.events.freebusy and https://www.googleapis.com/auth/calendar.events.readonly. They do not grant mutation authority despite the advertised create/update/delete/respond tools. The existing credential and policy owners verify selected account/calendar and scopes for each requested operation, with separate consent if required. No automatic scope expansion or credential fallback is supplied."
+        },
+        {
+          "kind": "administrator",
+          "instruction": "Confirm project service-enablement permissions and any Workspace administrator restrictions on the selected OAuth app, account and scopes."
+        },
+        {
+          "kind": "host_deployment",
+          "instruction": "Meet Google's prompt/response screening requirement using Model Armor or the host's documented alternative accepted by users. The host chooses and authorizes processors, permissions, routing and logging; Model Armor logging can include full payloads. Do not implicitly enable an external processor or transmit content to one."
+        },
+        {
+          "kind": "application_binding",
+          "instruction": "Bind the exact connection, current tool schemas, bounded operations, credential owner, policy and lifecycle in the existing ActivationManifest. Account, calendar, scope and role readiness need owner-authenticated receipts; offline selection validation is only a declaration."
+        }
+      ],
+      "plan": {
+        "kind": "remote_mcp",
+        "server": "calendar-hosted-preview",
+        "publisher": "google",
+        "documented_api_version": "v1",
+        "read_only": false,
+        "read_only_evidence": null
+      }
+    },
+    {
+      "strategy": "toolkit-rest",
+      "export": "google-calendar-api-setup.service",
+      "role": "service_connector",
+      "prerequisites": [
+        {
+          "kind": "artifact_preparation",
+          "instruction": "Select and verify the retained Python source checkpoint described in SUPPORT.md or a separately verified artifact containing it. Use Python 3.11+ and the google-calendar extra with HTTPX >=0.28.1,<0.29 and AnyIO >=4.13,<5. No public PyPI release or TypeScript Calendar implementation is claimed."
+        },
+        {
+          "kind": "developer_registration",
+          "instruction": "Enable calendar-json.googleapis.com in the selected project and configure consent/audience, any required verification and an OAuth client appropriate for the actual host. Reuse the existing credential owner; this recipe is not an OAuth implementation."
+        },
+        {
+          "kind": "account",
+          "instruction": "Explicitly select the account and calendar resource. A calendar ID, including primary, is not proof that the selected credential belongs to that account or may access that calendar."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "The host supplies the authenticated HTTPX client and optional per-request auth binding for the selected account, API base and calendar. Choose the least required scopes for the selected reads or mutations; read-only scopes cannot authorize writes. Existing owners retain secrets, refresh/revoke and account correspondence. No ambient credential lookup or retry after authentication failure is supplied."
+        },
+        {
+          "kind": "administrator",
+          "instruction": "Resolve applicable organization app/access restrictions for the requested account, calendar and scopes before use."
+        },
+        {
+          "kind": "application_binding",
+          "instruction": "Compose the five operations into the existing service export and retain host authorization, bounded paging, cancellation and cleanup. In PairedHost retain internal-calendar raw-write denial, origin stamping, the existing write-version ledger, semantic publisher, deterministic IDs, conditional ETags and final readback. An unknown write outcome requires owner reconciliation, never automatic resend, replacement ID or switching strategy. No crash-safe fencing or exactly-once delivery is supplied."
+        }
+      ],
+      "plan": {
+        "kind": "guidance_only",
+        "blockers": [
+          "The host must bind the selected Python SDK source or separately verified artifact, selected account/calendar, operation schemas and lifecycle to the existing service export. The operation library is not an activated tool surface.",
+          "The existing host credential owner must supply OAuth registration, account consent, minimal operation scopes and credential refresh/revoke. This recipe adds no credential storage, OAuth flow or authentication fallback.",
+          "The retained source checkpoint and local protocol tests do not establish public package availability, live Google access, current account authorization or complete PairedHost adoption."
+        ]
+      }
+    }
+  ]
+}

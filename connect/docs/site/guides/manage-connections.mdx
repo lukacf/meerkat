@@ -1,0 +1,211 @@
+---
+title: "Manage connections and frontends"
+description: "Inspect accounts, effective access, frontend audiences and package dependencies independently."
+icon: "sliders"
+---
+
+Manage services from `meerkat-connect` in the selected realm or through your application's integrated Console. Application authors can also use the saved-request and connection-view APIs below.
+
+## Ordinary CLI and Console setup
+
+The two product paths have different destinations:
+
+- **CLI:** choose the intended realm, follow the setup agent's terminal questions
+  and review the installation and requested access. After confirmed setup, use
+  the integration from ordinary agents in that realm under current permissions.
+- **Console:** begin with the original task. The integrated setup panel presents
+  questions, protected human actions and exact reviews. Successful setup returns
+  the capability to that same task through its native owner.
+
+The CLI archive includes its setup runtime. In an integrated Console, the application owns login, setup lifecycle and the original conversation.
+
+Follow [Request an integration](/guides/request-an-integration) for the guided
+journey and [Authentication](/concepts/authentication) for protected human actions.
+Keep installation, saved credentials and task grants distinct; use
+[readiness](/concepts/readiness) to interpret actual outcomes. A saved definition
+or accepted decision alone does not establish a usable connection.
+
+## Credential status, replacement and removal (unreleased)
+
+The development CLI can inspect stored credential presence, fill or replace
+selected slots, or remove them without starting an agent, installing the setup
+helper or adding setup grants. These commands are not included in the published
+0.9.0 binaries.
+
+```bash
+meerkat-connect --realm work credentials status
+meerkat-connect --realm work credentials set github --slot GITHUB_TOKEN
+meerkat-connect --realm work credentials remove github --slot GITHUB_TOKEN
+```
+
+Use the exact service identifier and declared slot names returned by `status`;
+`github` is an example. Repeat `--slot` to select multiple slots. If status returns
+a continuation cursor, pass it with `credentials status --after <cursor>`.
+Status reports presence, never credential values or successful provider access.
+
+Both changes present the current service and selected slots for protected
+terminal approval. `set` then asks for each value with terminal echo disabled.
+Enter values only at those prompts, never in command arguments or chat.
+The service must already be configured and declare the selected slots.
+These commands manage native secret slots for owned stdio services; they do
+not replace OAuth sign-in.
+
+These changes preserve other slots, the service configuration and grants.
+Cancellation can leave an already started save completed; an uncertain result
+does not mean that no value was saved. Check current presence before deciding
+what to do next, without treating it as proof about the earlier attempt.
+Existing running processes can retain old values. Storing a value
+does not prove provider acceptance. Removing a saved credential, revoking a task
+grant and revoking the token at its provider are separate operations.
+
+Select the realm that owns the service configuration. A hosted application's
+defining realm can differ from its agents' session realm. Use that host's state
+root and credential-store environment as well as its realm name. Place
+`--state-root`, `--context-root` and `--user-config-root`, when needed, before
+`credentials`. Model selection, the paired host pairing and `--stdio` options do not
+apply to these direct management commands.
+
+## Advanced library and archive workflows
+
+The current lower-level local setup tools can save exact requests, reopen them
+for readback, or propose their settings in a new setup. Use this section when
+operating the [advanced library setup](/library/local-install), whose host preparation and
+recovery are explicit responsibilities.
+
+### Save setup work
+
+In setup history, select each relevant job with **Add to recovery file**, then
+choose **Save recovery file**. The result is `toolkit-recovery.json`. An agent
+can obtain the same file with `setup_recovery_manifest`:
+
+```json
+{"job_ids":["EXACT_JOB_ID_FROM_SETUP_JOBS"]}
+```
+
+Replace the placeholder with an actual selected job ID. Save the returned
+`text` as UTF-8 unchanged and retain its `sha256`; the tool itself writes no
+file. Jobs need a durably retained request. An already anchored running job can
+be saved, so export does not prove completion or stop its worker.
+
+Keep the original workspace and installed/acquired files at their existing
+paths. The file contains request references, not software, credentials or the
+original agent's runtime. Review its contents before sharing it with another
+person or setup agent.
+
+### Read saved work after process loss
+
+A generated setup command owns a single-use workspace. Restarting that command
+against the same directory is refused. First establish that the old workers
+have stopped and retain exclusive custody of their files; recovery does not
+find or terminate those processes.
+
+Use the [library host-preparation command](/library/local-install#prepare-the-setup-host-with-one-command)
+with a new configuration output and future workspace, then add:
+
+```text
+--recover-manifest /absolute/saved/toolkit-recovery.json
+--recover-manifest-sha256 TRUSTED_SAVED_FILE_SHA256
+```
+
+Use `prepare_host.py` with an existing verified client, or `bootstrap_host.py`
+with an additional new client directory. Keep the original library payload,
+selected tool/profile bindings and required runtimes available. For configured
+library requests, explicitly select the relevant families. Acquisition-only
+readback can use `--families ''` without restoring acquisition tools.
+Do not carry live acquisition, Compose execution or prior-configuration options
+into this readback command. Optional source readers have their own archived
+contracts and must be enabled separately.
+
+The new output/workspace/client must be disjoint from old workspaces, manifests,
+acquired staging paths and recipe data. Read the exact archive's
+`selected/contracts/HOST-PREPARATION.md` for mixed-request bindings. The
+preparer checks each selected request; it does not search directories for a
+plausible installation or migrate to another library version.
+
+Start the new generated MCP connection. Use `setup_jobs`/`setup_job` to inspect
+the selected requests, then call `setup_reconcile` for each relevant job.
+Imported jobs remain `unconfirmed` with `historical_outcome_unknown`. A separate
+`matched` observation confirms the checked retained files, not the original
+operation's result, account access or tool availability.
+
+Readback restores no installation, retry, stop or business-task authority. To
+use an intact installed connector, the host must validate and authorize its
+existing launch and attach it through the [native owner](/guides/native-mcp).
+A fresh history readback alone does not restore connector processes.
+
+### Reuse saved settings in a new setup
+
+To continue configuring an integration through this library path, create a fresh setup and add:
+
+```text
+--prior-manifest /absolute/saved/toolkit-recovery.json
+--prior-manifest-sha256 TRUSTED_SAVED_FILE_SHA256
+--prior-request-id EXACT_CONFIGURED_REQUEST_ID
+```
+
+Choose the exact configured-install request from the saved file, even if it
+contains only one entry. This is its request ID, not a guessed directory name.
+The host approves that request's full contents for the new setup audience.
+Keep its original workspace available until preparation completes. Only that
+request is copied into private `prior-request.json`; after successful
+preparation, this new setup no longer needs the original workspace.
+
+Choose current families and runtimes explicitly. **Reuse prior configuration**
+or `setup_successor` proposes saved values against current help. Review
+unapplied settings, select operations again and validate/install into a new
+directory. The old selection cannot enable a family, authenticate an account,
+change a running connection or grant new use.
+
+Acquisition, selected-package and recipe-export requests cannot seed this
+configured-library shortcut. An exact raw configured request remains supported
+through `--prior-request` and `--prior-request-sha256`. Do not combine either
+prior-selection form with readback recovery.
+
+### Restore software or update a connection
+
+An installed environment and its absolute launch paths must stay in place.
+To restore software or adopt a new release, install the selected bytes into a
+new directory, review the current configuration and let the host switch its
+binding. Retain the old environment until the host has handled its dependants.
+This does not restore credentials, migrate provider data or replay a write.
+
+For interrupted preparation and ambiguous outputs, use
+[troubleshooting](/operations/troubleshooting#bootstrap-failed-or-was-interrupted).
+
+## Service connections
+
+For an application management view, compose the following information and controls with your existing account and policy services.
+
+A connection view should show the observed account, provider credential scope, effective operations/resources, assigned agent or task, grant lifetime and current diagnostics. A broad provider token can support a narrower local grant only where actual operation enforcement provides that restriction.
+
+<Steps>
+  <Step title="Inspect the selected account">
+    Match provider-observed identity with the intended host account. A friendly label is not an account verification receipt.
+  </Step>
+  <Step title="Inspect effective use">
+    Review which agent or task can perform which operations on which resources. Keeping the account connected does not extend an expired task grant.
+  </Step>
+  <Step title="Choose the intended control">
+    Reconnect repairs authentication. Change account creates an explicit selection change. Revoke access changes a grant. Disconnect affects the connection and any dependants named by the host.
+  </Step>
+</Steps>
+
+## Agent frontends
+
+Frontend management shows the entrypoint, admitted people/groups, target agent, conversation policy, output visibility, service authority and exposure lifetime. Include whether the interface supports text, media, streaming, approvals or interruption and how unsupported interactions are handed off.
+
+Pause blocks new admission according to the recorded policy. The host separately determines what happens to admitted work, observation subscriptions, active live sessions and queued replies. Remove ends the frontend binding and preserves unrelated agent state.
+
+Before removing the frontend carrying the management conversation, provide another authenticated management route or obtain the specific authorization needed to lose that route.
+
+## Package pages
+
+Package installation and export activation are different. A package page should link its service connections, frontends and supporting components so that a shared dependency is visible before removal or upgrade.
+
+An upgrade selects exact new bytes and configuration, checks migrations and compatibility, and reconciles affected bindings. Retaining the same tool name does not make a changed implementation the same authorized selection.
+
+## UI outcome handling
+
+The current UI submits the exact displayed owner control once per offered occurrence. A rejected callback means the acknowledgment is uncertain. It does not prove that the owner rejected or rolled back the action. Refresh from the owner before offering recovery; do not turn a rendering error into a new setup attempt.
+
+See [UI integration](/sdks/ui), [configuration](/reference/configuration) and [the operations runbook](/operations/runbook).

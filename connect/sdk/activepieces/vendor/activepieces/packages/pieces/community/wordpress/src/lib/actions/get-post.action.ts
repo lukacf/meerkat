@@ -1,0 +1,49 @@
+import {
+  createAction,
+  PiecePropValueSchema,
+  Property,
+} from '@activepieces/pieces-framework';
+import { wordpressCommon, WordPressMedia } from '../common';
+import {
+  httpClient,
+  HttpMethod,
+  AuthenticationType,
+} from '@activepieces/pieces-common';
+import FormData from 'form-data';
+import { wordpressAuth } from '../..';
+import { getPostActionOutputSchema } from '../output-schemas';
+
+export const getWordPressPost = createAction({
+  auth: wordpressAuth,
+  name: 'get_post',
+  classification: 'READ',
+  description: 'Fetch one post by its ID',
+  audience: 'human',
+  aiMetadata: { description: 'Fetches a single WordPress post by its numeric post ID via the REST API. Use it to read the current content, status, or metadata of a known post before acting on it. Requires the post ID; read-only and idempotent.', idempotent: true },
+  displayName: 'Get Post Details',
+  outputSchema: getPostActionOutputSchema,
+  props: {
+    id: Property.Number({
+      description: "Number after post= in the post's edit URL.",
+      displayName: 'Post ID',
+      required: true,
+    }),
+  },
+  async run(context) {
+    if (!(await wordpressCommon.urlExists(context.auth.props.website_url.trim()))) {
+      throw new Error('Website url is invalid: ' + context.auth.props.website_url);
+    }
+
+    return await httpClient.sendRequest<{ id: string; name: string }[]>({
+      method: HttpMethod.GET,
+      url: `${context.auth.props.website_url.trim()}/wp-json/wp/v2/posts/${
+        context.propsValue.id
+      }`,
+      authentication: {
+        type: AuthenticationType.BASIC,
+        username: context.auth.props.username,
+        password: context.auth.props.password,
+      },
+    });
+  },
+});

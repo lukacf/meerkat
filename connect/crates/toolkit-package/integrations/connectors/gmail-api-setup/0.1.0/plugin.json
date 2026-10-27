@@ -1,0 +1,70 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "gmail-api-setup",
+  "version": "0.1.0",
+  "description": "Guidance-only setup recipe with explicit source observations and newcomer prerequisites.",
+  "author": {
+    "name": "Meerkat Toolkit"
+  },
+  "license": "MIT OR Apache-2.0",
+  "extensions": {
+    "ai.rkat.toolkit": {
+      "schema_version": 1,
+      "identity": {
+        "publisher": "meerkat-toolkit",
+        "name": "gmail-api-setup",
+        "version": "0.1.0"
+      },
+      "display_name": "Gmail API newcomer setup",
+      "description": "Guidance-only setup recipe with explicit source observations and newcomer prerequisites.",
+      "provenance": {
+        "source": "https://developers.google.com/workspace/gmail/api/quickstart/python",
+        "source_revision": "sha256:87c3629cfd64f1fcc44e9bcc03b29895862ff3e9b9de15ff679d6814a1ded738",
+        "license": "MIT OR Apache-2.0 for Toolkit-authored recipe metadata only. Provider documentation and hosted service retain their own terms. No implementation is copied.",
+        "notices": [
+          "This package is authored by Meerkat Toolkit, not by the provider.",
+          "No upstream implementation is vendored. Hosted endpoints are mutable services, not pinned executable artifacts.",
+          "Offline recipe validation does not establish installation, authentication, readiness or supported live operations."
+        ],
+        "local_patches": []
+      },
+      "strategies": [
+        {
+          "id": "setup",
+          "kind": "configuration_recipe",
+          "instructions": "The official Python quickstart demonstrates enabling Gmail API, configuring a Google Cloud project and OAuth consent, and creating desktop OAuth client credentials. Use its read-only example only as setup evidence. Select and package a maintained connector separately. Keep account credentials behind the host credential owner; do not send quickstart credential files or tokens to the model.",
+          "sources": [
+            "https://developers.google.com/workspace/gmail/api/quickstart/python"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "No Gmail implementation artifact is retained; quickstart sample code is not an integration package.",
+            "Production OAuth verification, refresh/revoke handling and requested operations must be resolved."
+          ]
+        }
+      ],
+      "known_exports": [
+        {
+          "id": "gmail-api-setup.service",
+          "role": "service_connector",
+          "description": "Gmail API newcomer setup; only individually selected and owner-verified capabilities may be bound."
+        }
+      ],
+      "assessments": [
+        {
+          "status": "experimental",
+          "scope": "Retained recipe and source inspection only. Live operation and deployment conformance are unverified.",
+          "source_revision": "sha256:87c3629cfd64f1fcc44e9bcc03b29895862ff3e9b9de15ff679d6814a1ded738",
+          "assessed_at_unix_ms": 1790773045000,
+          "evidence": [
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "gmail",
+              "revision": "sha256:87c3629cfd64f1fcc44e9bcc03b29895862ff3e9b9de15ff679d6814a1ded738"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

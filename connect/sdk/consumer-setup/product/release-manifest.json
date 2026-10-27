@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "status": "private_package_inputs_not_product_qualification",
+  "assets": [
+    {
+      "upload_name": "toolkit-library-20261009-library-support-selection-macos-arm64.tar.gz",
+      "bytes": 128566016,
+      "sha256": "49482af8016a76de90826a1362030319f27063b92f9ee0c87de970801f04cb6b",
+      "scope": "Private Connect resource packaging input; full user-journey qualification remains separate."
+    },
+    {
+      "upload_name": "toolkit-library-20261009-installed-entry-recovery-linux-x86_64.tar.gz",
+      "bytes": 137446294,
+      "sha256": "50b5ee1e384ae24f7a4a0511efaca781025eeaa8489414d71fd825557e48f146",
+      "scope": "Unchanged private Connect Linux resource packaging input; no new platform qualification."
+    }
+  ]
+}

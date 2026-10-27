@@ -1,0 +1,141 @@
+{
+  "github": {
+    "url": "https://raw.githubusercontent.com/github/github-mcp-server/main/docs/remote-server.md",
+    "final_url": "https://raw.githubusercontent.com/github/github-mcp-server/main/docs/remote-server.md",
+    "sha256": "871acf118eb662bbaf7a8e3306d2a3bbe2716343b0c8965695ba376e85247f80",
+    "bytes": 29854,
+    "observed_at": "2026-09-29T21:59:24.987108+00:00",
+    "purpose": "Documentation identity only; not a pinned server artifact or runtime validation."
+  },
+  "github-auth": {
+    "url": "https://raw.githubusercontent.com/github/github-mcp-server/main/README.md",
+    "final_url": "https://raw.githubusercontent.com/github/github-mcp-server/main/README.md",
+    "sha256": "0686b41067fd437abbde4b473c394fe2365e5ad2ae81c21b9f988735359c9666",
+    "bytes": 113197,
+    "observed_at": "2026-09-29T21:59:24.970427+00:00",
+    "purpose": "Documentation identity only; not a pinned server artifact or runtime validation."
+  },
+  "linear": {
+    "url": "https://linear.app/docs/mcp",
+    "final_url": "https://linear.app/docs/mcp",
+    "sha256": "9f206d87629f367ba8b121a9dcef73f3234d1aab1448069ef7d0466c885c5315",
+    "bytes": 844526,
+    "observed_at": "2026-09-29T21:59:24.996557+00:00",
+    "purpose": "Documentation identity only; not a pinned server artifact or runtime validation."
+  },
+  "notion": {
+    "url": "https://developers.notion.com/guides/mcp/get-started-with-mcp",
+    "final_url": "https://developers.notion.com/guides/mcp/get-started-with-mcp",
+    "sha256": "830608d6d2d771b81fdced6019643df3ff47f013f4bb2b4d1d495730dfe6197b",
+    "bytes": 595107,
+    "observed_at": "2026-09-29T21:59:24.898368+00:00",
+    "purpose": "Documentation identity only; not a pinned server artifact or runtime validation."
+  },
+  "slack": {
+    "url": "https://docs.slack.dev/ai/slack-mcp-server/",
+    "final_url": "https://docs.slack.dev/ai/slack-mcp-server/",
+    "sha256": "7db6c89782fdbd3bc823637d780ce39a7ad403e97d664be78a6607c21f29ecad",
+    "bytes": 60455,
+    "observed_at": "2026-09-29T21:59:25.452283+00:00",
+    "purpose": "Documentation identity only; not a pinned server artifact or runtime validation."
+  },
+  "slack-frontend": {
+    "url": "https://docs.slack.dev/apis/events-api/using-http-request-urls",
+    "final_url": "https://docs.slack.dev/apis/events-api/using-http-request-urls/",
+    "sha256": "f90a0e5b887d1c2dd6f3c357ba180a0e10580021f81649201f10f5427e134aae",
+    "bytes": 60937,
+    "observed_at": "2026-09-29T21:59:26.095850+00:00",
+    "purpose": "Documentation identity only; not a pinned server artifact or runtime validation."
+  },
+  "home-assistant": {
+    "url": "https://www.home-assistant.io/integrations/mcp_server/",
+    "final_url": "https://www.home-assistant.io/integrations/mcp_server/",
+    "sha256": "86a3c0bb9918c0f1738734514038ef9f8c0b9f88e7e849d402ea9dd70cd7458c",
+    "bytes": 91945,
+    "observed_at": "2026-09-29T21:59:25.037309+00:00",
+    "purpose": "Documentation identity only; not a pinned server artifact or runtime validation."
+  },
+  "playwright": {
+    "url": "https://raw.githubusercontent.com/microsoft/playwright-mcp/main/README.md",
+    "final_url": "https://raw.githubusercontent.com/microsoft/playwright-mcp/main/README.md",
+    "sha256": "b33aa71a13d655e96e6b736d0c9de1e5ddea52f205916ca20b876387ff830e87",
+    "bytes": 66837,
+    "observed_at": "2026-09-29T21:59:25.162049+00:00",
+    "purpose": "Documentation identity only; not a pinned server artifact or runtime validation."
+  },
+  "telegram": {
+    "url": "https://core.telegram.org/bots/api",
+    "final_url": "https://core.telegram.org/bots/api",
+    "sha256": "bae0ec910d1cee56017c76f14830df2c70747d3eea4aee10bfc06bf65cd051ab",
+    "bytes": 860072,
+    "observed_at": "2026-09-29T21:59:25.455209+00:00",
+    "purpose": "Documentation identity only; not a pinned server artifact or runtime validation."
+  },
+  "gmail": {
+    "url": "https://developers.google.com/workspace/gmail/api/quickstart/python",
+    "final_url": "https://developers.google.com/workspace/gmail/api/quickstart/python",
+    "sha256": "07dbee38e9b1dc440221885373fac8d31632dd705a293a2fb0fcc4810a24a7b6",
+    "bytes": 185346,
+    "observed_at": "2026-09-29T21:59:25.433256+00:00",
+    "purpose": "Documentation identity only; not a pinned server artifact or runtime validation."
+  },
+  "calendar": {
+    "url": "https://developers.google.com/workspace/calendar/api/quickstart/python",
+    "final_url": "https://developers.google.com/workspace/calendar/api/quickstart/python",
+    "sha256": "464cd4d07fa019a0e0ecbd431f424e19a7af838d47b0f79f1f35766558c6fbb6",
+    "bytes": 169814,
+    "observed_at": "2026-09-29T21:59:25.771004+00:00",
+    "purpose": "Documentation identity only; not a pinned server artifact or runtime validation."
+  },
+  "robot": {
+    "url": "https://github.com/fixture/paired-host-robot/blob/0418a8b4e69a84f94adccd703a6060b9c293a49a/extension/contract.py",
+    "commit": "0418a8b4e69a84f94adccd703a6060b9c293a49a",
+    "sha256": "0dd53aebd585a924ffae2fd80d2b7d7e2bd6c4032d62912d33e0007a19264487",
+    "bytes": 5216,
+    "observed_at": "2026-09-29T22:03:30.034240+00:00",
+    "purpose": "Local clean source contract only; no runtime, package license or hardware validation."
+  },
+  "telegram-api-20261004": {
+    "url": "https://core.telegram.org/bots/api",
+    "final_url": "https://core.telegram.org/bots/api",
+    "sha256": "da1783d3c0f9b476fbe71eabeb95c185cac504324ff0194dd95093b805bba2ab",
+    "bytes": 860075,
+    "observed_at": "2026-10-04T05:35:54.935389+00:00",
+    "purpose": "Official provider documentation observation only; not an installed artifact or authenticated service."
+  },
+  "telegram-botfather-20261004": {
+    "url": "https://core.telegram.org/bots/features",
+    "final_url": "https://core.telegram.org/bots/features",
+    "sha256": "e9d974bbae552f49850e3c032e60a970e2d884eca1c7c11787ae463a2b1f6a32",
+    "bytes": 116992,
+    "observed_at": "2026-10-04T05:35:54.935389+00:00",
+    "purpose": "Official provider documentation observation only; not an installed artifact or authenticated service."
+  },
+  "paired-host-telegram-readme-20261007": {
+    "url": "https://github.com/fixture/paired-host-telegram/blob/49f53a27a4535f80a357ee13e8150776ed02886b/README.md",
+    "git_path": "README.md",
+    "commit": "49f53a27a4535f80a357ee13e8150776ed02886b",
+    "sha256": "9dff5f0e5cc4b2b13cf409743dbd6202587aa4c1f3dcae90dd1a02b429b8d0b7",
+    "bytes": 1515,
+    "observed_at": "2026-10-07T03:08:16.303223+00:00",
+    "purpose": "Immutable local Git source read only. No import, build, network access, host compatibility, distribution entitlement, authentication or runtime qualification."
+  },
+  "paired-host-telegram-package-20261007": {
+    "url": "https://github.com/fixture/paired-host-telegram/blob/49f53a27a4535f80a357ee13e8150776ed02886b/pyproject.toml",
+    "git_path": "pyproject.toml",
+    "commit": "49f53a27a4535f80a357ee13e8150776ed02886b",
+    "sha256": "4bc764ed4fa3332bc9a45cd82ea91532b3c35145956ba1b740684311b5d2877f",
+    "bytes": 1287,
+    "observed_at": "2026-10-07T03:08:16.303223+00:00",
+    "purpose": "Immutable local Git source read only. No import, build, network access, host compatibility, distribution entitlement, authentication or runtime qualification."
+  },
+  "paired-host-telegram-extension-20261007": {
+    "url": "https://github.com/fixture/paired-host-telegram/blob/49f53a27a4535f80a357ee13e8150776ed02886b/src/paired_host_ext_telegram/extension.py",
+    "git_path": "src/paired_host_ext_telegram/extension.py",
+    "commit": "49f53a27a4535f80a357ee13e8150776ed02886b",
+    "sha256": "3c57a43b1d97d64afd04571bcf7dc3fd0e0139d4ca8be18a2bd7e8d93e99d3bd",
+    "bytes": 52250,
+    "observed_at": "2026-10-07T03:08:16.303223+00:00",
+    "purpose": "Immutable local Git source read only. No import, build, network access, host compatibility, distribution entitlement, authentication or runtime qualification."
+  }
+}

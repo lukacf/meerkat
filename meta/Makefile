@@ -3,6 +3,13 @@
 # ──────────────────────────────────────────────────────────────
 
 CARGO  ?= ./scripts/repo-cargo
+# Meta's own packages in the monorepo's one Cargo workspace: its targets build,
+# test and lint these, never the whole workspace (which is Core's and the
+# other products' too). Derived from ci/products.json and cargo metadata.
+META_PACKAGES := $(shell node ../scripts/core-workspace-args.mjs --product meta 2>/dev/null)
+ifeq ($(strip $(META_PACKAGES)),)
+$(error could not derive Meta's packages: node ../scripts/core-workspace-args.mjs --product meta)
+endif
 
 GREEN  := \033[0;32m
 YELLOW := \033[0;33m
@@ -23,19 +30,19 @@ all: ci
 
 build: ## Build all workspace crates (debug)
 	@echo "$(YELLOW)Building workspace (debug)…$(NC)"
-	$(CARGO) build --workspace
+	$(CARGO) build $(META_PACKAGES)
 	@echo "$(GREEN)Build succeeded.$(NC)"
 
 release: ## Build all workspace crates (release)
 	@echo "$(YELLOW)Building workspace (release)…$(NC)"
-	$(CARGO) build --workspace --release
+	$(CARGO) build $(META_PACKAGES) --release
 	@echo "$(GREEN)Release build succeeded.$(NC)"
 
 # ── test ──────────────────────────────────────────────────────
 
 test: ## Run Rust tests via cargo-nextest
 	@echo "$(YELLOW)Running Rust tests…$(NC)"
-	$(CARGO) nextest run --workspace --no-fail-fast
+	$(CARGO) nextest run $(META_PACKAGES) --no-fail-fast
 	@echo "$(GREEN)Rust tests passed.$(NC)"
 
 test-python: ## Run Python SDK tests
@@ -82,7 +89,7 @@ test-all: test test-python test-flow-editor ## Run all tests (Rust + Python + Fl
 
 lint: ## Run clippy with warnings-as-errors
 	@echo "$(YELLOW)Running clippy…$(NC)"
-	$(CARGO) clippy --workspace --all-targets -- -D warnings
+	$(CARGO) clippy $(META_PACKAGES) --all-targets -- -D warnings
 	@echo "$(GREEN)Clippy passed.$(NC)"
 
 fmt: ## Format all Rust code
@@ -135,21 +142,21 @@ ci-smoke: fmt-check bright-line lint test test-python ## Quick smoke test (no au
 
 check: ## cargo check (fast compile check)
 	@echo "$(YELLOW)Running cargo check…$(NC)"
-	$(CARGO) check --workspace --all-targets
+	$(CARGO) check $(META_PACKAGES) --all-targets
 	@echo "$(GREEN)Check succeeded.$(NC)"
 
 doc: ## Build rustdoc for all crates
 	@echo "$(YELLOW)Building docs…$(NC)"
-	$(CARGO) doc --workspace --no-deps
+	$(CARGO) doc $(META_PACKAGES) --no-deps
 	@echo "$(GREEN)Docs built.$(NC)"
 
 doc-open: ## Build and open rustdoc
 	@echo "$(YELLOW)Building and opening docs…$(NC)"
-	$(CARGO) doc --workspace --no-deps --open
+	$(CARGO) doc $(META_PACKAGES) --no-deps --open
 
 coverage: ## Generate HTML coverage report (cargo-tarpaulin)
 	@echo "$(YELLOW)Generating coverage report…$(NC)"
-	$(CARGO) tarpaulin --workspace --timeout 120 --out Html
+	$(CARGO) tarpaulin $(META_PACKAGES) --timeout 120 --out Html
 	@echo "$(GREEN)Coverage report generated.$(NC)"
 
 clean: ## Remove build artefacts

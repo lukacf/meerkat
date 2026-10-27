@@ -164,6 +164,26 @@ test("authentication failure hides private prompts and never echoes server error
     });
 });
 
+test("provider failure keeps polling until the original child has joined", async t => {
+  let poll, reads = 0;
+  t.mock.method(globalThis, "setInterval", callback => { poll = callback; return 1; });
+  t.mock.method(globalThis, "clearInterval", () => {});
+  await mounted(call => {
+    assert.equal(call.method, "GET");
+    return { status: "failed", joined: ++reads > 1, live_entitlement: "unobserved" };
+  }, async ({ calls, button, tick, document }) => {
+    assert.ok(button("Cancel setup"));
+    assert.match(document.body.textContent, /Native cleanup is not confirmed yet/);
+    await act(async () => poll()); await tick();
+    assert.equal(reads, 2, "failure is not evidence that native cleanup finished");
+    assert.equal(button("Cancel setup"), undefined);
+    assert.doesNotMatch(document.body.textContent, /Native cleanup is not confirmed yet/);
+    await act(async () => poll()); await tick();
+    assert.equal(reads, 2, "polling ends after the same child is observed joined");
+    assert.ok(calls.every(call => call.method === "GET"));
+  });
+});
+
 test("StrictMode reads do not start native work, and unknown prompts offer no invented actions", async () => {
   await mounted(() => snapshot({ kind: "future_prompt", detail: "native-detail" }), async ({ document, calls, button }) => {
     assert.match(document.body.textContent, /not supported by this Forge version/);

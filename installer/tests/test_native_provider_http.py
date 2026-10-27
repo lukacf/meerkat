@@ -142,6 +142,43 @@ async def test_native_failure_reason_and_notices_survive_actual_pipe_join(constr
     finally: await owner.close()
 
 
+async def test_transport_failure_is_readable_while_same_child_cleanup_is_pending(construction, tmp_path, monkeypatch):
+    pin, binding, login, _ = construction
+    script = PEER.split("request=json.loads(sys.stdin.readline())")[0] + """
+while not (root/'fail_transport').exists():time.sleep(.01)
+print('invalid-json',flush=True)
+while (root/'hold_exit').exists():time.sleep(.01)
+sys.exit(1)
+"""
+    pin.path.write_text(pin.path.read_text().split('\n', 1)[0] + '\n' + script)
+    owner = ForgeProviderSetupSession(ExactFile(pin.path, hashlib.sha256(pin.path.read_bytes()).hexdigest()), binding, login)
+    monkeypatch.setattr(server, 'provider_setup_route', None)
+    route = server.select_provider_setup_session(owner, lambda request: login)
+    (tmp_path/'hold_exit').touch()
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url='http://testserver',
+                                     headers={'origin': login.origin}) as client:
+            await client.post('/api/provider-setup/begin', json={})
+            await until(lambda: owner.snapshot(login)['status'] == 'prompt')
+            child = owner._client._process
+            (tmp_path/'fail_transport').touch()
+            await until(lambda: owner.snapshot(login)['status'] == 'failed')
+            failed = (await client.get('/api/provider-setup')).json()
+            assert failed['joined'] is False and child.poll() is None
+            assert 'prompt' not in failed and 'selection' not in failed
+            with pytest.raises(ProviderSetupUnavailable):
+                owner.selection(login)
+            (tmp_path/'hold_exit').unlink()
+            await until(lambda: owner.snapshot(login)['joined'])
+            closed = (await client.get('/api/provider-setup')).json()
+            assert closed['status'] == 'failed' and closed['joined'] is True
+            assert owner._client._process is child and child.returncode == 1
+    finally:
+        (tmp_path/'fail_transport').touch()
+        (tmp_path/'hold_exit').unlink(missing_ok=True)
+        await route.shutdown()
+
+
 async def test_retired_surface_refuses_and_native_mode_refuses_legacy_save(route):
     client, selected, _, _, _ = route
     assert (await client.get('/api/provider-settings', headers={'origin':'http://testserver'})).json()['native_provider_setup'] is True

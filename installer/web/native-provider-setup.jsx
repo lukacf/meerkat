@@ -3,7 +3,7 @@ import { request } from "./state.mjs";
 import { startingContextDetails } from "./forge-starting-context.mjs";
 import "./native-provider-setup.css";
 
-const terminal = value => ["selected", "cancelled", "failed"].includes(value?.status);
+const terminal = value => value?.joined === true && ["selected", "cancelled", "failed"].includes(value.status);
 const actions = { use: "Use this model", enter_key: "Enter API key", sign_in: "Sign in", back: "Back to models" };
 const text = value => typeof value === "string" ? value : "";
 function safeLink(value) {
@@ -182,6 +182,7 @@ export function NativeProviderSetup({ onClose, firstRun = false, idea = "", star
     </>}
     {value?.status === "cancelled" && <p role="status">Native setup cancelled{value.joined ? " and closed" : ""}. Saved native changes may remain; status must be reobserved before another setup.</p>}
     {value?.status === "failed" && <p role="alert">Native setup failed. {value.terminal?.reason || "The native result could not be confirmed."}</p>}
+    {value?.status === "failed" && !value.joined && <p role="status">Native cleanup is not confirmed yet. Checking the original setup...</p>}
     {value?.terminal && <Fields value={value.terminal} label="Native completion details" />}
     {unknown && <p role="status">The previous request is still unconfirmed. Its answer cannot be submitted again.</p>}
     {error && <p role="alert">{error}</p>}

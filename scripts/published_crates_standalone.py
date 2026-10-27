@@ -42,6 +42,30 @@ scripts/release-rust-crates.sh lists.
       A flagged line that is not a test escape is listed under the crate's
       `guard_allow` with its reason.
 
+  published_crates_standalone.py floor --product NAME --out DIR
+      [--mode pr|release] [--allow-dirty]
+
+      The published-floor check of a product other than Core (ci/products.json:
+      meta, connect). In the one workspace a product compiles against the
+      in-tree Core (and Connect against the in-tree Meta) through path
+      dependencies; a published product requires the versions its manifests
+      declare from crates.io. The floor check builds the product's crates the
+      way a downloader resolves them:
+        - package: a product with a publish order packages those crates
+          (`cargo package --no-verify`, every in-repo crate patched to its
+          path so packaging resolves); an unpublished product's manifests are
+          normalized the same way (workspace inheritance resolved, `path`
+          dropped from every dependency outside the product);
+        - unpack them into a scratch workspace whose [patch.crates-io] covers
+          only the product's own crates, with the repository lock as the
+          seed and the repository's [env] (the forced LIBSQLITE3_FLAGS);
+        - resolve: every other in-repo crate must come from crates.io at the
+          declared version (a version crates.io lacks fails here, naming it:
+          the product needs an unreleased dependency);
+        - build: `cargo check --workspace --all-targets` (--mode pr) or
+          `cargo test --workspace --no-run` (--mode release).
+      Writes floor.json to --out. Exit 1 names the first failing stage.
+
 Exit 0 = proven, 1 = a crate fails, 2 = usage error or unreadable input.
 """
 
@@ -751,6 +775,242 @@ def census(root: pathlib.Path, crates: list[str], out: pathlib.Path, stack: str,
 
 
 # ---------------------------------------------------------------------------
+# Published floor (one product against the registry)
+# ---------------------------------------------------------------------------
+
+PRODUCTS = pathlib.Path("ci") / "products.json"
+
+
+def load_product(root: pathlib.Path, name: str) -> dict:
+    try:
+        products = json.loads((root / PRODUCTS).read_text())["products"]
+    except (OSError, ValueError, KeyError) as err:
+        raise UsageError(f"cannot read {PRODUCTS}: {err}") from err
+    for product in products:
+        if product.get("name") == name:
+            if not product.get("root"):
+                raise UsageError("Core has no published floor: it is the dependency the floor checks")
+            return product
+    raise UsageError(f"{PRODUCTS} lists no product {name!r}")
+
+
+def workspace_members(root: pathlib.Path) -> list[dict]:
+    out = subprocess.run(
+        [cargo(), "metadata", "--no-deps", "--format-version", "1"],
+        cwd=root, check=True, capture_output=True, text=True,
+    ).stdout
+    meta = json.loads(out)
+    members = set(meta["workspace_members"])
+    return [pkg for pkg in meta["packages"] if pkg["id"] in members]
+
+
+def under(path: pathlib.Path, root: pathlib.Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def toml_value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f"{json.dumps(key)} = {toml_value(item)}" for key, item in value.items()) + " }"
+    raise UsageError(f"cannot write {value!r} as TOML")
+
+
+def toml_document(document: dict) -> str:
+    """A manifest as TOML: scalar keys first, then tables, then arrays of
+    tables (the subset Cargo manifests use)."""
+    lines: list[str] = []
+
+    def table(prefix: str, body: dict) -> None:
+        scalars = {k: v for k, v in body.items() if not isinstance(v, dict) and not (isinstance(v, list) and v and all(isinstance(i, dict) for i in v))}
+        tables = {k: v for k, v in body.items() if isinstance(v, dict)}
+        arrays = {k: v for k, v in body.items() if isinstance(v, list) and v and all(isinstance(i, dict) for i in v)}
+        if prefix and (scalars or not tables):
+            lines.append(f"[{prefix}]")
+        for key, value in scalars.items():
+            lines.append(f"{json.dumps(key)} = {toml_value(value)}")
+        if prefix and (scalars or not tables):
+            lines.append("")
+        for key, value in tables.items():
+            table(f"{prefix}.{json.dumps(key)}" if prefix else json.dumps(key), value)
+        for key, items in arrays.items():
+            for item in items:
+                lines.append(f"[[{prefix + '.' if prefix else ''}{json.dumps(key)}]]")
+                for k, v in item.items():
+                    lines.append(f"{json.dumps(k)} = {toml_value(v)}")
+                lines.append("")
+
+    table("", document)
+    return "\n".join(lines) + "\n"
+
+
+def normalized_dependency(name: str, spec, workspace_deps: dict, kept_paths: dict[pathlib.Path, str],
+                          crate_dir: pathlib.Path, root: pathlib.Path):
+    """A dependency as `cargo package` writes it: workspace inheritance
+    resolved, and no `path` for a crate outside the product (`kept_paths`
+    maps each product crate's directory to its path in the scratch
+    workspace)."""
+    if isinstance(spec, str):
+        return spec
+    spec = dict(spec)
+    if spec.pop("workspace", False):
+        inherited = workspace_deps.get(name)
+        if inherited is None:
+            raise UsageError(f"{crate_dir.name}: {name} inherits a workspace dependency the root does not declare")
+        inherited = {"version": inherited} if isinstance(inherited, str) else dict(inherited)
+        member_features = spec.pop("features", [])
+        merged = {**inherited, **spec}
+        if member_features or inherited.get("features"):
+            merged["features"] = sorted(set(inherited.get("features", [])) | set(member_features))
+        spec = merged
+        base = root
+    else:
+        base = crate_dir
+    if "path" in spec:
+        target = (base / spec["path"]).resolve()
+        if target in kept_paths:
+            spec["path"] = kept_paths[target]
+        else:
+            spec.pop("path")
+            if "version" not in spec:
+                raise UsageError(f"{crate_dir.name}: {name} is a path dependency with no version, so no published build can resolve it")
+    return spec
+
+
+def normalized_manifest(crate_dir: pathlib.Path, root: pathlib.Path, kept_paths: dict[pathlib.Path, str]) -> dict:
+    root_manifest = tomllib.loads((root / "Cargo.toml").read_text())
+    workspace_package = root_manifest["workspace"].get("package", {})
+    workspace_deps = root_manifest["workspace"].get("dependencies", {})
+    manifest = tomllib.loads((crate_dir / "Cargo.toml").read_text())
+    package = manifest["package"]
+    for key, value in list(package.items()):
+        if isinstance(value, dict) and value.get("workspace") is True:
+            package[key] = workspace_package[key]
+    package.pop("workspace", None)
+
+    def dependencies(table: dict) -> dict:
+        return {name: normalized_dependency(name, spec, workspace_deps, kept_paths, crate_dir, root)
+                for name, spec in table.items()}
+
+    for key in ("dependencies", "dev-dependencies", "build-dependencies"):
+        if key in manifest:
+            manifest[key] = dependencies(manifest[key])
+    for target in (manifest.get("target") or {}).values():
+        for key in ("dependencies", "dev-dependencies", "build-dependencies"):
+            if key in target:
+                target[key] = dependencies(target[key])
+    if (manifest.get("lints") or {}).get("workspace") is True:
+        manifest["lints"] = root_manifest["workspace"].get("lints", {})
+    return manifest
+
+
+def repository_env(root: pathlib.Path) -> str:
+    """The repository's Cargo [env] table, as a config file for the scratch
+    workspace: the floor builds with the build settings CI tested."""
+    config = tomllib.loads((root / ".cargo" / "config.toml").read_text())
+    env = config.get("env") or {}
+    return "[env]\n" + "".join(f"{json.dumps(key)} = {toml_value(value)}\n" for key, value in env.items())
+
+
+def floor(root: pathlib.Path, product_name: str, out: pathlib.Path, mode: str, allow_dirty: bool) -> int:
+    product = load_product(root, product_name)
+    product_root = (root / product["root"]).resolve()
+    members = workspace_members(root)
+    product_crates = [pkg for pkg in members if under(pathlib.Path(pkg["manifest_path"]).parent, product_root)]
+    if not product_crates:
+        raise UsageError(f"no workspace member lies under {product['root']}/")
+    in_repo = {pkg["name"]: pkg for pkg in members}
+    out.mkdir(parents=True, exist_ok=False)
+    logs = out / "logs"
+    logs.mkdir()
+    env = build_env("mirror", out / "target", toolchain(root))
+    report: dict = {"product": product_name, "mode": mode, "crates": [pkg["name"] for pkg in product_crates],
+                    "stage": None, "problems": []}
+
+    def finish(stage: str, problems: list[str]) -> int:
+        report["stage"] = stage
+        report["problems"] = problems
+        (out / "floor.json").write_text(json.dumps(report, indent=2) + "\n")
+        verdict = "releasable against published dependencies" if not problems else f"not releasable ({stage})"
+        print(f"{product_name}: {verdict}")
+        for problem in problems:
+            print(f"  {problem}")
+        return 1 if problems else 0
+
+    publish_order = product.get("publish_order")
+    ws = out / "ws"
+    if isinstance(publish_order, list) and publish_order:
+        # Package the publishing crates as crates.io receives them. Packaging
+        # resolves their dependencies, so every in-repo crate is patched to
+        # its path for that step only.
+        unknown = [name for name in publish_order if name not in in_repo]
+        if unknown:
+            raise UsageError(f"{PRODUCTS}: {product_name} publishes unknown crates {', '.join(unknown)}")
+        dirs = {name: pathlib.Path(pkg["manifest_path"]).parent for name, pkg in in_repo.items()}
+        patched = [name for name, pkg in in_repo.items() if pkg.get("publish") is None or pkg.get("publish")]
+        unpacked = package_and_unpack(root, publish_order, sorted(set(patched) | set(publish_order)), dirs, out, allow_dirty, env)
+        floor_members = {name: path for name, path in unpacked.items()}
+    else:
+        # An unpublished product: its manifests normalized as cargo package
+        # would write them; the product's own crates keep their paths.
+        ws.mkdir()
+        floor_members = {}
+        crate_dirs_by_name = {pkg["name"]: pathlib.Path(pkg["manifest_path"]).parent.resolve() for pkg in product_crates}
+        kept = {directory: f"../{name}" for name, directory in crate_dirs_by_name.items()}
+        for name, crate_dir in crate_dirs_by_name.items():
+            target = ws / name
+            shutil.copytree(crate_dir, target, ignore=shutil.ignore_patterns("target", "BUILD.bazel"))
+            (target / "Cargo.toml").write_text(toml_document(normalized_manifest(crate_dir, root, kept)))
+            floor_members[name] = target
+        member_list = "".join(f'    "{path.name}",\n' for path in floor_members.values())
+        (ws / "Cargo.toml").write_text(f'[workspace]\nresolver = "2"\nmembers = [\n{member_list}]\n')
+        shutil.copyfile(root / "Cargo.lock", ws / "Cargo.lock")
+    (ws / ".cargo").mkdir(exist_ok=True)
+    (ws / ".cargo" / "config.toml").write_text(repository_env(root))
+
+    # Resolve: every other in-repo crate from crates.io at the declared
+    # version, never a path or git source.
+    proc = subprocess.run([cargo(), "metadata", "--format-version", "1"], cwd=ws, env=env, capture_output=True, text=True)
+    (logs / "resolve.log").write_text(f"$ cargo metadata\n# cwd {ws}\n{proc.stderr}\n# rc {proc.returncode}\n")
+    if proc.returncode != 0:
+        missing = sorted(set(re.findall(r"failed to select a version for the requirement `([^`]+)`", proc.stderr)))
+        lines = [line for line in proc.stderr.strip().splitlines() if line.strip()]
+        detail = "; ".join(missing) if missing else (lines[-1] if lines else "no output")
+        return finish("resolve", [f"declared dependency versions do not resolve from crates.io: {detail}"])
+    resolved = json.loads(proc.stdout)
+    problems = []
+    for pkg in resolved["packages"]:
+        if pkg["name"] in floor_members:
+            continue
+        if pkg["name"] in in_repo:
+            source = pkg.get("source") or "path"
+            if not source.startswith("registry+"):
+                problems.append(f"{pkg['name']} {pkg['version']} comes from {source}, not crates.io")
+    if problems:
+        return finish("resolve", problems)
+    report["registry_dependencies"] = sorted(
+        f"{pkg['name']} {pkg['version']}" for pkg in resolved["packages"] if pkg["name"] in in_repo and pkg["name"] not in floor_members
+    )
+
+    command = [cargo(), "check", "--workspace", "--all-targets"] if mode == "pr" else [cargo(), "test", "--workspace", "--no-run"]
+    rc, output = run(command, ws, env, logs / "build.log")
+    if rc != 0:
+        errors = [line for line in output.splitlines() if line.startswith("error")][:10]
+        return finish("build", [f"`{' '.join(command[1:])}` against the published dependencies fails", *errors])
+    return finish("build", [])
+
+
+# ---------------------------------------------------------------------------
 
 
 def main(argv: list[str]) -> int:
@@ -764,8 +1024,15 @@ def main(argv: list[str]) -> int:
     census_parser.add_argument("--shard", default="1/1", help="K/N: test every Nth crate starting at the Kth")
     guard_parser = sub.add_parser("guard")
     guard_parser.add_argument("--crate", action="append", default=[])
+    floor_parser = sub.add_parser("floor")
+    floor_parser.add_argument("--product", required=True)
+    floor_parser.add_argument("--out", required=True, type=pathlib.Path)
+    floor_parser.add_argument("--mode", choices=("pr", "release"), default="pr")
+    floor_parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args(argv)
     try:
+        if args.command == "floor":
+            return floor(ROOT, args.product, args.out, args.mode, args.allow_dirty)
         crates = release_crates(ROOT)
         if args.crate:
             unknown = sorted(set(args.crate) - set(crates))

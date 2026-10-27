@@ -1187,7 +1187,7 @@ async fn gateway_sigkill_mid_tool_is_recovered_before_new_work() {
     let started = {
         let fifo = fifo.clone();
         tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             tokio::task::spawn_blocking(move || std::fs::read_to_string(fifo)),
         )
         .await
@@ -1631,7 +1631,7 @@ async fn start_unshared_host(
             }
             panic!("host role {role} exited before it reported ({status}); stderr:\n{stderr}");
         }
-        () = tokio::time::sleep(std::time::Duration::from_secs(120)) => {
+        () = tokio::time::sleep(std::time::Duration::from_mins(2)) => {
             let _ = host.start_kill();
             let _ = host.wait().await;
             let stderr = collect_stderr(stderr_task).await;

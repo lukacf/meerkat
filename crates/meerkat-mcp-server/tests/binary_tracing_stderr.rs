@@ -97,7 +97,7 @@ async fn run_initialize(
     stdin.shutdown().await.unwrap();
     drop(stdin);
 
-    let output = timeout(Duration::from_secs(180), child.wait_with_output())
+    let output = timeout(Duration::from_mins(3), child.wait_with_output())
         .await
         .expect("rkat-mcp exits once stdin closes")
         .expect("rkat-mcp wait");

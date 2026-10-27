@@ -144,7 +144,7 @@ async fn async_main() -> Result<(), DemoError> {
     std::fs::create_dir_all(&store_path)?;
     let factory = AgentFactory::new(&store_path).comms(true);
     let service = Arc::new(build_ephemeral_service(factory, Config::default(), 16));
-    run_pipeline(service, Duration::from_secs(60), &mut std::io::stdout()).await
+    run_pipeline(service, Duration::from_mins(1), &mut std::io::stdout()).await
 }
 
 async fn run_pipeline(

@@ -707,7 +707,7 @@ fn assert_review_fault_audit(
         for record in records {
             assert_eq!(record.contributors.len(), 1);
             assert_eq!(&record.contributors[0].input_id, input);
-            assert!(record.contributors[0].requester == principal("requester"));
+            assert_eq!(record.contributors[0].requester, principal("requester"));
             assert_eq!(record.observation.execution_scope, source.execution_scope);
             assert_eq!(record.observation.run_id, source.run_id);
             assert_eq!(
@@ -743,7 +743,7 @@ fn assert_review_fault_audit(
     );
     assert_eq!(observations[0].status, ReviewAttemptStatus::Pending);
     assert!(observations[0].retirement.is_none());
-    assert!(observations[0].attempt == observations[1].attempt);
+    assert_eq!(observations[0].attempt, observations[1].attempt);
     if case.infrastructure_failure() {
         assert_eq!(observations[1].status, ReviewAttemptStatus::Retired);
         assert_eq!(
@@ -804,7 +804,7 @@ async fn exercise_review(controller_server: &Server, review_server: &Server, cas
     )
     .with_observer(reviews.clone());
     if let Some(route) = &human {
-        composed = composed.with_human_consent(route.clone(), Duration::from_secs(4 * 60 * 60));
+        composed = composed.with_human_consent(route.clone(), Duration::from_hours(4));
     }
     let review = Arc::new(composed);
 
@@ -995,7 +995,7 @@ esac"#;
             .pin_controller_client_for_actor(&actor)
             .await
             .unwrap();
-        assert!(pin.selection() == &selected);
+        assert_eq!(pin.selection(), &selected);
         meerkat_auth_core::save_tokens_and_publish_lifecycle(
             meerkat_core::auth::ProviderAuthPersistence::new(
                 Arc::new(meerkat_auth_core::EphemeralTokenStore::new()),
@@ -1162,7 +1162,7 @@ esac"#;
                 .pin_controller_client_for_actor(&actor)
                 .await
                 .unwrap();
-            assert!(pin.selection() == &selected);
+            assert_eq!(pin.selection(), &selected);
             let ingress = NativeIngressContext::from_trusted_ingress(
                 &fresh,
                 principal("requester"),
@@ -1388,9 +1388,9 @@ esac"#;
                 originals[0]["authenticated_association"],
                 serde_json::to_value(&claims).unwrap()
             );
-            assert!(claims.candidate().requester == principal("requester"));
-            assert!(claims.candidate().ingress_actor == principal("ingress"));
-            assert!(claims.candidate().logical_executor == principal("executor"));
+            assert_eq!(claims.candidate().requester, principal("requester"));
+            assert_eq!(claims.candidate().ingress_actor, principal("ingress"));
+            assert_eq!(claims.candidate().logical_executor, principal("executor"));
         }
 
         let stored = machine
@@ -1515,13 +1515,16 @@ esac"#;
                         && model.credential.as_ref() == Some(reviewer_selection.credential())))).collect();
             assert_eq!(reviewer_prepares.len(), usize::from(case.model_allowed()));
             for review_model in reviewer_prepares {
-                assert!(review_model.observation.operation_id != source.observation.operation_id);
+                assert_ne!(
+                    review_model.observation.operation_id,
+                    source.observation.operation_id
+                );
                 for record in audit.iter().filter(|record| {
                     record.observation.operation_id == review_model.observation.operation_id
                 }) {
                     assert_eq!(record.contributors.len(), 1);
                     assert_eq!(record.contributors[0].input_id, input_id);
-                    assert!(record.contributors[0].requester == principal("requester"));
+                    assert_eq!(record.contributors[0].requester, principal("requester"));
                     assert_eq!(
                         record.observation.execution_scope,
                         source.observation.execution_scope
@@ -1928,10 +1931,9 @@ esac"#;
             "one native original read for model review, with no policy retry"
         );
     };
-    let checks =
-        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(60), checks))
-            .catch_unwind()
-            .await;
+    let checks = std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_mins(1), checks))
+        .catch_unwind()
+        .await;
     // Bounded native cleanup, whether or not the checks passed or finished:
     // release a held request, then unregister the native session.
     controller_server.receiver.finish.notify_one();
@@ -2074,7 +2076,7 @@ async fn run_case(case: Case) {
     // The checks carry their own deadline inside exercise_review's bounded
     // native cleanup; this outer bound only stops a setup that never ends.
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         exercise_review(&controller, &reviewer, case),
     ))
     .catch_unwind()

@@ -788,7 +788,7 @@ async fn oauth_release_fixture() -> (
     let store_dyn: Arc<dyn crate::store::RuntimeStore> = store.clone();
     let flows = Arc::new(
         crate::handles::RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            std::time::Duration::from_secs(600),
+            std::time::Duration::from_mins(10),
             raw.clone(),
             &store_dyn,
         ),

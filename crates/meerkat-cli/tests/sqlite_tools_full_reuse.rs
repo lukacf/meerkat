@@ -81,7 +81,7 @@ async fn run_tools_full_sqlite_reuses_open_realm() -> Result<(), Box<dyn std::er
     write_test_config(&project_dir).await?;
 
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .env("HOME", temp_dir.path())

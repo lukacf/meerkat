@@ -209,8 +209,11 @@ fn assert_stock_record_scope(
     assert_eq!(record.observation.run_id.as_ref(), Some(run_id));
     assert_eq!(record.contributors.len(), 1);
     assert_eq!(&record.contributors[0].input_id, input_id);
-    assert!(record.contributors[0].requester == principal("requester"));
-    assert!(record.contributors[0].logical_executor == principal("executor"));
+    assert_eq!(record.contributors[0].requester, principal("requester"));
+    assert_eq!(
+        record.contributors[0].logical_executor,
+        principal("executor")
+    );
     assert!(record.contributors[0].represented_subject.is_none());
     assert!(
         matches!(&record.observation.execution_scope, OperationExecutionScope::RuntimeInput {
@@ -1934,7 +1937,7 @@ async fn run_stock_persistent_case_with_options(
 ) {
     let cleanup = CleanupSlot::new(None);
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         exercise_stock_persistent(
             &server,
             &cleanup,

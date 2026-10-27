@@ -2641,9 +2641,9 @@ mod tests {
             ownerless.active_runtime_generation,
             Some(mm_dsl::Generation(9))
         );
-        assert!(
-            ownerless.active_runtime_epoch_id
-                == Some(mm_dsl::RuntimeEpochId::from_domain(&epoch_before))
+        assert_eq!(
+            ownerless.active_runtime_epoch_id,
+            Some(mm_dsl::RuntimeEpochId::from_domain(&epoch_before))
         );
         {
             let sessions = machine.sessions.read().await;

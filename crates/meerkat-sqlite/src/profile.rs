@@ -74,7 +74,7 @@ use crate::ledger::SchemaDomain;
 /// default adopts it. Callers with a deliberate different policy pass an
 /// override via [`OpenOptions::busy_timeout`] so the decision stays named at
 /// the call site.
-pub const SHARED_BUSY_TIMEOUT: Duration = Duration::from_millis(60_000);
+pub const SHARED_BUSY_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Upper bound on the busy timeout actually handed to SQLite.
 ///

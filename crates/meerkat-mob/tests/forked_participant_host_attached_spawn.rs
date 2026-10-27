@@ -47,7 +47,7 @@ use support::{
     spawn_peer_comms_endpoint, spawn_scripted_host_peer, spawn_scripted_member_turn_responder,
 };
 
-const TTL: Duration = Duration::from_secs(600);
+const TTL: Duration = Duration::from_mins(10);
 
 fn identity(name: &str) -> AgentIdentity {
     AgentIdentity::from(name)

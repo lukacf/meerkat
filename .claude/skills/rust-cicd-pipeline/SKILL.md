@@ -284,7 +284,7 @@ pre-commit install --hook-type pre-push
 Use the repository's committed `rust-toolchain.toml` pin. The current pin is:
 ```toml
 [toolchain]
-channel = "1.94.1"
+channel = "1.97.0"
 components = ["rustfmt", "clippy"]
 ```
 

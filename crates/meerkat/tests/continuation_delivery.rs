@@ -3186,7 +3186,7 @@ mod hosting {
             let started = std::time::Instant::now();
             while hooks::verified_opens(&fresh_path) < 100 {
                 assert!(
-                    started.elapsed() < Duration::from_secs(60),
+                    started.elapsed() < Duration::from_mins(1),
                     "100 store ticks never came"
                 );
                 tokio::time::sleep(SWEEP).await;
@@ -3225,7 +3225,7 @@ mod hosting {
             // No sweep inside the test: the arming pass is the only read.
             let handle = fixture
                 .owner()
-                .with_store_sweep(Duration::from_secs(3600))
+                .with_store_sweep(Duration::from_hours(1))
                 .arm(ClaimHost::new(&capability))
                 .expect("arm");
             let mut passes = handle.subscribe_passes();
@@ -3277,7 +3277,7 @@ mod hosting {
         }
 
         /// A sweep no test here waits for.
-        const NO_SWEEP: Duration = Duration::from_secs(3600);
+        const NO_SWEEP: Duration = Duration::from_hours(1);
 
         /// Arm the owner of a watched store with `sweep`, its store watch
         /// registered before the owner's first read: the owner task runs only
@@ -3756,7 +3756,7 @@ mod hosting {
             host.sink.gate.arm();
             let handle = fixture
                 .owner()
-                .with_store_sweep(Duration::from_secs(3600))
+                .with_store_sweep(Duration::from_hours(1))
                 .arm(host.clone())
                 .expect("arm");
             let mut passes = handle.subscribe_passes();

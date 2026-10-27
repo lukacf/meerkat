@@ -86,7 +86,7 @@ pub(crate) use meerkat_core::time_compat::Instant;
 /// "Reported" means a `tracing` line and nothing else. There is no event-stream
 /// or wire delivery of this condition; a caller waiting on the run sees no
 /// change at this tier.
-pub(crate) const RUN_EXECUTION_START_NOTICE: Duration = Duration::from_secs(120);
+pub(crate) const RUN_EXECUTION_START_NOTICE: Duration = Duration::from_mins(2);
 
 /// How long a staged run may sit with its primitive provably un-applied before
 /// the runtime loop concludes the consumer will never pick it up.
@@ -113,7 +113,7 @@ pub(crate) const RUN_EXECUTION_START_NOTICE: Duration = Duration::from_secs(120)
 /// Whether every session-service path between staging and that transition is
 /// likewise free of durable writes is NOT independently verified here, so
 /// this comment does not assert it.
-pub(crate) const RUN_EXECUTION_START_BOUND: Duration = Duration::from_secs(3_600);
+pub(crate) const RUN_EXECUTION_START_BOUND: Duration = Duration::from_hours(1);
 
 // A notice tier at or past the hard bound would mean the window is escalated
 // before it is ever reported, and the emitted `bound_secs` would stop
@@ -1049,7 +1049,7 @@ mod tests {
         })
     }
 
-    const TEST_BOUND: Duration = Duration::from_secs(900);
+    const TEST_BOUND: Duration = Duration::from_mins(15);
 
     /// RED without the bound: `apply_with_execution_start_bound` degenerates to
     /// a bare `executor.apply(..).await` against a consumer that never returns,
@@ -1397,7 +1397,7 @@ mod tests {
                 run_id(),
                 vec![InputId::new()],
                 Instant::now(),
-                Duration::from_secs(120),
+                Duration::from_mins(2),
             );
 
             crate::tokio::time::sleep(Duration::from_secs(500)).await;
@@ -1422,7 +1422,7 @@ mod tests {
             run_id(),
             vec![InputId::new()],
             Instant::now(),
-            Duration::from_secs(120),
+            Duration::from_mins(2),
         );
 
         crate::tokio::time::sleep(Duration::from_secs(500)).await;
@@ -1825,7 +1825,7 @@ mod tests {
         ))
     }
 
-    const PARKED_NOTICE: Duration = Duration::from_secs(120);
+    const PARKED_NOTICE: Duration = Duration::from_mins(2);
 
     /// The positive pin: the exact field shape. Registration `Active`, no run
     /// in flight, an input in the machine's queued phase, and its ledger

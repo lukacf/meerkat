@@ -4199,7 +4199,7 @@ mod tests {
             poll_lifetime_fixture(Some(log)).await;
         let mut poll = Box::pin(observation.poll_events(
             &session,
-            lifetime_poll_request(&expected, Duration::from_secs(3600)),
+            lifetime_poll_request(&expected, Duration::from_hours(1)),
         ));
         let wake = Arc::new(PollWake::default());
         let waker = std::task::Waker::from(Arc::clone(&wake));
@@ -4235,7 +4235,7 @@ mod tests {
                     poll_lifetime_fixture(empty_lifetime_log(durable)).await;
                 let mut poll = Box::pin(observation.poll_events(
                     &session,
-                    lifetime_poll_request(&expected, Duration::from_secs(3600)),
+                    lifetime_poll_request(&expected, Duration::from_hours(1)),
                 ));
                 let wake = Arc::new(PollWake::default());
                 let waker = std::task::Waker::from(Arc::clone(&wake));

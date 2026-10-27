@@ -102,9 +102,9 @@ mod tests {
     const PROFILE_FILE: &str = "profile";
     /// Bound on a child incarnation reaching its signal; a child that exits
     /// first fails the row at once.
-    const CHILD_BOUND: Duration = Duration::from_secs(120);
+    const CHILD_BOUND: Duration = Duration::from_mins(2);
     /// Bound on a resumed run's end.
-    const RUN_BOUND: Duration = Duration::from_secs(60);
+    const RUN_BOUND: Duration = Duration::from_mins(1);
 
     /// The realm's session persistence.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -627,7 +627,7 @@ mod tests {
             .await
             .expect("accept prompt");
         tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             handle.expect("completion handle").wait(),
         )
         .await

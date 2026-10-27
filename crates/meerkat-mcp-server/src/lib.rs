@@ -7328,7 +7328,7 @@ mod tests {
     /// is, which is a different question - at three seconds these failed under
     /// a full-workspace run on a machine that was also compiling, and passed
     /// in 0.13s standalone, which says nothing about locking either way.
-    const NO_DEADLOCK_BOUND: Duration = Duration::from_secs(60);
+    const NO_DEADLOCK_BOUND: Duration = Duration::from_mins(1);
 
     fn bounded_resume_input(session_id: String, tools: Vec<McpToolDef>) -> MeerkatResumeInput {
         MeerkatResumeInput {

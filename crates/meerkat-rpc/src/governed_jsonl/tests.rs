@@ -3164,7 +3164,7 @@ async fn stock_governed_realm_binds_sessions_and_stages_its_installation() {
         );
     };
     let result =
-        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(60), scenario))
+        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_mins(1), scenario))
             .catch_unwind()
             .await;
     let cleanup_failures = cleanup_jsonl(r, &mut w, server_task, &mut http).await;
@@ -3708,7 +3708,7 @@ done
         assert!(!marker("connector").exists());
     };
     let result =
-        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(60), scenario))
+        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_mins(1), scenario))
             .catch_unwind()
             .await;
     let cleanup_failures = cleanup_jsonl(r, &mut w, server_task, &mut http).await;
@@ -4018,7 +4018,7 @@ async fn stock_governed_restart(revoke_while_down: bool, boundary_only: bool) {
         assert_eq!(turn["result"]["text"], FINISHED, "{turn}");
         (original, sibling)
     };
-    let (original, sibling) = tokio::time::timeout(Duration::from_secs(60), first)
+    let (original, sibling) = tokio::time::timeout(Duration::from_mins(1), first)
         .await
         .expect("the first host's scenario");
 
@@ -4955,7 +4955,7 @@ impl R3Host {
 async fn r3_bounded<T>(
     scenario: impl std::future::Future<Output = T>,
 ) -> std::thread::Result<Result<T, tokio::time::error::Elapsed>> {
-    std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(180), scenario))
+    std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_mins(3), scenario))
         .catch_unwind()
         .await
 }
@@ -5406,7 +5406,7 @@ async fn stock_r3_an_unpolled_public_serving_future_retires_the_pipes_consent() 
                 .collect(),
                 expires_at: Some(
                     chrono::Utc::now()
-                        + chrono::Duration::from_std(Duration::from_secs(600)).unwrap(),
+                        + chrono::Duration::from_std(Duration::from_mins(10)).unwrap(),
                 ),
                 metadata,
                 request_provenance: None,
@@ -5619,7 +5619,7 @@ async fn stock_governed_cold_turn(same_binding: bool) {
         sid
     };
     let first_outcome =
-        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(60), first))
+        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_mins(1), first))
             .catch_unwind()
             .await;
 
@@ -5939,7 +5939,7 @@ async fn stock_governed_host_refuses_a_scheduled_fire_before_materializing_its_s
         );
     };
     let result =
-        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(60), scenario))
+        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_mins(1), scenario))
             .catch_unwind()
             .await;
     let cleanup_failures = cleanup_jsonl(r, &mut w, server_task, &mut http).await;
@@ -6001,7 +6001,7 @@ async fn ordinary_rpc_host_materializes_a_scheduled_fire_past_the_mandate_gate()
             "{occurrence:?}"
         );
     };
-    let result = tokio::time::timeout(Duration::from_secs(60), scenario).await;
+    let result = tokio::time::timeout(Duration::from_mins(1), scenario).await;
     let shutdown = runtime.try_shutdown().await;
     result.expect("the scenario finishes within its bound");
     shutdown.expect("the runtime shuts down");

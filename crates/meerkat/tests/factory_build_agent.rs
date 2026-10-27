@@ -1429,7 +1429,7 @@ async fn build_agent_applies_configured_retry_schedule_without_call_timeout() {
     let mut config = Config::default();
     config.retry.max_retries = 8;
     config.retry.initial_delay = std::time::Duration::from_millis(750);
-    config.retry.max_delay = std::time::Duration::from_secs(120);
+    config.retry.max_delay = std::time::Duration::from_mins(2);
     config.retry.multiplier = 2.5;
     config.retry.call_timeout_override =
         meerkat_core::CallTimeoutOverride::Value(std::time::Duration::from_secs(90));
@@ -1444,7 +1444,7 @@ async fn build_agent_applies_configured_retry_schedule_without_call_timeout() {
 
     assert_eq!(retry.max_retries, 8);
     assert_eq!(retry.initial_delay, std::time::Duration::from_millis(750));
-    assert_eq!(retry.max_delay, std::time::Duration::from_secs(120));
+    assert_eq!(retry.max_delay, std::time::Duration::from_mins(2));
     assert_eq!(retry.multiplier, 2.5);
     assert_eq!(
         retry.call_timeout, None,

@@ -907,7 +907,7 @@ async fn a_writer_that_stopped_never_resumes_on_a_later_renew() {
     // The old writer's next tick re-acquires, meets the new holder, and
     // poisons itself; it never wrote again.
     let before = host.commit_count();
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(!old_realm.lease_is_live());
     let refused = old_store
         .persist_input_state(
@@ -931,7 +931,7 @@ async fn a_stopped_writer_reacquires_and_resumes_when_nothing_changed() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert!(!realm.lease_is_live());
     // The next tick re-acquires over its own still-recorded lease.
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(realm.lease_is_live());
     assert!(realm.fence() > first, "a fresh token");
     store
@@ -966,7 +966,7 @@ async fn a_stopped_writer_finds_a_foreign_write_and_stays_down() {
         drop(other_realm);
     }
     host.expire_lease();
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
         old_realm.realm_poisoned().is_some(),
         "a foreign batch since the stop keeps the old writer down"

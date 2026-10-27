@@ -359,7 +359,7 @@ async fn run_member_turn(
         )
         .await
         .expect("start a turn");
-    tokio::time::timeout(Duration::from_secs(60), work.wait_bounded(spec))
+    tokio::time::timeout(Duration::from_mins(1), work.wait_bounded(spec))
         .await
         .expect("turn completes within the failure bound")
         .expect("turn succeeds");
@@ -641,7 +641,7 @@ async fn the_refusal_reaches_the_model_as_a_tool_error_and_the_turn_continues() 
         )
         .await
         .expect("start a turn");
-    let result = tokio::time::timeout(Duration::from_secs(60), work.wait_bounded(spec))
+    let result = tokio::time::timeout(Duration::from_mins(1), work.wait_bounded(spec))
         .await
         .expect("turn completes within the failure bound")
         .expect("the refusal does not fail the turn");
@@ -686,7 +686,7 @@ async fn delegate(fixture: &CouncilFixture) -> (Result<ToolDispatchOutcome, Tool
         .expect("creator has a bridge session");
     let surface = agent_surface(&fixture.state, session.clone(), creator_authority());
     let outcome = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         dispatch(
             &surface,
             "delegate",
@@ -821,7 +821,7 @@ async fn delegate_from_a_member_turn(
         )
         .await
         .expect("start a turn");
-    tokio::time::timeout(Duration::from_secs(60), work.wait_bounded(spec))
+    tokio::time::timeout(Duration::from_mins(1), work.wait_bounded(spec))
         .await
         .expect("turn completes within the failure bound")
         .expect("turn succeeds");
@@ -987,7 +987,7 @@ async fn a_refused_delegate_reaches_the_model_as_a_tool_error_and_the_turn_conti
         )
         .await
         .expect("start a turn");
-    let result = tokio::time::timeout(Duration::from_secs(60), work.wait_bounded(spec))
+    let result = tokio::time::timeout(Duration::from_mins(1), work.wait_bounded(spec))
         .await
         .expect("turn completes within the failure bound")
         .expect("the refusal does not fail the turn");

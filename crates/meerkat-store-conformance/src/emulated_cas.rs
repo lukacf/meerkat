@@ -260,7 +260,7 @@ impl SessionStore for EmulatedCasSessionStore {
             }
             true
         });
-        metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        metas.sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
         let offset = filter.offset.unwrap_or(0);
         let limit = filter.limit.unwrap_or(usize::MAX);
         Ok(metas.into_iter().skip(offset).take(limit).collect())

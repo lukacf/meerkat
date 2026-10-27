@@ -10438,7 +10438,7 @@ mod tests {
             )
             .await
             .expect("commit A's provider acknowledgement");
-        tokio::time::timeout(std::time::Duration::from_secs(3600), delivery_task)
+        tokio::time::timeout(std::time::Duration::from_hours(1), delivery_task)
             .await
             .map_err(|_| "deadlock: B's release never woke after A's acknowledgement committed")?
             .expect("B's release task does not panic");

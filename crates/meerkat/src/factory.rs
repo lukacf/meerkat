@@ -8861,7 +8861,7 @@ impl AgentFactory {
                 let mut preload = build_config
                     .preload_skills
                     .take()
-                    .and_then(|ids| if ids.is_empty() { None } else { Some(ids) });
+                    .filter(|ids| !ids.is_empty());
 
                 // Resumed sessions may carry persisted skill IDs from an older
                 // surface or older metadata semantics. Filter to the skills
@@ -11663,7 +11663,7 @@ mod tests {
                 Provider::OpenAI,
                 "gpt-5.4"
             ),
-            Some(std::time::Duration::from_secs(600))
+            Some(std::time::Duration::from_mins(10))
         );
         assert_eq!(
             meerkat_core::ModelOperationalDefaultsResolver::call_timeout_for(

@@ -83,7 +83,7 @@ concurrency:
 
 env:
   CARGO_HOME: /tmp/meerkat-cargo-home
-  RUSTUP_TOOLCHAIN: 1.94.1
+  RUSTUP_TOOLCHAIN: 1.97.0
   MEERKAT_BAZEL_BACKEND: gcp-buildbuddy
   BUILDBUDDY_BAZEL_CONFIG: buildbuddy-linux-gcp-ci-rbe
   BUILDBUDDY_API_KEY: ${{ secrets.MEERKAT_GCP_BUILDBUDDY_API_KEY }}

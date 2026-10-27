@@ -2470,7 +2470,7 @@ mod tests {
             Arc::new(Producer {
                 calls: AtomicUsize::new(0),
                 text: "late".into(),
-                delay: Duration::from_secs(60),
+                delay: Duration::from_mins(1),
                 fail: false,
             }),
             4096,

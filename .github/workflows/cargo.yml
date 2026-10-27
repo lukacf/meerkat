@@ -67,7 +67,7 @@ env:
   # reuse (rust-cache + sccache) requires registry source paths that do not
   # change between runs.
   CARGO_HOME: /home/runner/.cargo
-  RUSTUP_TOOLCHAIN: 1.94.1
+  RUSTUP_TOOLCHAIN: 1.97.0
   # Keep repo-cargo's per-worktree redirection out of CI: pin the target dir
   # where Swatinem/rust-cache caches it (scripts/repo-cargo respects a
   # pre-set CARGO_TARGET_DIR).

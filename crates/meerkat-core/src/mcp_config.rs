@@ -1902,7 +1902,7 @@ fn string_array(values: &[String]) -> Array {
 fn string_map(values: &HashMap<String, String>) -> toml_edit::InlineTable {
     let mut table = toml_edit::InlineTable::new();
     let mut entries = values.iter().collect::<Vec<_>>();
-    entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    entries.sort_unstable_by_key(|(left, _)| *left);
     for (key, value) in entries {
         table.insert(key, value.as_str().into());
     }

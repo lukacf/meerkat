@@ -264,7 +264,7 @@ async fn fixture() -> Fixture {
     let persistence = ProviderAuthPersistence::new(store.clone(), coordinator.clone());
     let lifecycle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
     let flows = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
-        std::time::Duration::from_secs(300),
+        std::time::Duration::from_mins(5),
         lifecycle,
     ));
     let mut fixture = Fixture {

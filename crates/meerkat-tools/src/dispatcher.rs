@@ -565,7 +565,7 @@ mod tests {
         > {
             let erased = ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap();
             meerkat_core::ToolExecutionContract::default()
@@ -837,7 +837,7 @@ mod tests {
         let context = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -889,7 +889,7 @@ mod tests {
         let context = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );

@@ -101,7 +101,7 @@ impl RunFixture {
         ];
         args.extend_from_slice(extra_args);
         let run_output = timeout(
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             Command::new(&self.rkat)
                 .current_dir(&self.project_dir)
                 .env("HOME", &self.home_dir)
@@ -214,7 +214,7 @@ async fn integration_real_cli_export_atif() -> Result<(), Box<dyn std::error::Er
     // Explicit export works for a session that was never auto-exported.
     let export_path = temp_dir.path().join("exported-trajectory.json");
     let export_output = timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         Command::new(&fixture.rkat)
             .current_dir(&fixture.project_dir)
             .env("HOME", &fixture.home_dir)
@@ -492,7 +492,7 @@ async fn run_fidelity_turn(
             "Check the time, then answer.",
         ])
         .stdin(std::process::Stdio::null());
-    let output = timeout(Duration::from_secs(180), command.output())
+    let output = timeout(Duration::from_mins(3), command.output())
         .await
         .expect("rkat run within budget")
         .expect("spawn rkat run");

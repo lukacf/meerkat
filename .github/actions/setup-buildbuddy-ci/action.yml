@@ -22,7 +22,7 @@ runs:
   steps:
     - name: Install Rust
       if: ${{ inputs.profile == 'submitter' || inputs.profile == 'doctor' || inputs.profile == 'lint' || inputs.profile == 'sdk' || inputs.profile == 'rust' || inputs.profile == 'wasm' || inputs.profile == 'audit' || inputs.profile == 'native' || inputs.profile == 'full' }}
-      uses: dtolnay/rust-toolchain@ee868d7805ade43a1b47dd054727ab76c9108b4f # 1.94.1
+      uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0
 
     # Scripts from the action's own tree: release.yml's BuildBuddy binary
     # build runs this action from its tooling checkout (.release-tooling)
@@ -31,7 +31,7 @@ runs:
       if: ${{ inputs.profile == 'submitter' || inputs.profile == 'doctor' || inputs.profile == 'lint' || inputs.profile == 'sdk' || inputs.profile == 'rust' || inputs.profile == 'wasm' || inputs.profile == 'audit' || inputs.profile == 'native' || inputs.profile == 'full' }}
       shell: bash
       env:
-        RUSTUP_TOOLCHAIN: 1.94.1
+        RUSTUP_TOOLCHAIN: 1.97.0
       run: bash "${GITHUB_ACTION_PATH}/../../../scripts/ci-pin-rust-toolchain-env"
 
     - name: Add wasm32 target

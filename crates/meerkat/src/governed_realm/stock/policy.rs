@@ -1523,7 +1523,7 @@ mod tests {
     fn deadlines() -> meerkat_core::ToolDeadlineChain {
         meerkat_core::ToolDeadlineChain::new(vec![meerkat_core::ToolDeadlineContributor::finite(
             meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-            std::time::Duration::from_secs(600),
+            std::time::Duration::from_mins(10),
         )])
         .expect("deadline chain")
     }
@@ -1671,14 +1671,14 @@ mod tests {
             .operation_values
             .into_iter()
             .map(|values| {
-                assert!(values.resource_domain.authority == operator());
-                assert!(
-                    values.processor
-                        == ProcessorRef::Principal {
-                            principal: executor(),
-                        }
+                assert_eq!(values.resource_domain.authority, operator());
+                assert_eq!(
+                    values.processor,
+                    ProcessorRef::Principal {
+                        principal: executor(),
+                    }
                 );
-                assert!(values.audience == association.candidate().target.audience);
+                assert_eq!(values.audience, association.candidate().target.audience);
                 (
                     values.action.feature,
                     values.action.action,
@@ -3246,7 +3246,7 @@ mod tests {
                 lineage: vec![lineage],
             };
         });
-        assert!(invoked.candidate().target.logical_owner == operator());
+        assert_eq!(invoked.candidate().target.logical_owner, operator());
         policy
             .authorize_invocation(&ingress_context(caller()), &invoked)
             .expect("the host admits its caller");
@@ -3575,7 +3575,7 @@ mod tests {
         )
         .expect("the binding's own claims")
         .association;
-        assert!(reported.candidate().requester == ingress());
+        assert_eq!(reported.candidate().requester, ingress());
         policy
             .authorize_invocation(&ingress_context(ingress()), &reported)
             .expect("the ingress reports its own outcome");

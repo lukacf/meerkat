@@ -918,7 +918,7 @@ async fn an_undelivered_continuation_resumes_its_original_once_after_a_same_proc
         .context
         .controller_client()
         .expect("the resume runs on a controller client");
-    assert!(running.selection() == &selection);
+    assert_eq!(running.selection(), &selection);
     assert!(
         reacquired
             .0
@@ -1408,9 +1408,9 @@ impl Reopened {
                 assert!(self.boundary.is_held(), "the step runs under B");
                 assert_eq!(admitted.session_id(), &self.session);
                 assert_eq!(admitted.input_id(), &self.original_id);
-                assert!(
-                    Some(admitted.association())
-                        == self.original.header().authority_association.as_ref()
+                assert_eq!(
+                    Some(admitted.association()),
+                    self.original.header().authority_association.as_ref()
                 );
                 assert_eq!(
                     admitted.phase(),
@@ -1841,7 +1841,7 @@ async fn a_stale_witness_or_inexact_evidence_runs_no_publication_step() {
         .controller_model
         .clone()
         .expect("another controller selection");
-    assert!(other != reopened.selection);
+    assert_ne!(other, reopened.selection);
     reopened.actor.select(&other);
     assert_eq!(
         reopened
@@ -1927,8 +1927,8 @@ async fn a_stale_witness_or_inexact_evidence_runs_no_publication_step() {
     )
     .await;
     let (current_registration, current_attachment) = reopened.current().await;
-    assert!(current_registration != registration);
-    assert!(current_attachment != attachment);
+    assert_ne!(current_registration, registration);
+    assert_ne!(current_attachment, attachment);
     for (label, registration, attachment) in [
         (
             "the replaced registration and attachment",
@@ -1992,7 +1992,7 @@ async fn a_stale_witness_or_inexact_evidence_runs_no_publication_step() {
         .await
         .expect("a new actor");
     let (newest_registration, new_attachment) = reopened.current().await;
-    assert!(new_attachment != current_attachment);
+    assert_ne!(new_attachment, current_attachment);
     let replaced_observed = replaced_actor.identity();
     for (label, registration, attachment) in [
         (
@@ -2664,7 +2664,7 @@ async fn the_durable_read_refuses_inexact_evidence_and_unreadable_stores() {
         .expect("claims")
         .candidate()
         .clone();
-    assert!(candidate.controller_model.as_ref() != Some(&other_selection));
+    assert_ne!(candidate.controller_model.as_ref(), Some(&other_selection));
     candidate.controller_model = Some(other_selection);
     let mut reassociated = expected.clone();
     reassociated.header_mut().authority_association =

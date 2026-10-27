@@ -1198,7 +1198,7 @@ mod tests {
         let replacement_actor = replacement_slot
             .witness()
             .expect("replacement actor publication");
-        assert!(replacement_actor != original);
+        assert_ne!(replacement_actor, original);
         let stale_preparation = handles.prepare_durability_reload_cleanup().await;
         let first = handles.cleanup_after_durability_reload_required().await;
         let second = handles.cleanup_after_durability_reload_required().await;
@@ -1211,7 +1211,7 @@ mod tests {
         );
         first.expect("stale cleanup is harmless");
         second.expect("stale cleanup remains idempotent");
-        assert!(current.as_ref() == Some(&replacement_actor));
+        assert_eq!(current.as_ref(), Some(&replacement_actor));
         assert!(retained_live);
         assert_eq!(
             replacement_view

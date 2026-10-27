@@ -1579,7 +1579,7 @@ fn mob_destroy_session_children_within_production_stack_budget() {
                 .expect("production-sized destroy runtime");
             runtime.block_on(async {
                 tokio::time::timeout(
-                    Duration::from_secs(60),
+                    Duration::from_mins(1),
                     Box::pin(mob_destroy_session_children_stack_budget_scenario()),
                 )
                 .await
@@ -5572,7 +5572,7 @@ async fn a_resume_spawn_of_a_session_another_owner_hosts_refuses_typed() {
     let physical_before = physical_head_token(&store, &session_id).await;
 
     let refused = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.spawn_spec(
             SpawnMemberSpec::new("worker", worker.clone())
                 .with_resume_bridge_session_id(session_id.clone()),
@@ -5723,7 +5723,7 @@ async fn a_mob_start_settles_the_durable_tail_of_a_member_whose_restore_failed()
         .refusing
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(AgentIdentity::from("w-1"), None),
     )
     .await
@@ -6287,7 +6287,7 @@ async fn a_mob_start_defers_a_restore_failed_members_binding_restore_another_own
         .refusing
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -6303,7 +6303,7 @@ async fn a_mob_start_defers_a_restore_failed_members_binding_restore_another_own
 
     drop(other_owner_claim);
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -6398,7 +6398,7 @@ async fn a_mob_start_defers_a_broken_members_binding_restore_while_its_tail_is_u
         .refusing
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -6410,7 +6410,7 @@ async fn a_mob_start_defers_a_broken_members_binding_restore_while_its_tail_is_u
         unprovable,
         "respawn",
     );
-    let retired = tokio::time::timeout(Duration::from_secs(60), handle.retire(identity.clone()))
+    let retired = tokio::time::timeout(Duration::from_mins(1), handle.retire(identity.clone()))
         .await
         .expect("the retire settles");
     assert_binding_restore_deferred(
@@ -6560,7 +6560,7 @@ async fn an_explicit_resume_keeps_a_deferred_binding_restore_open_while_it_canno
     .await;
     let identity = AgentIdentity::from("w-1");
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -6619,7 +6619,7 @@ async fn a_mob_start_defers_the_binding_preparations_hosting_refusal_for_a_broke
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let identity = AgentIdentity::from("w-1");
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -6640,7 +6640,7 @@ async fn a_mob_start_defers_the_binding_preparations_hosting_refusal_for_a_broke
     );
     drop(other_owner_claim);
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -6688,7 +6688,7 @@ async fn a_resume_spawn_onto_a_foreign_session_tail_refuses_typed() {
     let adopter = AgentIdentity::from("w-adopt");
     let tail_before = tail.durable_tail_snapshot(&store).await;
     let spawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.spawn_spec(
             SpawnMemberSpec::new("worker", adopter.clone())
                 .with_resume_bridge_session_id(tail.session_id.clone()),
@@ -6961,7 +6961,7 @@ async fn a_resume_spawn_onto_a_foreign_whole_blob_session_tail_refuses_typed() {
         "the crash left the run's WholeBlob provisional tail"
     );
     let spawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.spawn_spec(
             SpawnMemberSpec::new("worker", adopter.clone())
                 .with_resume_bridge_session_id(tail.session_id.clone()),
@@ -7164,7 +7164,7 @@ async fn a_member_whose_session_has_a_durable_tail_respawns() {
         ),
     }
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -7442,7 +7442,7 @@ async fn a_mob_whose_member_retirement_cancelled_a_turn_at_its_boundary_restarts
     });
     sleep(Duration::from_millis(300)).await;
     client.release.notify_one();
-    let retired = tokio::time::timeout(Duration::from_secs(60), retire)
+    let retired = tokio::time::timeout(Duration::from_mins(1), retire)
         .await
         .expect("the retirement ends within its bound")
         .expect("the retirement task completes");
@@ -7595,7 +7595,7 @@ async fn a_member_retired_while_its_turn_reaches_the_boundary_retires() {
     // grace and reaches that boundary.
     sleep(Duration::from_millis(300)).await;
     client.release.notify_one();
-    let retired = tokio::time::timeout(Duration::from_secs(60), retire)
+    let retired = tokio::time::timeout(Duration::from_mins(1), retire)
         .await
         .expect("the retirement ends within its bound")
         .expect("the retirement task completes");
@@ -8291,7 +8291,7 @@ async fn a_member_retired_after_its_turn_stopped_before_its_boundary_commit_reti
     // The store-owned recovery may settle the tail from here on.
     stopped.power_store.hold_durable_tail_recovery(false);
     let retired = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         stopped.handle.retire(stopped.identity.clone()),
     )
     .await
@@ -8629,7 +8629,7 @@ async fn a_resume_spawn_onto_a_hosted_foreign_session_tail_refuses_typed() {
     stopped.power_store.hold_durable_tail_recovery(false);
     let tail_before = stopped.tail.durable_tail_snapshot(&stopped.store).await;
     let spawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         adopting.spawn_spec(
             SpawnMemberSpec::new("worker", adopter.clone())
                 .with_resume_bridge_session_id(session_id.clone()),
@@ -8789,7 +8789,7 @@ async fn a_sticky_fallback_after_a_deploy_stop_past_its_bound_acknowledges() {
     handle_1
         .shutdown_with_report(
             meerkat_mob::ShutdownOptions::default()
-                .with_deadline(meerkat_core::time_compat::Instant::now() + Duration::from_secs(60))
+                .with_deadline(meerkat_core::time_compat::Instant::now() + Duration::from_mins(1))
                 .with_queued_inputs(meerkat_mob::QueuedInputsOnShutdown::Requeue(
                     meerkat_mob::RequeueMaxAge::new(max_age).expect("an accepted requeue bound"),
                 )),
@@ -8955,7 +8955,7 @@ async fn a_retire_over_a_held_durable_tail_ends_typed_and_keeps_the_tail() {
     let stopped =
         a_member_whose_turn_stopped_before_its_boundary_commit(&paths, "held-tail-retire").await;
     let error = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         stopped.handle.retire(stopped.identity.clone()),
     )
     .await
@@ -9006,7 +9006,7 @@ async fn a_destroy_with_a_member_whose_turn_stopped_before_its_boundary_commit_c
             .await;
     // The store-owned recovery may settle the tail from here on.
     stopped.power_store.hold_durable_tail_recovery(false);
-    let report = match tokio::time::timeout(Duration::from_secs(60), stopped.handle.destroy())
+    let report = match tokio::time::timeout(Duration::from_mins(1), stopped.handle.destroy())
         .await
         .expect("the destroy ends within its bound")
     {
@@ -9219,7 +9219,7 @@ async fn a_member_retired_after_its_runtime_stopped_over_a_cancelled_turns_tail_
 
     // The archive's recovery may settle the tail from here on.
     power_store.hold_durable_tail_recovery(false);
-    let retired = tokio::time::timeout(Duration::from_secs(60), handle.retire(identity.clone()))
+    let retired = tokio::time::timeout(Duration::from_mins(1), handle.retire(identity.clone()))
         .await
         .expect("the retirement ends within its bound");
     assert!(
@@ -9425,7 +9425,7 @@ async fn an_archive_before_a_kept_run_registers_again_ends_the_work_it_kept() {
     // archived.
     let (service_2, store_2) = persistent_head_canonical_service(&paths, runtime_store.clone());
     let archived = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         service_2.archive_with_mob_lifecycle_authority(&w1_sid),
     )
     .await
@@ -9550,7 +9550,7 @@ async fn an_archive_of_a_kept_run_with_nothing_queued_consumes_its_input() {
     let (service, store) = persistent_head_canonical_service(&paths, crash.runtime_store.clone());
 
     let archived = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         service.archive_with_mob_lifecycle_authority(&crash.session_id),
     )
     .await
@@ -9672,7 +9672,7 @@ async fn an_archive_over_a_run_that_answered_before_its_boundary_consumes_its_in
     let (service, store) = persistent_head_canonical_service(&paths, tail.runtime_store.clone());
 
     let archived = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         service.archive_with_mob_lifecycle_authority(&tail.session_id),
     )
     .await
@@ -10096,7 +10096,7 @@ async fn settle_with_probe(lifetime: &FirstTurnLifetime, identity: &AgentIdentit
         .handle
         .wait_for_members_kickoff_complete(
             std::slice::from_ref(identity),
-            Some(Duration::from_secs(60)),
+            Some(Duration::from_mins(1)),
         )
         .await
         .expect("first turn settles");
@@ -10735,7 +10735,7 @@ async fn identity_convergence(
 /// `revision`.
 #[cfg(feature = "test-support")]
 async fn await_identity_converged(handle: &MobHandle, identity: &AgentIdentity, revision: u64) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         let status = identity_convergence(handle, identity).await;
         if status.as_ref().is_some_and(|status| {

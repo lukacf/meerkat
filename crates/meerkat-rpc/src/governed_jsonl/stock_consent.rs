@@ -339,7 +339,7 @@ mod tests {
             metadata.labels.insert(label.to_owned(), value.to_owned());
         }
         let validity =
-            chrono::Duration::from_std(std::time::Duration::from_secs(600)).expect("validity");
+            chrono::Duration::from_std(std::time::Duration::from_mins(10)).expect("validity");
         issuer
             .request(ApprovalRequest {
                 requester: ApprovalPrincipalId::new("human:uid-501").expect("requester"),

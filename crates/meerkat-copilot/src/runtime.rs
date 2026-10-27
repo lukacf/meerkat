@@ -3612,14 +3612,14 @@ mod tests {
                     self.authorizer.api_base().as_deref(),
                     Some("https://copilot.example.test")
                 );
-                assert!(
+                assert_eq!(
                     self.authorizer
                         .model_snapshot()
                         .unwrap()
                         .model("gpt-test")
                         .unwrap()
-                        .route_for(Provider::OpenAI)
-                        == Some(CopilotEndpoint::Responses)
+                        .route_for(Provider::OpenAI),
+                    Some(CopilotEndpoint::Responses)
                 );
             }
         }

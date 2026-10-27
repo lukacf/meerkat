@@ -1124,7 +1124,7 @@ mod tests {
         let err = LlmError::RateLimited {
             retry_after_ms: Some(5000),
         };
-        assert_eq!(err.retry_after(), Some(Duration::from_millis(5000)));
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(5)));
 
         let err = LlmError::RateLimited {
             retry_after_ms: None,

@@ -140,7 +140,7 @@ fn mkfifo(path: &Path) {
 /// Block (no polling) until the child writes a line into `fifo`.
 async fn read_fifo(fifo: PathBuf) -> Option<String> {
     tokio::time::timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         tokio::task::spawn_blocking(move || std::fs::read_to_string(fifo)),
     )
     .await

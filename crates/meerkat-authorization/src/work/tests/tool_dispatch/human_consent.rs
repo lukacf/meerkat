@@ -33,7 +33,7 @@ use super::*;
 const CONSENTED_TOOL: &str = "write_record";
 const SIBLING_TOOL: &str = "read_record";
 /// Host-chosen validity of one consent request.
-const VALIDITY: Duration = Duration::from_secs(4 * 60 * 60);
+const VALIDITY: Duration = Duration::from_hours(4);
 
 /// R3 is never model-reviewed; counts every review it is asked for.
 #[derive(Default)]
@@ -292,7 +292,7 @@ impl ConsentWorld {
                 meerkat_core::ToolDeadlineChain::new(vec![
                     meerkat_core::ToolDeadlineContributor::finite(
                         meerkat_core::ToolDeadlineOwner::DirectCaller,
-                        Duration::from_secs(600),
+                        Duration::from_mins(10),
                     ),
                 ])
                 .expect("finite caller deadline"),
@@ -546,7 +546,7 @@ async fn r3_work_owner_without_the_context_read_fails_closed_before_any_approval
             meerkat_core::ToolDeadlineChain::new(vec![
                 meerkat_core::ToolDeadlineContributor::finite(
                     meerkat_core::ToolDeadlineOwner::DirectCaller,
-                    Duration::from_secs(600),
+                    Duration::from_mins(10),
                 ),
             ])
             .expect("finite caller deadline"),
@@ -590,7 +590,7 @@ async fn r3_work_owner_without_the_context_read_fails_closed_before_any_approval
             meerkat_core::ToolDeadlineChain::new(vec![
                 meerkat_core::ToolDeadlineContributor::finite(
                     meerkat_core::ToolDeadlineOwner::DirectCaller,
-                    Duration::from_secs(600),
+                    Duration::from_mins(10),
                 ),
             ])
             .expect("finite caller deadline"),

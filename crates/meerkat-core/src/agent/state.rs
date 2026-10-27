@@ -21032,7 +21032,7 @@ mod tests {
     #[tokio::test]
     async fn tool_owned_deadline_obeys_an_operator_per_tool_override() {
         let tools_config = crate::config::ToolsConfig {
-            default_timeout: std::time::Duration::from_secs(600),
+            default_timeout: std::time::Duration::from_mins(10),
             tool_timeouts: std::collections::HashMap::from([(
                 "slow_tool".to_string(),
                 std::time::Duration::from_millis(20),
@@ -28584,7 +28584,7 @@ mod tests {
         });
 
         let error = tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             agent.run("keep going".to_string().into()),
         )
         .await
@@ -28750,11 +28750,11 @@ mod tests {
     #[test]
     fn compute_retry_delay_uses_hint_when_greater_than_computed() {
         let (delay, floor_applied) = select_retry_delay(
-            Some(Duration::from_secs(60)),
+            Some(Duration::from_mins(1)),
             Duration::from_millis(500),
             true,
         );
-        assert_eq!(delay, Duration::from_secs(60));
+        assert_eq!(delay, Duration::from_mins(1));
         assert!(!floor_applied);
     }
 
@@ -28772,7 +28772,7 @@ mod tests {
     #[test]
     fn compute_retry_delay_uses_computed_when_greater_than_hint() {
         let (delay, floor_applied) =
-            select_retry_delay(Some(Duration::from_secs(60)), Duration::from_secs(90), true);
+            select_retry_delay(Some(Duration::from_mins(1)), Duration::from_secs(90), true);
         assert_eq!(delay, Duration::from_secs(90));
         assert!(!floor_applied);
     }
@@ -30839,7 +30839,7 @@ mod tests {
                 max_delay: Duration::from_millis(1),
                 multiplier: 1.0,
                 call_timeout: Some(Duration::from_millis(50)),
-                stream_inactivity_timeout: Some(Duration::from_secs(3600)),
+                stream_inactivity_timeout: Some(Duration::from_hours(1)),
             })
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
@@ -30893,7 +30893,7 @@ mod tests {
             Duration::from_millis(60),
         ));
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .retry_policy(stall_window_policy(Some(Duration::from_secs(3600))))
+            .retry_policy(stall_window_policy(Some(Duration::from_hours(1))))
             .with_model_defaults_resolver(Arc::new(StallWindowResolver(Some(
                 Duration::from_millis(30),
             ))))
@@ -30918,10 +30918,10 @@ mod tests {
     async fn explicit_stream_inactivity_override_wins_over_the_model_window() {
         let client = Arc::new(StallThenSucceedClient::new());
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .retry_policy(stall_window_policy(Some(Duration::from_secs(3600))))
-            .with_model_defaults_resolver(Arc::new(StallWindowResolver(Some(Duration::from_secs(
-                3600,
-            )))))
+            .retry_policy(stall_window_policy(Some(Duration::from_hours(1))))
+            .with_model_defaults_resolver(Arc::new(StallWindowResolver(Some(
+                Duration::from_hours(1),
+            ))))
             .with_stream_inactivity_timeout_override(crate::config::CallTimeoutOverride::Value(
                 Duration::from_millis(30),
             ))
@@ -36262,7 +36262,7 @@ mod tests {
             let (tx, events) = mpsc::channel(1024);
             let started = tokio::time::Instant::now();
             let result = tokio::time::timeout(
-                std::time::Duration::from_secs(600),
+                std::time::Duration::from_mins(10),
                 agent.run_with_events_and_work_authorization(
                     "attempt the requested action".to_string().into(),
                     vec![],
@@ -38418,7 +38418,7 @@ mod tests {
                     approvals.clone(),
                     std::time::Duration::from_secs(30),
                 )
-                .with_human_consent(route.clone(), std::time::Duration::from_secs(4 * 60 * 60)),
+                .with_human_consent(route.clone(), std::time::Duration::from_hours(4)),
             );
             let observer = Arc::new(RecordingObserver::default());
             let tools = Arc::new(ConsentedAction::default());
@@ -38829,7 +38829,7 @@ mod tests {
                         crate::ToolDeadlineChain::new(vec![
                             crate::ToolDeadlineContributor::finite(
                                 crate::ToolDeadlineOwner::Dispatcher,
-                                std::time::Duration::from_secs(60),
+                                std::time::Duration::from_mins(1),
                             ),
                         ])?
                     } else {
@@ -38913,7 +38913,7 @@ mod tests {
                         approvals.clone(),
                         std::time::Duration::from_secs(30),
                     )
-                    .with_human_consent(route.clone(), std::time::Duration::from_secs(4 * 60 * 60)),
+                    .with_human_consent(route.clone(), std::time::Duration::from_hours(4)),
                 );
                 let agent = agent_over(&review, model, tools).await;
                 Host {

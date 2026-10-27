@@ -74,7 +74,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_HOME: /home/runner/.cargo
-  RUSTUP_TOOLCHAIN: 1.94.1
+  RUSTUP_TOOLCHAIN: 1.97.0
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"

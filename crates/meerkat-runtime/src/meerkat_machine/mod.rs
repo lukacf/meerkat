@@ -1105,7 +1105,7 @@ fn persistent_auth_authorities_for_key(
     let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
     let oauth_flows = Arc::new(
         crate::handles::RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            std::time::Duration::from_secs(10 * 60),
+            std::time::Duration::from_mins(10),
             Arc::clone(&auth_lease),
             store,
         ),
@@ -3854,7 +3854,7 @@ impl std::fmt::Debug for PendingRuntimeExecutorAttachment {
 /// run's carriers and retrying its terminal while its attachment comes to
 /// serve: one deadline for the whole detached task.
 const SETTLED_RUN_TERMINAL_PUBLICATION_BOUND: std::time::Duration =
-    std::time::Duration::from_secs(60);
+    std::time::Duration::from_mins(1);
 
 /// The runtime-termination reason a kept run settled past its stop's max age
 /// carries to its interaction terminals.
@@ -13229,7 +13229,7 @@ impl MeerkatMachine {
         let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
         #[cfg(not(target_arch = "wasm32"))]
         let oauth_flows = Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-            std::time::Duration::from_secs(10 * 60),
+            std::time::Duration::from_mins(10),
             Arc::clone(&auth_lease),
         ));
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
@@ -13803,7 +13803,7 @@ impl MeerkatMachine {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 *oauth_slot =
                     Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-                        std::time::Duration::from_secs(10 * 60),
+                        std::time::Duration::from_mins(10),
                         handle.clone(),
                     ));
                 *auth_slot = generated_runtime_auth_lease_handle(handle.clone());

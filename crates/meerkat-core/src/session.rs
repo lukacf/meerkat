@@ -6861,13 +6861,13 @@ impl Session {
                             .tool_calls()
                             .any(|call| call.id == tool_call_id.as_str());
                 }
-                Message::ToolResults { results, .. } if asked => {
-                    if results
-                        .iter()
-                        .any(|result| result.tool_use_id == *tool_call_id)
-                    {
-                        return true;
-                    }
+                Message::ToolResults { results, .. }
+                    if asked
+                        && results
+                            .iter()
+                            .any(|result| result.tool_use_id == *tool_call_id) =>
+                {
+                    return true;
                 }
                 _ => {}
             }

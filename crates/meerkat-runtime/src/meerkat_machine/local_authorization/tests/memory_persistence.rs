@@ -350,7 +350,7 @@ mod exported_authority_escapes {
                 target.clone(),
                 provider,
                 device_code.into(),
-                std::time::Duration::from_secs(3600),
+                std::time::Duration::from_hours(1),
             )
             .unwrap();
         let poll = oauth
@@ -500,14 +500,14 @@ async fn memory_persistent_admission_keeps_typed_readiness_before_any_row() {
         ),
         "missing actual credential must remain readiness: {result:?}"
     );
-    assert!(
-        before
-            == *persistent
-                .inner_ref()
-                .shared_dsl_authority()
-                .lock()
-                .unwrap()
-                .state()
+    assert_eq!(
+        before,
+        *persistent
+            .inner_ref()
+            .shared_dsl_authority()
+            .lock()
+            .unwrap()
+            .state()
     );
     persistent
         .require_durability_ready()
@@ -649,7 +649,7 @@ async fn memory_persistent_failed_claim_does_not_touch_auth_store() {
             )
             .unwrap();
         let foreign_oauth = Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_mins(1),
             Arc::new(concrete.clone()),
         ));
         assert!(matches!(

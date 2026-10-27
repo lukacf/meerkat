@@ -46,7 +46,7 @@ use super::process_lifecycle::{OwnedProcessGroup, join_output_bounded, join_read
 use super::types::{BackgroundJob, JobId, JobStatus, JobSummary, JobSummaryStatus};
 
 const MAX_VISIBLE_ORIGIN_JOBS: usize = 10_000;
-const LEASE_SETTLEMENT_MARGIN: Duration = Duration::from_secs(60);
+const LEASE_SETTLEMENT_MARGIN: Duration = Duration::from_mins(1);
 #[cfg(not(test))]
 const MONITOR_SETTLEMENT_STORE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
@@ -5624,7 +5624,7 @@ mod durable_tests {
             .await
             .expect("spawn monitor");
         let job_id = meerkat_jobs::JobId::new(public_job_id.to_string()).expect("domain job id");
-        let completion = tokio::time::timeout(Duration::from_secs(60), async {
+        let completion = tokio::time::timeout(Duration::from_mins(1), async {
             loop {
                 let snapshot = service.get(&job_id).await.expect("read").expect("job");
                 if snapshot.terminal_result.is_some() {
@@ -5765,7 +5765,7 @@ mod durable_tests {
             .await
             .expect("spawn monitor");
         let job_id = meerkat_jobs::JobId::new(public_job_id.to_string()).expect("domain job id");
-        tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::time::timeout(Duration::from_mins(1), async {
             loop {
                 let snapshot = service.get(&job_id).await.expect("read").expect("job");
                 if snapshot.terminal_result.is_some() {

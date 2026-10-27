@@ -683,7 +683,7 @@ const RETAINED_SPAWN_CLEANUP_BACKOFF: [Duration; 5] = [
     Duration::from_secs(2),
     Duration::from_secs(5),
     Duration::from_secs(15),
-    Duration::from_secs(60),
+    Duration::from_mins(1),
 ];
 
 fn retained_spawn_cleanup_backoff(attempts: u32) -> Duration {

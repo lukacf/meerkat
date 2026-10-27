@@ -103,7 +103,7 @@ impl RequestLog {
     ) -> Vec<RecordedRequest> {
         let mut recorded = self.recorded.subscribe();
         let reached = tokio::time::timeout(
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             recorded.wait_for(|_| !self.matching(&filter).is_empty()),
         )
         .await;
@@ -408,7 +408,7 @@ async fn wait_for_completion(
     owner: &SessionId,
     job_id: &str,
 ) -> CompletionRecord {
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + Duration::from_mins(1);
     loop {
         let mut records = completion_records(
             &persisted_messages(fixture.service.as_ref(), owner).await,
@@ -442,7 +442,7 @@ async fn drive_turn(fixture: &CouncilFixture, member: &str, prompt: &str) -> Str
         )
         .await
         .unwrap_or_else(|error| panic!("start a turn for {member}: {error}"));
-    match tokio::time::timeout(Duration::from_secs(60), work.wait_bounded(spec)).await {
+    match tokio::time::timeout(Duration::from_mins(1), work.wait_bounded(spec)).await {
         Ok(Ok(result)) => result.result().result().text().to_string(),
         Ok(Err(error)) => panic!("turn for {member} failed: {error:?}"),
         Err(elapsed) => panic!("turn for {member} timed out: {elapsed}"),
@@ -853,7 +853,7 @@ async fn one_shot_hosts_block_for_the_fork_off_result() {
         "a one-shot host's fork_off must wait for the child's turn"
     );
     gate.open();
-    let outcome = tokio::time::timeout(Duration::from_secs(60), pending)
+    let outcome = tokio::time::timeout(Duration::from_mins(1), pending)
         .await
         .expect("the blocking call returns once the child finishes")
         .expect("join")
@@ -903,7 +903,7 @@ async fn one_shot_fork_off_honours_max_run_secs() {
     let forker = member_surface(&fixture, "forker").await;
 
     let error = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         dispatch(
             &forker.surface,
             "fork_off",
@@ -1059,7 +1059,7 @@ async fn fork_off_and_council_are_not_cut_by_the_core_tool_deadline() {
     let composed: Arc<dyn AgentToolDispatcher> = Arc::new(meerkat_core::DynamicToolComposite::new(
         vec![Arc::clone(&forker.surface)],
     ));
-    let core_default = Duration::from_secs(600);
+    let core_default = Duration::from_mins(10);
     let resolution = meerkat_core::ToolExecutionResolutionContext::new(
         meerkat_core::ToolDeadlineChain::new(vec![meerkat_core::ToolDeadlineContributor::finite(
             meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
@@ -1435,7 +1435,7 @@ async fn a_live_completion_for_an_unservable_owner_is_applied_once_it_can_be_ser
 
     // The council's terminal is committed on its custody record.
     let council_store = fixture.state.temporary_council_store_for_tests();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
     loop {
         let committed = council_store
             .list_all()
@@ -2436,7 +2436,7 @@ async fn forker_checks_its_idle_child_while_an_operator_reads_the_busy_forker() 
         "the operator's reads of the busy forker were held open: {longest_operator_read:?}"
     );
     gate.open();
-    tokio::time::timeout(Duration::from_secs(60), held_turn.wait_bounded(spec))
+    tokio::time::timeout(Duration::from_mins(1), held_turn.wait_bounded(spec))
         .await
         .expect("the held forker turn finishes once released")
         .expect("the held forker turn completes");
@@ -2621,7 +2621,7 @@ async fn an_owner_hook_lets_a_plain_session_convener_run_the_council_detached() 
     // The council seals on its own task, with the convener's job bound.
     let store = fixture.state.temporary_council_store_for_tests();
     let council_id = fixture.council_id("hooked-detached");
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + Duration::from_mins(1);
     while store
         .load(&council_id)
         .await
@@ -2853,7 +2853,7 @@ async fn a_status_read_never_revives_the_owner_and_delivery_still_does() {
         .submit_retained_completion(&owner, delivery.clone(), &record, 1)
         .await
         .expect("commit the completion");
-    tokio::time::timeout(Duration::from_secs(60), entered)
+    tokio::time::timeout(Duration::from_mins(1), entered)
         .await
         .expect("the delivery owner resolves the row")
         .expect("the hook remains owned");
@@ -2892,7 +2892,7 @@ async fn a_status_read_never_revives_the_owner_and_delivery_still_does() {
     release
         .send(true)
         .expect("release the parked resolution as live");
-    let applied = tokio::time::timeout(Duration::from_secs(60), async {
+    let applied = tokio::time::timeout(Duration::from_mins(1), async {
         loop {
             if let meerkat::ContinuationStatus::Applied { session, .. } = continuations
                 .continuation_status(&owner, &delivery.key)
@@ -3112,7 +3112,7 @@ async fn a_row_owed_to_a_destroyed_mobs_member_never_reaches_the_mob_created_aga
         "the new member has its own address"
     );
 
-    let applied = tokio::time::timeout(Duration::from_secs(60), async {
+    let applied = tokio::time::timeout(Duration::from_mins(1), async {
         loop {
             if let meerkat::ContinuationStatus::Applied { session, .. } = continuations
                 .continuation_status(&owner, &current.key)
@@ -3277,7 +3277,7 @@ async fn a_status_read_keeps_a_discarded_ephemeral_owner_pending_through_its_sam
     let mut restore = meerkat_core::service::SessionBuildOptions::default();
     restore.resume_existing_session(snapshot);
     let restored = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         service.create_session(request(restore)),
     )
     .await
@@ -3501,7 +3501,7 @@ async fn delivery_keeps_a_discarded_ephemeral_owner_owed_until_a_hint_after_its_
     let mut restore = meerkat_core::service::SessionBuildOptions::default();
     restore.resume_existing_session(snapshot);
     let restored = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         service.create_session(request(restore)),
     )
     .await

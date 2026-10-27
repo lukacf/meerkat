@@ -1805,7 +1805,7 @@ struct RuntimeOAuthDevicePollLifecycle {
 
 impl Default for RuntimeOAuthFlowHandle {
     fn default() -> Self {
-        Self::new(Duration::from_secs(10 * 60))
+        Self::new(Duration::from_mins(10))
     }
 }
 
@@ -2444,7 +2444,7 @@ pub(crate) mod tests {
 
     fn owner(store: &Arc<dyn RuntimeStore>) -> RuntimeOAuthFlowHandle {
         RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(600),
+            Duration::from_mins(10),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             store,
         )
@@ -2908,7 +2908,7 @@ pub(crate) mod tests {
     fn browser_flow_only_machine_stays_reauth_required_until_credentials_commit() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority =
-            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_mins(1), lifecycle.clone());
         let target = target();
         let provider = OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1/callback";
@@ -2947,7 +2947,7 @@ pub(crate) mod tests {
     fn missing_browser_projection_cannot_overwrite_authmachine_flow() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority =
-            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_mins(1), lifecycle.clone());
         let target = target();
         let provider = OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1/callback";
@@ -2996,7 +2996,7 @@ pub(crate) mod tests {
     fn missing_device_poll_projection_cannot_overwrite_authmachine_flow() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority =
-            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_mins(1), lifecycle.clone());
         let target = target();
         let provider = OAuthProviderIdentity::GoogleCodeAssist;
         let device_code = "provider-device-code";
@@ -3006,7 +3006,7 @@ pub(crate) mod tests {
                 target.clone(),
                 provider,
                 device_code.to_string(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )
             .expect("device flow admitted");
         let poll = authority
@@ -3035,7 +3035,7 @@ pub(crate) mod tests {
         let store = Arc::new(FailingOAuthSnapshotStore::default());
         let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
         let authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             lifecycle.clone(),
             &store_dyn,
         );
@@ -3146,7 +3146,7 @@ pub(crate) mod tests {
         let store = Arc::new(FailingOAuthSnapshotStore::default());
         let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
         let authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             lifecycle.clone(),
             &store_dyn,
         );
@@ -3161,7 +3161,7 @@ pub(crate) mod tests {
                 target.clone(),
                 provider,
                 failed_device_code.to_string(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             ),
             Err(OAuthFlowError::PersistenceFailed { .. })
         ));
@@ -3179,7 +3179,7 @@ pub(crate) mod tests {
                 target,
                 provider,
                 successful_device_code.to_string(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )
             .expect("subsequent device admit persists after store recovers");
         let snapshot_json = store
@@ -3209,12 +3209,12 @@ pub(crate) mod tests {
         let store_two: Arc<dyn RuntimeStore> =
             Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
         let first_authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_one,
         );
         let second_authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_two,
         );
@@ -3263,7 +3263,7 @@ pub(crate) mod tests {
         );
 
         let restarted = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_three,
         );
@@ -3290,7 +3290,7 @@ pub(crate) mod tests {
         let store = Arc::new(FailingOAuthSnapshotStore::default());
         let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
         let creator = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_dyn,
         );
@@ -3310,13 +3310,13 @@ pub(crate) mod tests {
 
         let stale_authority = Arc::new(
             RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 Arc::new(RuntimeAuthLeaseHandle::new()),
                 &store_dyn,
             ),
         );
         let consumer = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_dyn,
         );
@@ -3366,7 +3366,7 @@ pub(crate) mod tests {
         );
 
         let restarted = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_dyn,
         );
@@ -3392,7 +3392,7 @@ pub(crate) mod tests {
         let store = Arc::new(FailingOAuthSnapshotStore::default());
         let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
         let creator = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_dyn,
         );
@@ -3406,19 +3406,19 @@ pub(crate) mod tests {
                 target.clone(),
                 provider,
                 consumed_device_code.to_string(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )
             .expect("creator admits device flow");
 
         let stale_authority = Arc::new(
             RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 Arc::new(RuntimeAuthLeaseHandle::new()),
                 &store_dyn,
             ),
         );
         let consumer = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_dyn,
         );
@@ -3432,7 +3432,7 @@ pub(crate) mod tests {
                     replacement_target,
                     provider,
                     replacement_device_code.to_string(),
-                    Duration::from_secs(60),
+                    Duration::from_mins(1),
                 )
             }
         });
@@ -3470,7 +3470,7 @@ pub(crate) mod tests {
         );
 
         let restarted = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_dyn,
         );
@@ -3498,7 +3498,7 @@ pub(crate) mod tests {
         let consumer_store: Arc<dyn RuntimeStore> =
             Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
         let creator = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &creator_store,
         );
@@ -3510,12 +3510,12 @@ pub(crate) mod tests {
                 target.clone(),
                 provider,
                 device_code.to_string(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )
             .expect("creator admits device flow");
 
         let stale_authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &stale_store,
         );
@@ -3523,7 +3523,7 @@ pub(crate) mod tests {
             .begin_device_code_poll(device_code, &target, provider)
             .expect("stale authority begins pending poll");
         let consumer = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &consumer_store,
         );
@@ -3554,7 +3554,7 @@ pub(crate) mod tests {
         let restarted_store: Arc<dyn RuntimeStore> =
             Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
         let restarted = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &restarted_store,
         );
@@ -3579,7 +3579,7 @@ pub(crate) mod tests {
         let consumer_store: Arc<dyn RuntimeStore> =
             Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
         let creator = RuntimeOAuthFlowHandle::new_with_capacity_auth_lease_and_store(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             1,
             Arc::new(RuntimeAuthLeaseHandle::new()),
             Some(Arc::downgrade(&creator_store)),
@@ -3599,13 +3599,13 @@ pub(crate) mod tests {
             .expect("creator admits browser flow");
 
         let stale_authority = RuntimeOAuthFlowHandle::new_with_capacity_auth_lease_and_store(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             1,
             Arc::new(RuntimeAuthLeaseHandle::new()),
             Some(Arc::downgrade(&stale_store)),
         );
         let consumer = RuntimeOAuthFlowHandle::new_with_capacity_auth_lease_and_store(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             1,
             Arc::new(RuntimeAuthLeaseHandle::new()),
             Some(Arc::downgrade(&consumer_store)),
@@ -3644,7 +3644,7 @@ pub(crate) mod tests {
         let consumer_store: Arc<dyn RuntimeStore> =
             Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
         let creator = RuntimeOAuthFlowHandle::new_with_capacity_auth_lease_and_store(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             1,
             Arc::new(RuntimeAuthLeaseHandle::new()),
             Some(Arc::downgrade(&creator_store)),
@@ -3659,18 +3659,18 @@ pub(crate) mod tests {
                 target.clone(),
                 provider,
                 consumed_device_code.to_string(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )
             .expect("creator admits device flow");
 
         let stale_authority = RuntimeOAuthFlowHandle::new_with_capacity_auth_lease_and_store(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             1,
             Arc::new(RuntimeAuthLeaseHandle::new()),
             Some(Arc::downgrade(&stale_store)),
         );
         let consumer = RuntimeOAuthFlowHandle::new_with_capacity_auth_lease_and_store(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             1,
             Arc::new(RuntimeAuthLeaseHandle::new()),
             Some(Arc::downgrade(&consumer_store)),
@@ -3686,7 +3686,7 @@ pub(crate) mod tests {
                 replacement_target.clone(),
                 provider,
                 replacement_device_code.to_string(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )
             .expect("stale capacity is pruned before device admit");
         stale_authority
@@ -3699,7 +3699,7 @@ pub(crate) mod tests {
         let store = Arc::new(FailingOAuthSnapshotStore::default());
         let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
         let creator = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_dyn,
         );
@@ -3716,13 +3716,13 @@ pub(crate) mod tests {
             .expect("browser flow admitted");
         let first = Arc::new(
             RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 Arc::new(RuntimeAuthLeaseHandle::new()),
                 &store_dyn,
             ),
         );
         let second = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_dyn,
         );
@@ -3755,7 +3755,7 @@ pub(crate) mod tests {
         let store = Arc::new(FailingOAuthSnapshotStore::default());
         let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
         let creator = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_dyn,
         );
@@ -3767,16 +3767,16 @@ pub(crate) mod tests {
                 target.clone(),
                 provider,
                 device_code.to_string(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )
             .expect("device flow admitted");
         let first = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_dyn,
         );
         let second = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_dyn,
         );
@@ -3812,14 +3812,14 @@ pub(crate) mod tests {
         let second_store = Arc::clone(&store) as Arc<dyn RuntimeStore>;
         let first = Arc::new(
             RuntimeOAuthFlowHandle::new_with_capacity_auth_lease_and_store(
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 1,
                 Arc::new(RuntimeAuthLeaseHandle::new()),
                 Some(Arc::downgrade(&first_store)),
             ),
         );
         let second = RuntimeOAuthFlowHandle::new_with_capacity_auth_lease_and_store(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             1,
             Arc::new(RuntimeAuthLeaseHandle::new()),
             Some(Arc::downgrade(&second_store)),
@@ -3872,14 +3872,14 @@ pub(crate) mod tests {
         let second_store = Arc::clone(&store) as Arc<dyn RuntimeStore>;
         let first = Arc::new(
             RuntimeOAuthFlowHandle::new_with_capacity_auth_lease_and_store(
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 1,
                 Arc::new(RuntimeAuthLeaseHandle::new()),
                 Some(Arc::downgrade(&first_store)),
             ),
         );
         let second = RuntimeOAuthFlowHandle::new_with_capacity_auth_lease_and_store(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             1,
             Arc::new(RuntimeAuthLeaseHandle::new()),
             Some(Arc::downgrade(&second_store)),
@@ -3897,7 +3897,7 @@ pub(crate) mod tests {
                     first_target,
                     provider,
                     "first-device-code".to_string(),
-                    Duration::from_secs(60),
+                    Duration::from_mins(1),
                 )
             }
         });
@@ -3908,7 +3908,7 @@ pub(crate) mod tests {
                 second_target,
                 provider,
                 "second-device-code".to_string(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )
             .expect("second authority wins durable device admission race");
         store.release_blocked_oauth_persist();
@@ -3930,7 +3930,7 @@ pub(crate) mod tests {
         let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
         let authority = Arc::new(
             RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 lifecycle,
                 &store_dyn,
             ),
@@ -4000,7 +4000,7 @@ pub(crate) mod tests {
 
         let restarted_lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let restarted = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             restarted_lifecycle,
             &store_dyn,
         );
@@ -4016,7 +4016,7 @@ pub(crate) mod tests {
         let store = Arc::new(FailingOAuthSnapshotStore::default());
         let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
         let authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             lifecycle.clone(),
             &store_dyn,
         );
@@ -4051,7 +4051,7 @@ pub(crate) mod tests {
         let store = Arc::new(FailingOAuthSnapshotStore::default());
         let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
         let authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             lifecycle.clone(),
             &store_dyn,
         );
@@ -4063,7 +4063,7 @@ pub(crate) mod tests {
                 target.clone(),
                 provider,
                 device_code.to_string(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )
             .expect("device flow admitted");
         let poll = authority
@@ -4092,7 +4092,7 @@ pub(crate) mod tests {
         let store = Arc::new(FailingOAuthSnapshotStore::default());
         let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
         let authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             lifecycle.clone(),
             &store_dyn,
         );
@@ -4131,12 +4131,12 @@ pub(crate) mod tests {
         let store = Arc::new(FailingOAuthSnapshotStore::default());
         let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
         let releasing_authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             releasing_lifecycle.clone(),
             &store_dyn,
         );
         let admitting_authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_dyn,
         );
@@ -4188,12 +4188,12 @@ pub(crate) mod tests {
             Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
         let releasing_lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let releasing_authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             releasing_lifecycle.clone(),
             &releasing_store,
         );
         let admitting_authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &admitting_store,
         );
@@ -4216,7 +4216,7 @@ pub(crate) mod tests {
                 target.clone(),
                 device_provider,
                 device_code.to_string(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )
             .expect("other authority admits device flow");
         assert!(
@@ -4235,7 +4235,7 @@ pub(crate) mod tests {
         let restarted_store: Arc<dyn RuntimeStore> =
             Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
         let restarted = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &restarted_store,
         );
@@ -4264,7 +4264,7 @@ pub(crate) mod tests {
     fn oauth_flow_membership_does_not_advance_credential_generation() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority =
-            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_mins(1), lifecycle.clone());
         let target = target();
         let lease_key = LeaseKey::from_credential_identity(&target);
         let provider = OAuthProviderIdentity::OpenAiChatGpt;
@@ -4383,7 +4383,7 @@ pub(crate) mod tests {
     fn device_admit_rejects_registry_pruned_canonical_membership() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority =
-            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_mins(1), lifecycle.clone());
         let target = target();
         let provider = OAuthProviderIdentity::GoogleCodeAssist;
         let device_code = "provider-device-code";
@@ -4393,7 +4393,7 @@ pub(crate) mod tests {
                 target.clone(),
                 provider,
                 device_code.to_string(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )
             .expect("device flow admitted");
         assert!(lifecycle.has_oauth_device_flow_for_test(&target, device_code));
@@ -4408,7 +4408,7 @@ pub(crate) mod tests {
                 target.clone(),
                 provider,
                 device_code.to_string(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             ),
             Err(OAuthFlowError::LifecycleRejected {
                 operation: "admit_oauth_device_flow",
@@ -4442,7 +4442,7 @@ pub(crate) mod tests {
     fn duplicate_device_admit_preserves_active_lifecycle_membership() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority =
-            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_mins(1), lifecycle.clone());
         let target = target();
         let provider = OAuthProviderIdentity::GoogleCodeAssist;
         let device_code = "provider-device-code";
@@ -4452,14 +4452,14 @@ pub(crate) mod tests {
                 target.clone(),
                 provider,
                 device_code.to_string(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )
             .expect("device flow admitted");
         let duplicate = authority.admit_device_code(
             target.clone(),
             provider,
             device_code.to_string(),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
 
         assert!(matches!(
@@ -4479,7 +4479,7 @@ pub(crate) mod tests {
     fn stale_registry_payloads_do_not_block_authmachine_admission_after_lifecycle_release() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority = RuntimeOAuthFlowHandle::new_with_capacity_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             1,
             lifecycle.clone(),
         );
@@ -4512,7 +4512,7 @@ pub(crate) mod tests {
     fn release_observer_does_not_prune_flow_admitted_after_release_acceptance() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             lifecycle.clone(),
         ));
         let target = target_with_binding("release_after_accept_openai");
@@ -4576,7 +4576,7 @@ pub(crate) mod tests {
     fn release_precommit_admission_waits_for_release_commit() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             lifecycle.clone(),
         ));
         let target = target_with_binding("release_before_commit_openai");
@@ -4648,7 +4648,7 @@ pub(crate) mod tests {
     fn browser_capacity_rejection_comes_from_authmachine_lifecycle() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority = RuntimeOAuthFlowHandle::new_with_capacity_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             1,
             lifecycle,
         );
@@ -4683,7 +4683,7 @@ pub(crate) mod tests {
     fn unknown_or_replayed_browser_state_is_a_missing_attempt() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority =
-            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle);
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_mins(1), lifecycle);
         let target = target();
         let provider = OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1/callback";
@@ -4720,7 +4720,7 @@ pub(crate) mod tests {
     fn browser_provider_mismatch_rejection_comes_from_authmachine_lifecycle() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority =
-            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle);
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_mins(1), lifecycle);
         let target = target();
         let redirect_uri = "http://127.0.0.1/callback";
         let state = authority
@@ -4755,7 +4755,7 @@ pub(crate) mod tests {
     fn browser_redirect_mismatch_is_refused_typed_and_leaves_the_attempt() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority =
-            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_mins(1), lifecycle.clone());
         let target = target();
         let provider = OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1:41001/callback";
@@ -4801,7 +4801,7 @@ pub(crate) mod tests {
     fn browser_provider_mismatch_on_another_redirect_stays_a_lifecycle_rejection() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority =
-            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle);
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_mins(1), lifecycle);
         let target = target();
         let state = authority
             .start(
@@ -4842,7 +4842,7 @@ pub(crate) mod tests {
     fn release_lease_terminally_cancels_pending_browser_flow() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority =
-            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_mins(1), lifecycle.clone());
         let target = target_with_binding("release_cancels_browser");
         let lease_key = LeaseKey::from_credential_identity(&target);
         let provider = OAuthProviderIdentity::OpenAiChatGpt;
@@ -4897,7 +4897,7 @@ pub(crate) mod tests {
     fn release_lease_terminally_cancels_pending_device_flow() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority =
-            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_mins(1), lifecycle.clone());
         let target = target_with_binding("release_cancels_device");
         let lease_key = LeaseKey::from_credential_identity(&target);
         let provider = OAuthProviderIdentity::OpenAiChatGpt;
@@ -4907,7 +4907,7 @@ pub(crate) mod tests {
                 target.clone(),
                 provider,
                 "device-code-1".to_string(),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )
             .expect("device flow admitted");
 
@@ -4976,7 +4976,7 @@ pub(crate) mod tests {
     fn late_prune_expire_at_release_acceptance_is_benign() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority =
-            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_mins(1), lifecycle.clone());
         let target = target_with_binding("release_late_prune");
         let lease_key = LeaseKey::from_credential_identity(&target);
         let provider = OAuthProviderIdentity::OpenAiChatGpt;
@@ -5153,7 +5153,7 @@ mod connector_owner_tests {
             Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&path).unwrap());
         assert!(persisted_snapshot(&store).browser.is_empty());
         let owner = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(300),
+            Duration::from_mins(5),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store,
         );
@@ -5185,7 +5185,7 @@ mod connector_owner_tests {
             &store_a,
         );
         let owner_b = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store_b,
         );
@@ -5327,10 +5327,8 @@ mod connector_owner_tests {
     #[test]
     fn explicit_retirement_and_revocation_are_native_terminal_transitions() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
-        let owner = RuntimeOAuthFlowHandle::new_with_auth_lease(
-            Duration::from_secs(600),
-            lifecycle.clone(),
-        );
+        let owner =
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_mins(10), lifecycle.clone());
         let target = target("account-a");
         let expired = owner
             .start(
@@ -5375,7 +5373,7 @@ mod connector_owner_tests {
 
     #[test]
     fn connector_deadline_uses_existing_window_even_with_longer_llm_ttl() {
-        let owner = RuntimeOAuthFlowHandle::new(Duration::from_secs(600));
+        let owner = RuntimeOAuthFlowHandle::new(Duration::from_mins(10));
         let target = target("account-a");
         owner
             .start(
@@ -5403,7 +5401,7 @@ mod connector_owner_tests {
             let store: Arc<dyn RuntimeStore> =
                 Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&path).unwrap());
             let owner = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-                Duration::from_secs(600),
+                Duration::from_mins(10),
                 Arc::new(RuntimeAuthLeaseHandle::new()),
                 &store,
             );
@@ -5420,7 +5418,7 @@ mod connector_owner_tests {
             let store: Arc<dyn RuntimeStore> =
                 Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&path).unwrap());
             let owner = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-                Duration::from_secs(600),
+                Duration::from_mins(10),
                 Arc::new(RuntimeAuthLeaseHandle::new()),
                 &store,
             );
@@ -5440,7 +5438,7 @@ mod connector_owner_tests {
         let store: Arc<dyn RuntimeStore> =
             Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&path).unwrap());
         let owner = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(600),
+            Duration::from_mins(10),
             Arc::new(RuntimeAuthLeaseHandle::new()),
             &store,
         );
@@ -5506,7 +5504,7 @@ mod start_admission_tests {
     const REDIRECT: &str = "http://127.0.0.1:12345/callback";
     const RESOURCE: &str = "https://mcp.example/mcp";
     const ACCOUNT: &str = "account-a";
-    const TTL: Duration = Duration::from_secs(600);
+    const TTL: Duration = Duration::from_mins(10);
 
     /// An MCP target of its own: the login lifecycle lock is process-wide
     /// per lease key, so no two tests share one.

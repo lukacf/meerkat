@@ -664,7 +664,7 @@ fn compute_replacements(
         }
     }
 
-    replacements.sort_by(|lhs, rhs| lhs.0.cmp(&rhs.0));
+    replacements.sort_by_key(|lhs| lhs.0);
     Ok(replacements)
 }
 

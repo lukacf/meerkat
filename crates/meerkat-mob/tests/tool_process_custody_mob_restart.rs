@@ -50,7 +50,7 @@ const NEXT_PROMPT: &str = "what happened?";
 const ANSWER: &str = "noted";
 /// Bound on the host child reaching the tool; a child that exits first fails
 /// the row at once.
-const CHILD_BOUND: Duration = Duration::from_secs(180);
+const CHILD_BOUND: Duration = Duration::from_mins(3);
 
 /// Scripted model: on a fresh request (no tool results, no interrupted-run
 /// notice) it calls the shell tool; otherwise it answers.
@@ -413,7 +413,7 @@ async fn mob_member_interrupted_by_host_death_is_settled_not_replayed_on_resume(
         .resume()
         .await
         .expect("mob resume after host death");
-    tokio::time::timeout(Duration::from_secs(60), async {
+    tokio::time::timeout(Duration::from_mins(1), async {
         handle
             .member(&AgentIdentity::from(WORKER))
             .await

@@ -6711,7 +6711,7 @@ mod skill_activation_effect_tests {
                 approvals.clone(),
                 std::time::Duration::from_secs(30),
             )
-            .with_human_consent(route.clone(), std::time::Duration::from_secs(3600)),
+            .with_human_consent(route.clone(), std::time::Duration::from_hours(1)),
         );
         let mut agent =
             with_test_turn_state_handle(AgentBuilder::new().with_operation_review(review.clone()))

@@ -3476,7 +3476,7 @@ mod tests {
             Duration::from_secs(30),
         );
         Arc::new(if routed {
-            review.with_human_consent(Arc::new(NoConsentRoute), Duration::from_secs(60))
+            review.with_human_consent(Arc::new(NoConsentRoute), Duration::from_mins(1))
         } else {
             review
         })

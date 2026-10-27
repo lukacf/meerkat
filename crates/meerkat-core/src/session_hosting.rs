@@ -1330,7 +1330,7 @@ mod native {
             let (entered, release) = hold_next_release(&path);
             let releasing = std::thread::spawn(move || drop(predecessor));
             entered
-                .recv_timeout(Duration::from_secs(60))
+                .recv_timeout(Duration::from_mins(1))
                 .expect("the predecessor's release began");
             let ClaimAttempt::Acquired {
                 lock: successor,

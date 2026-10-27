@@ -82,7 +82,7 @@ async fn rkat_mcp_starts_without_a_working_directory_when_no_flag_needs_it() {
     let _ = stdin.shutdown().await;
     drop(stdin);
 
-    let output = timeout(Duration::from_secs(180), child.wait_with_output())
+    let output = timeout(Duration::from_mins(3), child.wait_with_output())
         .await
         .expect("rkat-mcp exits once stdin closes")
         .expect("rkat-mcp wait");

@@ -501,7 +501,7 @@ fn open() -> ChildGrantValidity {
     ChildGrantValidity {
         not_before_ms: 0,
         expires_at_ms: u64::MAX,
-        deadline: Instant::now() + Duration::from_secs(3600),
+        deadline: Instant::now() + Duration::from_hours(1),
     }
 }
 fn child_intent(parent: &GrantLineageRef, name: &str) -> ChildGrantIntent {

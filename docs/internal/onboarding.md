@@ -6,7 +6,7 @@ the same runtime contracts.
 
 ## Prerequisites
 
-- Rust 1.94.1 (the pinned toolchain in `rust-toolchain.toml`)
+- Rust 1.97.0 (the pinned toolchain in `rust-toolchain.toml`)
 - `cargo-nextest` for the default Cargo test lanes
 - GNU Make
 - Git

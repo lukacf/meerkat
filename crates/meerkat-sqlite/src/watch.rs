@@ -47,12 +47,12 @@ use std::time::{Duration, Instant};
 use notify::{RecursiveMode, Watcher as _};
 
 /// Default sweep interval: the bounded eventual-wake guarantee.
-pub const SQLITE_WATCH_SWEEP: Duration = Duration::from_millis(5_000);
+pub const SQLITE_WATCH_SWEEP: Duration = Duration::from_secs(5);
 /// Settle delay after a notification, so a burst of events (a commit touches
 /// the WAL and its index) coalesces into one tick.
 const SQLITE_WATCH_COALESCE: Duration = Duration::from_millis(10);
 const SQLITE_WATCH_RECOVERY_BACKOFF_MIN: Duration = Duration::from_millis(100);
-const SQLITE_WATCH_RECOVERY_BACKOFF_MAX: Duration = Duration::from_millis(30_000);
+const SQLITE_WATCH_RECOVERY_BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// Notification registrations a process runs at once. A stalled platform
 /// (macOS FSEvents) holds each one for as long as it stalls, with two threads
 /// apiece, so a stall holds at most 128 threads; past this many, a new watch
@@ -1765,16 +1765,12 @@ mod tests {
             "the last close removed both"
         );
         let (tick_tx, tick_rx) = mpsc::channel();
-        let watch = start_sqlite_change_watch(
-            &db,
-            "test-own-open",
-            Duration::from_secs(3600),
-            move |tick| {
+        let watch =
+            start_sqlite_change_watch(&db, "test-own-open", Duration::from_hours(1), move |tick| {
                 let _ = tick_tx.send(tick);
                 SqliteWatchControl::Handled
-            },
-        )
-        .expect("watch starts");
+            })
+            .expect("watch starts");
         assert_eq!(
             settled_registration(&watch),
             SqliteWatchRegistration::Registered
@@ -1841,7 +1837,7 @@ mod tests {
         let watch = start_sqlite_change_watch(
             &db,
             "test-commit-existing-wal",
-            Duration::from_secs(3600),
+            Duration::from_hours(1),
             move |tick| {
                 let _ = tick_tx.send(tick);
                 SqliteWatchControl::Handled
@@ -1889,7 +1885,7 @@ mod tests {
         let watch = start_sqlite_change_watch(
             &db,
             "test-commit-creates-wal",
-            Duration::from_secs(3600),
+            Duration::from_hours(1),
             move |tick| {
                 let _ = tick_tx.send(tick);
                 SqliteWatchControl::Handled
@@ -2163,7 +2159,7 @@ mod tests {
     /// guard, not a latency bound. A macOS FSEvents registration can take tens
     /// of seconds ([`WatchSource::watch`]), so a minute; a registration that
     /// never returns still fails the row.
-    const REGISTRATION_BOUND: Duration = Duration::from_secs(60);
+    const REGISTRATION_BOUND: Duration = Duration::from_mins(1);
     /// How long a row waits for released sources to finish their teardown:
     /// a hang guard, not a latency bound. Dropping a macOS FSEvents source
     /// joins its run-loop thread, which makes two round trips to the file
@@ -2171,7 +2167,7 @@ mod tests {
     /// before it lets go ([`WatchSource::teardown_waits`]), and under load two
     /// of those teardowns in turn outlasted the 10 s guard. So a minute; a
     /// teardown that never ends still fails the row.
-    const TEARDOWN_BOUND: Duration = Duration::from_secs(60);
+    const TEARDOWN_BOUND: Duration = Duration::from_mins(1);
 
     #[test]
     fn a_held_registration_does_not_hold_the_start() {

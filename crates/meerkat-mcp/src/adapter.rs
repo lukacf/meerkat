@@ -2893,7 +2893,7 @@ mod tests {
                 meerkat_core::ToolDeadlineChain::new(vec![
                     meerkat_core::ToolDeadlineContributor::finite(
                         meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                        Duration::from_secs(600),
+                        Duration::from_mins(10),
                     ),
                 ])
                 .expect("deadline chain"),
@@ -2941,7 +2941,7 @@ mod tests {
                     meerkat_core::ToolDeadlineChain::new(vec![
                         meerkat_core::ToolDeadlineContributor::finite(
                             meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                            Duration::from_secs(600),
+                            Duration::from_mins(10),
                         ),
                     ])
                     .expect("deadline chain"),
@@ -2989,7 +2989,7 @@ mod tests {
                     meerkat_core::ToolDeadlineChain::new(vec![
                         meerkat_core::ToolDeadlineContributor::finite(
                             meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                            Duration::from_secs(600),
+                            Duration::from_mins(10),
                         ),
                     ])
                     .expect("deadline chain"),
@@ -3072,7 +3072,7 @@ mod tests {
                 meerkat_core::ToolDeadlineChain::new(vec![
                     meerkat_core::ToolDeadlineContributor::finite(
                         meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                        Duration::from_secs(600),
+                        Duration::from_mins(10),
                     ),
                 ])
                 .expect("deadline chain"),
@@ -3100,7 +3100,7 @@ mod tests {
                 meerkat_core::ToolDeadlineChain::new(vec![
                     meerkat_core::ToolDeadlineContributor::finite(
                         meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                        Duration::from_secs(600),
+                        Duration::from_mins(10),
                     ),
                 ])
                 .expect("deadline chain"),
@@ -4082,7 +4082,7 @@ mod tests {
             meerkat_core::ToolDeadlineChain::new(vec![
                 meerkat_core::ToolDeadlineContributor::finite(
                     meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                    Duration::from_secs(600),
+                    Duration::from_mins(10),
                 ),
             ])
             .expect("deadline chain"),
@@ -4170,7 +4170,7 @@ mod tests {
             meerkat_core::ToolDeadlineChain::new(vec![
                 meerkat_core::ToolDeadlineContributor::finite(
                     meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                    Duration::from_secs(600),
+                    Duration::from_mins(10),
                 ),
             ])
             .expect("deadline chain"),
@@ -4281,7 +4281,7 @@ mod tests {
             meerkat_core::ToolDeadlineChain::new(vec![
                 meerkat_core::ToolDeadlineContributor::finite(
                     meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                    Duration::from_secs(600),
+                    Duration::from_mins(10),
                 ),
             ])
             .expect("deadline chain"),

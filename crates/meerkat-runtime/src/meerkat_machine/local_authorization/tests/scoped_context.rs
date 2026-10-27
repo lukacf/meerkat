@@ -525,7 +525,10 @@ async fn retained_resume_goes_through_the_installed_owner() {
     let client = retained_resume_with(Some(reacquiring))
         .await
         .expect("current original and grants admit the resume");
-    assert!(client.client().controller_model_selection().as_ref() == Some(client.selection()));
+    assert_eq!(
+        client.client().controller_model_selection().as_ref(),
+        Some(client.selection())
+    );
 }
 
 /// An owner that requires scoped destinations refuses governed work until a

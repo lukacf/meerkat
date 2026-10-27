@@ -208,7 +208,7 @@ impl FenceTiming {
     pub const MIN_RENEW_INTERVAL: Duration = Duration::from_secs(1);
 
     /// The longest lease a host may choose. A takeover may wait this long.
-    pub const MAX_LEASE: Duration = Duration::from_secs(60 * 60);
+    pub const MAX_LEASE: Duration = Duration::from_hours(1);
 
     /// A timing that renews every `renew_interval` and keeps a holder live
     /// for `lease` after its last acquire or renew. The interval is at least

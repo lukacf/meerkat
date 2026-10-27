@@ -558,7 +558,7 @@ async fn assert_retained_profile_policy_matches_native_gate(
             // exact saga to its terminal reply instead, under an outer bound so
             // a wedged retirement still fails the test rather than hanging it.
             tokio::time::timeout(
-                std::time::Duration::from_secs(120),
+                std::time::Duration::from_mins(2),
                 retire_to_terminal(&handle, &identity),
             )
             .await

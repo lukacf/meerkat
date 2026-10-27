@@ -397,7 +397,7 @@ static LIVE_GROUPS: Mutex<BTreeMap<i32, Option<ProcessStartStamp>>> = Mutex::new
 /// Upper bound on one blocking exit wait of a release watcher. The watcher
 /// re-lists and waits again; the bound only limits how long a stale listing
 /// is trusted, never whether a group is considered exited.
-const RELEASE_WATCH_ROTATION: Duration = Duration::from_secs(600);
+const RELEASE_WATCH_ROTATION: Duration = Duration::from_mins(10);
 
 fn live_groups() -> std::sync::MutexGuard<'static, BTreeMap<i32, Option<ProcessStartStamp>>> {
     LIVE_GROUPS.lock().unwrap_or_else(PoisonError::into_inner)

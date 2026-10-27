@@ -699,7 +699,7 @@ where
 
 /// Bound on waiting, at CLI exit, for a session's durable event projection
 /// (the realm event log and `.rkat/sessions/<id>/events.jsonl`) to drain.
-const CLI_EVENT_PROJECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+const CLI_EVENT_PROJECTION_DRAIN_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Wait until every event the session published is in its durable event log
 /// and the derived `.rkat/` files are synced.
@@ -7362,7 +7362,7 @@ fn resolve_login_provider(hint: Option<&str>) -> anyhow::Result<LoginProvider> {
             .ok_or_else(|| anyhow::anyhow!("Selection must be 1 or greater"))?
     };
     ALL_LOGIN_PROVIDERS.get(idx).copied().ok_or_else(|| {
-        anyhow::anyhow!("Selection out of range (1..={})", ALL_LOGIN_PROVIDERS.len(),)
+        anyhow::anyhow!("Selection out of range (1..={})", ALL_LOGIN_PROVIDERS.len())
     })
 }
 
@@ -8686,8 +8686,8 @@ async fn interactive_login(
     if let Some(env_var) = provider.env_var()
         && std::env::var(env_var)
             .ok()
-            .filter(|v| !v.is_empty())
-            .is_some()
+            .as_ref()
+            .is_some_and(|v| !v.is_empty())
     {
         eprintln!();
         print_warn(&format!("{env_var} is set in your environment."));
@@ -8805,7 +8805,7 @@ async fn interactive_login(
         4,
         "Waiting for you to finish the sign-in (timeout: 2 minutes)",
     );
-    let outcome = match handle.wait(Duration::from_secs(120)).await {
+    let outcome = match handle.wait(Duration::from_mins(2)).await {
         Ok(o) => o,
         Err(OAuthError::Timeout) => {
             eprintln!();
@@ -8872,7 +8872,7 @@ async fn interactive_login(
         auth_green(&format!("Signed in to {}.", provider.display_name())),
     );
     eprintln!();
-    eprintln!("  {} {}", auth_bold("Profile:"), key,);
+    eprintln!("  {} {}", auth_bold("Profile:"), key);
     eprintln!("  {} {}", auth_bold("Storage:"), storage_location);
     if let Some(expiry) = expires_at {
         let human_delta = (expiry - chrono::Utc::now()).num_minutes();
@@ -8985,10 +8985,10 @@ async fn interactive_logout(binding_key: &str, scope: &RuntimeScope) -> anyhow::
             )
             .await
             .map_err(|e| anyhow::anyhow!("Token lifecycle clear failed: {e}"))?;
-            eprintln!("{} Cleared {}", auth_green("✓"), key,);
+            eprintln!("{} Cleared {}", auth_green("✓"), key);
             cleared += 1;
         } else {
-            eprintln!("{} No stored credentials for {}", auth_dim("·"), key,);
+            eprintln!("{} No stored credentials for {}", auth_dim("·"), key);
         }
     }
     if cleared == 0 {
@@ -9413,8 +9413,8 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
 fn env_var_present(env_key: &str) -> bool {
     std::env::var(env_key)
         .ok()
-        .filter(|value| !value.is_empty())
-        .is_some()
+        .as_ref()
+        .is_some_and(|value| !value.is_empty())
 }
 
 /// The doctor's self-hosted probe sends the server's configured credential,
@@ -24620,7 +24620,7 @@ mod tests {
             .await
             .expect("the schedule is created");
 
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_mins(1);
         let occurrence = loop {
             let occurrence = schedules
                 .list_occurrences(&schedule.schedule_id)
@@ -26231,7 +26231,7 @@ mod tests {
             .expect("test AuthLeaseHandle must be certified by generated AuthMachine authority");
         let authority = Arc::new(
             meerkat_runtime::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-                std::time::Duration::from_secs(60),
+                std::time::Duration::from_mins(1),
                 Arc::clone(&raw_auth_lease),
             ),
         );
@@ -32743,7 +32743,7 @@ capabilities = ["core", "skills", "hooks", "adaptive_flow"]
             config.budget_limits(),
             BudgetLimits {
                 max_tokens: Some(200_000),
-                max_duration: Some(Duration::from_secs(900)),
+                max_duration: Some(Duration::from_mins(15)),
                 max_turn_duration: None,
                 max_tool_calls: Some(50),
             }
@@ -32782,7 +32782,7 @@ capabilities = ["core", "skills", "hooks", "adaptive_flow"]
             config.budget_limits(),
             BudgetLimits {
                 max_tokens: Some(1000),
-                max_duration: Some(Duration::from_secs(900)),
+                max_duration: Some(Duration::from_mins(15)),
                 max_turn_duration: None,
                 max_tool_calls: Some(7),
             },
@@ -34046,7 +34046,7 @@ auth_profile = "inline"
             *observed.lock().expect("lock observed"),
             Some(BudgetLimits {
                 max_tokens: Some(1000),
-                max_duration: Some(Duration::from_secs(900)),
+                max_duration: Some(Duration::from_mins(15)),
                 max_turn_duration: None,
                 max_tool_calls: Some(7),
             }),

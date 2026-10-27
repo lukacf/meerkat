@@ -1431,13 +1431,13 @@ mod tests {
         let err = AgentError::llm(
             "anthropic",
             LlmFailureReason::RateLimited {
-                retry_after: Some(std::time::Duration::from_secs(60)),
+                retry_after: Some(std::time::Duration::from_mins(1)),
             },
             "rate limited",
         );
         assert_eq!(
             err.retry_after_hint(),
-            Some(std::time::Duration::from_secs(60))
+            Some(std::time::Duration::from_mins(1))
         );
     }
 

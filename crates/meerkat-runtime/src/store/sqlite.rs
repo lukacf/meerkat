@@ -645,18 +645,11 @@ CREATE TABLE IF NOT EXISTS runtime_direct_member_high_waters (
         })
     }
 
-    struct PreFloorNoopWake;
-
-    impl std::task::Wake for PreFloorNoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn accept_pre_0_8_10_input_immediately(
         driver: &mut crate::driver::ephemeral::EphemeralRuntimeDriver,
         input: crate::input::Input,
     ) -> Result<crate::accept::AcceptOutcome, String> {
-        let waker = std::task::Waker::from(Arc::new(PreFloorNoopWake));
-        let mut context = std::task::Context::from_waker(&waker);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         let mut future = Box::pin(crate::traits::RuntimeDriver::accept_input(driver, input));
         match std::future::Future::poll(future.as_mut(), &mut context) {
             std::task::Poll::Ready(result) => result.map_err(|error| error.to_string()),

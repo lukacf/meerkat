@@ -296,7 +296,7 @@ content = "Evaluate technical feasibility, architecture options, scalability con
         "Briefly outline 3 key research questions about the market for AI code assistants. \
              Keep your response to 3-4 sentences total. Do NOT use any tools -- \
              just provide the questions in plain text.",
-        std::time::Duration::from_secs(60),
+        std::time::Duration::from_mins(1),
         &mut std::io::stdout(),
     )
     .await;

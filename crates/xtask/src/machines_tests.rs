@@ -430,7 +430,7 @@ fn tlc_lane_script_heap_floor_matches_the_xtask_floor() {
 fn tlc_lane_budget_split_never_exceeds_the_total_worker_budget() {
     let budget = |workers: usize| TlcRunBudget {
         workers,
-        cap: std::time::Duration::from_secs(900),
+        cap: std::time::Duration::from_mins(15),
         gc_threads: None,
         heap_mb: None,
     };

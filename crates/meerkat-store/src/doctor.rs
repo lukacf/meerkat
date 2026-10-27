@@ -219,7 +219,7 @@ const TRANSCRIPT_HISTORY_REPORT_CAP: usize = 20;
 /// markers are live coordination (info), older ones are crash leftovers
 /// (warning). Deliberately far above the store's own takeover window so a
 /// marker mid-takeover is never flagged.
-const FIRST_START_MARKER_STALE_AFTER: Duration = Duration::from_secs(600);
+const FIRST_START_MARKER_STALE_AFTER: Duration = Duration::from_mins(10);
 
 const FIRST_START_MARKER_PREFIX: &str = ".realm-first-start.";
 const FIRST_START_MARKER_SUFFIX: &str = ".lock";
@@ -3855,7 +3855,7 @@ mod tests {
             .open(&lock_path)
             .unwrap();
         lock.set_times(
-            std::fs::FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(3600)),
+            std::fs::FileTimes::new().set_modified(SystemTime::now() - Duration::from_hours(1)),
         )
         .unwrap();
         drop(lock);

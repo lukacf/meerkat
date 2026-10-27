@@ -5661,7 +5661,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -5726,7 +5726,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -5810,7 +5810,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )])
             .unwrap(),
         );
@@ -5871,7 +5871,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )])
             .unwrap(),
         );
@@ -5910,7 +5910,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -5975,7 +5975,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6042,7 +6042,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6088,7 +6088,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6230,7 +6230,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6299,7 +6299,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6351,7 +6351,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6395,7 +6395,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6845,7 +6845,7 @@ mod governed_operation_tests {
         let resolution = crate::ToolExecutionResolutionContext::new(
             crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
                 crate::ToolDeadlineOwner::CoreToolDispatch,
-                std::time::Duration::from_secs(60),
+                std::time::Duration::from_mins(1),
             )])
             .unwrap(),
         );
@@ -7030,7 +7030,7 @@ mod governed_operation_tests {
                 tier,
                 0,
                 begin_after_checks,
-                std::time::Duration::from_secs(3600),
+                std::time::Duration::from_hours(1),
             )
         }
 

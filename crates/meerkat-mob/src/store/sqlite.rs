@@ -15996,7 +15996,7 @@ mod identity_fence_contention_tests {
     /// Ends a [`hold_mob_db_until`] hold that nobody releases, so a fence
     /// that waits for the lock instead of its own bound fails instead of
     /// hanging the suite.
-    const HOLD_GUARD: Duration = Duration::from_secs(60);
+    const HOLD_GUARD: Duration = Duration::from_mins(1);
 
     /// An adopted identity with a current lease in a SQLite identity store.
     struct AdoptedIdentity {

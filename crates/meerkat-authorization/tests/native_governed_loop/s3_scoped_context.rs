@@ -165,7 +165,7 @@ async fn scoped_destination_carries_a_native_turn_and_refuses_other_destinations
         .pin_controller_client_for_actor(&actor)
         .await
         .expect("actual immutable selected LlmClientAdapter");
-    assert!(pin.selection() == &selection());
+    assert_eq!(pin.selection(), &selection());
     // This scripted transport has no physical vault or external credential.
     // Native readiness still uses the actual machine's generated owner and the
     // exact credential identity pinned by the real adapter.
@@ -412,7 +412,7 @@ async fn a_retired_destination_keeps_the_known_result_and_the_executor() {
         .pin_controller_client_for_actor(&actor)
         .await
         .expect("actual immutable selected LlmClientAdapter");
-    assert!(pin.selection() == &selection());
+    assert_eq!(pin.selection(), &selection());
     // This scripted transport has no physical vault or external credential.
     // Native readiness still uses the actual machine's generated owner and the
     // exact credential identity pinned by the real adapter.

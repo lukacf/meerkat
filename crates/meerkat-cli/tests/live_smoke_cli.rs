@@ -211,7 +211,7 @@ async fn inner_e2e_cli_run_resume_persistence() -> Result<(), Box<dyn std::error
 
     // --- Step 1: Initial run ---
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .args([
@@ -248,7 +248,7 @@ async fn inner_e2e_cli_run_resume_persistence() -> Result<(), Box<dyn std::error
 
     // --- Step 2: Resume and ask about name ---
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .args([
@@ -332,7 +332,7 @@ async fn inner_e2e_cli_shell_tool() -> Result<(), Box<dyn std::error::Error>> {
     let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .args([
@@ -373,7 +373,7 @@ async fn inner_e2e_cli_shell_tool() -> Result<(), Box<dyn std::error::Error>> {
     let schema =
         r#"{"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"]}"#;
     let structured_output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .args([
@@ -465,7 +465,7 @@ async fn inner_e2e_cli_generate_image_openai_default() -> Result<(), Box<dyn std
 
     let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
     let output = timeout(
-        Duration::from_secs(600),
+        Duration::from_mins(10),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .args([
@@ -802,7 +802,7 @@ async fn inner_e2e_cli_structured_output() -> Result<(), Box<dyn std::error::Err
         r#"{"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"]}"#;
 
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .args([
@@ -901,7 +901,7 @@ async fn inner_e2e_001_bg_active_turn() -> Result<(), Box<dyn std::error::Error>
     // Ask the agent to run a fast background job and wait for it to complete.
     // The agent should see the completion via [SYSTEM NOTICE][BG_JOB].
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .args([
@@ -1105,7 +1105,7 @@ async fn inner_e2e_cli_shorthand_prompt() -> Result<(), Box<dyn std::error::Erro
 
     let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .arg("Hello Meerkat!")
@@ -1223,7 +1223,7 @@ async fn inner_e2e_cli_slow_mcp_resume_journey() -> Result<(), Box<dyn std::erro
 
     // --- Turn one beside the pending server ---
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .args([
@@ -1247,7 +1247,7 @@ async fn inner_e2e_cli_slow_mcp_resume_journey() -> Result<(), Box<dyn std::erro
 
     // --- Turn two: resume while the server is still pending ---
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .args(["run", "--resume", &session_id, "Reply with the word ok."])
@@ -1263,7 +1263,7 @@ async fn inner_e2e_cli_slow_mcp_resume_journey() -> Result<(), Box<dyn std::erro
     // --- Turn three: resume after the slow server is gone ---
     tokio::fs::remove_file(project_dir.join(".rkat/mcp.toml")).await?;
     let output = timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .args(["run", "--resume", &session_id, "Reply with the word ok."])

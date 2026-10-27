@@ -444,7 +444,7 @@ mod config_loading {
             retry_config.initial_delay,
             std::time::Duration::from_secs(1)
         );
-        assert_eq!(retry_config.max_delay, std::time::Duration::from_secs(60));
+        assert_eq!(retry_config.max_delay, std::time::Duration::from_mins(1));
 
         // Verify BudgetLimits can be deserialized
         let budget_toml = r"

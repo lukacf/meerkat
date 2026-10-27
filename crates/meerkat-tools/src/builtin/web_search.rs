@@ -455,7 +455,7 @@ mod tests {
         executor: Arc<dyn WebSearchExecutor>,
         work: meerkat_core::WorkAuthorizationContext,
     ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
-        governed_dispatch_within(executor, work, std::time::Duration::from_secs(60)).await
+        governed_dispatch_within(executor, work, std::time::Duration::from_mins(1)).await
     }
 
     /// [`governed_dispatch`] whose plan has `tool_time` as its tool timeout.

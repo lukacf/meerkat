@@ -1719,7 +1719,7 @@ fn store_with_held_rehydration(binding: &str) -> Arc<crate::handles::FailingOAut
     let store = Arc::new(crate::handles::FailingOAuthSnapshotStore::default());
     let store_dyn: Arc<dyn crate::store::RuntimeStore> = store.clone();
     let flows = crate::handles::RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-        Duration::from_secs(600),
+        Duration::from_mins(10),
         Arc::new(crate::handles::RuntimeAuthLeaseHandle::new()),
         &store_dyn,
     );
@@ -1972,7 +1972,7 @@ fn persistent_oauth_flow_authority_survives_process_cache_restart_for_sqlite_sto
             target.clone(),
             device_provider,
             "device-code".to_string(),
-            Duration::from_secs(120),
+            Duration::from_mins(2),
         )
         .expect("persistent runtime authority admits device OAuth state");
     drop(first);
@@ -2025,7 +2025,7 @@ fn persistent_oauth_device_consume_prunes_durable_snapshot_for_sqlite_store() {
             target.clone(),
             provider,
             "consumed-device-code".to_string(),
-            Duration::from_secs(120),
+            Duration::from_mins(2),
         )
         .expect("persistent runtime authority admits device OAuth state");
     machine
@@ -2210,7 +2210,7 @@ fn persistent_oauth_release_prunes_durable_payload_snapshot_for_sqlite_store() {
             target.clone(),
             device_provider,
             "released-device-code".to_string(),
-            Duration::from_secs(120),
+            Duration::from_mins(2),
         )
         .expect("persistent runtime authority admits device OAuth state");
     machine
@@ -2294,7 +2294,7 @@ fn oauth_device_expiry_clears_runtime_lifecycle_membership() {
             target,
             provider,
             device_code.to_string(),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         )
         .expect("registry expiry should expire the AuthMachine flow membership");
 }
@@ -3878,7 +3878,7 @@ async fn held_teardown_session() -> HeldTeardownSession {
         .expect("the registered session exposes its exact registration");
     // The watcher waits for the unregister it joins under its caller grace;
     // keep that wait open for the whole test.
-    machine.test_set_unregister_caller_wait_grace(Duration::from_secs(3600));
+    machine.test_set_unregister_caller_wait_grace(Duration::from_hours(1));
     HeldTeardownSession {
         store,
         machine,
@@ -5851,7 +5851,7 @@ async fn mixed_directed_max_attempt_failure_terminalizes_only_exhausted_contribu
     /// reruns, on a runner executing roughly twenty concurrent jobs. The bound
     /// exists so a genuinely stuck choreography fails instead of hanging the
     /// suite, and a generous one serves that identically.
-    const STEP_BOUND: Duration = Duration::from_secs(60);
+    const STEP_BOUND: Duration = Duration::from_mins(1);
 
     struct MixedMaxAttemptsExecutor {
         apply_calls: Arc<AtomicUsize>,
@@ -6996,7 +6996,7 @@ async fn unregister_session_aborts_and_removes_drain_slot() {
         &session_id,
         CommsDrainMode::PersistentHost,
         comms_runtime,
-        Duration::from_secs(60),
+        Duration::from_mins(1),
     )
     .await;
 
@@ -33721,7 +33721,7 @@ async fn meerkat_machine_spine_snapshot_tracks_comms_drain_state() {
         &session_id,
         CommsDrainMode::PersistentHost,
         comms_runtime,
-        Duration::from_secs(60),
+        Duration::from_mins(1),
     )
     .await;
 
@@ -58956,7 +58956,7 @@ mod terminal_completion_batch_bound {
                 .await
                 .expect("the session is registered");
             let stopped = tokio::time::timeout(
-                Duration::from_secs(120),
+                Duration::from_mins(2),
                 self.machine
                     .stop_runtime_executor_until_terminal_if_current(&registration, reason),
             )
@@ -59027,7 +59027,7 @@ mod terminal_completion_batch_bound {
             waiters: Vec<CompletionHandle>,
             context: &str,
         ) -> Vec<Result<CompletionOutcome, CompletionWaitError>> {
-            self.settle_within(waiters, context, Duration::from_secs(120))
+            self.settle_within(waiters, context, Duration::from_mins(2))
                 .await
         }
 
@@ -59390,7 +59390,7 @@ mod terminal_completion_batch_bound {
             .expect("the runtime loop parks on the hold")
             .expect("park signal");
         tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             crate::traits::RuntimeControlPlane::retire(
                 fixture.machine.as_ref(),
                 &fixture.runtime_id(),
@@ -59677,7 +59677,7 @@ mod terminal_completion_batch_bound {
             .expect("the runtime loop parks on the hold")
             .expect("park signal");
         tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             crate::traits::RuntimeControlPlane::retire(
                 fixture.machine.as_ref(),
                 &fixture.runtime_id(),
@@ -59687,7 +59687,7 @@ mod terminal_completion_batch_bound {
         .expect("the retire returns within 60 s")
         .expect("retire while the held loop owns the drain");
         let abandoned_count = tokio::time::timeout(
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             fixture
                 .machine
                 .abandon_retired_pending_inputs(&fixture.session_id, "retired cleanup"),
@@ -59745,7 +59745,7 @@ mod terminal_completion_batch_bound {
             .expect("the runtime loop parks on the hold")
             .expect("park signal");
         let report = tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             crate::traits::RuntimeControlPlane::retire(
                 fixture.machine.as_ref(),
                 &fixture.runtime_id(),
@@ -59759,7 +59759,7 @@ mod terminal_completion_batch_bound {
             "the held loop owns the drain: retire abandons nothing"
         );
         let abandoned_count = tokio::time::timeout(
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             fixture
                 .machine
                 .abandon_retired_pending_inputs(&fixture.session_id, "retired cleanup"),
@@ -60132,7 +60132,7 @@ mod terminal_completion_batch_bound {
         let deadline = meerkat_core::time_compat::Instant::now()
             + meerkat_core::time_compat::Duration::from_secs(2);
         let cleanup = tokio::time::timeout(
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             fixture.machine.abandon_retired_pending_inputs_before(
                 &fixture.session_id,
                 "retired cleanup",
@@ -60197,7 +60197,7 @@ mod terminal_completion_batch_bound {
             retired_with_pending_mixed_inputs(&fixture, Arc::clone(&publisher) as _, BACKLOG, 0)
                 .await;
         let abandoned_count = tokio::time::timeout(
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             fixture
                 .machine
                 .abandon_retired_pending_inputs(&fixture.session_id, "retired cleanup"),
@@ -60369,7 +60369,7 @@ mod terminal_completion_batch_bound {
             .expect("prepare the archive lease")
             .expect("the registered session has an archive lease");
         let retired = tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             fixture
                 .machine
                 .retire_session_with_archive_lease_and_post_commit_hook_before(

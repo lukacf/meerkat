@@ -1534,7 +1534,7 @@ pub(crate) mod tests {
         let resolution = crate::ToolExecutionResolutionContext::new(
             crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
                 crate::ToolDeadlineOwner::CoreToolDispatch,
-                std::time::Duration::from_secs(600),
+                std::time::Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -1898,7 +1898,7 @@ pub(crate) mod tests {
         let resolution = crate::ToolExecutionResolutionContext::new(
             crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
                 crate::ToolDeadlineOwner::CoreToolDispatch,
-                std::time::Duration::from_secs(600),
+                std::time::Duration::from_mins(10),
             )])
             .expect("deadline chain"),
         );
@@ -2330,7 +2330,7 @@ pub(crate) mod tests {
 
         let (dispatched, hold_until) = std::sync::mpsc::channel::<()>();
         let clock_hold = tokio::task::spawn_blocking(move || {
-            let _ = hold_until.recv_timeout(std::time::Duration::from_secs(60));
+            let _ = hold_until.recv_timeout(std::time::Duration::from_mins(1));
         });
         let error = dispatch_named_with_context(&gated, "alpha").await;
         drop(dispatched);

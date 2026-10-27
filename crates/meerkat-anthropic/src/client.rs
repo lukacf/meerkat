@@ -31,7 +31,7 @@ use crate::tool_schema_root::{
 /// Default connect timeout
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default request timeout
-const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// Default pool idle timeout
 const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -4173,7 +4173,7 @@ mod tests {
     fn test_client_builder_creates_configured_client() -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::builder("test-key".to_string())
             .connect_timeout(std::time::Duration::from_secs(5))
-            .request_timeout(std::time::Duration::from_secs(120))
+            .request_timeout(std::time::Duration::from_mins(2))
             .build()?;
 
         assert_eq!(client.provider(), Provider::Anthropic);

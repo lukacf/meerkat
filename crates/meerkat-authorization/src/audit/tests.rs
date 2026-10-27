@@ -647,15 +647,15 @@ fn a_second_owner_change_still_refuses_with_one_refused_record() {
         }
     ));
     // The rebuilt attempt read 2 and the change it met completed at 4.
-    assert!(
-        refusal_read(&prepared)
-            == AuditRefusalRead::new(
-                1,
-                AuditRefusalBasis::PublicationChanged,
-                2,
-                Some(4),
-                prepared.instance,
-            )
+    assert_eq!(
+        refusal_read(&prepared),
+        AuditRefusalRead::new(
+            1,
+            AuditRefusalBasis::PublicationChanged,
+            2,
+            Some(4),
+            prepared.instance,
+        )
     );
 }
 
@@ -676,15 +676,15 @@ fn a_change_still_in_progress_reads_as_change_in_progress() {
             if refusal.kind() == OperationRefusalKind::ReprepareRequired
     ));
     assert_eq!(prepared.attempts, 0, "no owner is asked during a change");
-    assert!(
-        refusal_read(&prepared)
-            == AuditRefusalRead::new(
-                1,
-                AuditRefusalBasis::ChangeInProgress,
-                1,
-                Some(1),
-                prepared.instance,
-            )
+    assert_eq!(
+        refusal_read(&prepared),
+        AuditRefusalRead::new(
+            1,
+            AuditRefusalBasis::ChangeInProgress,
+            1,
+            Some(1),
+            prepared.instance,
+        )
     );
 }
 

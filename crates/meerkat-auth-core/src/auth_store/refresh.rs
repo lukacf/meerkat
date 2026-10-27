@@ -468,7 +468,7 @@ mod file_lock {
 
     /// How long a caller-runtime coordinator waits for another holder of the
     /// cross-process lock before answering with a typed pending refusal.
-    const CALLER_RUNTIME_LOCK_WAIT: Duration = Duration::from_secs(120);
+    const CALLER_RUNTIME_LOCK_WAIT: Duration = Duration::from_mins(2);
 
     /// Pause between non-blocking lock attempts.
     const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(20);

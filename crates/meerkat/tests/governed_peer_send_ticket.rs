@@ -816,7 +816,7 @@ async fn an_unused_peer_send_ticket_refuses_after_its_run_is_consumed() {
         .pin_controller_client_for_actor(&actor)
         .await
         .expect("selected controller client");
-    assert!(pin.selection() == &selection());
+    assert_eq!(pin.selection(), &selection());
     let credential_owner = machine.generated_auth_lease_handle();
     meerkat_core::publish_token_lifecycle_acquired_for_identity_within(
         &credential_owner,

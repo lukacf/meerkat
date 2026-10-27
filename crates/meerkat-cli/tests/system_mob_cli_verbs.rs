@@ -39,7 +39,7 @@ use deterministic_mob_provider::{
     remove_ambient_provider_credentials,
 };
 
-const DESCRIPTOR_TIMEOUT: Duration = Duration::from_secs(60);
+const DESCRIPTOR_TIMEOUT: Duration = Duration::from_mins(1);
 /// The bind bridge reply deadline is 60s (actor bind_host send); the verb
 /// budget must comfortably contain it.
 const VERB_TIMEOUT: Duration = Duration::from_secs(150);

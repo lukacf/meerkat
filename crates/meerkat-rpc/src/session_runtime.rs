@@ -19071,7 +19071,7 @@ mod tests {
             "the persisted attempt is still live"
         );
         let owner = meerkat_runtime::handles::RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            Duration::from_secs(600),
+            Duration::from_mins(10),
             Arc::new(meerkat_runtime::handles::RuntimeAuthLeaseHandle::new()),
             &reopened,
         );
@@ -22464,7 +22464,7 @@ mod tests {
     ) -> Result<RunResult, RpcError> {
         let (event_tx, _event_rx) = mpsc::channel(100);
         tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             runtime.start_turn_via_runtime(
                 session_id,
                 prompt.into(),
@@ -25104,7 +25104,7 @@ mod tests {
             })
             .await
             .expect("create the schedule");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
         loop {
             let occurrence = runtime
                 .schedule_service()
@@ -37433,7 +37433,7 @@ mod tests {
         // background drain, not that boundary, finalizes it. A 20 ms timeout
         // raced the boundary's own removal pass and finalized there under load.
         adapter
-            .set_removal_timeout_for_testing(Duration::from_secs(60))
+            .set_removal_timeout_for_testing(Duration::from_mins(1))
             .await
             .expect("set timeout");
         adapter

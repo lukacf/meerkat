@@ -2026,7 +2026,7 @@ impl MobOperatorToolDispatcher {
                         .map(|receipt| AsyncOpRef::detached(receipt.operation_id.clone()))
                         .collect::<Vec<_>>();
                     let mut results = Vec::with_capacity(receipts.len());
-                    for (result, identity) in receipts.into_iter().zip(identities.into_iter()) {
+                    for (result, identity) in receipts.into_iter().zip(identities) {
                         match result {
                             Ok(_receipt) => {
                                 let entry = self

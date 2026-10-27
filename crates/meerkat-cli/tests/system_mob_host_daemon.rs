@@ -60,7 +60,7 @@ use tempfile::TempDir;
 use tokio::process::{Child, Command};
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
-const DESCRIPTOR_TIMEOUT: Duration = Duration::from_secs(60);
+const DESCRIPTOR_TIMEOUT: Duration = Duration::from_mins(1);
 // Lifetime 1 is terminated without a graceful lease release. The replacement
 // driver must wait out the exact 60-second executor lease before it can claim
 // the overdue occurrence, so the observation bound needs deterministic room

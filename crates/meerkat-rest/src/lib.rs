@@ -11296,7 +11296,7 @@ mod tests {
         use tower::ServiceExt;
 
         // Bounds a failure only; the passing path never waits for it.
-        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
 
         let temp = TempDir::new().unwrap();
         let mut state = load_rest_state_with_capacity(&temp, 4).await;
@@ -11558,7 +11558,7 @@ mod tests {
     #[tokio::test]
     async fn rest_graceful_shutdown_keeps_a_durable_sessions_turns_for_the_next_start() {
         // Bounds a failure only; the passing path never waits for it.
-        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
 
         let temp = TempDir::new().unwrap();
         let session_id = {

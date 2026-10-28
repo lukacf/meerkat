@@ -27,7 +27,8 @@ test("typos, empty selections, duplicate IDs and invalid shards cannot produce g
 test("shipping runners discover every registered scenario and shard default acceptance exactly once", () => {
   const browser = require("./browser-e2e.cjs").scenarios;
   for (const scenario of [...require("./scenarios/settled-history-queue.cjs").scenarios,
-    ...require("./scenarios/operator-panel-frame.cjs").scenarios]) {
+    ...require("./scenarios/operator-panel-frame.cjs").scenarios,
+    ...require("./scenarios/history-replay-tool-order.cjs").scenarios]) {
     assert.equal(browser.filter(item => item.id === scenario.id && item.backend === "mock").length, 1, scenario.id);
     assert(selectScenarios(browser, []).selected.some(item => item.id === scenario.id), `${scenario.id} runs by default`);
   }

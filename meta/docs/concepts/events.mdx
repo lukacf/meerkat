@@ -140,6 +140,8 @@ The module boundary accepts direct `EventEnvelope<UnifiedEvent>` JSON and a supp
 
 `insert_event_sorted` uses the same ordering when runtime operations add later events.
 
+The merged envelopes are a recent-event buffer, not a history: the runtime keeps at least the newest 4,096 and drops older ones in batches as new ones arrive. Every forwarded member event lands there, text deltas included. For history, read the event log (`meta/query_events`, when one is configured) or the console timeline.
+
 ## Structural mob events
 
 The structural surface preserves a Meerkat mob-event cursor and the serialized `MobEventKind` payload:

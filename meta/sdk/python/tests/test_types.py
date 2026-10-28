@@ -1686,6 +1686,29 @@ class TestIdentityResolvedToolsResult:
         assert result.identity == "domain:security"
         assert result.session_id == "sid-1"
         assert result.tools == ["shell", "send_message"]
+        assert result.tools_source == "live", "a gateway without the field answers live reads"
+        assert result.record_revision is None
+
+    def test_no_build_recorded_keeps_the_session(self):
+        result = IdentityResolvedToolsResult.from_dict({
+            "identity": "domain:security",
+            "session_id": "sid-1",
+            "tools": [],
+            "tools_source": "no_build_recorded",
+        })
+        assert result.tools_source == "no_build_recorded"
+        assert result.session_id == "sid-1"
+        assert result.tools == []
+
+    def test_an_unknown_tools_source_is_kept_raw(self):
+        result = IdentityResolvedToolsResult.from_dict({
+            "identity": "domain:security",
+            "session_id": "sid-1",
+            "tools": ["shell"],
+            "tools_source": "a_later_source",
+        })
+        assert result.tools_source == "a_later_source"
+        assert result.tools == ["shell"]
 
 
 def _workgraph_item_payload(**overrides):

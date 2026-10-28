@@ -2529,6 +2529,53 @@ impl UnifiedRuntime {
         };
         let remote_identity_authoritative = remote_target.is_some();
         let remote_mob_id = remote_mob_id.to_string();
+        // A durable identity of a same-process peer mob is reached through
+        // its identity door, whatever its residency: its admission guards
+        // (addressability, a pending first-boot row, an owed held completion,
+        // the registered row) and its delivery preparation apply, and Core
+        // wakes it when it is dormant. The door takes the identity's own
+        // lifecycle lock and checks a generated alias against its current
+        // incarnation, so the send holds no lock of the target itself.
+        if let (LocalOrRemote::Local(authority), Some(target)) = (&remote, remote_target.as_ref())
+            && let Some(identity_runtime) = authority.identity_runtime.clone()
+        {
+            let identity = target.durable_identity().clone();
+            // The sender is checked current under its own lock first; it
+            // names the message's origin and does not take the delivery.
+            // The door checks it again under the target's lock, just before
+            // delivery, without the sender's own: taking it there would nest
+            // one identity's lock inside another's.
+            let sender = local_target.clone();
+            run_member_authority_transaction(
+                [local_target],
+                from_local_member.clone(),
+                local_mob_id.clone(),
+                || async { Ok(()) },
+            )
+            .await?;
+            let sent = match sender {
+                Some(sender) => {
+                    identity_runtime
+                        .send_through_identity_door_as(
+                            &identity,
+                            &remote_member_id,
+                            &content,
+                            sender,
+                        )
+                        .await
+                }
+                None => {
+                    identity_runtime
+                        .send_through_identity_door(&identity, &remote_member_id, &content)
+                        .await
+                }
+            };
+            return sent.map_err(|error| CrossMobError::IdentityAuthority {
+                member_id: remote_member_id.clone(),
+                mob_id: remote_mob_id.clone(),
+                message: error.to_string(),
+            });
+        }
         run_member_authority_transaction(
             [local_target, remote_target],
             format!("{from_local_member} -> {remote_member_id}"),

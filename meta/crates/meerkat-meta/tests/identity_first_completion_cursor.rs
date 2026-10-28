@@ -133,26 +133,28 @@ impl SessionBridge for ScriptedPreviewBridge {
         })
     }
 
-    /// One Core transition: the successor is a fresh session one generation
-    /// up, and Core's fence for the member advances with it.
-    async fn reset_member_to_successor(
+    /// One Core transition (Core's rotation): the fresh life is seated on a
+    /// fresh session one generation up, and Core's fence for the member
+    /// advances with it.
+    async fn rotate_member(
         &self,
         identity: &AgentIdentity,
         spec: &DurableAgentSpec,
         _draft: &AgentBuildDraft,
-    ) -> Result<meerkat_meta::identity_first::MemberRuntimeBinding, BridgeError> {
+    ) -> Result<meerkat_core::types::SessionId, BridgeError> {
         let generation = self
             .core
             .last_member_binding(identity)?
             .map_or(0, |binding| binding.generation().get() + 1);
         let agent_runtime_id = AgentRuntimeId::parse(&format!("rt:{identity}:{generation}"))
             .map_err(|error| BridgeError::Mob(error.to_string()))?;
+        let session_id = meerkat_core::types::SessionId::new();
         let binding = meerkat_meta::identity_first::MemberRuntimeBinding {
             agent_runtime_id,
-            session_id: Some(meerkat_core::types::SessionId::new()),
+            session_id: Some(session_id.clone()),
         };
         self.core.bind(identity, &binding, &spec.profile);
-        Ok(binding)
+        Ok(session_id)
     }
 
     async fn live_member(

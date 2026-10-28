@@ -8,7 +8,15 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { Meta, MetaBuilder } from "../dist/index.js";
+import {
+  CONFIGURED_AUTH_BINDING_ORIGIN,
+  Meta,
+  MetaBuilder,
+  authBindingRefToWire,
+  nativeRealmToWire,
+  parseAuthBindingRef,
+  parseNativeRealm,
+} from "../dist/index.js";
 
 describe("Meta.builder()", () => {
   it("returns a MetaBuilder instance", () => {
@@ -145,6 +153,117 @@ describe("MetaBuilder chainable methods", () => {
       () => Meta.builder().providerCredentialsRoot("  "),
       /providerCredentialsRoot path must not be empty/,
     );
+  });
+
+  it("nativeRealm() sets nativeRealm and returns this", () => {
+    const builder = Meta.builder();
+    const realm = {
+      realmId: "native-team",
+      contextRoot: "/srv/native/context",
+      stateRoot: "/srv/native/realms",
+      userConfigRoot: "/srv/native/home",
+    };
+    const result = builder.nativeRealm(realm);
+    assert.equal(result, builder);
+    assert.deepEqual(builder._config.nativeRealm, realm);
+  });
+
+  it("nativeRealm() rejects an empty field and an unknown one", () => {
+    assert.throws(
+      () =>
+        Meta.builder().nativeRealm({
+          realmId: "native-team",
+          contextRoot: "/srv/native/context",
+          stateRoot: " ",
+          userConfigRoot: "/srv/native/home",
+        }),
+      /native realm stateRoot must be a non-empty string/,
+    );
+    assert.throws(
+      () =>
+        Meta.builder().nativeRealm({
+          realmId: "native-team",
+          contextRoot: "/srv/native/context",
+          stateRoot: "/srv/native/realms",
+          userConfigRoot: "/srv/native/home",
+          extra: true,
+        } as never),
+      /native realm has unknown fields: extra/,
+    );
+  });
+
+  it("memberAuthBinding() sets memberAuthBinding and returns this", () => {
+    const builder = Meta.builder();
+    const result = builder.memberAuthBinding({
+      realm: "native-team",
+      binding: "b",
+      profile: "work",
+      origin: "configured",
+    });
+    assert.equal(result, builder);
+    assert.deepEqual(builder._config.memberAuthBinding, {
+      realm: "native-team",
+      binding: "b",
+      profile: "work",
+      origin: "configured",
+    });
+  });
+
+  it("memberAuthBinding() refuses any origin but configured", () => {
+    assert.equal(CONFIGURED_AUTH_BINDING_ORIGIN, "configured");
+    for (const origin of ["synthetic_env_default", "Configured", ""]) {
+      assert.throws(
+        () =>
+          Meta.builder().memberAuthBinding({
+            realm: "native-team",
+            binding: "b",
+            origin,
+          } as never),
+        /auth binding origin must be "configured" or absent/,
+      );
+    }
+  });
+
+  it("memberAuthBinding() rejects empty ids and unknown fields", () => {
+    assert.throws(
+      () => Meta.builder().memberAuthBinding({ realm: "native-team", binding: "" }),
+      /auth binding binding must be a non-empty string/,
+    );
+    assert.throws(
+      () =>
+        Meta.builder().memberAuthBinding({
+          realm: "native-team",
+          binding: "b",
+          token: "x",
+        } as never),
+      /auth binding has unknown fields: token/,
+    );
+  });
+
+  it("the member route values round-trip through their wire forms", () => {
+    const binding = {
+      realm: "native-team",
+      binding: "b",
+      profile: "work",
+      origin: "configured" as const,
+    };
+    assert.deepEqual(parseAuthBindingRef(authBindingRefToWire(binding)), binding);
+    const bare = { realm: "native-team", binding: "b" };
+    assert.deepEqual(authBindingRefToWire(bare), bare);
+    assert.deepEqual(parseAuthBindingRef(authBindingRefToWire(bare)), bare);
+    const realm = {
+      realmId: "native-team",
+      contextRoot: "/srv/native/context",
+      stateRoot: "/srv/native/realms",
+      userConfigRoot: "/srv/native/home",
+    };
+    assert.deepEqual(nativeRealmToWire(realm), {
+      realm_id: "native-team",
+      context_root: "/srv/native/context",
+      state_root: "/srv/native/realms",
+      user_config_root: "/srv/native/home",
+    });
+    assert.deepEqual(parseNativeRealm(nativeRealmToWire(realm)), realm);
   });
 
   it("httpListen() trims, sets httpListen and returns this", () => {
@@ -286,6 +405,20 @@ describe("MetaBuilder chainable methods", () => {
     assert.throws(() => builder.forkInstructionPolicy("inherit" as never), RangeError);
   });
 
+  it("memberRestore() records the restore mode and returns this", () => {
+    for (const restore of ["on_demand", "on_demand_verified", "eager"] as const) {
+      const builder = Meta.builder();
+      const result = builder.memberRestore(restore);
+      assert.equal(result, builder);
+      assert.equal(builder._config.memberRestore, restore);
+    }
+  });
+
+  it("memberRestore() rejects an unknown mode", () => {
+    const builder = Meta.builder();
+    assert.throws(() => builder.memberRestore("lazy" as never), RangeError);
+  });
+
   it("memory() sets memoryConfig with config object and returns this", () => {
     const builder = Meta.builder();
     const cfg = { backend: "local_json" };
@@ -354,6 +487,8 @@ describe("MetaBuilder default config", () => {
     assert.equal(cfg.consoleConfigPath, null);
     assert.equal(cfg.meerkatConfigPath, null);
     assert.equal(cfg.providerCredentialsRoot, null);
+    assert.equal(cfg.nativeRealm, null);
+    assert.equal(cfg.memberAuthBinding, null);
     assert.equal(cfg.httpListen, null);
     assert.equal(cfg.httpPublicBaseUrl, null);
     assert.equal(cfg.allowRemote, null);

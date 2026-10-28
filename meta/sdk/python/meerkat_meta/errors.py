@@ -817,8 +817,8 @@ class IdentityHistoryUnavailableError(RpcError):
     ``session_id``, or starting fresh when ``session_id`` is ``None``), or
     ``"identity_session_absent"`` when a delivery reached a member whose
     session ``session_id`` Core holds no durable copy of: nothing was
-    delivered, and the next delivery starts the identity's fresh session. A
-    failed read of the whole roster's history names no ``identity``.
+    delivered, and Core settles the member; deliver again. A failed read of
+    the whole roster's history names no ``identity``.
     ``kind``, ``identity`` and ``session_id`` are ``None`` when the gateway
     did not send them.
     """

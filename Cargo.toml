@@ -157,10 +157,10 @@ meerkat-store-conformance = { version = "=0.9.7", path = "crates/meerkat-store-c
 oai-rt-rs = { version = "=0.5.1", features = ["experimental-gpt-live"] }
 
 # Meerkat Meta crates (Meta's version line; a Meta release moves these).
-meta-extension-state = { version = "=0.9.5", path = "meta/crates/meta-extension-state" }
-meerkat-meta = { version = "=0.9.5", path = "meta/crates/meerkat-meta" }
+meta-extension-state = { version = "=0.9.6", path = "meta/crates/meta-extension-state" }
+meerkat-meta = { version = "=0.9.6", path = "meta/crates/meerkat-meta" }
 # Connect's code imports Meta as meerkat_mobkit.
-meerkat-mobkit = { package = "meerkat-meta", version = "=0.9.5", path = "meta/crates/meerkat-meta" }
+meerkat-mobkit = { package = "meerkat-meta", version = "=0.9.6", path = "meta/crates/meerkat-meta" }
 
 # Meerkat Connect crates (unpublished).
 toolkit-store = { path = "connect/crates/toolkit-store" }

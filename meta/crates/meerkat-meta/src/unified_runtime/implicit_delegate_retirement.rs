@@ -827,6 +827,10 @@ comms = true
                 .is_some(),
             "the sweeper must be running before identity authority attaches"
         );
+        // Every retire the sweep is about to make in this mob is held, so a
+        // pass that starts before the identity authority attaches reaches its
+        // retire first and is released only once the authority is attached.
+        let (mut retiring, release_retire) = pause_retire("late-bound-retirement");
 
         let identity = DurableIdentity::parse("domain:late-bound").expect("identity");
         // Seated at the roster row of its durable identity, as identity-first
@@ -875,15 +879,26 @@ comms = true
             placement: None,
         };
         identity_runtime.register(spec.clone()).await;
+        // The identity's retirement hook hears of each retire made through
+        // the identity authority; a raw retire of the member tells it nothing.
+        let (retired_tx, mut retirements) = tokio::sync::mpsc::unbounded_channel();
+        let observer: crate::identity_first::runtime::RetiredMemberObserver =
+            Arc::new(move |retired| {
+                let _ = retired_tx.send(retired);
+                Box::pin(async { Ok::<(), String>(()) })
+            });
+        identity_runtime.set_retired_member_observer(Some(observer));
+        let before = identity_runtime.status(&identity).await.expect("status");
         assert_eq!(
-            identity_runtime
-                .status(&identity)
-                .await
-                .expect("status")
-                .state,
+            before.state,
             IdentityLifecycleState::Active,
             "Core holds the seated member before the sweeper runs"
         );
+        let held = tokio::time::timeout(Duration::from_secs(30), retiring.recv())
+            .await
+            .expect("the sweep reached the member's retire")
+            .expect("a held retire");
+        assert_eq!(held[0].0, roster_member);
         runtime.attach_identity_first_context(Arc::new(IdentityFirstRuntimeContext::new(
             Arc::clone(&identity_runtime),
             Arc::new(FixedRoster(vec![spec])),
@@ -891,24 +906,30 @@ comms = true
             None,
             Some(runtime.mob_handle().definition().clone()),
         )));
+        unpause_retire("late-bound-retirement");
+        release_retire.send(()).expect("release the held retire");
 
-        // Retired through the identity authority: Core no longer holds the
-        // member, so the identity reads Dormant.
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if identity_runtime
-                    .status(&identity)
-                    .await
-                    .is_ok_and(|status| status.state == IdentityLifecycleState::Dormant)
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("late-bound sweeper never retired through identity authority");
+        // The held pass reads the identity authority after the attach and
+        // retires through it. That retire is a release: the
+        // identity's retirement hook hears of it, and the identity stays a
+        // member of Core's mob, active on the same session at the same
+        // generation. A raw retire would have ended the membership and told
+        // no hook.
+        let retired = tokio::time::timeout(Duration::from_secs(5), retirements.recv())
+            .await
+            .expect("late-bound sweeper never retired through identity authority")
+            .expect("the retirement hook's channel");
+        assert_eq!(retired.identity, identity);
+        assert_eq!(
+            retired.cause,
+            crate::identity_first::RetiredIdentityCause::Retire
+        );
+        let after = identity_runtime.status(&identity).await.expect("status");
+        assert_eq!(after.state, IdentityLifecycleState::Active, "{after:?}");
+        assert_eq!(after.session_id, before.session_id, "the same session");
+        assert_eq!(after.generation, before.generation, "the same generation");
 
+        drop(release_retire);
         runtime.shutdown().await;
     }
 
@@ -1095,6 +1116,38 @@ comms = true
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(record.clone());
+                Ok(())
+            }
+            async fn identity_tool_record(
+                &self,
+                _mob_id: &str,
+                _identity: &str,
+            ) -> Result<Option<crate::IdentityToolRecord>, MetadataStoreError> {
+                Ok(None)
+            }
+            async fn set_identity_tool_record(
+                &self,
+                _record: &crate::IdentityToolRecord,
+            ) -> Result<(), MetadataStoreError> {
+                Ok(())
+            }
+            async fn load_identity_rotation_intents(
+                &self,
+                _mob_id: &str,
+            ) -> Result<Vec<crate::IdentityRotationIntent>, MetadataStoreError> {
+                Ok(Vec::new())
+            }
+            async fn set_identity_rotation_intent(
+                &self,
+                _intent: &crate::IdentityRotationIntent,
+            ) -> Result<(), MetadataStoreError> {
+                Ok(())
+            }
+            async fn clear_identity_rotation_intent(
+                &self,
+                _mob_id: &str,
+                _identity: &str,
+            ) -> Result<(), MetadataStoreError> {
                 Ok(())
             }
         }
@@ -1763,56 +1816,113 @@ comms = true
         runtime.shutdown().await;
     }
 
-    /// On a runtime whose sessions live in memory only, a retired member's
-    /// session is gone with it. The next wake reads that no authority knows
-    /// the session and starts the identity's fresh life (the Absent rule),
-    /// naming the replaced session, instead of retrying a resume that can
-    /// never succeed.
+    /// On a runtime whose sessions live in memory only, a retire releases
+    /// the member: Core keeps it seated on its session at the same
+    /// generation. Core releases a member only once it is quiescent: while
+    /// its spawn kickoff runs, the retire is refused, retryable, and nothing
+    /// changes; once the kickoff is done, the retire goes ahead. The
+    /// member's next wake is Core's to decide (Core resumes the session it
+    /// still holds, or refuses typed one it holds no copy of), and Meta
+    /// starts no fresh session in its place and names none replaced.
     #[tokio::test]
-    async fn a_retired_identity_of_an_in_memory_runtime_wakes_on_a_fresh_session() {
+    async fn a_retired_identity_of_an_in_memory_runtime_stays_on_its_session() {
         const MOB_ID: &str = "identity-in-memory-retire-wake";
         let temp = tempfile::tempdir().expect("tempdir");
         let metadata_path = temp.path().join("metadata.sqlite3");
-        let mut runtime = boot_sweeping_runtime(
-            MOB_ID,
-            &temp.path().join("state"),
-            &metadata_path,
-            3_600_000,
+        // The member's turns hold until the gate opens, so its spawn kickoff
+        // is in flight at the first retire.
+        let (open_gate, gate) = tokio::sync::watch::channel(false);
+        let mob_spec = crate::MobBootstrapSpec::ephemeral(
+            sweeping_definition(MOB_ID),
+            meerkat_mob::MobStorage::in_memory(),
+            temp.path().join("state"),
+            4,
+            None,
         )
-        .await;
+        .expect("build the idle retirement fixture ephemeral spec")
+        .with_options(crate::MobBootstrapOptions {
+            default_llm_client: Some(Arc::new(GatedLlmClient { gate })),
+            ..sweeping_options()
+        });
+        let mut runtime = bootstrap_sweeping(mob_spec, MOB_ID, &metadata_path, 3_600_000).await;
         let (identity_runtime, identity, _roster_member, before) =
             seated_identity(&mut runtime, MOB_ID).await;
 
-        identity_runtime
-            .retire(&identity)
+        let refused = identity_runtime.retire(&identity).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(crate::identity_first::IdentityRuntimeError::IdentityWakeRetryable { .. })
+            ),
+            "the retire is refused, retryable, while the kickoff runs: {refused:?}"
+        );
+        let unchanged = identity_runtime
+            .status(&identity)
             .await
-            .expect("retire the identity");
-        identity_runtime
-            .materialize(&identity)
+            .expect("identity status");
+        assert_eq!(
+            (unchanged.state, unchanged.session_id.as_ref()),
+            (
+                crate::identity_first::IdentityLifecycleState::Active,
+                Some(&before)
+            ),
+            "the refused retire changed nothing: {unchanged:?}"
+        );
+
+        // Once the kickoff is done the member is quiescent, and the retire,
+        // retried as its refusal says, releases it.
+        open_gate.send(true).expect("open the gate");
+        runtime
+            .mob_handle()
+            .wait_for_kickoff_complete(Some(Duration::from_secs(30)))
             .await
-            .expect("the wake starts a fresh life");
+            .expect("the kickoff resolves");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match identity_runtime.retire(&identity).await {
+                Ok(()) => break,
+                Err(crate::identity_first::IdentityRuntimeError::IdentityWakeRetryable {
+                    ..
+                }) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("retire the quiescent identity: {error:?}"),
+            }
+        }
+        let seated = identity_runtime
+            .status(&identity)
+            .await
+            .expect("identity status");
+        assert_eq!(
+            seated.session_id.as_ref(),
+            Some(&before),
+            "the retire keeps the identity seated on its session: {seated:?}"
+        );
+        match identity_runtime.materialize(&identity).await {
+            Ok(_) => {}
+            Err(crate::identity_first::IdentityRuntimeError::IdentitySessionAbsent {
+                session_id,
+                ..
+            }) => assert_eq!(
+                session_id, before,
+                "Core's refusal names the identity's own session"
+            ),
+            Err(other) => {
+                panic!("the wake resumes the identity's session or is refused typed: {other:?}")
+            }
+        }
         let status = identity_runtime
             .status(&identity)
             .await
             .expect("identity status");
         assert_eq!(
-            status.state,
-            crate::identity_first::IdentityLifecycleState::Active
-        );
-        assert!(
-            status
-                .session_id
-                .as_ref()
-                .is_some_and(|session| *session != before),
-            "the identity runs a fresh session: {status:?}"
+            status.session_id.as_ref(),
+            Some(&before),
+            "Meta started no fresh session: {status:?}"
         );
         assert_eq!(
-            status
-                .replaced_session
-                .as_ref()
-                .map(|replaced| replaced.session_id.clone()),
-            Some(before),
-            "the status names the session the wake replaced"
+            status.replaced_session, None,
+            "Meta names no replaced session: {status:?}"
         );
         runtime.shutdown().await;
     }

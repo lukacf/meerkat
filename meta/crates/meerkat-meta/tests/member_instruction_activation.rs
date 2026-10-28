@@ -24,6 +24,7 @@ use meerkat_meta::identity_first::{
 };
 use meerkat_meta::mob_composition_manifest::persistent_mob_storage;
 use meerkat_meta::{DiscoverySpec, MetaConfig, MobBootstrapOptions, MobBootstrapSpec};
+use meerkat_mob::machines::mob_machine::MemberMaterializationPhase;
 use meerkat_mob::{MobDefinition, ProfileName};
 use serde_json::{Value, json};
 
@@ -114,8 +115,15 @@ struct Booted {
 }
 
 /// Boot on durable state, activated through
-/// `install_and_bootstrap_identity_first_context`.
+/// `install_and_bootstrap_identity_first_context`, with the member
+/// materialized once the roster pass seated it.
 async fn boot(state_path: &std::path::Path) -> Booted {
+    boot_with(state_path, true).await
+}
+
+/// [`boot`], materializing the member only when `materialize` is set: a
+/// boot that does not leaves it a Dormant member of Core's mob.
+async fn boot_with(state_path: &std::path::Path, materialize: bool) -> Booted {
     std::fs::create_dir_all(state_path).expect("state root");
     let (storage, provenance) = persistent_mob_storage(state_path.join("mob.sqlite3"))
         .expect("open persistent mob storage");
@@ -197,8 +205,17 @@ async fn boot(state_path: &std::path::Path) -> Booted {
                 .clone()
                 .expect("Core binds the identity's member to a session")
         }
-        other => panic!("{IDENTITY} did not materialize: {other:?}"),
+        other => panic!("{IDENTITY} was not seated: {other:?}"),
     };
+    // The roster pass seats the member without building it: Core
+    // materializes it now (Core's wake), as a start that restored it built
+    // it before members were restored on demand.
+    if materialize {
+        identity_runtime
+            .materialize(&AgentIdentity::parse(IDENTITY).unwrap())
+            .await
+            .expect("Core materializes the member");
+    }
     Booted {
         unified,
         session_id,
@@ -346,6 +363,70 @@ async fn a_host_activated_member_instruction_survives_a_restart() {
         again["result"]["receipt"]["disposition"],
         json!("duplicate"),
         "re-applying after the restart is a duplicate from durable state: {again:#?}"
+    );
+    booted.unified.shutdown().await;
+}
+
+/// After a restart that materializes nothing, the member is a Dormant member
+/// of Core's mob. Re-applying the activation goes to Core's member-level door
+/// as it is: Core wakes the member itself before the append, and the answer
+/// is the same typed `duplicate` read from durable state, with no second
+/// record.
+#[tokio::test(flavor = "multi_thread")]
+async fn re_applying_an_activation_to_a_dormant_member_after_a_restart_is_a_duplicate() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state_path = temp.path().join("state");
+
+    // Boot 1: the host activates the instruction on the member's session.
+    let booted = boot(&state_path).await;
+    let response = rpc(
+        &booted,
+        "meta/member_activate_instruction",
+        json!({"identity": IDENTITY, "activation": activation()}),
+    )
+    .await;
+    assert!(response["error"].is_null(), "{response:#?}");
+    assert_eq!(
+        response["result"]["receipt"]["disposition"],
+        json!("applied"),
+        "{response:#?}"
+    );
+    let session_id = booted.session_id.clone();
+    booted.unified.shutdown().await;
+    drop(booted);
+
+    // Boot 2: the same durable state, and nothing materializes the member.
+    let booted = boot_with(&state_path, false).await;
+    assert_eq!(
+        booted.session_id, session_id,
+        "the member is seated on its session"
+    );
+    let member = meerkat_meta::member_comms_id::roster_member_id_for_identity(IDENTITY);
+    assert_eq!(
+        booted
+            .unified
+            .mob_handle()
+            .member_materialization_for_test(&member),
+        Some(MemberMaterializationPhase::Dormant),
+        "the restart left the member Dormant"
+    );
+    let again = rpc(
+        &booted,
+        "meta/member_activate_instruction",
+        json!({"identity": IDENTITY, "activation": activation()}),
+    )
+    .await;
+    assert!(again["error"].is_null(), "{again:#?}");
+    assert_eq!(
+        again["result"]["receipt"]["disposition"],
+        json!("duplicate"),
+        "re-applying to the Dormant member is a duplicate from durable state: {again:#?}"
+    );
+    let records = activation_records(&booted).await;
+    assert_eq!(
+        records.len(),
+        1,
+        "the duplicate wrote no second record: {records:?}"
     );
     booted.unified.shutdown().await;
 }

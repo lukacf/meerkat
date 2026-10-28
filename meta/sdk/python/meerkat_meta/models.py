@@ -49,6 +49,116 @@ class ToolArtifactRef:
         return cls(artifact_id=data["artifact_id"], digest=data["digest"])
 
 
+#: The one origin a member auth binding may name.
+CONFIGURED_AUTH_BINDING_ORIGIN = "configured"
+
+
+def _closed_wire(data: Any, fields_: tuple[str, ...], context: str) -> dict[str, Any]:
+    """``data`` as a dict holding no key outside ``fields_``."""
+    if not isinstance(data, dict):
+        raise ValueError(f"{context} must be an object")
+    unknown = sorted(set(data) - set(fields_))
+    if unknown:
+        raise ValueError(f"{context} has unknown fields: {', '.join(unknown)}")
+    return data
+
+
+@dataclass(frozen=True)
+class AuthBindingRef:
+    """A configured auth binding of a realm: Meerkat's ``AuthBindingRef``.
+
+    ``realm`` and ``binding`` name the binding, and ``profile`` one of its
+    auth profiles when set. ``origin`` may be left out or be ``"configured"``,
+    the only origin a member binding takes; any other value raises
+    ``ValueError``. The gateway resolves the binding in the members'
+    configuration at init; this class checks only its shape.
+    """
+
+    realm: str
+    binding: str
+    profile: str | None = None
+    origin: str | None = None
+
+    def __post_init__(self) -> None:
+        for label, part in (("realm", self.realm), ("binding", self.binding)):
+            if not isinstance(part, str) or not part.strip():
+                raise ValueError(f"auth binding {label} must be a non-empty string")
+        if self.profile is not None and (
+            not isinstance(self.profile, str) or not self.profile.strip()
+        ):
+            raise ValueError("auth binding profile must be a non-empty string or None")
+        if self.origin is not None and self.origin != CONFIGURED_AUTH_BINDING_ORIGIN:
+            raise ValueError(
+                f"auth binding origin must be {CONFIGURED_AUTH_BINDING_ORIGIN!r} or None, "
+                f"got {self.origin!r}"
+            )
+
+    def to_wire(self) -> dict[str, str]:
+        wire = {"realm": self.realm, "binding": self.binding}
+        if self.profile is not None:
+            wire["profile"] = self.profile
+        if self.origin is not None:
+            wire["origin"] = self.origin
+        return wire
+
+    @classmethod
+    def from_wire(cls, data: Any) -> AuthBindingRef:
+        wire = _closed_wire(data, ("realm", "binding", "profile", "origin"), "auth binding")
+        return cls(
+            realm=wire.get("realm"),
+            binding=wire.get("binding"),
+            profile=wire.get("profile"),
+            origin=wire.get("origin"),
+        )
+
+
+@dataclass(frozen=True)
+class NativeRealm:
+    """A realm a native host keeps, whose configuration a gateway's members
+    build from (``runtime_options.native_realm``).
+
+    ``realm_id`` is the realm's id, ``state_root`` the realms root it lives
+    under, ``user_config_root`` the home-like root whose ``.rkat/config.toml``
+    is the ``global`` realm's document, and ``context_root`` the native
+    host's context root. The gateway requires each root to be an absolute
+    path and resolves the realm at init; this class checks only that every
+    field is a non-empty string.
+    """
+
+    realm_id: str
+    context_root: str
+    state_root: str
+    user_config_root: str
+
+    def __post_init__(self) -> None:
+        for label in ("realm_id", "context_root", "state_root", "user_config_root"):
+            value = getattr(self, label)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"native realm {label} must be a non-empty string")
+
+    def to_wire(self) -> dict[str, str]:
+        return {
+            "realm_id": self.realm_id,
+            "context_root": self.context_root,
+            "state_root": self.state_root,
+            "user_config_root": self.user_config_root,
+        }
+
+    @classmethod
+    def from_wire(cls, data: Any) -> NativeRealm:
+        wire = _closed_wire(
+            data,
+            ("realm_id", "context_root", "state_root", "user_config_root"),
+            "native realm",
+        )
+        return cls(
+            realm_id=wire.get("realm_id"),
+            context_root=wire.get("context_root"),
+            state_root=wire.get("state_root"),
+            user_config_root=wire.get("user_config_root"),
+        )
+
+
 @dataclass
 class DiscoverySpec:
     """Agent discovery specification.

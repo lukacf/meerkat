@@ -64,6 +64,23 @@ belongs to another sequence space, the stream replays the current space from
 its earliest retained event. A `stream_truncated` gap event carries no `id`,
 so it does not move the reconnect position.
 
+### Dormant members
+
+A member that is seated but not running in this process (dormant after a
+restart, or seated with a session its first wake has not created yet) still
+answers **200** at once. Opening the stream never wakes the member: the
+connection stays open, with keep-alives and no events, until the member is
+woken (a delivery, or an operator or boot wake). The stream then attaches to
+the woken member and replays from its first retained event, or resumes after
+the connection's `Last-Event-ID` when that id names the woken member's
+sequence space. Every event with a place in that sequence carries an
+`<epoch>:<seq>` id of that space (a `stream_truncated` gap event carries
+none), so a reconnect resumes exactly as above. A stream that is waiting ends
+without a final event when the member leaves the mob, when the runtime stops,
+or when the runtime refuses the member's stream for any other reason; a
+reconnect opens it again or answers the refusal. An agent that is not a
+member answers **404**.
+
 ### Frame format
 
 ```
@@ -118,9 +135,9 @@ Streams a replay snapshot followed by live console timeline frames. The route
 accepts the same `identity`, `conversation_id`, `after`, `before`, `mode`, and
 `limit` parameters as [`GET /console/timeline`](/api/rest), with distinct seed
 semantics: without `after`, `since` switches to `recent`. `recent` returns a
-bounded seed page; anchored `since` drains all retained matching backlog in
-pages, so `limit` controls each page, not total replay size. A non-empty
-`Last-Event-ID` header overrides the URL's `after`.
+bounded seed page (`limit` sizes it); anchored `since` replays all retained
+matching backlog, sent page by page as it is read, whatever `limit` says. A
+non-empty `Last-Event-ID` header overrides the URL's `after`.
 
 ### Timeline frame format
 
@@ -151,7 +168,10 @@ data: {"type":"snapshot_complete","cursor":"console:240"}
 
 `after` and `cursor` are omitted on markers when absent. The SSE event name
 and `data.type` need not coincide for updates. Persist cursor-bearing IDs for
-`Last-Event-ID` continuation; frame content remains in `frame.payload`.
+`Last-Event-ID` continuation; frame content remains in `frame.payload`. A
+cursor still resumes after its frame once the log has removed it, as it does
+for a streamed delta frame its block's complete frame superseded (see
+[`GET /console/timeline`](/api/rest)).
 Initial replay refusal is an HTTP error before the stream opens, rather than
 a promise that every failure arrives as a `replay_unavailable` event.
 
@@ -167,6 +187,14 @@ If replay cannot satisfy the requested cursor, the server returns HTTP **409** w
 
 Clients should refetch a recent page and resume from its `latest_cursor`
 rather than retrying the stale cursor.
+
+An anchored replay is read after the stream opens, one page at a time, so it
+can also end early in two ways. If the log no longer holds what follows the
+frames sent (it was cleared while the stream replayed), the stream sends a
+`replay_unavailable` event and ends: handle it as the `409`. If a later page
+cannot be read, the stream ends after the frames it sent, with no
+`snapshot_complete`: reconnect with the last frame's cursor as
+`Last-Event-ID`.
 
 ## Identity timeline stream
 
@@ -221,13 +249,17 @@ Supported scopes:
 For `agent` scope, `agent_id` may be the exact projected ID or the bare alias
 whose only difference is a trailing numeric generation suffix. The server
 applies the scope first and retains at most its three newest matching events.
+It selects from the runtime's buffer of recent merged events (at least the
+newest 4,096), so a scope whose newest matching events are older than the
+buffer returns fewer events, or none.
 
 `last_event_id` is an `event_id` from an earlier
 `meta/events/subscribe` result, not an HTTP SSE frame ID. It must be present
 in that bounded, scope-filtered window. Replay is inclusive: the checkpoint
 event is returned again, followed by later retained events. An unknown,
-out-of-scope, or expired checkpoint returns JSON-RPC `-32602`, so reconnecting
-consumers should deduplicate the first event by `event_id`.
+out-of-scope, or expired checkpoint (one that has left the window or the
+buffer) returns JSON-RPC `-32602`, so reconnecting consumers should
+deduplicate the first event by `event_id`.
 
 ## WorkGraph wake stream
 

@@ -9110,22 +9110,26 @@ async fn a_registry_miss_on_the_gateways_native_seam_waits_typed() {
 /// the delivery's native key holds no commit. The member's preparation the
 /// deadline cut off is not lost: it runs to its end on its own, so the
 /// member is ready without another request, and the retry commits once.
+/// The member is seated Dormant (materialized on first use): it reads active
+/// from the start, so "not prepared" and "ready" are Core's materialization
+/// phase, Dormant before the first delivery and Live once the preparation
+/// finished.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delivery_reaching_its_commit_after_its_deadline_commits_nothing() {
-    use crate::identity_first::{AgentIdentity, IdentityLifecycleState};
+    use crate::identity_first::AgentIdentity;
     use crate::runtime::keyed_inject::{
         KeyedInject, KeyedInjectCallerScope, KeyedInjectReceiver, KeyedInjectRefusalCause,
         KeyedInjectRefusalCode, StaleRequestCause,
     };
+    use meerkat_mob::machines::mob_machine::MemberMaterializationPhase as Phase;
     let state = tempfile::tempdir().expect("state dir");
     let runtime = identity_first_test_runtime(state.path(), "mob-k-deadline").await;
-    let identities = runtime
-        .identity_runtime_ref()
-        .expect("an identity-first runtime");
     let agent = AgentIdentity::parse("agent:a").expect("identity");
-    assert_ne!(
-        identities.status(&agent).await.expect("a status").state,
-        IdentityLifecycleState::Active,
+    let member = crate::member_comms_id::roster_member_id_for_identity(agent.as_str());
+    let mob = runtime.mob_handle();
+    assert_eq!(
+        mob.member_materialization_for_test(&member),
+        Some(Phase::Dormant),
         "the member is not prepared before the first delivery"
     );
     let local = Arc::new(super::local_delivery(&runtime).expect("the gateway's native seam"));
@@ -9162,13 +9166,13 @@ async fn a_delivery_reaching_its_commit_after_its_deadline_commits_nothing() {
     // The preparation the deadline cut off finishes without another request.
     let ready_by = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
-        let state = identities.status(&agent).await.expect("a status").state;
-        if state == IdentityLifecycleState::Active {
+        let phase = mob.member_materialization_for_test(&member);
+        if phase == Some(Phase::Live) {
             break;
         }
         assert!(
             std::time::Instant::now() < ready_by,
-            "the cut-off preparation never finished: {state:?}"
+            "the cut-off preparation never finished: {phase:?}"
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }

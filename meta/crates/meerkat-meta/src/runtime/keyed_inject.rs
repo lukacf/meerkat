@@ -123,7 +123,10 @@ pub enum KeyedInjectRefusalCode {
     Governed,
     /// The delivery key is already bound to other content.
     Conflict,
-    /// The member has no live incarnation now; nothing was committed.
+    /// Core holds no member for the identity now (it left the roster, or
+    /// the request named an incarnation that ended); nothing was committed.
+    /// A seated member, dormant or live, is never refused this: Core
+    /// materializes it for the delivery.
     OwnerRetired,
     /// A native read or write could not be made now; nothing is implied.
     NativeUnavailable,

@@ -18,6 +18,10 @@ use meerkat_runtime::store::{
 use meerkat_runtime::{HostingCapability, LogicalRuntimeId, RuntimeStore};
 
 const REFUSAL: &str = "forwarding probe: controller mutation custody";
+/// The runtime the probe names as owing recovery work: the trait default
+/// refuses the scan, and a store that does not answer it boots every member
+/// eagerly.
+const RECOVERY_WORK_RUNTIME: &str = "forwarding-probe-recovery-work";
 const DELIVERY_GENERATION: u64 = 41;
 /// The probe's commit outcome deadline: neither the trait default
 /// (`DEFAULT_COMMIT_OUTCOME_DEADLINE`) nor the in-memory store's `None`.
@@ -301,6 +305,15 @@ pub(crate) async fn assert_forwards_to(
         "the inner store's import outcome: {imported:?}"
     );
     assert_eq!(
+        store
+            .list_runtimes_with_recovery_work()
+            .await
+            .expect("the inner store's runtimes with recovery work"),
+        vec![LogicalRuntimeId::new(RECOVERY_WORK_RUNTIME)],
+        "the inner store's recovery-work scan: a decorator that keeps the refusing default makes \
+         Core's boot plan restore every member"
+    );
+    assert_eq!(
         probe.calls(),
         vec![
             "execution_custody",
@@ -319,6 +332,7 @@ pub(crate) async fn assert_forwards_to(
             "append_service_call_audit",
             "read_service_call_audit",
             "import_whole_blob_session",
+            "list_runtimes_with_recovery_work",
         ],
         "each method reaches the inner store exactly once"
     );
@@ -367,6 +381,13 @@ mod store_impl {
         fn execution_custody(&self) -> Option<&RuntimeStoreExecutionCustody> {
             self.record("execution_custody");
             Some(&self.custody)
+        }
+
+        async fn list_runtimes_with_recovery_work(
+            &self,
+        ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
+            self.record("list_runtimes_with_recovery_work");
+            Ok(vec![LogicalRuntimeId::new(RECOVERY_WORK_RUNTIME)])
         }
 
         fn try_controller_mutation_custody<'a>(

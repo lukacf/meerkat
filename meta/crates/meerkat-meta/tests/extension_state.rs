@@ -1093,6 +1093,19 @@ async fn extension_native_first_turn_creation_has_stable_owner_after_reset_and_r
             ..
         } if *predecessor_session_id == session
     ));
+    // Core seats the reset successor unborn: its first wake creates its
+    // session. A caller resolves only from a running turn's dispatch (the
+    // native runner stamps the origin session), so the successor is woken
+    // first, as its first delivery would wake it.
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        runtime
+            .mob_handle()
+            .ensure_member_live(successor.identity()),
+    )
+    .await
+    .expect("the successor's first wake answers")
+    .expect("the successor's first wake materializes it");
     let after_reset = caller_at(&context, &successor_session, "stable owner after reset").await;
     assert_eq!(after_reset.principal(), &principal);
     assert!(

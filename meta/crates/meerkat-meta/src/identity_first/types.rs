@@ -576,8 +576,8 @@ pub enum TurnUntrackable {
     /// on the ingress lane.
     BridgeCannotReportOutput,
     /// A re-dispatch meant to be deduplicated onto an earlier tracked
-    /// admission landed on a different session (delivery repair or a respawn
-    /// moved the member), whose runtime ledger had never seen the idempotency
+    /// admission landed on a different session (Core or a respawn moved the
+    /// member), whose runtime ledger had never seen the idempotency
     /// key, so it ran as a turn of its own that this delivery did not track.
     /// Delivered once on the ingress lane.
     SessionRotated,
@@ -773,6 +773,24 @@ pub enum ContinuityFailureKind {
     RoleMigrationNotApplied,
 }
 
+/// An identity's customizer tools that are not published to its member yet.
+/// Either Core built the member held, before the identity runtime was
+/// composed, and the publication that releases it has not succeeded: its
+/// runs wait until the next composition, wake or delivery publishes the
+/// tools. Or the member's build preparation failed, so Core did not build
+/// it: it stays dormant until a later delivery's preparation publishes them.
+/// Process-local: cleared by the next successful publication.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomizerToolsPending {
+    /// Why the tools are not published: the customizer's error, a failed
+    /// release of the member's hold, or the composition not having run yet.
+    pub reason: String,
+    /// The typed refusal, when the customizer's callback tools were refused
+    /// for their installed-artifact references.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_refusal: Option<meerkat_core::ToolArtifactRefusal>,
+}
+
 /// Typed "session needs repair" hold recorded against a Broken identity.
 ///
 /// Produced when a resume, a reload, or the heal authority reports meerkat's
@@ -789,21 +807,6 @@ pub enum ContinuityFailureKind {
 /// which resumes the same durable session and clears the hold. The hold is
 /// process-local (entry state, not durable): a gateway restart re-attempts
 /// the resume once and re-records it if the document is still refused.
-/// A restored member whose customizer tools are not published yet: the
-/// pre-activation `customize_build` for its identity failed, so meerkat
-/// restored it without them. It advertises no customizer tools until its
-/// materialization publishes them (#563). Process-local: cleared by the next
-/// successful publication, and absent after a restart that publishes early.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CustomizerToolsPending {
-    /// Why the early publication did not happen (the customizer error).
-    pub reason: String,
-    /// The typed refusal, when the customizer's callback tools were refused
-    /// for their installed-artifact references.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact_refusal: Option<meerkat_core::ToolArtifactRefusal>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRepairRequired {
     /// The durable session whose committed document needs the repair.
@@ -1381,26 +1384,116 @@ fn write_canonical_json(
 /// public background-warm control inside that same operational envelope.
 pub const MAX_IDENTITY_BACKGROUND_WARM_CONCURRENCY: usize = 16;
 
-/// Controls how identity-first durable agents are materialized at startup.
+/// How an identity-first runtime's roster pass runs at startup.
+///
+/// Under every mode each roster identity is a member of the mob once the
+/// pass reports ready: an identity the mob already holds needs nothing, and
+/// one it does not hold is seated, bound to its session with nothing built.
+/// The mob materializes a member on its first delivery, from the host or
+/// from a peer, and at start only as [`MemberRestore`] says. A read never
+/// materializes one. Every seated member is listed, addressable and reported
+/// `active`, materialized or not.
+///
+/// The names are kept for configuration compatibility: `eager_materialize`
+/// is the reported default and no longer materializes anything itself, and
+/// the lazy names behave as the default except for their background warm
+/// and for hosted identities (placed, or bound to an external runtime): the
+/// default pass creates a hosted identity the mob does not hold through its
+/// host, and a lazy pass leaves it registered and dormant for its first use.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum IdentityBootstrapMode {
-    /// Compatibility mode: startup synchronously creates or resumes every
-    /// identity in the roster.
+    /// The default: the roster pass seats every roster identity the mob
+    /// does not hold, and reports ready once each is a member. Nothing is
+    /// materialized by the pass.
     #[default]
     EagerMaterialize,
-    /// Register roster/topology/continuity metadata only. A concrete member is
-    /// created or resumed on first use or explicit materialization.
+    /// As the default, except that a hosted identity the mob does not hold
+    /// is left for its first use. The name is kept for configuration
+    /// compatibility.
     LazyMaterialize,
-    /// Return after metadata registration and hydrate identities in a tracked
-    /// background task with bounded concurrency.
-    LazyWithBackgroundWarm { concurrency: usize },
+    /// As [`Self::LazyMaterialize`], and once the pass is ready a tracked
+    /// background task asks the mob to materialize each roster identity, at
+    /// most
+    /// `concurrency` at once (`1..=16`), off the ready path: the warm never
+    /// holds the bootstrap's readiness back. Without `concurrency` the warm
+    /// runs at the member restore's bound,
+    /// `META_IDENTITY_RESTORE_CONCURRENCY` (16 by default); in the gateway's
+    /// `runtime_options`, omit the key for that (it refuses an explicit
+    /// `null`).
+    LazyWithBackgroundWarm {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        concurrency: Option<usize>,
+    },
+}
+
+/// How the mob materializes its seated identity members when it starts:
+/// `runtime_options.member_restore` on the stdio gateway,
+/// `UnifiedRuntimeBuilder::member_restore` on the library builder. Absent,
+/// it is [`Self::OnDemand`].
+///
+/// Whatever the mode, every seated member is listed, addressable and
+/// reported active once the start is ready, and a delivery to a member that
+/// is not materialized materializes it first. The mode only decides how much
+/// the start materializes up front, and it applies under every
+/// [`IdentityBootstrapMode`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MemberRestore {
+    /// Materialize at start only the members that hold work (an open or
+    /// suspended run, queued inputs, a pending delivery, a kickoff owed), a
+    /// network transport endpoint, or a host requirement. Every other member
+    /// is materialized by its first delivery.
+    #[default]
+    OnDemand,
+    /// As [`Self::OnDemand`], plus one read-only check per member left
+    /// unmaterialized before the start is ready: a member whose durable
+    /// session cannot be resumed reads broken at ready, as under
+    /// [`Self::Eager`], without being materialized.
+    OnDemandVerified,
+    /// Materialize every seated member at start, as releases before this
+    /// option did.
+    Eager,
+}
+
+impl MemberRestore {
+    /// The wire name (`on_demand`, `on_demand_verified`, `eager`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OnDemand => "on_demand",
+            Self::OnDemandVerified => "on_demand_verified",
+            Self::Eager => "eager",
+        }
+    }
+
+    /// Parse a wire name. Any other value is refused.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "on_demand" => Some(Self::OnDemand),
+            "on_demand_verified" => Some(Self::OnDemandVerified),
+            "eager" => Some(Self::Eager),
+            _ => None,
+        }
+    }
+
+    /// The mob's restore policy for this mode.
+    pub fn policy(self) -> meerkat_mob::MemberRestorePolicy {
+        match self {
+            Self::OnDemand => meerkat_mob::MemberRestorePolicy::OnDemand,
+            Self::OnDemandVerified => meerkat_mob::MemberRestorePolicy::OnDemandVerified,
+            Self::Eager => meerkat_mob::MemberRestorePolicy::Eager,
+        }
+    }
 }
 
 impl IdentityBootstrapMode {
     /// Validate the operational concurrency contract.
     pub fn validate(&self) -> Result<(), String> {
-        if let Self::LazyWithBackgroundWarm { concurrency } = self {
+        if let Self::LazyWithBackgroundWarm {
+            concurrency: Some(concurrency),
+        } = self
+        {
             if *concurrency == 0 {
                 return Err("LazyWithBackgroundWarm concurrency must be greater than 0".to_string());
             }
@@ -1430,23 +1523,26 @@ pub enum IdentityBootstrapState {
     Broken,
 }
 
-/// Where one identity's eager restore stands, published on the bootstrap
-/// status while the restore pass runs, so a host can follow each member
-/// instead of waiting on the whole pass.
+/// Where one identity's restore stands, published on the bootstrap status
+/// once the pass's seat step answers: every member of the pass settles
+/// together, each with its own typed outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "stage", rename_all = "snake_case")]
 pub enum IdentityRestoreProgress {
-    /// The roster metadata is registered; the wake has not started.
+    /// The roster metadata is registered; the identity is not seated by
+    /// this pass (a lazy pass, or a runtime with no session bridge).
     Registered,
-    /// The identity's wake (a resume, or a fresh spawn) is running.
+    /// The identity's seat or held create is running.
     Resuming,
-    /// Core spawned the identity fresh.
+    /// Core seated the identity on a fresh session it minted (a new
+    /// identity, or a fresh life), materialized or not.
     Minted,
-    /// Core resumed the identity onto its committed session.
+    /// Core seated the identity on its own committed session, or already
+    /// held it there, materialized or not.
     Resumed,
-    /// The wake was refused: `code` is the refusal's JSON-RPC
+    /// The seat was refused: `code` is the refusal's JSON-RPC
     /// code and `kind` its structured kind, when it has one. Nothing is
-    /// parked: the next wake asks Core again.
+    /// parked: the identity's next compile or delivery asks Core again.
     Refused {
         code: i64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1498,7 +1594,8 @@ pub enum DeferredIdentityReason {
     /// and the launch declared that migration: its wake would move it.
     MoveRole,
     /// Its stored session is not in the runtime store: its wake would start
-    /// a fresh session in place of it.
+    /// a fresh session. The session is unborn (a seat builds nothing, and
+    /// the member's first wake creates it) or the store lost it.
     FreshSession,
     /// Its first-boot manifest row starts it on a fresh session, replacing
     /// its live member.
@@ -1539,11 +1636,13 @@ pub struct DeferredIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityBootstrapStatus {
     pub mode: IdentityBootstrapMode,
-    /// True once the configured startup coordination pass has stopped running.
-    /// Lazy materialization can therefore be complete while `ready` remains
-    /// false because dormant identities intentionally remain.
+    /// True once the roster pass has stopped running. The background warm
+    /// of `lazy_with_background_warm` runs after it and changes neither
+    /// this nor any identity's state.
     pub complete: bool,
-    /// True exactly when every tracked roster identity is materialized.
+    /// True exactly when the pass is complete with no pass-level error and
+    /// every tracked roster identity is active: a member of the mob,
+    /// materialized or not, that Core does not hold broken.
     pub ready: bool,
     /// Pass-level failure, for example a roster/topology provider or restore
     /// error that is not attributable to one durable identity.
@@ -1696,15 +1795,15 @@ impl IdentityLifecycleState {
     }
 }
 
-/// Why one incarnation of a durable identity's member was retired, as a
-/// gateway host's retirement hook reads it
+/// Why a durable identity's member was retired or released, as a gateway
+/// host's retirement hook reads it
 /// (`GatewayHostComposition::identity_member_retired`).
 ///
-/// Every cause ends exactly that incarnation. Only [`Self::Unlisted`] ends
-/// the identity's place in the roster: after [`Self::Retire`] or
-/// [`Self::Scoped`] the identity stays registered and dormant, Core keeps its
-/// session, and while the roster lists the identity the next roster pass,
-/// boot or wake resumes it at the next generation on the same session.
+/// Every cause ends the member's registration. Only [`Self::Unlisted`] ends
+/// the incarnation and the identity's place in the roster: [`Self::Retire`]
+/// and [`Self::Scoped`] release the member, and the identity stays
+/// registered and active on the same session at the same generation, so its
+/// next delivery materializes it again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RetiredIdentityCause {
@@ -1712,9 +1811,10 @@ pub enum RetiredIdentityCause {
     /// the identity (an identity this runtime registered, or a live member
     /// Meta spawned for an identity it never registered).
     Unlisted,
-    /// An explicit retire of the identity.
+    /// An explicit retire of the identity: the member is released.
     Retire,
-    /// A retire at a captured delivery scope that named the live member.
+    /// A retire at a captured delivery scope that named the live member:
+    /// the member is released.
     Scoped,
 }
 
@@ -1729,9 +1829,10 @@ impl RetiredIdentityCause {
     }
 }
 
-/// One retired incarnation of a durable identity's member, read from Core
-/// before the retire: the binding the incarnation ran under. Handed to a
-/// gateway host's retirement hook once, after Core's retire returned.
+/// A durable identity's member that was retired or released, read from Core
+/// before the retire: the binding its incarnation ran under. Handed to a
+/// gateway host's retirement hook once, after Core's retire or release
+/// returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RetiredIdentityMember {
@@ -1812,8 +1913,11 @@ pub struct IdentityStatus {
     /// The last refused wake, until the next successful one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_refusal: Option<WakeRefusal>,
-    /// The session the last wake replaced with a fresh one because Core
-    /// holds no durable session for it, until the next wake.
+    /// The session an earlier release's wake replaced with a fresh one
+    /// because Core held no durable session for it. Never set now: a wake
+    /// starts no fresh session in place of one Core holds no copy of (Core
+    /// refuses it typed), so the field is always absent. Kept so a reader
+    /// of either release parses the status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaced_session: Option<ReplacedSession>,
     /// The exact `rkat session repair-wholeblob` commands while the last

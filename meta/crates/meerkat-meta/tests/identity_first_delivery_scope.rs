@@ -1160,6 +1160,16 @@ async fn status(boot: &Boot) -> meerkat_meta::identity_first::IdentityStatus {
         .expect("the identity is registered")
 }
 
+/// Core retires the identity's member, as a host or the roster compile
+/// does: Meta's own retire only releases it.
+async fn core_retire(boot: &Boot, scope: &DeliveryScope) {
+    boot.unified
+        .mob_handle()
+        .retire(scope.member().agent_identity().clone())
+        .await
+        .expect("Core retires the member");
+}
+
 /// Nothing was retired: the identity is active and its member is still in
 /// meerkat's roster.
 async fn assert_not_retired(boot: &Boot, scope: &DeliveryScope) {
@@ -1172,12 +1182,12 @@ async fn assert_not_retired(boot: &Boot, scope: &DeliveryScope) {
 }
 
 /// An unchanged scope retires the identity, and the retirement has settled
-/// when the call returns: the member has left meerkat's roster and the
-/// identity rests dormant on its session in Core's history. Retiring again at
-/// the same scope converges to `Ok`: no incarnation is current and none is
-/// retiring, so a retry after a lost reply is safe.
+/// when the call returns: Core released the member's materialization, and
+/// the member stays seated on the same session at the same generation, so
+/// the identity stays active and the scope stays valid. Retiring again at
+/// the same scope converges to `Ok`, so a retry after a lost reply is safe.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unchanged_scope_retires_the_identity_and_settles() {
+async fn an_unchanged_scope_releases_the_identity_and_settles() {
     let temp = tempfile::TempDir::new().unwrap();
     let (client, mut calls) = BarrierClient::new(true);
     let boot = Boot::start(&temp.path().join("state"), &unique_mob_id(), &client).await;
@@ -1189,42 +1199,46 @@ async fn an_unchanged_scope_retires_the_identity_and_settles() {
         .expect("an unchanged scope retires the identity");
 
     let status = status(&boot).await;
-    assert_eq!(status.state, IdentityLifecycleState::Dormant, "{status:?}");
+    assert_eq!(status.state, IdentityLifecycleState::Active, "{status:?}");
     assert_eq!(
         status.session_id.as_ref(),
         Some(scope.session_id()),
-        "the continuity keeps the retired session"
+        "the identity stays on its session"
     );
     assert!(
-        !member_present(&boot, &scope).await,
-        "the member has left meerkat's roster"
+        member_present(&boot, &scope).await,
+        "the member stays in meerkat's roster"
+    );
+    assert_eq!(
+        boot.unified
+            .mob_handle()
+            .member_materialization_for_test(scope.member().agent_identity()),
+        Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Dormant),
+        "the retire released the member's materialization"
     );
     let again = boot
         .identity_rt
         .retire_at_scope_tracked(&identity(), &scope)
         .await
-        .expect("a retry at the retired scope converges");
+        .expect("a retry at the same scope converges");
     assert_eq!(again.get(), scope.member().fence_token().get());
-    assert!(!member_present(&boot, &scope).await);
+    assert!(member_present(&boot, &scope).await);
     assert_no_model_call(&mut calls, "retirement submits nothing");
     boot.shutdown().await;
 }
 
-/// A scope of an identity retired since the capture (by a plain retire, not
-/// at the scope) still reaches Core: with no live member there is no live
-/// scope for Meta to read, and Core answers `Ok` because no incarnation of
-/// the identity is current. The first call converges like a retry, and
-/// nothing wakes the identity.
+/// A scope of an identity whose member Core retired since the capture (a
+/// host's retire, not at the scope) still reaches Core: with no live member
+/// there is no live scope for Meta to read, and Core answers `Ok` because no
+/// incarnation of the identity is current. The first call converges like a
+/// retry, and nothing wakes the identity.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_scope_of_an_already_retired_identity_converges_to_ok() {
     let temp = tempfile::TempDir::new().unwrap();
     let (client, mut calls) = BarrierClient::new(true);
     let boot = Boot::start(&temp.path().join("state"), &unique_mob_id(), &client).await;
     let scope = captured_scope(&boot).await;
-    boot.identity_rt
-        .retire_tracked(&identity())
-        .await
-        .expect("a plain retire");
+    core_retire(&boot, &scope).await;
     assert!(
         !member_present(&boot, &scope).await,
         "the member has left meerkat's roster"
@@ -1340,10 +1354,11 @@ async fn a_replacement_refuses_the_scoped_retirement() {
     boot.shutdown().await;
 }
 
-/// A retire and a wake between capture and the scoped retirement resume the
-/// same session at Core's next generation: another incarnation is current.
-/// The old scope is refused on its runtime id, and the woken member keeps
-/// running.
+/// Core's retire and a wake between capture and the scoped retirement
+/// resume the same session at Core's next generation: another incarnation is
+/// current. The old scope is refused on its runtime id, and the woken member
+/// keeps running. (Meta's own retire only releases the member, which keeps
+/// its incarnation and the scope valid.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_retire_and_wake_refuses_the_old_scope() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1351,10 +1366,7 @@ async fn a_retire_and_wake_refuses_the_old_scope() {
     let boot = Boot::start(&temp.path().join("state"), &unique_mob_id(), &client).await;
     let scope = captured_scope(&boot).await;
 
-    boot.identity_rt
-        .retire_tracked(&identity())
-        .await
-        .expect("retire");
+    core_retire(&boot, &scope).await;
     boot.identity_rt
         .materialize_tracked(&identity())
         .await

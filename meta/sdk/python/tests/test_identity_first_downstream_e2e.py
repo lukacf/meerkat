@@ -284,18 +284,41 @@ def state_dir(tmp_path):
     return d
 
 
+def _turn_driven_mob_toml() -> str:
+    """The downstream mob with every profile turn-driven: a turn-driven
+    member owes no first turn, so its seat builds nothing until a delivery or
+    a warm wakes it (an autonomous member's fresh seat is built at start)."""
+    text = _DOWNSTREAM_MOB_TOML
+    for profile in ("personal", "triage", "calendar", "gatekeeper"):
+        header = f"[profiles.{profile}]\n"
+        assert header in text, header
+        text = text.replace(header, f'{header}runtime_mode = "turn_driven"\n', 1)
+    return text
+
+
+@pytest.fixture
+def turn_driven_mob_toml(tmp_path):
+    p = tmp_path / "turn_driven_mob.toml"
+    p.write_text(_turn_driven_mob_toml())
+    return str(p)
+
+
 @_skip_no_binary
 @pytest.mark.asyncio
 @pytest.mark.timeout(30)
-async def test_lazy_gateway_init_exposes_typed_dormant_bootstrap_status(
-    mob_toml, state_dir
+async def test_lazy_gateway_init_seats_every_identity_without_building_it(
+    turn_driven_mob_toml, state_dir
 ):
-    """Lazy init is metadata-only and needs no model-provider credential."""
+    """X3: lazy init seats every roster identity in the mob without building
+    it, so it needs no model-provider credential, and every identity reads
+    active and reachable from ready, as under the default mode. The profiles
+    are turn-driven, so no identity owes a first turn that would build it at
+    start."""
     roster = DownstreamRoster(_DEFAULT_ROSTER)
     runtime = await (
         Meta.builder()
         .gateway(_GATEWAY_BIN)
-        .mob(mob_toml)
+        .mob(turn_driven_mob_toml)
         .persistent_state(state_dir)
         .roster(roster)
         .identity_bootstrap_mode(IdentityBootstrapMode.lazy_materialize())
@@ -305,19 +328,19 @@ async def test_lazy_gateway_init_exposes_typed_dormant_bootstrap_status(
         status = await runtime.identity_bootstrap_status()
         assert status.mode == IdentityBootstrapMode.lazy_materialize()
         assert status.complete is True
-        assert status.ready is False
-        assert status.counts.dormant == len(_DEFAULT_ROSTER)
+        assert status.ready is True
+        assert status.counts.active == len(_DEFAULT_ROSTER)
+        assert status.counts.dormant == 0
         assert status.counts.warming == 0
-        assert status.counts.active == 0
         assert status.counts.broken == 0
         assert all(
-            entry.state is IdentityBootstrapState.DORMANT
+            entry.state is IdentityBootstrapState.ACTIVE
             for entry in status.identities.values()
         )
 
         immediate = await runtime.wait_identity_bootstrap(timeout=0)
-        assert immediate.timed_out is True
-        assert immediate.ready is False
+        assert immediate.timed_out is False
+        assert immediate.ready is True
     finally:
         await runtime.shutdown()
 

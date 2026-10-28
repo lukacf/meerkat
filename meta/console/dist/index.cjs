@@ -53029,6 +53029,7 @@ function MemoryPanel({
   canReviewQuarantine = false,
   unavailable = false,
   error: error48,
+  loaded = true,
   nextCursor = null,
   recordsDenied = false,
   dreamsDenied = false,
@@ -53088,7 +53089,7 @@ function MemoryPanel({
   }, [openRecordKey]);
   const latticeRanForRef = import_react33.default.useRef(null);
   import_react33.default.useEffect(() => {
-    if (tab2 !== "holdings" || !onQueryRecords || recordsDenied) return;
+    if (tab2 !== "holdings" || !onQueryRecords || recordsDenied || !loaded) return;
     const fingerprint = latticeFingerprint(records, realms, nextCursor);
     if (latticeRanForRef.current === fingerprint) return;
     latticeRanForRef.current = fingerprint;
@@ -53113,7 +53114,7 @@ function MemoryPanel({
         latticeRanForRef.current = null;
       }
     };
-  }, [tab2, records, recordsDenied, realms, nextCursor]);
+  }, [tab2, records, recordsDenied, realms, nextCursor, loaded]);
   const overviewRows = import_react33.default.useMemo(() => scopeOverviewRows(records), [records]);
   const overviewScopes = import_react33.default.useMemo(
     () => overview ? sortOverviewScopes(
@@ -62919,6 +62920,13 @@ var PANEL_ROUTABLE_EVENTS = /* @__PURE__ */ new Set([
   "boundary_appends_discarded",
   "runtime_notice_snapshot",
   "assistant_history_snapshot",
+  // A saved assistant step without text, such as a round of tool calls,
+  // arrives as this kind. It is the canonical row its tool calls render in,
+  // and a history page fetch already delivers it. Dropped from the live
+  // stream, a replayed run rendered its calls from loose call frames, whose
+  // order is not the saved order when live and saved frames share a
+  // millisecond.
+  "assistant_message",
   "frame_updated"
 ]);
 var HISTORY_REFRESH_EVENTS = /* @__PURE__ */ new Set([
@@ -62964,6 +62972,7 @@ function emptyMemoryPanelData() {
     detailLoading: false,
     unavailable: false,
     error: null,
+    loaded: false,
     nextCursor: null,
     recordsDenied: false,
     dreamsDenied: false,
@@ -64798,7 +64807,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         auditVerdictsDenied: auditVerdicts.denied,
         canDecideQuarantine,
         unavailable: false,
-        error: null
+        error: null,
+        loaded: true
       }));
     } catch (err) {
       if (panelRuntimeKeyRef.current !== panelRuntimeKey) return;
@@ -66655,6 +66665,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             canReviewQuarantine: experience?.memory?.can_review_quarantine === true,
             unavailable: memoryData.unavailable,
             error: memoryData.error,
+            loaded: memoryData.loaded,
             nextCursor: memoryData.nextCursor,
             recordsDenied: memoryData.recordsDenied,
             dreamsDenied: memoryData.dreamsDenied,

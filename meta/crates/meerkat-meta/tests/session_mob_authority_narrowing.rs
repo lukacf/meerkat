@@ -722,6 +722,22 @@ async fn lead_session(runtime: &UnifiedRuntime) -> String {
         .to_string()
 }
 
+/// Builds the lead with a turn that is not the probe. The roster pass seats
+/// the lead without building it, and a start restores it unbuilt, so its
+/// session build, and the host's hook on that build, happen at its first
+/// delivery.
+async fn build_lead(runtime: &UnifiedRuntime) {
+    runtime
+        .identity_runtime()
+        .expect("identity runtime")
+        .send_awaiting_commit(
+            &AgentIdentity::parse(LEAD_IDENTITY).expect("lead identity"),
+            &meerkat_core::ContentInput::Text("Good morning.".to_string()),
+        )
+        .await
+        .expect("the lead's first turn commits");
+}
+
 /// An identity-first lead on `persistent_state` whose host customizer
 /// publishes tools for it: the session the host's hook narrowed spawns only
 /// the kept profile.
@@ -741,11 +757,18 @@ async fn an_identity_member_with_customizer_tools_spawns_only_the_profiles_its_h
     );
     assert_eq!(
         hook.sessions_with_authority(),
+        0,
+        "the roster pass seats the lead without building its session"
+    );
+
+    // The probe is the lead's first delivery: Core builds its session, and
+    // the hook narrows that build.
+    let results = probe_lead_identity(&runtime, &client).await;
+    assert_eq!(
+        hook.sessions_with_authority(),
         1,
         "the hook narrowed the lead's session, and no other"
     );
-
-    let results = probe_lead_identity(&runtime, &client).await;
     let mounted = client.mounted();
     assert!(
         mounted.iter().any(|name| name == "lookup_workspace"),
@@ -756,12 +779,13 @@ async fn an_identity_member_with_customizer_tools_spawns_only_the_profiles_its_h
     assert!(shutdown.cleanup_completed(), "{shutdown:?}");
 }
 
-/// Boots the identity-first lead with `first_hook`, which edits its build,
-/// stops it, and boots it again on the same state with `second_hook`; returns
-/// the restored runtime once its lead holds the same session. Both boots'
-/// builds of the lead reach their hook with Meerkat's default authority: the
-/// restore build is built through the hook again rather than restoring what
-/// the first boot's hook made of it.
+/// Boots the identity-first lead with `first_hook`, builds it with its first
+/// delivery (which `first_hook` edits), stops it, and boots it again on the
+/// same state with `second_hook`; returns the restored runtime once its lead,
+/// on the same session, was built again by its first delivery after the
+/// restart. Both boots' builds of the lead reach their hook with Meerkat's
+/// default authority: the restored lead's build is built through the hook
+/// again rather than restoring what the first boot's hook made of it.
 async fn restart_lead(
     state: &std::path::Path,
     mob_id: &str,
@@ -770,6 +794,7 @@ async fn restart_lead(
     second_hook: Arc<HostHook>,
 ) -> UnifiedRuntime {
     let first = identity_runtime(state, mob_id, client, Arc::clone(&first_hook)).await;
+    build_lead(&first).await;
     assert_eq!(
         first_hook.arrived_with(),
         vec![every_profile()],
@@ -788,8 +813,15 @@ async fn restart_lead(
     );
     assert_eq!(
         second_hook.sessions_with_authority(),
+        0,
+        "the second boot restores the lead unbuilt"
+    );
+    build_lead(&second).await;
+    assert_eq!(
+        second_hook.sessions_with_authority(),
         1,
-        "the lead's restore build reaches the second boot's hook, and no other build carries authority"
+        "the restored lead's build reaches the second boot's hook, and no other build carries \
+         authority"
     );
     assert_eq!(
         second_hook.arrived_with(),

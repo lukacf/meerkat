@@ -504,9 +504,15 @@ comms = true
     let retired_status = rpc(&app, "meta/status_identity", json!({"identity": "builder"})).await;
     assert_eq!(
         retired_status["result"]["state"],
-        json!("dormant"),
-        "runtime-alias retirement must leave the identity dormant (Core retired its member): \
+        json!("active"),
+        "runtime-alias retirement releases the member: the identity stays active on its \
+         session, a member of Core's mob that its next delivery materializes: \
          {retired_status}"
+    );
+    assert_eq!(
+        retired_status["result"]["generation"],
+        json!(0),
+        "a release advances no generation: {retired_status}"
     );
     let respawn = rpc(
         &app,

@@ -948,6 +948,43 @@ async def test_identity_resolved_tools_detail_rpc_name():
 
 
 @pytest.mark.asyncio
+async def test_identity_resolved_tools_detail_of_a_dormant_member_reads_its_record():
+    handle, calls = make_mock_mob_handle({
+        "meta/identity/resolved_tools": {
+            "identity": "domain:security",
+            "session_id": "sid-1",
+            "tools": ["shell"],
+            "tools_source": "recorded",
+            "record_revision": 3,
+            "published_at_ms": 1700000000000,
+        }
+    })
+    result = await handle.identity_resolved_tools_detail("domain:security")
+    assert result.tools_source == "recorded"
+    assert result.record_revision == 3
+    assert result.published_at_ms == 1700000000000
+
+
+@pytest.mark.asyncio
+async def test_identity_warm_rpc_name():
+    handle, calls = make_mock_mob_handle({
+        "meta/identity/warm": {
+            "identity": "domain:security",
+            "session_id": "sid-1",
+            "tools": ["fetch", "shell"],
+            "record_revision": 1,
+            "published_at_ms": 1700000000000,
+        }
+    })
+    result = await handle.identity_warm("domain:security")
+    assert calls[0][0] == "meta/identity/warm"
+    assert calls[0][1] == {"identity": "domain:security"}
+    assert result.session_id == "sid-1"
+    assert result.tools == ["fetch", "shell"]
+    assert result.record_revision == 1
+
+
+@pytest.mark.asyncio
 async def test_identity_routing_status_rpc_name():
     handle, calls = make_mock_mob_handle({
         "meta/identity/routing_status": {

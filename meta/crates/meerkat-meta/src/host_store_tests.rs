@@ -119,6 +119,17 @@ struct TestHost {
     /// The next batches that touch the mob announcement store's scope are
     /// refused, and nothing of them lands.
     refused_announcement_batches: AtomicUsize,
+    /// Batches that landed through this process and wrote the first-boot
+    /// manifest document.
+    first_boot_writes: AtomicUsize,
+    /// The next commits that create a session scope each take
+    /// `slow_session_creation` of the clock before they land, one at a time
+    /// behind `slow_writer`.
+    slow_session_creations: AtomicUsize,
+    slow_session_creation: StdMutex<Duration>,
+    /// The store's one slow writer: a slowed commit lands only after the
+    /// slowed commits before it.
+    slow_writer: tokio::sync::Mutex<()>,
 }
 
 /// Whether `rows` carry `text`.
@@ -135,6 +146,16 @@ fn touches_announcements(batch: &CommitBatch) -> bool {
         .any(|update| update.scope.name.as_str().starts_with("mxa:"))
 }
 
+/// Whether `batch` writes the first-boot manifest document: a scope of
+/// Meta's document family named for the manifest's key.
+fn touches_first_boot_manifest(batch: &CommitBatch) -> bool {
+    let family = format!("{}:", crate::host_store_documents::META_DOCUMENT_FAMILY.tag);
+    batch.updates().iter().any(|update| {
+        let name = update.scope.name.as_str();
+        name.starts_with(&family) && name.contains(crate::host_store_documents::FIRST_BOOT_KEY)
+    })
+}
+
 impl TestHost {
     fn over(store: Arc<InMemoryHostStore>) -> Self {
         Self {
@@ -146,11 +167,28 @@ impl TestHost {
             paused: AtomicBool::new(false),
             announcement_rows: StdMutex::new(Vec::new()),
             refused_announcement_batches: AtomicUsize::new(0),
+            first_boot_writes: AtomicUsize::new(0),
+            slow_session_creations: AtomicUsize::new(0),
+            slow_session_creation: StdMutex::new(Duration::ZERO),
+            slow_writer: tokio::sync::Mutex::new(()),
         }
     }
 
     fn landed(&self) -> usize {
         self.landed.load(Ordering::SeqCst)
+    }
+
+    fn first_boot_writes(&self) -> usize {
+        self.first_boot_writes.load(Ordering::SeqCst)
+    }
+
+    /// The next `count` commits that create a session scope each take
+    /// `latency` of the clock before they land, one at a time, as on a store
+    /// whose one writer is slow: however many sessions a start creates at
+    /// once, those commits take `count` x `latency` of the clock together.
+    fn slow_next_session_creations(&self, count: usize, latency: Duration) {
+        *lock(&self.slow_session_creation) = latency;
+        self.slow_session_creations.store(count, Ordering::SeqCst);
     }
 
     /// The first landed announcement store batch whose rows carry `text`, by
@@ -235,6 +273,21 @@ impl HostStore for TestHost {
     }
 
     async fn commit(&self, batch: &CommitBatch) -> Result<(), HostStoreError> {
+        if batch
+            .updates()
+            .iter()
+            .any(|update| update.scope.kind == ScopeKind::Session && update.previous.is_none())
+            && self
+                .slow_session_creations
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+        {
+            let latency = *lock(&self.slow_session_creation);
+            let _writer = self.slow_writer.lock().await;
+            tokio::time::sleep(latency).await;
+        }
         if self
             .failing
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
@@ -267,6 +320,9 @@ impl HostStore for TestHost {
             ));
         }
         self.store.commit(batch).await?;
+        if touches_first_boot_manifest(batch) {
+            self.first_boot_writes.fetch_add(1, Ordering::SeqCst);
+        }
         if announcements {
             lock(&self.announcement_rows).push(
                 batch
@@ -678,6 +734,57 @@ impl AgentCustomizer for PlainCustomizer {
     ) -> Result<(), CustomizerError> {
         Ok(())
     }
+}
+
+/// Accepts every build, recording the identity of each build it was
+/// asked to customize.
+#[derive(Default)]
+struct BuildRecordingCustomizer {
+    builds: StdMutex<Vec<String>>,
+}
+
+impl BuildRecordingCustomizer {
+    /// The identities of the builds customized so far, in order.
+    fn builds(&self) -> Vec<String> {
+        lock(&self.builds).clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentCustomizer for BuildRecordingCustomizer {
+    async fn customize_build(
+        &self,
+        _context: &AgentBuildContext,
+        spec: &DurableAgentSpec,
+        _draft: &mut AgentBuildDraft,
+    ) -> Result<(), CustomizerError> {
+        lock(&self.builds).push(spec.identity.as_str().to_string());
+        Ok(())
+    }
+}
+
+/// Whether Core holds the run starts of `member`'s session: `None` when the
+/// member has no session or its runtime holds no state for it.
+async fn run_starts_held(
+    runtime: &UnifiedRuntime,
+    member: &meerkat_mob::AgentIdentity,
+) -> Option<bool> {
+    let service = runtime
+        .mob_runtime()
+        .session_service()
+        .cloned()
+        .expect("the realm's session service");
+    let machine = service
+        .acquire_runtime_adapter(None)
+        .expect("acquire the realm's runtime adapter")?;
+    let session = runtime
+        .mob_handle()
+        .list_all_members()
+        .await
+        .into_iter()
+        .find(|entry| &entry.agent_identity == member)
+        .and_then(|entry| entry.bridge_session_id().cloned())?;
+    machine.run_starts_held_for_test(&session).await
 }
 
 /// Every pair of the roster's identities is wired.
@@ -1443,6 +1550,47 @@ async fn a_burst_of_cursor_checkpoints_lands_in_a_few_batches_and_skips_nothing(
     );
 }
 
+/// Shutdown's settle of the metadata store's detached writes returns only
+/// once the cursor writes the subscription left in flight have landed, so
+/// the runtime that drops next drops none of them (a dropped write poisons
+/// the cursor's host store scope in that process). Checkpoints return
+/// before their write runs, so the settle is the only point they land by
+/// here; a restart then reads the newest cursor.
+#[tokio::test]
+async fn settling_detached_writes_lands_the_cursor_writes_in_flight() {
+    let fixture = Fixture::new();
+    let host = fixture.process();
+    {
+        let provider = fixture.open(&host).await.expect("open");
+        let metadata = SpiMetadataStore::new(provider.realm.documents().clone());
+        let before = host.landed();
+        for cursor in 1..=50_u64 {
+            metadata
+                .set_subscription_cursor("mob-a", cursor)
+                .await
+                .expect("set the cursor");
+        }
+        tokio::time::timeout(Duration::from_secs(30), metadata.settle_detached_writes())
+            .await
+            .expect("the cursor writes settle");
+        assert!(
+            host.landed() > before,
+            "the settle returned before any cursor write landed"
+        );
+    }
+
+    fixture.lapse();
+    let provider = fixture.open(&fixture.process()).await.expect("restart");
+    let metadata = SpiMetadataStore::new(provider.realm.documents().clone());
+    assert_eq!(
+        metadata
+            .get_subscription_cursor("mob-a")
+            .await
+            .expect("read the cursor"),
+        Some(50)
+    );
+}
+
 /// The host's fence timing shows in the storage census, and a restart waits
 /// at most its lease.
 #[tokio::test]
@@ -1847,6 +1995,182 @@ async fn a_failover_onto_an_empty_cache_resumes_each_identity_on_its_session() {
     a_restart_resumes_each_identity(true).await;
 }
 
+/// A restart after a clean stop starts and gets ready even when its mob
+/// resume takes longer than a minute. The first lifetime stops cleanly, so
+/// the mob's history ends with the Stop's quiesce start and then
+/// `MobStopped`: no Stop an earlier process placed is left for the boot to
+/// wait for. The restart's slow work is its member restore, so it restores
+/// every member (`MemberRestore::Eager`). Under the default `on_demand` a
+/// clean restart restores no member at all (a member is materialized on its
+/// first use): it commits nothing to a session, and nothing could make it
+/// slow this way. The first lifetime woke no member, so the restore creates
+/// each member's session, and the first 30 session creations each take
+/// 2.1 s, one at a time, as on a store whose one writer is slow: 63 s
+/// together, however many member restores run at once. The restart ends
+/// ready with no member Broken. The boot has no one-minute bound (the defect
+/// this row pins was one around the boot's history read).
+///
+/// The row runs on the real clock, about a minute of wall time. The
+/// members' session creations run on Core's own runtimes, on the real
+/// clock, so on a paused test clock every bound on the restart's side (a
+/// wake's bound, a takeover's budget) would expire in virtual time while the
+/// slow writer still works.
+///
+/// A creation queued behind the slow writer takes longer than its 2.1 s, up
+/// to the whole queue, so the host declares a longest commit that covers it
+/// (70 s, on a 90 s lease), as a host whose commits take that long must:
+/// the default is 2 s. 30 creations of 2.1 s is the shortest setting that
+/// proves the restart outlasts a minute; the fallback is 45 members at 1.5 s
+/// each (67.5 s). The premise check names how many slow creations were left
+/// unspent.
+///
+/// The first lifetime runs as a process of its own would, on a runtime of
+/// its own, and its graceful stop settles every member, as it must.
+/// Dropping that runtime then cuts every task it left before the restart
+/// opens the realm, so the restart meets only what the realm holds, and only
+/// the restart is slowed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clean_restart_whose_mob_resume_outlasts_a_minute_starts_ready() {
+    use meerkat_mob::MobEventKind as Kind;
+    use meerkat_mob::machines::mob_machine::PlacedCompletionLifecycleIntentKind as Intent;
+    const MEMBERS: usize = 30;
+    const SLOW_CREATIONS: usize = MEMBERS;
+    const SLOW_CREATION: Duration = Duration::from_millis(2100);
+    // A failure names its cause: the mob actor's own warnings and errors.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
+        .with_test_writer()
+        .try_init();
+    let fixture = Fixture::with_timing(
+        FenceTiming::try_new(Duration::from_secs(10), Duration::from_secs(90))
+            .expect("a 90 s lease renewed every 10 s")
+            .try_with_max_commit_latency(Duration::from_secs(70))
+            .expect("a longest commit within the lease"),
+    );
+    let mob_id = unique_mob_id("slow-resume");
+    let model = Model::default();
+    let cache = tempfile::tempdir().expect("cache");
+    let keys = tempfile::tempdir().expect("the members' comms identity directory");
+    let names: Vec<String> = (0..MEMBERS)
+        .map(|index| format!("personal:member-{index:02}"))
+        .collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let first = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("the first lifetime's runtime");
+                first.block_on(async {
+                    let provider = Arc::new(fixture.open(&fixture.process()).await.expect("open"));
+                    let runtime = build(
+                        builder(&provider, cache.path(), &mob_id, &names, &model)
+                            .session_identity_config_root(keys.path()),
+                    )
+                    .await;
+                    let horizon = runtime.shutdown_horizon();
+                    let report = tokio::time::timeout(horizon, runtime.shutdown())
+                        .await
+                        .expect("the first lifetime shuts down within its published horizon");
+                    assert!(
+                        report.mob_stop.is_ok(),
+                        "the first lifetime stops its mob: {:?}",
+                        report.mob_stop
+                    );
+                    assert!(
+                        matches!(
+                            &report.mob_terminal_shutdown,
+                            crate::unified_runtime::MobTerminalShutdownOutcome::Completed(
+                                shutdown
+                            ) if shutdown.is_clean()
+                        ),
+                        "the first lifetime settles every member before the restart: {:?}",
+                        report.mob_terminal_shutdown
+                    );
+                });
+                // Dropping the runtime here cuts every task the first
+                // lifetime left: none of its loops outlives it.
+            })
+            .join()
+            .expect("the first lifetime ended cleanly");
+    });
+
+    fixture.lapse();
+    let host = fixture.process();
+    let provider = Arc::new(
+        fixture
+            .open(&host)
+            .await
+            .expect("the realm opens once the lease lapsed"),
+    );
+    host.slow_next_session_creations(SLOW_CREATIONS, SLOW_CREATION);
+    let begun = tokio::time::Instant::now();
+    let runtime = match Box::pin(
+        builder(&provider, cache.path(), &mob_id, &names, &model)
+            .session_identity_config_root(keys.path())
+            .member_restore(crate::identity_first::MemberRestore::Eager)
+            .build(),
+    )
+    .await
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let error = error.to_string();
+            let left = host.slow_session_creations.load(Ordering::SeqCst);
+            assert!(
+                !error.contains("an earlier process placed"),
+                "a clean restart was refused for a Stop no earlier process left \
+                 ({left} slow session creations left): {error}"
+            );
+            panic!(
+                "the slow restart over the host store realm ({left} slow session creations \
+                 left): {error}"
+            );
+        }
+    };
+    assert!(
+        begun.elapsed() > Duration::from_mins(1),
+        "the restart's slow session creations outlast a minute ({:?}, {} slow creations left)",
+        begun.elapsed(),
+        host.slow_session_creations.load(Ordering::SeqCst)
+    );
+    let (status, timed_out) = runtime
+        .identity_runtime()
+        .expect("an identity-first runtime")
+        .wait_identity_bootstrap_terminal(Duration::from_mins(10))
+        .await;
+    assert!(!timed_out && status.ready, "{status:?}");
+    assert_eq!(status.counts.broken, 0, "no member is Broken: {status:?}");
+    // The history the restart resumed ends as a clean stop leaves it: the
+    // Stop's quiesce start, then `MobStopped`.
+    let history = runtime
+        .mob_handle()
+        .events()
+        .replay_all()
+        .await
+        .expect("the mob's history reads");
+    let own = meerkat_mob::MobId::from(mob_id.as_str());
+    let kinds: Vec<&Kind> = history
+        .iter()
+        .filter(|event| event.mob_id == own)
+        .map(|event| &event.kind)
+        .collect();
+    assert!(
+        kinds.windows(2).any(|pair| matches!(
+            pair,
+            [
+                Kind::PlacedCompletionLifecycleQuiesceStarted {
+                    intent: Intent::Stop
+                },
+                Kind::MobStopped,
+            ]
+        )),
+        "the first process's Stop began its quiesce and then landed: {kinds:?}"
+    );
+    stop(runtime).await;
+}
+
 /// The storage census entry of the members' comms identities.
 fn comms_identity_slot(runtime: &UnifiedRuntime) -> crate::storage_health::StorageSlotSummary {
     runtime
@@ -1958,7 +2282,10 @@ async fn a_failover_with_the_comms_identity_directory_on_a_moved_volume_recovers
 /// A member restored without its key pair stays broken, as since 0.9.4, and
 /// the storage census names the directory that lost it, its resolved path
 /// and the setting that places it: here the comms identity directory is
-/// emptied between two starts.
+/// emptied between two starts. The first start builds alice with one turn
+/// (a seated member that was never built has no key pair yet), and the
+/// restart restores every member (`MemberRestore::Eager`), so the start
+/// itself meets the missing key pair.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_restored_without_its_key_pair_is_broken_and_the_census_names_the_directory() {
     let fixture = Fixture::new();
@@ -1974,6 +2301,14 @@ async fn a_member_restored_without_its_key_pair_is_broken_and_the_census_names_t
                 .session_identity_config_root(volume.path()),
         )
         .await;
+        send(
+            &runtime,
+            &provider,
+            &model,
+            ALICE,
+            &format!("Remember this token: {}", token(ALICE)),
+        )
+        .await;
         stop(runtime).await;
     }
     // The directory is emptied: alice's key pair is gone.
@@ -1985,7 +2320,8 @@ async fn a_member_restored_without_its_key_pair_is_broken_and_the_census_names_t
     let provider = reopen(&fixture).await;
     let runtime = build(
         builder(&provider, cache.path(), &mob_id, &[ALICE], &model)
-            .session_identity_config_root(volume.path()),
+            .session_identity_config_root(volume.path())
+            .member_restore(crate::identity_first::MemberRestore::Eager),
     )
     .await;
     let alice = crate::member_comms_id::roster_member_id_for_identity(ALICE);
@@ -2108,9 +2444,11 @@ async fn a_composition_record_lost_after_the_create_is_recorded_by_the_next_star
 }
 
 /// A member the realm restores for an identity the roster no longer lists is
-/// held while the build reads the realm's member bindings, and the roster
-/// pass retires it before it runs anything. The hold list the build reads
-/// from the realm before the mob is built names both restored members.
+/// retired by the roster pass before it runs anything. The restart restores
+/// every member (`MemberRestore::Eager`), so Core builds both at the start,
+/// before the pass: Meta's build preparer holds both builds, the pass
+/// retires the dropped member while its build is still held, so the host is
+/// never asked to customize it, and it releases the listed member's.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_restored_member_the_roster_dropped_is_retired_before_it_runs() {
     let fixture = Fixture::new();
@@ -2124,6 +2462,18 @@ async fn a_restored_member_the_roster_dropped_is_retired_before_it_runs() {
                 .agent_customizer(Arc::new(PlainCustomizer)),
         )
         .await;
+        // One turn each, so both members are built and their sessions are
+        // durable before the restart restores them.
+        for name in [ALICE, BOB] {
+            send(
+                &runtime,
+                &provider,
+                &model,
+                name,
+                &format!("Remember this token: {}", token(name)),
+            )
+            .await;
+        }
         stop(runtime).await;
     }
 
@@ -2132,30 +2482,12 @@ async fn a_restored_member_the_roster_dropped_is_retired_before_it_runs() {
         crate::member_comms_id::roster_member_id_for_identity(ALICE),
         crate::member_comms_id::roster_member_id_for_identity(BOB),
     );
-    // The build holds the restored members whose identities Core manages by
-    // command, as it reads them from the realm before the mob is built.
-    {
-        let spec = host_store_spec(
-            &fixture,
-            &provider,
-            cache.path(),
-            definition(&mob_id),
-            Arc::new(model.clone()),
-        )
-        .await;
-        let mut held = spec
-            .stored_command_driven_identity_members()
-            .await
-            .expect("the realm's member bindings");
-        held.sort();
-        let mut restored = vec![alice.clone(), bob.clone()];
-        restored.sort();
-        assert_eq!(held, restored, "the build holds both restored members");
-    }
     let before = model.count();
+    let customizer = Arc::new(BuildRecordingCustomizer::default());
     let runtime = build(
         builder(&provider, cache.path(), &mob_id, &[ALICE], &model)
-            .agent_customizer(Arc::new(PlainCustomizer)),
+            .agent_customizer(customizer.clone())
+            .member_restore(crate::identity_first::MemberRestore::Eager),
     )
     .await;
     let members: Vec<meerkat_mob::AgentIdentity> = runtime
@@ -2182,6 +2514,21 @@ async fn a_restored_member_the_roster_dropped_is_retired_before_it_runs() {
         "bob's binding is retired"
     );
     assert_eq!(model.count(), before, "nothing ran");
+    let builds = customizer.builds();
+    assert!(
+        builds.iter().any(|built| built == ALICE),
+        "the listed member's restored build reached the host: {builds:?}"
+    );
+    assert!(
+        !builds.iter().any(|built| built == BOB),
+        "the dropped member's restored build was held until the pass retired it, so the host \
+         never customized it: {builds:?}"
+    );
+    assert_eq!(
+        run_starts_held(&runtime, &alice).await,
+        Some(false),
+        "the pass released the listed member's held build"
+    );
     stop(runtime).await;
 }
 
@@ -2199,9 +2546,8 @@ fn worker_definition(mob_id: &str) -> meerkat_mob::MobDefinition {
 }
 
 /// A durable worker spawned at runtime on a host store realm, as a member's
-/// mob tools spawn it, is the roster's neither to hold nor to retire: the
-/// hold list the build reads from the realm names only the roster's
-/// identity, and after the restart the worker is still an active member.
+/// mob tools spawn it, is the roster's neither to hold nor to retire: after
+/// the restart the worker is still an active member.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_durable_worker_spawned_at_runtime_is_neither_held_nor_retired_at_a_restart() {
     let fixture = Fixture::new();
@@ -2224,29 +2570,13 @@ async fn a_durable_worker_spawned_at_runtime_is_neither_held_nor_retired_at_a_re
         stop(runtime).await;
     }
 
+    // The restart restores every member (`MemberRestore::Eager`), so Core
+    // builds the worker at the start, before the roster pass.
     let provider = reopen(&fixture).await;
-    {
-        let spec = host_store_spec(
-            &fixture,
-            &provider,
-            cache.path(),
-            worker_definition(&mob_id),
-            Arc::new(model.clone()),
-        )
-        .await;
-        let held = spec
-            .stored_command_driven_identity_members()
-            .await
-            .expect("the realm's member bindings");
-        assert_eq!(
-            held,
-            vec![crate::member_comms_id::roster_member_id_for_identity(ALICE)],
-            "the hold list names the roster's identity, never the worker"
-        );
-    }
     let runtime = build(
         builder(&provider, cache.path(), &mob_id, &[ALICE], &model)
-            .definition(worker_definition(&mob_id)),
+            .definition(worker_definition(&mob_id))
+            .member_restore(crate::identity_first::MemberRestore::Eager),
     )
     .await;
     let members = runtime.mob_handle().list_members().await;
@@ -2259,6 +2589,11 @@ async fn a_durable_worker_spawned_at_runtime_is_neither_held_nor_retired_at_a_re
         meerkat_mob::MobMemberStatus::Active,
         "{:?}",
         entry.error
+    );
+    assert_eq!(
+        run_starts_held(&runtime, &worker).await,
+        Some(false),
+        "the worker's restored build is not the roster's to hold: its run starts are free"
     );
     stop(runtime).await;
 }
@@ -2347,6 +2682,98 @@ async fn a_failover_build_reads_the_events_cursor_and_opt_ins_the_realm_keeps() 
         "the build restored the realm's opt-in"
     );
     stop(runtime).await;
+}
+
+/// An identity's tool record and a recorded rotation, as Meta keeps them in
+/// a host store realm's documents, round trip: a later tool record replaces
+/// the earlier one, records are per mob, another host reads both from the
+/// realm, and a cleared rotation is gone there.
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_tool_records_and_rotations_round_trip_through_the_realm_documents() {
+    use crate::runtime::{IdentityRotationIntent, IdentityToolRecord};
+    let fixture = Fixture::new();
+    let mob_id = unique_mob_id("identity-records");
+    let session = SessionId::new();
+    let tool_record = |record_revision: u64| IdentityToolRecord {
+        mob_id: mob_id.clone(),
+        identity: ALICE.to_string(),
+        session_id: session.clone(),
+        tools: vec!["fetch".to_string(), "search".to_string()],
+        record_revision,
+        published_at_ms: 1_700_000_000_000,
+    };
+    let intent = IdentityRotationIntent {
+        mob_id: mob_id.clone(),
+        identity: ALICE.to_string(),
+        verb: "reset".to_string(),
+        from_generation: Some(3),
+        recorded_at_ms: 1_700_000_000_000,
+    };
+    {
+        let provider = fixture.open(&fixture.process()).await.expect("open");
+        let store = SpiMetadataStore::new(provider.realm.documents().clone());
+        assert_eq!(
+            store
+                .identity_tool_record(&mob_id, ALICE)
+                .await
+                .expect("read the tool record"),
+            None
+        );
+        store
+            .set_identity_tool_record(&tool_record(1))
+            .await
+            .expect("write the tool record");
+        store
+            .set_identity_tool_record(&tool_record(2))
+            .await
+            .expect("write a later tool record");
+        store
+            .set_identity_rotation_intent(&intent)
+            .await
+            .expect("record the rotation");
+    }
+
+    fixture.lapse();
+    let provider = fixture
+        .open(&fixture.process())
+        .await
+        .expect("another host opens the realm");
+    let store = SpiMetadataStore::new(provider.realm.documents().clone());
+    assert_eq!(
+        store
+            .identity_tool_record(&mob_id, ALICE)
+            .await
+            .expect("read the tool record"),
+        Some(tool_record(2)),
+        "the later record replaced the earlier one, and the realm keeps it"
+    );
+    assert_eq!(
+        store
+            .identity_tool_record(&unique_mob_id("another-mob"), ALICE)
+            .await
+            .expect("read another mob's tool record"),
+        None,
+        "records are per mob"
+    );
+    assert_eq!(
+        store
+            .load_identity_rotation_intents(&mob_id)
+            .await
+            .expect("load the rotations"),
+        vec![intent]
+    );
+    store
+        .clear_identity_rotation_intent(&mob_id, ALICE)
+        .await
+        .expect("clear the rotation");
+    assert!(
+        store
+            .load_identity_rotation_intents(&mob_id)
+            .await
+            .expect("load the rotations")
+            .is_empty(),
+        "a cleared rotation is gone"
+    );
 }
 
 /// A build on another host's empty cache reads the held-completion marks
@@ -2803,15 +3230,28 @@ async fn declarations_apply_once_across_failovers(sidecar: bool) {
     );
     assert_eq!(announcement_records(&service, &mob_id).await, (1, 2));
 
-    // A lower revision is refused as a rollback.
+    // A lower revision is refused as a rollback. A gateway whose
+    // declarations come from a sidecar takes none on an apply, which reads
+    // its sidecar again, so there the lower revision goes into the sidecar
+    // file this gateway's options name.
+    let rollback = if sidecar {
+        std::fs::write(
+            sidecars.path().join("declarations-2.json"),
+            declarations(1, &["declared-a"]).to_string(),
+        )
+        .expect("the sidecar is rewritten with the lower revision");
+        serde_json::json!({})
+    } else {
+        serde_json::json!({
+            "revision": 1,
+            "declarations": declarations(1, &["declared-a"]),
+        })
+    };
     let refused = try_announcement_call(
         &service,
         &mob_id,
         "meta/mob_announcements/declarations/apply",
-        serde_json::json!({
-            "revision": 1,
-            "declarations": declarations(1, &["declared-a"]),
-        }),
+        rollback,
     )
     .await
     .expect_err("a lower revision is refused");
@@ -3325,9 +3765,55 @@ async fn imported_first_boot_rows_are_carried_out_at_the_first_roster_compile() 
     stop(runtime).await;
 }
 
+/// The first roster compile after an import carries its first-boot rows
+/// out as one batch and writes the first-boot manifest once, after the last
+/// of them (here it removes it, every row being done), where a rewrite per
+/// row wrote it, a host commit each, once per carried-out row. Each
+/// identity resumes its imported session.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_roster_compile_after_an_import_writes_the_first_boot_manifest_once() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let mob_id = unique_mob_id("imported-rows-once");
+    let names = [ALICE, BOB, CAROL];
+    let (export, sessions) = export_of_a_running_realm(scratch.path(), &mob_id, &names).await;
+
+    let fixture = Fixture::new();
+    let report = import(&fixture.import_request(&export, MigrateMode::Apply)).await;
+    assert!(report.is_clean() && report.completed, "{report:#?}");
+    assert_eq!(report.first_boot_rows.len(), names.len(), "{report:#?}");
+    fixture.lapse();
+
+    let model = Model::default();
+    let cache = tempfile::tempdir().expect("cache");
+    let host = fixture.process();
+    let provider = Arc::new(fixture.open(&host).await.expect("open"));
+    let runtime = build(builder(&provider, cache.path(), &mob_id, &names, &model)).await;
+    for name in names {
+        assert_eq!(
+            session_of(&runtime, name).await,
+            sessions[name],
+            "{name} resumes its imported session"
+        );
+    }
+    assert!(
+        FirstBootManifest::read_host_store(provider.realm.documents())
+            .await
+            .expect("the first-boot rows read")
+            .is_none(),
+        "every row is carried out"
+    );
+    assert_eq!(
+        host.first_boot_writes(),
+        1,
+        "the roster compile writes the manifest once"
+    );
+    stop(runtime).await;
+}
+
 /// The first start after an import, with an empty comms identity directory:
-/// each imported member gets a new key pair there and is healthy on its
-/// imported session, and peer messages flow between them both ways.
+/// each imported member is healthy on its imported session, peer messages
+/// flow between them both ways (each message materializes its recipient),
+/// and each member, once materialized, has a new key pair there.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_first_start_after_an_import_needs_no_comms_identity() {
     let scratch = tempfile::tempdir().expect("scratch");
@@ -3369,12 +3855,6 @@ async fn the_first_start_after_an_import_needs_no_comms_identity() {
             session,
             "{name} resumes its imported session"
         );
-        assert!(
-            keys.join(session.to_string())
-                .join("identity.key")
-                .is_file(),
-            "{name} has a new key pair in the directory"
-        );
     }
 
     // Peer messages flow between the imported members, both ways.
@@ -3403,6 +3883,269 @@ async fn the_first_start_after_an_import_needs_no_comms_identity() {
             (model.requests_carrying(note) > 0).then_some(())
         })
         .await;
+    }
+    // Both members are materialized now: each has its new key pair.
+    for (name, session) in &sessions {
+        assert!(
+            keys.join(session.to_string())
+                .join("identity.key")
+                .is_file(),
+            "{name} has a new key pair in the directory"
+        );
+    }
+    stop(runtime).await;
+}
+
+/// The released 0.9.3 host the remote-continuity export comes from: its mob,
+/// its one profile, and its self-hosted model, which the members' sessions
+/// record. A cutover keeps them.
+const RELEASED_MOB_ID: &str = "hr-fixture-mob";
+const RELEASED_PROFILE: &str = "specialist";
+const RELEASED_MODEL: &str = "hr-fixture-model";
+
+/// The released host's mob definition.
+fn released_definition() -> meerkat_mob::MobDefinition {
+    meerkat_mob::MobDefinition::from_toml(&format!(
+        "[mob]\nid = \"{RELEASED_MOB_ID}\"\n\n[profiles.{RELEASED_PROFILE}]\n\
+         model = \"{RELEASED_MODEL}\"\nprovider = \"self_hosted\"\n\
+         external_addressable = true\nruntime_mode = \"turn_driven\"\n\n\
+         [profiles.{RELEASED_PROFILE}.tools]\ncomms = true\n"
+    ))
+    .expect("the released mob definition parses")
+}
+
+/// The released host's model configuration: its self-hosted server and
+/// model, and the `loop` binding of the global realm and of the mob's realm.
+/// The members run on the test's model client, so the server is never
+/// called.
+fn released_host_config() -> meerkat::Config {
+    let mut text = format!(
+        "[self_hosted]\ndefault_model = \"{RELEASED_MODEL}\"\n\n\
+         [self_hosted.servers.loop]\nbase_url = \"http://127.0.0.1:9\"\n\n\
+         [self_hosted.models.\"{RELEASED_MODEL}\"]\nserver = \"loop\"\n\
+         remote_model = \"{RELEASED_MODEL}\"\ndisplay_name = \"Released fixture model\"\n\
+         family = \"{RELEASED_MODEL}\"\n"
+    );
+    for realm in ["global".to_string(), format!("mob.{RELEASED_MOB_ID}")] {
+        text.push_str(&format!(
+            "\n[realm.\"{realm}\"]\ndefault_binding = \"loop\"\n\n\
+             [realm.\"{realm}\".backend.loop]\nprovider = \"self_hosted\"\n\
+             backend_kind = \"self_hosted\"\n\n\
+             [realm.\"{realm}\".auth.loop]\nprovider = \"self_hosted\"\nauth_method = \"none\"\n\
+             source = {{ kind = \"platform_default\" }}\n\n\
+             [realm.\"{realm}\".binding.loop]\nbackend_profile = \"loop\"\n\
+             auth_profile = \"loop\"\ndefault_model = \"{RELEASED_MODEL}\"\n\
+             provider_default = true\n"
+        ));
+    }
+    toml::from_str(&text).expect("the released host config parses")
+}
+
+/// The cutover from a released 0.9.3 host that kept its sessions in a
+/// continuity provider: its continuity export, imported into a fresh realm
+/// whose comms identity directory is empty, so no member has a key pair.
+/// The first start, with the released host's mob and model configuration,
+/// seats every imported identity from its first-boot `Resume` row on its
+/// imported session, Dormant: no row is refused, no member is broken, and
+/// nothing is built. A peer message to one of them wakes it on its imported
+/// session, and its turn takes the message; the members it did not reach
+/// stay Dormant.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_released_import_without_key_pairs_seats_dormant_and_a_peer_message_wakes_its_recipient()
+{
+    use meerkat_mob::machines::mob_machine::MemberMaterializationPhase;
+
+    const SENDER: &str = "agent:hr-alpha";
+    const RECIPIENT: &str = "agent:hr-reset";
+    const NOTE: &str = "PEER-NOTE-TO-A-DORMANT-IMPORTED-MEMBER";
+    /// The last turn of the recipient's imported transcript.
+    const IMPORTED_TURN: &str = "boot 2 turn 2 after reset 2 for agent:hr-reset";
+
+    let scratch = tempfile::tempdir().expect("scratch");
+    let export = released_export(scratch.path(), "durable");
+    let fixture = Fixture::new();
+    let report = import(&fixture.import_request(&export, MigrateMode::Apply)).await;
+    assert!(report.is_clean() && report.completed, "{report:#?}");
+    let imported: BTreeMap<String, SessionId> = report
+        .first_boot_rows
+        .iter()
+        .map(|row| match row {
+            crate::storage_migrate_native::FirstBootRowPlan::Resume { identity, session } => (
+                identity.clone(),
+                SessionId::parse(session).expect("a resume row names its session"),
+            ),
+            other => panic!("an import writes resume rows only: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        imported.len(),
+        4,
+        "a resume row per ready entry of the export: {report:#?}"
+    );
+    assert!(imported.contains_key(SENDER) && imported.contains_key(RECIPIENT));
+    fixture.lapse();
+
+    let volume = tempfile::tempdir().expect("an empty comms identity volume");
+    let keys = volume.path().join(".rkat").join("session_comms_identity");
+    assert!(files_under(&keys).is_empty(), "no member has a key pair");
+    let roster = imported
+        .keys()
+        .map(|name| DurableAgentSpec {
+            profile: meerkat_mob::ProfileName::from(RELEASED_PROFILE),
+            ..spec(name)
+        })
+        .collect();
+    let model = Model::default();
+    let cache = tempfile::tempdir().expect("cache");
+    let provider = Arc::new(fixture.open(&fixture.process()).await.expect("open"));
+    let runtime = build(
+        UnifiedRuntimeBuilder::default()
+            .definition(released_definition())
+            .meerkat_config(released_host_config())
+            .storage_provider(provider.clone())
+            .scratch_dir(cache.path())
+            .roster_provider(Arc::new(Roster(roster)))
+            .identity_runtime_instance_id(RELEASED_MOB_ID)
+            .default_llm_client(Arc::new(model.clone()))
+            .topology_provider(Arc::new(CompleteGraph))
+            .session_identity_config_root(volume.path()),
+    )
+    .await;
+
+    // Every row is carried out: each identity is seated on its imported
+    // session, Dormant, and none is refused or broken.
+    assert!(
+        FirstBootManifest::read_host_store(provider.realm.documents())
+            .await
+            .expect("the first-boot rows read")
+            .is_none(),
+        "every first-boot row is carried out"
+    );
+    let identities = runtime
+        .identity_runtime()
+        .expect("an identity-first runtime");
+    for (name, session) in &imported {
+        let status = identities
+            .status(&id(name))
+            .await
+            .unwrap_or_else(|error| panic!("the status of {name}: {error}"));
+        assert_eq!(
+            status.state,
+            crate::identity_first::IdentityLifecycleState::Active,
+            "{name} is seated: {status:?}"
+        );
+        assert!(
+            status.wake_refusal.is_none(),
+            "{name} was refused nothing: {status:?}"
+        );
+        assert_eq!(
+            status.session_id.as_ref(),
+            Some(session),
+            "{name} is seated on its imported session"
+        );
+        assert_eq!(
+            runtime.mob_handle().member_materialization_for_test(
+                &crate::member_comms_id::roster_member_id_for_identity(name)
+            ),
+            Some(MemberMaterializationPhase::Dormant),
+            "{name} is seated Dormant: nothing is built"
+        );
+    }
+    let members = runtime.mob_handle().list_members().await;
+    assert_eq!(members.len(), imported.len(), "{members:?}");
+    for member in &members {
+        assert_eq!(
+            member.status,
+            meerkat_mob::MobMemberStatus::Active,
+            "{} is not broken: {:?}",
+            member.agent_identity,
+            member.error
+        );
+    }
+    // Each seat minted its member's key pair where the member's build loads
+    // it, before anything woke.
+    for (name, session) in &imported {
+        assert!(
+            keys.join(session.to_string())
+                .join("identity.key")
+                .is_file(),
+            "{name}'s seat minted its key pair in the directory"
+        );
+    }
+
+    // A peer message to a Dormant imported member wakes it on its imported
+    // session, and its turn takes the message. The sender, another imported
+    // member, is woken first, so it sends from its own comms runtime.
+    let names: Vec<&str> = imported.keys().map(String::as_str).collect();
+    let desired = desired_pairs(&names);
+    eventually_holds("the imported members to be wired", || async {
+        wired_pairs(&runtime).await == desired
+    })
+    .await;
+    let sender = crate::member_comms_id::roster_member_id_for_identity(SENDER);
+    let recipient = crate::member_comms_id::roster_member_id_for_identity(RECIPIENT);
+    runtime
+        .mob_handle()
+        .ensure_member_live(&sender)
+        .await
+        .unwrap_or_else(|error| panic!("wake {SENDER}: {error}"));
+    assert_eq!(
+        runtime
+            .mob_handle()
+            .member_materialization_for_test(&recipient),
+        Some(MemberMaterializationPhase::Dormant),
+        "{RECIPIENT} is still Dormant"
+    );
+    let before = model.count();
+    let _receipt = runtime
+        .mob_handle()
+        .send_peer_message(
+            sender.clone(),
+            recipient.clone(),
+            NOTE,
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{SENDER} messages {RECIPIENT}: {error}"));
+    eventually(&format!("{RECIPIENT}'s turn on the message"), || {
+        (model.requests_carrying(NOTE) > 0).then_some(())
+    })
+    .await;
+    // The turn continues the imported conversation: its request carries the
+    // imported transcript before the message.
+    let turn = model
+        .requests_since(before)
+        .into_iter()
+        .find(|request| request.contains(NOTE))
+        .expect("the turn's request carries the message");
+    assert!(
+        turn.contains(IMPORTED_TURN),
+        "{RECIPIENT}'s turn continues its imported transcript"
+    );
+    assert_eq!(
+        runtime
+            .mob_handle()
+            .member_materialization_for_test(&recipient),
+        Some(MemberMaterializationPhase::Live),
+        "the message woke {RECIPIENT}"
+    );
+    assert_eq!(
+        session_of(&runtime, RECIPIENT).await,
+        imported[RECIPIENT],
+        "{RECIPIENT} woke on its imported session"
+    );
+    for name in names
+        .iter()
+        .copied()
+        .filter(|name| ![SENDER, RECIPIENT].contains(name))
+    {
+        assert_eq!(
+            runtime.mob_handle().member_materialization_for_test(
+                &crate::member_comms_id::roster_member_id_for_identity(name)
+            ),
+            Some(MemberMaterializationPhase::Dormant),
+            "the message woke {RECIPIENT} alone, not {name}"
+        );
     }
     stop(runtime).await;
 }
@@ -3676,6 +4419,21 @@ async fn a_provider_topology_is_reconciled_after_an_import_and_after_a_restart_o
 // The event log
 // ---------------------------------------------------------------------------
 
+/// Wait until `log` holds an event of `runtime`'s. The runtime ingests only
+/// the member events its event drain hands the event log, and a host runs
+/// that drain (`serve()`, `run()` or `spawn_event_drain_task()`). These rows
+/// run no host server, so each poll drains as one tick of that task does.
+async fn wait_for_ingest(runtime: &UnifiedRuntime, log: &RecordedLog, what: &str) {
+    eventually_holds(what, || async move {
+        runtime
+            .drain_mob_agent_events()
+            .await
+            .expect("the runtime drains its member events");
+        log.count() > 0
+    })
+    .await;
+}
+
 /// Over a realm whose host supplies no event log store, the builder's
 /// `event_log()` ingests the runtime's events into its own store, with its
 /// own settings (here its filter).
@@ -3715,10 +4473,7 @@ async fn the_builder_event_log_ingests_over_a_realm_that_supplies_none() {
         "a turn the event log records",
     )
     .await;
-    eventually("the builder's event log to ingest the turn", || {
-        (log.count() > 0).then_some(())
-    })
-    .await;
+    wait_for_ingest(&runtime, &log, "the builder's event log to ingest the turn").await;
     assert!(
         filtered.load(Ordering::SeqCst) > 0,
         "the builder's filter decides what is ingested"
@@ -3756,9 +4511,11 @@ async fn the_realm_event_log_store_ingests_with_the_default_settings() {
         "a turn the event log records",
     )
     .await;
-    eventually("the realm's event log store to ingest the turn", || {
-        (log.count() > 0).then_some(())
-    })
+    wait_for_ingest(
+        &runtime,
+        &log,
+        "the realm's event log store to ingest the turn",
+    )
     .await;
     stop(runtime).await;
 }
@@ -3800,9 +4557,11 @@ async fn two_event_logs_are_refused_before_the_realm_serves_the_build() {
         "a turn the event log records",
     )
     .await;
-    eventually("the realm's event log store to ingest the turn", || {
-        (log.count() > 0).then_some(())
-    })
+    wait_for_ingest(
+        &runtime,
+        &log,
+        "the realm's event log store to ingest the turn",
+    )
     .await;
     stop(runtime).await;
 }

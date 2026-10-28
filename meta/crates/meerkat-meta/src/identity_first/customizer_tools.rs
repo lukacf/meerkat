@@ -1,12 +1,12 @@
-//! Customizer tools that follow an identity across meerkat-side rebuilds (#563).
+//! Customizer tools that follow an identity across meerkat-side rebuilds.
 //!
 //! The tools a host returns from `AgentCustomizer::customize_build` used to
 //! reach a member only as the per-spawn `external_tools` overlay of the one
 //! spawn that ran the customizer. meerkat-mob keeps that overlay in memory
 //! and never persists it, so a restart restore, an adopted occupant
-//! (`MemberAlreadyExists`), a respawn or a delivery-time repair rebuilt the
-//! member without them: the host's handlers stayed registered, but the live
-//! agent no longer advertised the tools.
+//! (`MemberAlreadyExists`) or a respawn rebuilt the member without them: the
+//! host's handlers stayed registered, but the live agent no longer
+//! advertised the tools.
 //!
 //! Instead, every identity member carries ONE stable, dynamic dispatcher
 //! ([`IdentityCustomizerTools`]) for its whole life. Each successful
@@ -20,10 +20,13 @@
 //!   live, without a respawn;
 //! - [`CustomizerToolsSpawnCustomizer`], installed on the mob whenever an
 //!   agent customizer exists, attaches the same dispatcher to every
-//!   meerkat-side build of a registered identity member (restart restore,
-//!   explicit resume, respawn, delivery-time repair). It is synchronous and
+//!   meerkat-side build of a registered identity member (a restore at start
+//!   or at a wake, an explicit resume, a respawn). It is synchronous and
 //!   makes no host call: it attaches the stable dispatcher rather than
-//!   re-running the host.
+//!   re-running the host. The host is asked once per build, before it, by
+//!   Meta's member build preparer
+//!   ([`super::build_preparer::IdentityBuildPreparer`]), which publishes into
+//!   the same dispatcher.
 //!
 //! Members that are not roster identities (helpers, forks, flow-provisioned
 //! or raw-spawned members under their own ids) are never registered and get
@@ -496,207 +499,6 @@ impl CustomizerToolRegistry {
         entry.publish(dispatcher);
         entry
     }
-}
-
-/// Run the host customizer for each roster identity and publish its tools
-/// into `registry`, BEFORE meerkat builds any member (#563). Returns the
-/// identities whose `customize_build` failed, with the typed reason; they stay
-/// registered with nothing published until their materialization publishes.
-/// Each failure is logged per identity.
-pub async fn prepublish(
-    registry: &CustomizerToolRegistry,
-    roster: &[super::types::DurableAgentSpec],
-    customizer: &dyn super::contracts::AgentCustomizer,
-    runtime_services: super::types::AgentRuntimeServices,
-    active_peers: &[AgentIdentity],
-    managed_edges: &[super::types::ManagedPeerEdge],
-) -> BTreeMap<AgentIdentity, super::types::CustomizerToolsPending> {
-    prepublish_logged(
-        registry,
-        roster,
-        customizer,
-        runtime_services,
-        active_peers,
-        managed_edges,
-        PrepublishFailureLog::Warn,
-    )
-    .await
-}
-
-/// [`prepublish`] for the mob build's early publication, which runs before
-/// the mob handle exists, so a customizer whose tools need it always fails
-/// there. The identity bootstrap's publication always follows it with the
-/// runtime's services and logs its own failures, so these are logged at
-/// DEBUG.
-pub(crate) async fn prepublish_before_mob_build(
-    registry: &CustomizerToolRegistry,
-    roster: &[super::types::DurableAgentSpec],
-    customizer: &dyn super::contracts::AgentCustomizer,
-    runtime_services: super::types::AgentRuntimeServices,
-) -> BTreeMap<AgentIdentity, super::types::CustomizerToolsPending> {
-    prepublish_logged(
-        registry,
-        roster,
-        customizer,
-        runtime_services,
-        &[],
-        &[],
-        PrepublishFailureLog::DeferredToBootstrap,
-    )
-    .await
-}
-
-/// Why a member's customizer tools wait when no publication before the mob
-/// build covers them.
-const PUBLISHED_WHEN_THE_IDENTITY_MATERIALIZES: &str =
-    "customizer tools are published when the identity materializes, after the mob build";
-
-/// Each identity's customizer tools as pending, for identities no
-/// publication before the mob build covers: every roster identity of a
-/// composition that publishes none before its build (the gateway composes
-/// its agent customizer only after it), whose materialization publishes
-/// them as it publishes those an early publication could not, and a
-/// restored member's identity the roster no longer lists
-/// ([`unlisted_stored_identities`]).
-pub(crate) fn unpublished_before_mob_build(
-    identities: impl IntoIterator<Item = AgentIdentity>,
-) -> BTreeMap<AgentIdentity, super::types::CustomizerToolsPending> {
-    identities
-        .into_iter()
-        .map(|identity| {
-            (
-                identity,
-                super::types::CustomizerToolsPending {
-                    reason: PUBLISHED_WHEN_THE_IDENTITY_MATERIALIZES.to_string(),
-                    artifact_refusal: None,
-                },
-            )
-        })
-        .collect()
-}
-
-/// The identities of the live members `stored` names that `roster` does
-/// not list. `stored` is read from the mob store before the build
-/// (`MobBootstrapSpec::stored_command_driven_identity_members`, which leaves
-/// out the identities the roster pass never retires, and the durable members
-/// spawned at runtime, which the roster never materialized): a resume of a
-/// log left Running revives those members like any other, but no
-/// publication covers them, so their run starts are held until the roster
-/// pass retires them. A member id that names no valid identity is left out;
-/// the roster pass refuses it.
-pub(crate) fn unlisted_stored_identities(
-    roster: &[super::types::DurableAgentSpec],
-    stored: &[meerkat_mob::AgentIdentity],
-) -> Vec<AgentIdentity> {
-    let listed = roster
-        .iter()
-        .map(|spec| &spec.identity)
-        .collect::<std::collections::BTreeSet<_>>();
-    let unlisted = stored
-        .iter()
-        .filter_map(|member| {
-            let durable =
-                crate::member_comms_id::durable_identity_for_roster_member(member.as_str());
-            match AgentIdentity::parse(&durable) {
-                Ok(identity) => Some(identity),
-                Err(error) => {
-                    tracing::warn!(
-                        %member,
-                        %error,
-                        "a stored durable identity member names no valid identity; its run \
-                         starts are not held"
-                    );
-                    None
-                }
-            }
-        })
-        .filter(|identity| !listed.contains(identity))
-        .collect::<Vec<_>>();
-    if !unlisted.is_empty() {
-        tracing::info!(
-            identities = ?unlisted,
-            "the mob build holds the run starts of restored members the roster no longer \
-             lists until the roster pass retires them"
-        );
-    }
-    unlisted
-}
-
-#[derive(Clone, Copy)]
-enum PrepublishFailureLog {
-    Warn,
-    DeferredToBootstrap,
-}
-
-async fn prepublish_logged(
-    registry: &CustomizerToolRegistry,
-    roster: &[super::types::DurableAgentSpec],
-    customizer: &dyn super::contracts::AgentCustomizer,
-    runtime_services: super::types::AgentRuntimeServices,
-    active_peers: &[AgentIdentity],
-    managed_edges: &[super::types::ManagedPeerEdge],
-    failure_log: PrepublishFailureLog,
-) -> BTreeMap<AgentIdentity, super::types::CustomizerToolsPending> {
-    let mut pending = BTreeMap::new();
-    for spec in roster {
-        let build_context = super::types::AgentBuildContext {
-            identity: spec.identity.clone(),
-            active_peers: active_peers.to_vec(),
-            managed_edges: managed_edges.to_vec(),
-            runtime_services: runtime_services.clone(),
-        };
-        let mut draft = super::types::AgentBuildDraft {
-            model: None,
-            system_prompt: None,
-            additional_instructions: spec.additional_instructions.clone(),
-            labels: spec.labels.clone(),
-            app_context: spec.context.clone(),
-            external_tools: Vec::new(),
-            local_external_tools: Default::default(),
-            provider_params: None,
-            compaction_curator: Default::default(),
-        };
-        match customizer
-            .customize_build(&build_context, spec, &mut draft)
-            .await
-        {
-            Ok(()) => {
-                registry.publish(&spec.identity, draft.local_external_tools.dispatcher());
-            }
-            Err(error) => {
-                let reason = format!("pre-activation customize_build failed: {error}");
-                let artifact_refusal = match &error {
-                    super::types::CustomizerError::ToolArtifactRefused(refusal) => {
-                        Some(refusal.as_ref().clone())
-                    }
-                    _ => None,
-                };
-                match failure_log {
-                    PrepublishFailureLog::Warn => tracing::warn!(
-                        identity = %spec.identity,
-                        %reason,
-                        "restored member's customizer tools are not published; it advertises \
-                         none until its materialization publishes them"
-                    ),
-                    PrepublishFailureLog::DeferredToBootstrap => tracing::debug!(
-                        identity = %spec.identity,
-                        %reason,
-                        "customizer tools not published before the mob build; deferred to the \
-                         identity bootstrap's publication, which runs with the runtime's services"
-                    ),
-                }
-                registry.ensure(&spec.identity);
-                pending.insert(
-                    spec.identity.clone(),
-                    super::types::CustomizerToolsPending {
-                        reason,
-                        artifact_refusal,
-                    },
-                );
-            }
-        }
-    }
-    pending
 }
 
 fn same_dispatcher(a: &Arc<dyn AgentToolDispatcher>, b: &Arc<IdentityCustomizerTools>) -> bool {

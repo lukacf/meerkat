@@ -466,6 +466,14 @@ pub type AgentEventSubscribeFn = Arc<dyn Fn(String) -> AgentEventSubscribeFuture
 /// sequence space of its envelopes (`None` for a live-only source).
 pub(crate) struct AgentEventReplay {
     pub(crate) epoch: Option<meerkat_core::comms::SessionEventEpoch>,
+    /// For a subscription that attaches after the connection opened (its
+    /// member was dormant, or its session unborn, when the request came):
+    /// set when it attaches, before its first event, to the sequence space
+    /// the attached subscription names (`None` for a live-only source), so
+    /// every frame with a place in that space carries a resumable id. `None`
+    /// for a subscription attached at once.
+    pub(crate) attached_epoch:
+        Option<Arc<std::sync::OnceLock<Option<meerkat_core::comms::SessionEventEpoch>>>>,
     pub(crate) stream: EventStream,
 }
 
@@ -488,6 +496,7 @@ fn live_only_agent_subscribe(subscribe_fn: AgentEventSubscribeFn) -> AgentEventR
         Box::pin(async move {
             Ok(AgentEventReplay {
                 epoch: None,
+                attached_epoch: None,
                 stream: subscribe_fn(agent_id).await?,
             })
         })
@@ -654,6 +663,7 @@ async fn agent_events_sse_handler(
 
     let AgentEventReplay {
         epoch,
+        attached_epoch,
         stream: event_stream,
     } = (state.subscribe_fn)(agent_id.clone(), agent_sse_resume_cursor(&headers))
         .await
@@ -724,8 +734,15 @@ async fn agent_events_sse_handler(
             // A replay-capable source ids frames by their place in the
             // member's sequence space, so a reconnect resumes after the last
             // one received. A typed gap marker has no place of its own and
-            // carries no id, leaving the client's last event id unchanged.
-            let id = match epoch {
+            // carries no id, leaving the client's last event id unchanged. A
+            // subscription that attached after the connection opened names
+            // its space once attached, before its first frame.
+            let frame_epoch = epoch.or_else(|| {
+                attached_epoch
+                    .as_ref()
+                    .and_then(|attached| attached.get().copied().flatten())
+            });
+            let id = match frame_epoch {
                 Some(epoch) => (envelope.seq != 0).then(|| format!("{epoch}:{}", envelope.seq)),
                 None => Some(format!("{agent_id}:{seq}")),
             };
@@ -1242,6 +1259,7 @@ mod tests {
                 );
                 Ok(AgentEventReplay {
                     epoch: Some(epoch),
+                    attached_epoch: None,
                     stream: Box::pin(futures::stream::iter(vec![gap, text(3), text(4)])),
                 })
             })

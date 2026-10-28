@@ -217,6 +217,10 @@ async def test_real_gateway_reset_reprofile_materializes_shell_tools(tmp_path):
         assert security_status.profile == "security"
         assert security_status.agent_runtime_id != old_runtime_id
         await _assert_stale_runtime_id_rejected(handle, old_runtime_id, stale_label)
+        # The reset seats the identity's next life unborn: nothing builds it
+        # until a wake. The warm builds it under the new profile, with no
+        # turn, and records the tools it resolves.
+        await handle.identity_warm("domain:security")
         await _assert_security_shell_surface(handle)
         await _assert_routing_status_is_reachable_through_a_real_gateway(handle)
 

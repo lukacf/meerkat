@@ -204,26 +204,73 @@ impl TicketBridge {
 
 #[async_trait]
 impl SessionBridge for TicketBridge {
-    /// Core's successor transition (reset, `delete_identity`): the live
-    /// member is replaced by its successor on a fresh session, one
-    /// generation up.
-    async fn reset_member_to_successor(
+    /// Core's rotation (reset, `delete_identity`): the member's fresh life is
+    /// seated on a fresh session, one generation up.
+    async fn rotate_member(
         &self,
         identity: &AgentIdentity,
         spec: &DurableAgentSpec,
         _draft: &AgentBuildDraft,
-    ) -> Result<crate::identity_first::MemberRuntimeBinding, BridgeError> {
+    ) -> Result<meerkat_core::types::SessionId, BridgeError> {
         let generation = self
             .core
             .last_member_binding(identity)?
             .map_or(0, |binding| binding.generation().get() + 1);
+        let session_id = meerkat_core::types::SessionId::new();
         let binding = crate::identity_first::MemberRuntimeBinding {
             agent_runtime_id: AgentRuntimeId::parse(&format!("rt:{identity}:{generation}"))
                 .map_err(|error| BridgeError::Mob(error.to_string()))?,
-            session_id: Some(meerkat_core::types::SessionId::new()),
+            session_id: Some(session_id.clone()),
         };
         self.core.bind(identity, &binding, &spec.profile);
-        Ok(binding)
+        Ok(session_id)
+    }
+
+    /// Core seats each identity on the session the request names, or on a
+    /// fresh one. While this double refuses resumes, a named session reads
+    /// archived, so the seat revives it through `resume_session`, which
+    /// refuses it.
+    async fn seat_dormant_members(
+        &self,
+        requests: Vec<crate::identity_first::bridge::DormantSeatRequest>,
+    ) -> Result<
+        Vec<(
+            AgentIdentity,
+            crate::identity_first::bridge::DormantSeatResult,
+        )>,
+        BridgeError,
+    > {
+        let mut seated = Vec::with_capacity(requests.len());
+        for request in requests {
+            let result = match request.session {
+                Some(session_id) if self.refuses_resume.load(Ordering::SeqCst) => {
+                    crate::identity_first::bridge::DormantSeatResult::SessionArchived { session_id }
+                }
+                session => {
+                    let session_id = session.unwrap_or_else(meerkat_core::types::SessionId::new);
+                    let agent_runtime_id =
+                        AgentRuntimeId::parse(&format!("rt:{}:0", request.identity))
+                            .map_err(|error| BridgeError::Mob(error.to_string()))?;
+                    self.core.bind(
+                        &request.identity,
+                        &crate::identity_first::MemberRuntimeBinding {
+                            agent_runtime_id,
+                            session_id: Some(session_id.clone()),
+                        },
+                        &request.spec.profile,
+                    );
+                    crate::identity_first::bridge::DormantSeatResult::Seated { session_id }
+                }
+            };
+            seated.push((request.identity, result));
+        }
+        Ok(seated)
+    }
+
+    /// Core releases the member's materialization: it stays seated, on the
+    /// same session and generation.
+    async fn release_member(&self, _identity: &AgentIdentity) -> Result<(), BridgeError> {
+        Ok(())
     }
     async fn create_session(
         &self,
@@ -1099,10 +1146,11 @@ async fn wait_racing<F: std::future::Future<Output = ()>>(
 }
 
 /// #468 review: a completion wait never runs to its deadline on an identity
-/// whose run failed, that went Broken, retired, or was deleted. Each ends the
-/// wait with its typed outcome.
+/// whose run failed, that went Broken, or was deleted. Each ends the wait
+/// with its typed outcome. A retire releases the member, which stays seated
+/// on its session, so it ends no wait: the identity's next completion does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wait_for_completion_ends_typed_on_failure_broken_retire_and_delete() {
+async fn wait_for_completion_ends_typed_on_failure_broken_and_delete_and_outlives_a_retire() {
     let (live, bridge, identity_runtime, ctx, session) = ticket_bridge_rpc().await;
     let params = |name: &str, baseline: crate::identity_first::CompletionCursor| {
         json!({
@@ -1122,7 +1170,8 @@ async fn wait_for_completion_ends_typed_on_failure_broken_retire_and_delete() {
     assert_eq!(result["outcome"], "run_failed", "{result}");
 
     // Broken: Core let the member go and refuses its resume for good, so
-    // the wake that follows ends as a final refusal.
+    // the wake that follows, which seats it on its archived session and
+    // revives it, ends as a final refusal.
     let breaking = register_bound(&identity_runtime, &bridge, "breaking", &session).await;
     let baseline = identity_runtime.completion_cursor(&breaking).await;
     let result = wait_racing(&live, &ctx, params("breaking", baseline), async {
@@ -1137,17 +1186,19 @@ async fn wait_for_completion_ends_typed_on_failure_broken_retire_and_delete() {
     assert_eq!(result["outcome"], "broken", "{result}");
     bridge.refuses_resume.store(false, Ordering::SeqCst);
 
-    // Retired.
+    // Retired: the member stays seated, so the wait goes on to the
+    // identity's next completion.
     let retiree = register_bound(&identity_runtime, &bridge, "retiree", &session).await;
     let baseline = identity_runtime.completion_cursor(&retiree).await;
     let result = wait_racing(&live, &ctx, params("retiree", baseline), async {
         identity_runtime.retire(&retiree).await.expect("retire");
+        identity_runtime.record_turn_completed(&retiree).await;
     })
     .await;
-    assert_eq!(result["outcome"], "retiring", "{result}");
+    assert_eq!(result["outcome"], "completed", "{result}");
 
     // Deleted. A delete starts the identity's fresh life at once: Core
-    // replaces the live member by its successor, so the wait ends typed
+    // rotates the member onto its successor, so the wait ends typed
     // `incarnation_changed`.
     let doomed = register_bound(&identity_runtime, &bridge, "doomed", &session).await;
     let baseline = identity_runtime.completion_cursor(&doomed).await;

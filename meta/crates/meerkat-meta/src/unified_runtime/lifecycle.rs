@@ -489,6 +489,17 @@ impl UnifiedRuntime {
 
         // Phase 3: Close event router
         self.close_event_router().await;
+        // The aborted structural-events subscription's last cursor write may
+        // still run on the metadata store's own task (cursor writes are
+        // coalesced off the caller). It lands within what is left of the
+        // drain window; dropped with the runtime it would poison the
+        // cursor's host store scope in this process, and the next start
+        // would replay the events after the previous cursor.
+        let _ = tokio::time::timeout_at(
+            drain_deadline,
+            self.persistent_metadata.settle_detached_writes(),
+        )
+        .await;
 
         // The runtime owns the console projector. Detach its live source after
         // draining runtime events so closed runtimes cannot retain discovery tasks.

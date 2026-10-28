@@ -279,10 +279,7 @@ async fn converged_idle_gateway_consumes_near_zero_cpu() {
     for member in &roster {
         match result.outcomes.get(&member.identity) {
             Some(RestoreOutcome::Created { .. } | RestoreOutcome::Resumed { .. }) => {}
-            other => panic!(
-                "expected materialized member {}, got {other:?}",
-                member.identity
-            ),
+            other => panic!("expected seated member {}, got {other:?}", member.identity),
         }
     }
 

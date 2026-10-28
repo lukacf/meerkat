@@ -3,6 +3,7 @@
 pub mod adapters;
 pub mod agent_memory;
 pub mod bridge;
+pub mod build_preparer;
 pub mod contracts;
 #[cfg(test)]
 pub(crate) mod core_test_bridge;
@@ -39,9 +40,10 @@ pub use bridge::{
     GovernedDelivery, GovernedDeliveryCustody, GovernedEntryFence, GovernedEntryOutcome,
     GovernedEntryPermit, GovernedEntryRefusal, GovernedInputBinder, GovernedInputError,
     GovernedSettlement, MemberInspection, MemberRuntimeBinding, MobSessionBridge,
-    NativeInputAdmissionSettlement, QueuedMemberInputs, ResumeFallbackReason, ResumeRejectionKind,
-    ResumeSessionOutcome, SessionBridge,
+    NativeInputAdmissionSettlement, QueuedMemberInputs, ResumeRejectionKind, ResumeSessionOutcome,
+    SessionBridge,
 };
+pub use build_preparer::IdentityBuildPreparer;
 pub use contracts::*;
 pub use customizer_tools::{
     ComposedSpawnMemberCustomizer, CustomizerToolRegistry, CustomizerToolsSpawnCustomizer,
@@ -150,6 +152,11 @@ impl PublicIdentityRuntime {
     /// attachment carries the native prepared control for that session
     /// (`MeerkatMachine::prepare_mcp_attachment`); the actor's router stages
     /// it with that control, which is asked again at the connection's entry.
+    ///
+    /// The member must be live: a control is prepared only for the session's
+    /// current registration with a live executor, so wake a dormant member
+    /// ([`IdentityRuntime::materialize`]) before preparing the attachment,
+    /// outside any turn of that member. This call never wakes it.
     ///
     /// It never waits for a held turn boundary: `Busy` means that boundary
     /// is held (not necessarily an active model turn), so a member cannot

@@ -338,17 +338,6 @@ mod losing {
             self.inner.recover_committed_boundary(session_id).await
         }
 
-        async fn reset_member_to_successor(
-            &self,
-            identity: &AgentIdentity,
-            spec: &DurableAgentSpec,
-            draft: &AgentBuildDraft,
-        ) -> Result<MemberRuntimeBinding, BridgeError> {
-            self.inner
-                .reset_member_to_successor(identity, spec, draft)
-                .await
-        }
-
         async fn create_session(
             &self,
             identity: &AgentIdentity,

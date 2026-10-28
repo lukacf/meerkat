@@ -9,12 +9,15 @@ reads return lightweight `MobMemberListEntry` projections. Deep execution
 inspection is a separate operation that returns `MobMemberSnapshot`.
 
 <Warning>
-Member lifecycle is dual-plane. Use the worker plane for ephemeral, disposable
-members such as helpers spawned by a parent agent and reaped by an idle-retire
-policy. Durable members, including per-user agents and long-lived coordinators,
-belong on the identity plane: declare them in an identity roster and reconcile
-them. The gateway profile changes the default behavior of
-`meta/ensure_member`; see the profile-specific contract below.
+Member lifecycle is dual-plane. Durable members the host owns, including
+per-user agents and long-lived coordinators, belong on the identity plane:
+declare them in an identity roster and reconcile them. The worker plane holds
+the members agents create at runtime: helpers reaped by an idle-retire policy,
+and long-lived members spawned from a `durable = true` profile, which survive
+a restart (see
+[Long-lived members an agent creates](#long-lived-members-an-agent-creates)).
+An agent never creates an identity. The gateway profile changes the default
+behavior of `meta/ensure_member`; see the profile-specific contract below.
 </Warning>
 
 ## Profiles are templates and members are declared
@@ -298,6 +301,48 @@ continues; its later WorkGraph writes are revision-checked and conflict. And
 the mobs that agents create through the mob tools have no check: their
 durable workers continue unchecked.
 
+### Long-lived members an agent creates
+
+An agent creates a long-lived agent as a mob member, never as an identity.
+Identities are declared by the host alone: a roster provider, the
+`identity_roster` init param, or `meta/ensure_member`. The agent spawns the
+member from a `durable = true` profile, into its own mob (`mob_spawn_member`,
+or the member tool `spawn_member`) or into a child mob it creates
+(`mob_create`, then `mob_spawn_member`).
+
+- **It survives a restart** as a member of its mob. The roster pass retires
+  only the identities the roster materialized, so a member an agent spawned
+  is never retired because no roster lists it. It ends through its own
+  lifecycle: its work's completion or supersession, an explicit retire, or
+  the idle-retirement policy when the spawn opted in with `idle_retire_secs`
+  (see
+  [Implicit delegate idle retirement](/reference/configuration#implicit-delegate-idle-retirement)).
+  After a restart it is restored like every member of its mob: a member of
+  the root mob is materialized at start only as `member_restore` says (see
+  [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)),
+  and otherwise on its first message or turn.
+- **Talking to it.** A member an agent spawns into its own mob with
+  `mob_spawn_member` is wired to it by default: Meta sets `auto_wire_parent`
+  when the agent omits it, so the two talk through comms, before and after a
+  restart. The member tool `spawn_member` wires the two only when the agent
+  passes `auto_wire_parent: true`. The host reaches the member by its member
+  id with `meta/send_message`.
+- **On a host store realm** child mobs are process-bound and do not survive a
+  restart, while members of the realm's root mob do (see
+  [Keeping a Meta realm in your own database](/guides/unified-runtime#keeping-a-meta-realm-in-your-own-database)).
+  There, an agent spawns its long-lived members into its own mob.
+- **What it lacks compared with an identity:**
+  - identity status: `meta/status_identity`, `meta/inspect_identity` and the
+    identity bootstrap report do not know it;
+  - a Console identity: it is not among the Console's identities
+    (`/console/identities`), and the identity-addressed `meta/console/send`
+    does not reach it (the Console still shows its spawn and its timeline);
+  - agent memory, which is identity-scoped: no recall injection and no
+    `memory` tool;
+  - identity delivery: `meta/send`, `meta/interact` and `meta/dispatch`, with
+    their completion baselines, turn tickets and keyed sends, address
+    identities only.
+
 ## Deep member status
 
 `meta/member_status` serializes Meerkat's `MobMemberSnapshot`. It is a deep
@@ -382,16 +427,21 @@ migration landed is inert rather than a repeated restamp. That is why an
 identical repeated declaration is accepted on purpose, while one identity
 declared twice with conflicting predecessor roles is refused.
 
-On a restart the mob restores every durable member under its stored role
-before the identity plane resumes it, so a declared migration first meets the
-member still on its old role. Meta then applies it or refuses it, and never
-adopts the member as it is:
+The roster pass meets every identity Core holds under the role Core stored
+for it, at a start and at a roster refresh alike, so a declared migration
+first meets the member still on its old role. Meta then applies it or holds
+it, and never adopts the member as it is:
 
 - When the identity plane has repair custody (no Meerkat identity intent, or
-  an Absent one), Meta retires the restored member to absence, after proving
-  the session it will resume exists and carrying its queued input, and resumes
-  the same session under the declared role. Meerkat re-verifies the
-  predecessor role, and Meta checks that the member runs the declared role.
+  an Absent one), Meta retires the member to absence, after proving the
+  session it will resume exists and carrying its queued input, resumes the
+  same session under the declared role, and releases the member again, so
+  its liveness is as before. Meerkat re-verifies the predecessor role, and
+  Meta checks that the member runs the declared role. A member no wake has
+  created a session for yet (seated, never woken) has no session to keep or
+  transcript to lose: the declared move rotates it onto a fresh session
+  under the declared role at the next generation, and its reconcile outcome
+  reads `created`.
 - When the restored member's role is not the declared `from_role`, the
   declaration does not describe it, and Meta refuses before retiring
   anything.
@@ -400,15 +450,52 @@ adopts the member as it is:
   its profile and MobMachine owns its materialization, so Meta refuses
   rather than retire it. Declare the new profile in the identity intent.
 
-A refusal holds the identity's wake with the typed kind
-`identity_role_migration_refused` (`-32603`): the identity reads `dormant`,
-its `wake_refusal` names the remedy `resolve_role_migration`, and the
-`meta/init` result reports it under `identity_bootstrap` (restore stage
-`refused` with that kind), so a refused migration is visible at boot. The
-hold stands for the roster spec it was refused against: nothing retries it,
-and no later restore or reconcile pass retires the member the refusal
-kept. Change the declaration (next boot) or the member's roster
-spec to try again.
+A profile change this activation declared no migration for, or a refused
+migration, is held with the typed kind `identity_role_migration_refused`
+(`-32603`), and the member is never retired for it: the identity stays a
+member of Core's mob under its previous role and reads `active` (an identity
+Core holds no member for stays unseated and reads `dormant`), its
+`wake_refusal` names the remedy `resolve_role_migration`, a delivery through
+Meta is refused with that kind, and the `meta/init` result reports it under
+`identity_bootstrap` (restore stage `refused` with that kind), so a held
+migration is visible at boot. A roster refresh that moves an identity to
+another profile releases the identity's live member and then plans the
+same way: it no longer retires the member, so the identity never leaves the
+mob and keeps its session and generation. Core still holds the member under
+its previous role, so a peer message Core routes to it directly wakes it
+under that role. No pass retires the member the hold kept; each roster pass
+and each delivery through Meta checks again, so declaring the migration
+(next boot) or restoring the roster spec ends the hold.
+
+On a runtime whose sessions live in memory only (one built with
+`MobBootstrapSpec::ephemeral`, whose session service keeps no session beyond
+its member), there is no session to carry over to the new role, and Core's
+release keeps such a member materialized. So a roster pass that moves an
+identity Core holds to another profile neither releases it nor holds it: once
+the member is idle, the pass rotates the identity onto a fresh session under
+the new profile at the next generation, in one Core step that retires the
+previous incarnation, whether or not a migration is declared. There is no
+session continuity across a reprofile in this mode: the next turn, whether a
+delivery through Meta or a message sent to the member on the mob, runs under
+the new profile on the fresh session, and the previous role answers nothing
+more.
+
+A member with work in flight (a running turn, or input queued behind it) is
+not rotated, so none of that work is cancelled: Core refuses the release the
+pass asks for first, the work completes under the previous role, and a later
+roster pass, or an explicit materialization or warm of the identity, rotates
+it once it is idle. Inputs sent through Meta wait for the move; an input that
+reaches the member outside Meta (a peer message, a send on the mob handle) in
+the moment between Core's idle answer and the start of the retirement ends,
+typed, with the previous incarnation. A rotation Core refuses (another
+lifecycle operation of the member is in flight) waits the same way. Until
+then, deliveries through Meta and messages from peers still run under the
+previous role; a delivery does not retry the move. A host that composes its
+session bridge without the mob's session service (`MobSessionBridge::new`)
+cannot tell that the sessions live in memory only, so it keeps the release
+and the hold described above, under which Core keeps the member materialized
+under its previous role; compose it with
+`MobSessionBridge::with_session_service`, as the gateways do.
 
 <Warning>
 A malformed or self-contradicting `role_migrations` payload refuses the boot

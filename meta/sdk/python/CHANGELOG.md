@@ -4,12 +4,55 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+## 0.9.6
+
 - `MetaBuilder.provider_credentials_root(path)` sends
   `runtime_options.provider_credentials_root`: the gateway keeps every agent's
   provider credentials in that directory, an absolute path it opens once at
   init, instead of the process default `<config dir>/meerkat/credentials`,
   which every process of the OS user shares. Sent only when set; an empty
   path raises `ValueError`.
+- `IdentityBootstrapStatus.deferred` lists the identities a candidate
+  (non-authoritative) launch left to the authoritative launch, each a
+  `DeferredIdentity` (`identity`, and `reason`: `"first_boot_fresh"`,
+  `"create_member"`, `"move_role"`, `"fresh_session"` or `"resume_member"`;
+  a newer reason is kept as sent), and `IdentityBootstrapCounts.deferred`
+  counts them. They are not in `identities` and count neither as broken nor
+  against `ready`. Both are empty or `0` on every other launch and from an
+  older gateway, and `to_dict` writes them only when set.
+- `ReconcileEdgesReport.applied` is `False` for a candidate launch's dry run
+  of `meta/reconcile_edges`, where nothing was wired, unwired or pruned and
+  the edge lists name what would be; it is `True` otherwise, also when the
+  gateway omits it.
+- A candidate launch refuses the methods that would change state with
+  `-32047` and `data.kind` `"candidate_launch"`, which the SDK raises as
+  `AnnouncementRefusedError` with `kind == "candidate_launch"`, as for any
+  `-32047`.
+- An identity whose live member Core holds Broken reads `"broken"` too, with
+  its `agent_runtime_id` set and no `wake_refusal` (`IdentityStatus` says so).
+- `MetaBuilder.native_realm(realm_id, *, context_root, state_root,
+  user_config_root)` sends `runtime_options.native_realm`, and
+  `MetaBuilder.member_auth_binding(binding)` sends
+  `runtime_options.member_auth_binding`: the gateway builds every agent from
+  that native realm's effective configuration, and every member with that
+  binding, both checked at init. `AuthBindingRef(realm, binding, profile=None,
+  origin=None)` and `NativeRealm` are their typed values, each with
+  `to_wire()` and `from_wire()`; an `origin` other than `"configured"`
+  (`CONFIGURED_AUTH_BINDING_ORIGIN`) or an empty field raises `ValueError`,
+  and `member_auth_binding` takes only an `AuthBindingRef` (`TypeError`
+  otherwise). Each is sent only when set.
+- `MetaBuilder.member_restore(restore)` sends `runtime_options.member_restore`
+  (`"on_demand"`, `"on_demand_verified"` or `"eager"`): how the mob
+  materializes its seated members at start. Sent only when set; a gateway
+  older than this option refuses it.
+- `MobHandle.identity_warm(identity)` calls `meta/identity/warm` and returns
+  `IdentityWarmResult` (`identity`, `session_id`, `tools`, `record_revision`,
+  `published_at_ms`). `IdentityResolvedToolsResult` gains `tools_source`
+  (`TOOLS_SOURCE_LIVE`, `TOOLS_SOURCE_RECORDED`,
+  `TOOLS_SOURCE_NO_BUILD_RECORDED`; a value this SDK does not know is kept as
+  its raw string), and `record_revision` and `published_at_ms` for a recorded
+  answer. `record_revision` counts the writes of the identity's tool record;
+  it is not the identity's generation.
 
 ## 0.9.5
 

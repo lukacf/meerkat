@@ -2473,8 +2473,31 @@ async fn handle_inject(
             };
         }
     };
+    // A durable identity is reached through its identity door, whatever its
+    // residency: its admission guards (addressability, a pending first-boot
+    // row, an owed held completion, the registered row) and its delivery
+    // preparation apply, and Core wakes it when it is dormant. The door takes
+    // the identity's own lifecycle lock and checks a generated alias itself.
+    let member_alias = crate::member_comms_id::runtime_alias_str(remote_member).into_owned();
+    if let Some(runtime) = identity_runtime
+        && let Some(identity) = runtime.identity_for_member_mutation(&member_alias).await
+    {
+        return match runtime
+            .send_through_identity_door(&identity, &member_alias, &content_input)
+            .await
+        {
+            Ok(session_id) => ControlResponse::Injected {
+                session_id,
+                sig_b64: None,
+            },
+            Err(error) => {
+                let (code, message) = control_identity_error(error);
+                ControlResponse::Err { code, message }
+            }
+        };
+    }
     let operation_handle = handle.clone();
-    let operation_member = crate::member_comms_id::runtime_alias_str(remote_member).into_owned();
+    let operation_member = member_alias;
     match run_control_member_operation(identity_runtime, remote_member, move || async move {
         // Gated by `run_control_member_operation`, as in `handle_wire`.
         let mid = crate::member_comms_id::roster_member_id_for_supplied_id(&operation_member);
@@ -2915,10 +2938,14 @@ mod tests {
     struct EchoHandler;
 
     /// An identity runtime over a Core that holds `worker`'s member live at
-    /// generation 0: its current runtime alias is `rt:worker:0`.
-    async fn identity_runtime_with_current_alias()
-    -> Result<Arc<IdentityRuntime>, Box<dyn std::error::Error + Send + Sync>> {
-        let bridge = Arc::new(CoreReadsBridge::default());
+    /// generation 0: its current runtime alias is `rt:worker:0`. Its bridge,
+    /// returned with it, admits a delivery to that member on its session, as
+    /// the identity door's delivery does.
+    async fn identity_runtime_with_current_alias() -> Result<
+        (Arc<IdentityRuntime>, Arc<CoreReadsBridge>),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let bridge = Arc::new(CoreReadsBridge::with_deliveries());
         let runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
             continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
             lease_provider: Arc::new(LocalLeaseProvider::new()),
@@ -2949,7 +2976,7 @@ mod tests {
             meerkat_core::types::SessionId::new(),
         )
         .await?;
-        Ok(runtime)
+        Ok((runtime, bridge))
     }
 
     impl ControlHandler for EchoHandler {
@@ -3454,7 +3481,7 @@ mod tests {
     #[tokio::test]
     async fn identity_control_rejects_stale_and_encoded_aliases_before_mutation()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let runtime = identity_runtime_with_current_alias().await?;
+        let (runtime, _) = identity_runtime_with_current_alias().await?;
         let calls = Arc::new(AtomicUsize::new(0));
 
         for stale_alias in [
@@ -3506,11 +3533,12 @@ mod tests {
     /// lifecycle lock and acts on the durable roster row the alias names.
     /// Before, the operation encoded the alias itself, which no row has, so
     /// lookup and inject answered unknown_member and wire failed for a
-    /// healthy member.
+    /// healthy member. An inject reaches a registered identity through its
+    /// identity door, which delivers to the incarnation the alias names.
     #[tokio::test]
     async fn control_requests_reach_the_member_a_current_runtime_alias_names()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let identity_runtime = identity_runtime_with_current_alias().await?;
+        let (identity_runtime, deliveries) = identity_runtime_with_current_alias().await?;
         let dir = tempfile::tempdir()?;
         let definition = meerkat_mob::MobDefinition::from_toml(
             "[mob]\nid = \"control-current-alias\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\n\
@@ -3570,6 +3598,11 @@ mod tests {
             (true, true, true),
             "lookup: {lookup:?}\ninject: {injected:?}\nwire: {wired:?}"
         );
+        assert_eq!(
+            deliveries.delivered(),
+            vec![crate::identity_first::AgentRuntimeId::parse("rt:worker:0")?],
+            "the inject was delivered to the incarnation the current alias names"
+        );
         let _ = handle.shutdown().await;
         Ok(())
     }
@@ -3584,6 +3617,24 @@ mod tests {
             images.push(serde_json::to_value(&state)?);
         }
         Ok(images)
+    }
+
+    /// Each stored input image as its id, its state and the reason of its
+    /// last transition, for a failure message.
+    fn input_image_summary(images: &[serde_json::Value]) -> Vec<String> {
+        images
+            .iter()
+            .map(|image| {
+                let last_reason = image["history"]
+                    .as_array()
+                    .and_then(|history| history.last())
+                    .map_or(serde_json::Value::Null, |entry| entry["reason"].clone());
+                format!(
+                    "{} {} ({last_reason})",
+                    image["input_id"], image["current_state"]
+                )
+            })
+            .collect()
     }
 
     /// A candidate launch's control listener refuses a peer's `Wire`,
@@ -3619,6 +3670,18 @@ mod tests {
                 meerkat_mob::ProfileName::from("worker"),
                 worker.clone(),
             ))
+            .await?;
+        // The worker is an autonomous member: its spawn admits a kickoff
+        // prompt and returns before that prompt's run ends, and the run then
+        // moves the kickoff input through its states on its own. Settle it
+        // before the baseline is read, so the stored inputs change below only
+        // if the candidate's handler writes one.
+        handle
+            .wait_for_members_kickoff_complete(
+                std::slice::from_ref(&worker),
+                // A settle bound only: the assertions below check state, not elapsed time.
+                Some(std::time::Duration::from_secs(30)),
+            )
             .await?;
         let session_id = handle
             .resolve_bridge_session_id(&worker)
@@ -3676,11 +3739,13 @@ mod tests {
                 other => format!("served: {other:?}"),
             });
         }
+        let row_after = handle.get_member(&worker).await?;
+        let inputs_after = member_input_images(&machine, &session_id).await?;
         assert_eq!(
             (
                 refused,
-                handle.get_member(&worker).await? == row_before,
-                member_input_images(&machine, &session_id).await? == inputs_before,
+                row_after == row_before,
+                inputs_after == inputs_before,
             ),
             (
                 vec![CANDIDATE_LAUNCH_CONTROL_CODE.to_string(); 3],
@@ -3688,7 +3753,9 @@ mod tests {
                 true
             ),
             "a candidate refuses the peer's wire, unwire and inject, and the member's wiring \
-             and stored inputs are unchanged"
+             and stored inputs are unchanged\nstored inputs before: {:?}\nafter: {:?}",
+            input_image_summary(&inputs_before),
+            input_image_summary(&inputs_after),
         );
 
         let authoritative =

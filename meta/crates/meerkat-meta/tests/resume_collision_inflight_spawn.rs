@@ -137,6 +137,7 @@ id = "{mob_id}"
 
 [profiles.general]
 model = "gpt-5.5"
+runtime_mode = "turn_driven"
 
 [profiles.general.tools]
 comms = true
@@ -245,6 +246,10 @@ where
 /// Everything both scenarios share: boot 1 creates `review:singleton`,
 /// persists one completed turn and shuts down; boot 2 comes up against the
 /// same durable store with an empty roster and a store-only bridge.
+///
+/// The member is turn-driven, so that turn is the seed turn: a fresh
+/// AutonomousHost seat owes a kickoff turn, which runs at its seat, and that
+/// request alone would satisfy the seed wait's request count.
 struct Raced {
     _temp: tempfile::TempDir,
     boot: Boot,
@@ -407,6 +412,9 @@ async fn assert_single_member_bound(raced: &Raced) {
     );
 }
 
+/// The race in the module docs. The member is turn-driven (a fresh
+/// AutonomousHost seat owes a kickoff turn, which runs at its seat), so boot
+/// 1 persists exactly the seed turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn resume_collision_with_in_flight_spawn_awaits_convergence_and_attaches() {
     let raced = restart_with_durable_member().await;
@@ -462,10 +470,8 @@ async fn resume_collision_with_in_flight_spawn_awaits_convergence_and_attaches()
         &record.session_id,
         "the colliding resume must attach to the same durable session"
     );
-    assert!(
-        first.fallback_reason().is_none() && second.fallback_reason().is_none(),
-        "neither resume may degrade to a fresh spawn: {first:?} / {second:?}"
-    );
+    // `ResumeSessionOutcome` has no fresh-spawn arm: neither resume can
+    // degrade to one.
     assert!(
         matches!(
             second,
@@ -485,6 +491,9 @@ async fn resume_collision_with_in_flight_spawn_awaits_convergence_and_attaches()
 /// resumed. That member is healthy and it IS the resume target, so it must be
 /// adopted, not retired and re-resumed: the same roster row (runtime id,
 /// generation, fence) must survive the second resume.
+///
+/// The member is turn-driven (a fresh AutonomousHost seat owes a kickoff
+/// turn, which runs at its seat), so boot 1 persists exactly the seed turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn resume_collision_with_a_completed_spawn_adopts_the_bound_member() {
     let raced = restart_with_durable_member().await;

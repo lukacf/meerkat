@@ -4146,7 +4146,10 @@ async function runMemoryBodyClickAcrossRefreshProof() {
 // The Memory lattice tile page-walks the loaded records. A good refresh that
 // brings the same records must not walk again, and a walk that does run must
 // show its re-check without growing the tile row: either would move the tiles
-// below it, and with them a click in progress on a lower tile.
+// below it, and with them a click in progress on a lower tile. Nor may the
+// panel walk before its first records load: that walk settles the tile over
+// an empty placeholder, and the records' arrival then walks the same store
+// again, under whatever click comes next.
 async function runMemoryLatticeRecheckAcrossRefreshProof() {
   const evidence = path.join(process.env.META_BROWSER_EVIDENCE || path.join(repoRoot, "output/playwright/console-acceptance"), "memory-lattice-recheck-across-refresh");
   fs.mkdirSync(evidence, { recursive: true });
@@ -4167,6 +4170,9 @@ async function runMemoryLatticeRecheckAcrossRefreshProof() {
   };
   const { eventually } = require("./acceptance-runtime.cjs");
   let holdWalkReads = false;
+  // The walk reads routed before the panel's first load asked for its dreams.
+  // That load asks for them only after its records, and lands after both.
+  let walkReadsBeforeFirstLoad = null;
   const heldWalkReads = [], walkReads = [], plainReads = [], errors = [], checkpoints = [], problems = [];
   const server = await startMockConsoleServer();
   let browser, page, routes, failure;
@@ -4198,6 +4204,9 @@ async function runMemoryLatticeRecheckAcrossRefreshProof() {
           plainReads.push(request.id);
         }
         return reply({ result: { records, realms: ["default"] } });
+      }
+      if (request.method === "meta/memory/panel/dreams" && walkReadsBeforeFirstLoad === null) {
+        walkReadsBeforeFirstLoad = walkReads.length;
       }
       if (Object.hasOwn(replies, request.method)) return reply({ result: replies[request.method] });
       return route.continue();
@@ -4246,6 +4255,11 @@ async function runMemoryLatticeRecheckAcrossRefreshProof() {
 
     await page.getByTestId("memory-verdict-strip").waitFor();
     await latticeSettled();
+    // The panel shows before its first load lands. Only a walk over that
+    // load's records may settle the tile, or their arrival walks again inside
+    // the press below.
+    await eventually(async () => walkReadsBeforeFirstLoad !== null, "the first load read its dreams");
+    checkpoints.push({ step: "first-load", walkReadsBeforeFirstLoad });
     // The same records again: the settled verdict already covers them.
     const unchanged = await pressAcrossGoodRefresh("unchanged-records", () => page.waitForTimeout(400));
     if (unchanged.walkReads !== 0) problems.push(`unchanged-records: the refresh walked the same records again (${unchanged.walkReads} walk reads)`);
@@ -4257,6 +4271,7 @@ async function runMemoryLatticeRecheckAcrossRefreshProof() {
     });
     if (!/re-checking/.test(changed.latticeText)) problems.push("changed-records: the running walk showed no re-check");
 
+    assert.equal(walkReadsBeforeFirstLoad, 0, "the Memory panel walked the store before its records loaded");
     assert.deepEqual(problems, [], "a good refresh moved the memory tiles under a click");
     await routes.settle();
     routes.check();
@@ -4271,7 +4286,7 @@ async function runMemoryLatticeRecheckAcrossRefreshProof() {
     holdWalkReads = false;
     heldWalkReads.splice(0).forEach(resolve => resolve());
     await routes?.settle();
-    fs.writeFileSync(path.join(evidence, "result.json"), JSON.stringify({ backend: "mock HTTP memory RPC", checkpoints, problems, walkReads: walkReads.length, plainReads: plainReads.length, errors, routeFailures: routes?.failures || [], failure: failure || null }, null, 2));
+    fs.writeFileSync(path.join(evidence, "result.json"), JSON.stringify({ backend: "mock HTTP memory RPC", checkpoints, problems, walkReadsBeforeFirstLoad, walkReads: walkReads.length, plainReads: plainReads.length, errors, routeFailures: routes?.failures || [], failure: failure || null }, null, 2));
     if (browser) await browser.close();
     await server.close();
   }
@@ -4459,6 +4474,8 @@ const allScenarios = [
     ...require("./scenarios/real-legacy-import.cjs").scenarios,
     ...require("./scenarios/real-sidebar-activity.cjs").scenarios,
     ...require("./scenarios/operator-panel-frame.cjs").scenarios,
+    // Appended last: sharding is by list position, so earlier scenarios keep their shards.
+    ...require("./scenarios/history-replay-tool-order.cjs").scenarios,
   ];
 
 module.exports = { scenarios: allScenarios };

@@ -540,7 +540,7 @@ if health.last_delivery_error and health.last_delivery_error["class"] == "reload
 |--------|-------------|-------------|
 | `list_members()` | `list[MemberSnapshot]` | List all members in the roster |
 | `get_member(member_id)` | `MemberSnapshot` | Get a single member by ID |
-| `retire_member(member_id)` | `None` | Retire a member (graceful shutdown) |
+| `retire_member(member_id)` | `None` | Retire a member (graceful shutdown). For an identity's member this is a release: the identity stays seated on its session at its generation |
 | `respawn_member(member_id)` | `None` | Respawn a previously retired member (identity-first: resets the identity onto a fresh session) |
 | `reload_member(member_id)` | `MemberReloadResult` | Non-destructive cold reload: same identity, same durable session, same generation (identity-first only) |
 | `member_health(member_id)` | `MemberHealth` | Lifecycle and delivery health from in-process reads; carries `actor_loop`, `open_stall_id`, and `last_delivery_error` |
@@ -599,12 +599,15 @@ rt = await (
 | `.mob_inline(toml_str)` | Inline mob TOML string (no temp file) |
 | `.meerkat_config(path)` | Meerkat host `config.toml` forwarded as `runtime_options.meerkat_config_path`, the only door for the `[self_hosted]` and `[realm]` tables Meerkat keeps out of `mob.toml` (a host-config `[models]` table reaches the factory too, but a profile's `model` must be catalogued, provider-annotated or defined under `mob.toml`'s own `[models.<id>]` to pass the init model check); a missing, malformed or non-validating file refuses init rather than building agents from the default config, and a top-level `[self_hosted]` or `[realm]` table inside `mob.toml` is refused at init with a message naming this option. TypeScript twin `meerkatConfig(path)`. See [Self-hosted models and the Meerkat host config](/reference/configuration#self-hosted-models-and-the-meerkat-host-config) |
 | `.provider_credentials_root(path)` | Provider credentials directory forwarded as `runtime_options.provider_credentials_root`: every agent the gateway builds resolves and persists provider logins and tokens there instead of the process default `<config dir>/meerkat/credentials`, which every process of the OS user shares. Absolute: the gateway opens it once at init, creating it when missing, and a relative path or a root it cannot open refuses init, never falling back to the default. Give each user their own root, and pass the same root on every reopen of that user's state; a host moving off a per-process `XDG_CONFIG_HOME=<C>` passes `<C>/meerkat/credentials` to keep existing logins. See [Provider credentials](/reference/configuration#provider-credentials) |
+| `.native_realm(realm_id, *, context_root, state_root, user_config_root)` | A native realm's effective configuration as every agent's configuration, forwarded as `runtime_options.native_realm`: the gateway reads it once at init with Meerkat's own native reader, copying and writing nothing, in place of `.meerkat_config(path)` (the two are refused together). Each root is an absolute path; a realm the state root does not hold, or a configuration that cannot be read or does not validate, refuses init, never falling back to the default configuration. The realm's whole configuration applies to every member. Requires `.member_auth_binding(...)`. TypeScript twin `nativeRealm({...})`. See [Native realm and member auth binding](/reference/configuration#native-realm-and-member-auth-binding) |
+| `.member_auth_binding(binding)` | The `AuthBindingRef(realm, binding, profile=None, origin=None)` every member is built with, forwarded as `runtime_options.member_auth_binding`; `origin` is `None` or `"configured"`. The gateway refuses at init a binding the members' configuration does not define, a definition profile the binding does not serve, and an automatic spawn policy, a model fallback target off the binding, image generation or the agent memory engines, in the definition, a realm profile it references or a stored child mob, and an identity declaration an earlier launch adopted that was sealed with no binding or another one; every member it builds then uses exactly this binding, or its build is refused (roster members, helpers and forks, later spawns, respawns and resets, members rebuilt after a restart, child mobs' members), never a default one; a member Meerkat rebuilds from its own records (a fork seated before the launch named the binding) that recorded another binding or none is refused at its rebuild and must be re-created; and a spawn that names another binding, an agent's child mob that would leave it, identity adoption, and an attach of a session whose live actor runs another binding are refused. A running gateway is never rebound. TypeScript twin `memberAuthBinding({...})`. See [Native realm and member auth binding](/reference/configuration#native-realm-and-member-auth-binding) |
 | `.persistent_state(path)` | Enable persistent state at path |
 | `.roster(provider)` | Identity-first roster provider |
 | `.topology_provider(provider)` | Identity-first topology provider |
 | `.agent_customizer(customizer)` | Identity-first agent customizer (`customize_build(context, spec, draft)`; see [Per-profile tools](#session-agent-builder-and-per-profile-tools)) |
 | `.on_error(callback)` | Error hook. Receives every runtime `ErrorEvent` (`category`, `message`, `context`) the gateway forwards as the `meta/on_error` notification; sync or async, fire-and-forget. Without a callback the events reach only the gateway's normal log sink: ERROR for failures, INFO for `actor_loop_recovered` and `mob_announcement_escalation_resolved`, subject to configured tracing filters and stderr handling (see [Error hook and logging](/guides/unified-runtime#error-hook-and-logging)). `ErrorEvent.is_resolution` is true for those two, a failure ending rather than starting |
-| `.identity_bootstrap_mode(mode)` | Eager, lazy, or bounded background-warm identity materialization; requires `.roster(...)` |
+| `.identity_bootstrap_mode(mode)` | The roster pass's mode: every mode seats each roster identity without materializing it, and `lazy_with_background_warm` also materializes them in a bounded background task; requires `.roster(...)` |
+| `.member_restore(restore)` | How the mob materializes its seated members at start: `"on_demand"` (default; only members that hold work), `"on_demand_verified"` (plus a read-only check of the others before ready) or `"eager"` (all); sent as `runtime_options.member_restore` |
 | `.role_migrations(declarations)` | Authorize durable member role migrations for THIS boot. Takes an iterable of `RoleMigrationDeclaration` dataclasses or equivalent `identity` / `from_role` dicts, validating either form; a conflicting pair for one identity raises `ValueError`, an identical repeat is accepted, and leaving the setter unused emits no `role_migrations` init-params key at all |
 | `.session_service(builder)` | Session agent builder |
 | `.gating(path)` | Gating config path (`config/gating.toml` is discovered when present). An empty path raises `ValueError`: it no longer switches gating off. To keep gating off, do not call it and keep nothing at `config/gating.toml` under the working directory |
@@ -673,7 +676,10 @@ migration landed is inert. It arms only where an identity plane exists; on
 Every explicit `.identity_bootstrap_mode(...)` call declares identity-first
 intent and requires `.roster(...)`, including explicit eager mode. Omitting the
 setter keeps a gateway without a roster on the classic path; a configured
-roster with no explicit mode retains eager materialization.
+roster with no explicit mode reports the `eager_materialize` mode. Under every
+mode each roster identity is a member of the mob from ready, and is
+materialized when work reaches it; `.member_restore(...)` decides what is
+materialized at start.
 
 Gateway memory config accepts `{backend: "local_json"}` with an optional
 `health_check_endpoint` (`memory.local_json(...)`), the only backend. The
@@ -923,11 +929,10 @@ session builder exists, so there is no post-connect registration.
 
 On the identity plane the same hook is `AgentCustomizer.customize_build`,
 registered with the public `.agent_customizer(customizer)`. It runs when an
-identity is actually built or re-materialized, including fresh creation and
-cold restore/resume. An already-active converged identity is reused without
-customization; lazy registration defers the hook until materialization.
-Do not use reconciliation to refresh an already-active identity's tool
-handlers. The hook receives the durable spec (so `spec.profile` is the profile
+identity is seated (created), and when its member is built (see below). An
+identity the mob already holds is reused without customization until its
+next build. Do not use reconciliation to refresh an already-active identity's
+tool handlers. The hook receives the durable spec (so `spec.profile` is the profile
 name), and registers tools on the draft:
 
 ```python
@@ -959,25 +964,48 @@ Each identity member has one stable tool dispatcher for its whole life, and
 every `customize_build` publishes its tools into it. The tool list and the
 handler scope that serves it always change together. The tools therefore
 follow the member through every rebuild: a gateway restart, a member that is
-adopted instead of respawned, a respawn, and delivery-time repair. On a
-restart Meta runs `customize_build` for each roster identity before the mob
-is restored, so every restored member starts with its tools. They are listed by
-`meta/identity/resolved_tools` before any turn, and a run that starts at
-activation (a queued input, a kickoff) sees them. A gateway that stopped
-uncleanly left its mob running, so its restart restores the members while it
-builds the mob, before that call: each one starts no run until the call has
-published its tools. A restored member whose identity the roster no longer
-lists starts no run either, until the roster retires it (a host-adopted
-identity's member, which the roster never retires, is not held). The
-materialization
-that follows runs `customize_build`
-again and republishes. On a persistent gateway each roster identity reports
-`customizer_tools_pending` (with the reason) in its identity status until its
-tools are published; if that early call fails, the failure is logged for the
-identity, and the member advertises no customizer tools until its
-materialization publishes them. A tool
-from an earlier build that the latest build no longer declares is refused,
-never routed to stale handlers.
+adopted instead of respawned, a respawn. `customize_build` runs:
+
+- once when an identity is seated and the mob held no member for it (a new
+  identity, an identity a first-boot manifest row brings in, a hosted
+  identity its host creates), when a reset or a delete starts its fresh
+  life, and when a declared role migration moves it to its new role, with
+  the runtime's real context (every registered identity as `active_peers`,
+  the roster's managed edges). That call publishes the tools and records
+  the customized spawn spec, nothing more: nothing is built, and
+  `resolved_tools`, which reports the tools a build actually resolved,
+  answers `no_build_recorded` until the member's first build. Your
+  `after_create(identity,
+  session_id, context)`, when you define one, is then called once with the
+  session the identity is bound to;
+- once per build of a member, right before it: when work reaches a member
+  that is not materialized (a send, a dispatch, a peer message, a kickoff),
+  and at start for the members that must be live then. No `after_create`
+  follows a build.
+
+A member is never built without its tools, so its first run sees them. A
+restart over idle members the mob already holds calls `customize_build` for
+none of them. A member the gateway builds before your customizer is composed (a
+gateway that stopped uncleanly restores the members that hold work while it
+builds the mob) is built, then starts no run until the roster pass has
+published its tools. A member whose identity the roster no longer lists
+starts no run either, until the roster retires it (a host-adopted identity's
+member, which the roster never retires, is not held). A `customize_build`
+that fails refuses the member's build: the member stays as it was, the
+delivery that needed it answers a typed retryable error (the artifact
+refusal itself, typed, when the host's installed artifacts refused the
+tools), and the next delivery tries again. While a member's tools are not
+published, its identity status reports `customizer_tools_pending` with the
+reason. A tool from an earlier build that the latest build no longer
+declares is refused, never routed to stale handlers.
+
+`meta/identity/resolved_tools` lists a member's tools without building it:
+a live member's live tools, or, for a member that is not materialized, the
+tools its last build had (`tools_source` says which, and reads
+`no_build_recorded` for a member not built since the upgrade or since its
+fresh life began). `runtime.mob_handle().identity_warm(identity)` builds a
+member without a turn and records its tools; its `record_revision` counts
+the record's writes and is not the identity's generation.
 
 Customizer tools belong to roster identities only. Helpers, forks,
 flow-provisioned members, and members spawned under their own ids never get

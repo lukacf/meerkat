@@ -324,14 +324,15 @@ impl ScopedDeliveryError {
 }
 
 /// Why a retirement at a scope
-/// ([`super::IdentityRuntime::retire_at_scope_tracked`]) did not retire.
+/// ([`super::IdentityRuntime::retire_at_scope_tracked`]) did not release
+/// the scope's member.
 ///
-/// `Unsupported`, `StaleScope`, `Rejected` and `Refused` refuse to retire
-/// the scope's member. Core retires the member's `spawned_by` descendants
-/// first and checks the scope in every step, so a `StaleScope` or `Rejected`
-/// Core reaches after its first step leaves the descendants it already
-/// retired retired. `Retire` is the retirement's own failure, or a
-/// retirement whose outcome is unknown.
+/// A retirement at a scope is a release: Core releases the live
+/// materialization of the incarnation the scope names, which stays seated
+/// on the same session at the same generation, and no `spawned_by`
+/// descendant is touched. `Unsupported`, `StaleScope`, `Rejected` and
+/// `Refused` release nothing. `Retire` is the release's own refusal or
+/// failure, or a release whose outcome is unknown.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ScopedRetireError {
@@ -341,20 +342,15 @@ pub enum ScopedRetireError {
     /// Core found another incarnation of the identity current, the scope's
     /// incarnation current under another session, or the scope captured at
     /// another incarnation of the mob. Final for this scope: capture it
-    /// again. The scope's member was not retired; when
-    /// Core found it after its first step (a successor minted while the
-    /// cascade ran), the descendants it retired before stay retired.
+    /// again. Nothing was released.
     StaleScope {
         mismatch: ScopeMismatch,
         detail: String,
     },
-    /// The scope's member was not retired: a scope of another identity or
+    /// The scope's member was not released: a scope of another identity or
     /// member, Core's live scope that could not be read, a mob that is not
     /// running, or a runtime that no longer admits identity operations (it
-    /// is shutting down, or its mob is closed). Meta refuses the first two
-    /// before Core is asked; when Core refuses after its first step (the mob
-    /// stopping while the cascade ran), the descendants it retired before
-    /// stay retired.
+    /// is shutting down, or its mob is closed). Nothing was released.
     Rejected { detail: String },
     /// Refused by Meta before Core was asked, with the identity runtime's
     /// typed error: a host-adopted identity
@@ -364,10 +360,12 @@ pub enum ScopedRetireError {
     /// ([`super::IdentityRuntimeError::IdentityHistoryUnavailable`]).
     /// Nothing was retired.
     Refused(super::IdentityRuntimeError),
-    /// meerkat's retirement of the scope's incarnation failed or is stuck.
-    /// Also the tracked operation ending without a result (it panicked),
-    /// after which whether the identity was retired is unknown: read its
-    /// status.
+    /// Core did not release the scope's incarnation: it refused, retryably
+    /// and typed ([`super::IdentityRuntimeError::IdentityWakeRetryable`]),
+    /// while the member is being woken or has work in flight, interrupting
+    /// nothing, or the release failed. Also the tracked operation ending
+    /// without a result (it panicked), after which whether the member was
+    /// released is unknown: read its status.
     Retire(super::IdentityRuntimeError),
 }
 

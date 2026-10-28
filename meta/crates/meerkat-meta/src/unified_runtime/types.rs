@@ -785,7 +785,8 @@ impl From<meerkat_core::event::CompactionPreservedHistoryFit> for CompactionPres
 /// - `ActorLoopTerminated` - the probe's round trip resolved with the actor's
 ///   command or reply channel CLOSED: the loop did not recover, it is gone,
 ///   and the process must restart
-/// - `IdentityMaterializationFailure` — identity-first peer/fleet hydration skipped a member
+/// - `IdentityMaterializationFailure`: a materialization an operator or a background warm asked
+///   for failed
 /// - `MobStopProceededWithoutInterrupt` — `lifecycle.rs` teardown gave up
 ///   waiting for runtime-attach readiness and continued without interrupting
 /// - `RetiredMemberReleaseFailed` - `identity_first/runtime.rs`: a gateway

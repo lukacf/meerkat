@@ -36,6 +36,16 @@ for (const [surface, map] of [["stock", stock], ["shared", shared]] as const) {
     assert.equal(rows.filter(row => row.id === "history-B").length, 1);
     assert.deepEqual(rows.map(text), ["Identical answer", "Identical answer", "Identical answer"]);
   });
+  test(`${surface}: a reloaded compacted reply keeps its place before content streamed after its first chunk`, () => {
+    // The console log removes a block's chunks once its complete row is
+    // stored, all but the first, which holds the block's place.
+    const first = live("chunk-1", "text_delta", A, { delta: "Searching. " });
+    const search = live("search-2", "server_tool_content", A, { id: "search-1", content: { id: "ws-1", name: "web_search", type: "web_search_call", status: "completed" } });
+    const rest = live("chunk-3", "text_delta", A, { delta: "Found it." });
+    const done = live("done-4", "text_complete", A, { content: "Searching. Found it." });
+    const describe = (frames: ConsoleFrame[]) => JSON.stringify(project(frames).map(entry => [entry.kind, text(entry)]));
+    assert.equal(describe([first, search, done]), describe([first, search, rest, done]));
+  });
   test(`${surface}: canonical changed text wins in either arrival order and late chunks cannot replace it`, () => {
     const saved = history("saved", A, "  Canonical A\u030a\n\nLast paragraph.  ");
     const delta = live("draft", "text_delta", A, { delta: "Discarded provider draft" });

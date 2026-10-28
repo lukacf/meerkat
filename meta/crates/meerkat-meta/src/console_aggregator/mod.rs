@@ -1,10 +1,18 @@
 mod assistant_history_refresh;
 use assistant_history_refresh::AssistantHistoryRefreshReason;
+#[cfg(test)]
+pub(crate) use assistant_history_refresh::core_status_reads;
 mod tool_application_projection;
 
 #[cfg(test)]
 mod assistant_message_identity_tests;
+mod delta_compaction;
+#[cfg(test)]
+mod delta_compaction_tests;
 pub(crate) mod faults;
+mod member_cut;
+#[cfg(test)]
+mod member_cut_tests;
 #[cfg(test)]
 mod member_frame_access_tests;
 #[cfg(test)]
@@ -24,6 +32,10 @@ mod state;
 mod store;
 mod types;
 
+use member_cut::{
+    FrameVisibilityRead, MemberCut, capture_member_lineage_in, capture_member_provenance_in,
+    console_identity_record_visible_in, frame_matches_hidden_member_in, resolved_member_visible_in,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -67,11 +79,11 @@ pub use store::{
     InMemoryConsoleLogStore, SqliteConsoleLogStore,
 };
 pub use types::{
-    AppendDisposition, AppendOutcome, ConsoleCursor, ConsoleFrame, ConsoleFrameLineageLink,
-    ConsoleFrameMemberProvenance, ConsoleFrameSource, ConsoleFrameSourceKind, ConsoleFrameStatus,
-    ConsoleIdentityInspection, ConsoleIdentityRecord, ConsoleInteractionAccepted,
-    ConsoleReplayUnavailable, ConsoleSendRequest, ConsoleTimelineEvent, ConsoleTimelineMode,
-    ConsoleTimelinePage, ConsoleTimelineQuery, ConsoleTimelineWindowPage,
+    AppendDisposition, AppendOutcome, ConsoleCursor, ConsoleDeltaCompaction, ConsoleDeltaKind,
+    ConsoleFrame, ConsoleFrameLineageLink, ConsoleFrameMemberProvenance, ConsoleFrameSource,
+    ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleIdentityInspection, ConsoleIdentityRecord,
+    ConsoleInteractionAccepted, ConsoleReplayUnavailable, ConsoleSendRequest, ConsoleTimelineEvent,
+    ConsoleTimelineMode, ConsoleTimelinePage, ConsoleTimelineQuery, ConsoleTimelineWindowPage,
     ConsoleTimelineWindowQuery, ConsoleTurnOrigin, ConsoleVisibility, IdentityFirstReservation,
     NewConsoleFrame,
 };
@@ -82,7 +94,8 @@ const SESSION_HISTORY_REFRESH_TTL_MS: u64 = 30_000;
 const SESSION_HISTORY_GROWING_REFRESH_TTL_MS: u64 = 2_000;
 const SESSION_HISTORY_DISCOVERY_INTERVAL: Duration = Duration::from_secs(5);
 const IDENTITY_FIRST_LIVE_MEMBER_REFRESH_WAIT: Duration = Duration::from_millis(250);
-const TIMELINE_RAW_SCAN_PAGE_LIMIT: usize = 1_000;
+/// The raw frames one timeline scan reads from the store per page.
+pub(crate) const TIMELINE_RAW_SCAN_PAGE_LIMIT: usize = 1_000;
 const TIMELINE_MAX_RAW_SCAN_FRAMES: usize = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +249,10 @@ struct AggregatorInner {
     /// The live dispatch owner of each console send frame in this process,
     /// shared with every policy view (see [`SendDispatchClaims`]).
     send_dispatch_claims: Arc<SendDispatchClaims>,
+    /// The streamed blocks whose delta rows the projection compacts (see
+    /// [`delta_compaction`]), shared with every policy view: a dedupe cache
+    /// over the console log's durable rows, holding no lifecycle.
+    streamed_blocks: Arc<tokio::sync::Mutex<delta_compaction::StreamedBlocks>>,
     /// Test seam: replaces the runtime's admission evidence for sends.
     #[cfg(test)]
     send_admission_override: std::sync::Mutex<Option<Arc<dyn send_recovery::SendAdmissionReader>>>,
@@ -514,80 +531,19 @@ const CAPTURED_LINEAGE_DEPTH: usize = 8;
 /// there: the access decision then fails closed under any deny its bare
 /// identity cannot decide. A later member under the parent's identity is
 /// never captured in its place.
+///
+/// Reads the members once for itself: a read that already listed them
+/// captures through [`capture_member_lineage_in`] with its own cut.
 async fn capture_member_lineage(
     resolved: &ResolvedConsoleMember,
     record: &ConsoleIdentityRecord,
 ) -> Vec<ConsoleFrameLineageLink> {
-    let namespace = resolved.entry.identity_namespace.as_str();
-    let mut lineage = vec![lineage_link_for_record(
+    Box::pin(capture_member_lineage_in(
+        &MemberCut::new(&resolved.entry),
+        resolved,
         record,
-        namespace,
-        resolved.member.role.as_str(),
-    )];
-    let mut visited = BTreeSet::from([record.identity.clone()]);
-    let mut child_labels = record.labels.clone();
-    let mut sources: Option<Vec<ResolvedConsoleMember>> = None;
-    while lineage.len() < CAPTURED_LINEAGE_DEPTH {
-        let Some(parent) = child_labels
-            .get(crate::console_spawn::SPAWNED_BY_LABEL)
-            .map(|parent| parent.trim().to_string())
-            .filter(|parent| !parent.is_empty())
-        else {
-            break;
-        };
-        let parent_identity = apply_namespace(&parent, namespace);
-        if !visited.insert(parent_identity.clone()) {
-            break;
-        }
-        let bound_session = child_labels
-            .get(crate::console_spawn::SPAWNED_BY_SESSION_LABEL)
-            .map(|session| session.trim().to_string())
-            .filter(|session| !session.is_empty());
-        let mut confirmed = None;
-        if let Some(bound_session) = bound_session.as_deref() {
-            if sources.is_none() {
-                sources = Some(
-                    Box::pin(member_sources_for_entry_including_hidden(&resolved.entry)).await,
-                );
-            }
-            for candidate in sources.iter().flatten() {
-                let roster_id = candidate.member.agent_identity.as_str();
-                let alias_name = crate::member_comms_id::runtime_alias_str(roster_id);
-                let alias: &str = alias_name.as_ref();
-                let durable =
-                    crate::member_comms_id::durable_identity_label(&candidate.member.labels)
-                        .unwrap_or(alias);
-                if roster_id != parent && alias != parent && durable != parent {
-                    continue;
-                }
-                let Some(candidate_record) =
-                    Box::pin(identity_record_for_resolved_member(candidate)).await
-                else {
-                    continue;
-                };
-                if candidate_record.session_id.as_deref() == Some(bound_session) {
-                    confirmed = Some((candidate_record, candidate.member.role.to_string()));
-                    break;
-                }
-            }
-        }
-        match confirmed {
-            Some((parent_record, role)) => {
-                lineage.push(lineage_link_for_record(&parent_record, namespace, &role));
-                child_labels = parent_record.labels;
-            }
-            None => {
-                lineage.push(ConsoleFrameLineageLink {
-                    identity: parent_identity,
-                    agent_id: None,
-                    role: None,
-                    labels: None,
-                });
-                break;
-            }
-        }
-    }
-    lineage
+    ))
+    .await
 }
 
 /// One captured lineage link, in the namespace the access attribute cache
@@ -862,15 +818,17 @@ fn retained_member_visible(
         && policy.member_visible(&source.member)
 }
 
+/// Reads the members once for itself, when the binding check needs them: a
+/// read that already listed them decides through
+/// [`resolved_member_visible_in`] with its own cut.
 async fn resolved_member_visible(
     resolved: &ResolvedConsoleMember,
     record: &ConsoleIdentityRecord,
 ) -> bool {
-    if !raw_resolved_member_visible(resolved, record) {
-        return false;
-    }
-    !Box::pin(live_record_shadowed_by_hidden_durable_binding(
-        resolved, record,
+    Box::pin(resolved_member_visible_in(
+        &MemberCut::new(&resolved.entry),
+        resolved,
+        record,
     ))
     .await
 }
@@ -1010,6 +968,9 @@ impl MetaConsoleAggregator {
                 options,
                 live_projection_shutdowns: std::sync::Mutex::new(BTreeMap::new()),
                 send_dispatch_claims: Arc::new(SendDispatchClaims::default()),
+                streamed_blocks: Arc::new(tokio::sync::Mutex::new(
+                    delta_compaction::StreamedBlocks::default(),
+                )),
                 #[cfg(test)]
                 send_admission_override: std::sync::Mutex::new(None),
             }),
@@ -1098,6 +1059,7 @@ impl MetaConsoleAggregator {
                 options: owner.options,
                 live_projection_shutdowns: std::sync::Mutex::new(BTreeMap::new()),
                 send_dispatch_claims: owner.send_dispatch_claims.clone(),
+                streamed_blocks: owner.streamed_blocks.clone(),
                 #[cfg(test)]
                 send_admission_override: std::sync::Mutex::new(None),
             }),
@@ -1617,6 +1579,42 @@ impl MetaConsoleAggregator {
             }
         }
         Ok(phases)
+    }
+
+    /// The spawn registry's labels for each record, in record order: what the
+    /// agent-tool spawn path registered for the record's identity in the
+    /// record's own runtime, its `spawned_by` lineage among them. `None` for a
+    /// record the registry does not know, as for a member no agent spawned.
+    /// Access decisions read a record's lineage here, never from its labels:
+    /// an identity's declared labels can carry a lineage claim no spawn made.
+    pub(crate) async fn spawn_registry_labels_for_identities(
+        &self,
+        identities: &[ConsoleIdentityRecord],
+    ) -> ConsoleLogResult<Vec<Option<BTreeMap<String, String>>>> {
+        let entries = self
+            .inner
+            .runtimes
+            .read()
+            .map_err(|_| runtime_registry_lock_error())?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut registered = vec![None; identities.len()];
+        for entry in entries {
+            let registry = entry.console_events.identity_labels_snapshot().await;
+            for (index, record) in identities
+                .iter()
+                .enumerate()
+                .filter(|(_, record)| record.runtime_key == entry.runtime_key)
+            {
+                registered[index] =
+                    namespace_match_candidates(&record.identity, &entry.identity_namespace)
+                        .iter()
+                        .find_map(|candidate| registry.get(candidate))
+                        .cloned();
+            }
+        }
+        Ok(registered)
     }
 
     #[cfg(test)]
@@ -2309,7 +2307,9 @@ impl MetaConsoleAggregator {
         let mut scan_query = query.clone();
         scan_query.limit = TIMELINE_RAW_SCAN_PAGE_LIMIT;
         let mut visible_frames = Vec::with_capacity(requested_limit);
-        let mut identity_visibility_cache = HashMap::new();
+        // One read: every frame of this page is decided against the members
+        // each runtime had when the page first needed them.
+        let mut read = FrameVisibilityRead::default();
         let identity_records = self.inner.identity_read_model.current().await;
         let mut next_cursor = query.after.clone();
         let mut since_last_scanned_cursor = query.after.clone();
@@ -2379,7 +2379,7 @@ impl MetaConsoleAggregator {
                     &self.inner,
                     &frame,
                     allow_historical_identity,
-                    &mut identity_visibility_cache,
+                    &mut read,
                     &identity_records,
                 ))
                 .await
@@ -2426,6 +2426,7 @@ impl MetaConsoleAggregator {
                     // oldest frame scanned so the caller can continue into
                     // older history. Not an error: an error would tell the
                     // caller that frames it may not see exist.
+                    self.refresh_identities_after_stream_page(projection, &read);
                     return Ok(ConsoleTimelineWindowPage {
                         frames: Vec::new(),
                         next_cursor: scan_query.before.clone().or(next_cursor),
@@ -2436,6 +2437,7 @@ impl MetaConsoleAggregator {
                 break;
             }
         }
+        self.refresh_identities_after_stream_page(projection, &read);
 
         if query.mode == ConsoleTimelineMode::Recent {
             visible_frames.sort_by_key(|frame| frame.cursor.seq().unwrap_or(u64::MAX));
@@ -2465,6 +2467,22 @@ impl MetaConsoleAggregator {
             latest_cursor,
             exhausted,
         })
+    }
+
+    /// A stream's page (its frames read as stored) that decided a frame of
+    /// an identity the identity read model does not know asks the model to
+    /// refresh, as the stream's live frames do
+    /// ([`Self::timeline_event_visible_for_subscriber`]): once per page.
+    fn refresh_identities_after_stream_page(
+        &self,
+        projection: FrameProjection,
+        read: &FrameVisibilityRead,
+    ) {
+        if projection == FrameProjection::Stored && read.decided_unknown_identity() {
+            self.inner
+                .identity_read_model
+                .refresh_soon(self.inner.clone());
+        }
     }
 
     pub async fn refresh_session_history(&self) -> ConsoleLogResult<()> {
@@ -3362,19 +3380,27 @@ impl MetaConsoleAggregator {
                 else {
                     continue;
                 };
-                if let Ok(status) = identity_runtime.status(&parsed_identity).await {
-                    let record = identity_record_for_status(entry, &status);
-                    if !Box::pin(console_identity_record_visible(entry, &record)).await {
-                        hidden_durable_match = true;
+                let status = match identity_runtime.status(&parsed_identity).await {
+                    Ok(status) => status,
+                    Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => {
                         continue;
                     }
-                    durable_matches.push((
-                        entry.clone(),
-                        identity_runtime.clone(),
-                        parsed_identity,
-                        record,
-                    ));
+                    // A registered identity whose binding cannot be read is
+                    // never sent to past its visibility check: refused before
+                    // anything is reserved.
+                    Err(error) => return Err(ConsoleSendError::RuntimeOperation(Box::new(error))),
+                };
+                let record = identity_record_for_status(entry, &status);
+                if !Box::pin(console_identity_record_visible(entry, &record)).await {
+                    hidden_durable_match = true;
+                    continue;
                 }
+                durable_matches.push((
+                    entry.clone(),
+                    identity_runtime.clone(),
+                    parsed_identity,
+                    record,
+                ));
             }
         }
         if durable_matches.len() > 1 {
@@ -3626,8 +3652,15 @@ impl MetaConsoleAggregator {
                 else {
                     continue;
                 };
-                let Ok(status) = identity_runtime.status(&parsed_identity).await else {
-                    continue;
+                let status = match identity_runtime.status(&parsed_identity).await {
+                    Ok(status) => status,
+                    Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => {
+                        continue;
+                    }
+                    // A registered binding that cannot be read cannot vouch
+                    // for the live member: the send is refused, not let past
+                    // the stale-binding check.
+                    Err(error) => return Err(ConsoleSendError::RuntimeOperation(Box::new(error))),
                 };
                 let record = identity_record_for_status(entry, &status);
                 if !Box::pin(console_identity_record_visible(entry, &record)).await {
@@ -3798,122 +3831,33 @@ impl MetaConsoleAggregator {
     }
 }
 
+/// Reads the members once for itself: a read that decides several records
+/// or frames decides through [`console_identity_record_visible_in`] with its
+/// own cut.
 async fn console_identity_record_visible(
     entry: &RuntimeEntry,
     record: &ConsoleIdentityRecord,
 ) -> bool {
-    if !entry.visibility_policy.identity_visible(record) {
-        return false;
-    }
-    let mut bound_live_member_seen = false;
-    let mut wrong_live_projection_seen = false;
-    for resolved in Box::pin(member_sources_for_entry_including_hidden(entry)).await {
-        // Associate the live row with this durable record by the approved
-        // predicate, not by exact equality with the record's runtime_member_id.
-        // That field holds the BINDING (an incarnation), while the row is now the
-        // encoded durable identity, so exact equality never matched and a hidden
-        // row stopped affecting its own record's visibility - which is how a
-        // hidden member stayed inspectable.
-        if !crate::member_comms_id::live_member_names_identity_or_incarnation(
-            &resolved.runtime_identity,
-            &record.identity,
-            Some(record.runtime_member_id.as_str()),
-        ) {
-            continue;
-        }
-        bound_live_member_seen = true;
-        let Some(live_record) = identity_record_for_resolved_member(&resolved).await else {
-            continue;
-        };
-        if live_record.identity != record.identity {
-            wrong_live_projection_seen = true;
-            continue;
-        }
-        if raw_resolved_member_visible(&resolved, &live_record) {
-            return true;
-        }
-    }
-    if wrong_live_projection_seen {
-        return true;
-    }
-    !bound_live_member_seen
+    Box::pin(console_identity_record_visible_in(
+        &MemberCut::new(entry),
+        record,
+    ))
+    .await
 }
 
+#[cfg(test)]
 async fn live_record_shadowed_by_hidden_durable_binding(
     resolved: &ResolvedConsoleMember,
     record: &ConsoleIdentityRecord,
 ) -> bool {
-    let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref() else {
-        return false;
-    };
-    let Ok(identity) = crate::identity_first::AgentIdentity::parse(&record.identity) else {
-        return false;
-    };
-    let Ok(status) = identity_runtime.status(&identity).await else {
-        return false;
-    };
-    // A binding must exist for this status to shadow anything.
-    if status.agent_runtime_id.is_none() {
-        return false;
-    }
-    // Identity-level: `resolved.runtime_identity` is the DECODED roster member
-    // id, which since the stable-identity lowering is the bare durable
-    // identity.
-    if crate::member_comms_id::live_member_is_identity(
-        &resolved.runtime_identity,
-        status.identity.as_str(),
-    ) {
-        return false;
-    }
-    for candidate in Box::pin(member_sources_for_entry(&resolved.entry)).await {
-        // Same identity-level rule: find the candidate whose roster identity IS
-        // this status's durable identity, not one whose spelling matches an
-        // AgentRuntimeId.
-        if !crate::member_comms_id::live_member_is_identity(
-            &candidate.runtime_identity,
-            status.identity.as_str(),
-        ) {
-            continue;
-        }
-        let Some(bound_record) = identity_record_for_resolved_member(&candidate).await else {
-            continue;
-        };
-        if bound_record.identity == record.identity
-            && !raw_resolved_member_visible(&candidate, &bound_record)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-async fn frame_matches_hidden_member(entry: &RuntimeEntry, frame: &ConsoleFrame) -> bool {
-    let runtime_member_id = strip_namespace(&frame.identity, &entry.identity_namespace)
-        .unwrap_or_else(|| frame.identity.clone());
-    let frame_session_id = frame.session_id.as_deref();
-    let mut saw_hidden = false;
-    let mut saw_visible = false;
-    for resolved in Box::pin(member_sources_for_entry_including_hidden(entry)).await {
-        let Some(record) = identity_record_for_resolved_member(&resolved).await else {
-            continue;
-        };
-        let session_matches =
-            frame_session_id.is_some() && record.session_id.as_deref() == frame_session_id;
-        let runtime_matches = record.runtime_member_id == runtime_member_id;
-        let identity_matches = record.identity == frame.identity;
-        if !session_matches && !runtime_matches && !identity_matches {
-            continue;
-        }
-        if session_matches && !raw_resolved_member_visible(&resolved, &record) {
-            return true;
-        }
-        if Box::pin(resolved_member_visible(&resolved, &record)).await {
-            saw_visible = true;
-        } else {
-            saw_hidden = true;
-        }
-    }
-    saw_hidden && !saw_visible
+    Box::pin(
+        member_cut::live_record_shadowed_by_hidden_durable_binding_in(
+            &MemberCut::new(&resolved.entry),
+            resolved,
+            record,
+        ),
+    )
+    .await
 }
 
 async fn live_records_for_runtime_member(
@@ -3937,10 +3881,13 @@ async fn visible_live_records_for_entry(
     entry: &RuntimeEntry,
     records: &[ConsoleIdentityRecord],
 ) -> Vec<ConsoleIdentityRecord> {
+    // One listing of the entry's members decides every record (see
+    // `member_cut`).
+    let cut = MemberCut::new(entry);
     let mut visible = Vec::new();
     for record in records {
         if record.runtime_key != entry.runtime_key
-            || Box::pin(console_identity_record_visible(entry, record)).await
+            || Box::pin(console_identity_record_visible_in(&cut, record)).await
         {
             visible.push(record.clone());
         }
@@ -4341,6 +4288,9 @@ async fn collect_identity_records(
         .clone();
     let mut identities = Vec::new();
     for entry in entries.values() {
+        // One listing of the entry's members, taken when this read first
+        // needs it, decides every record below (see `member_cut`).
+        let cut = MemberCut::new(entry);
         let mut identity_display_names = BTreeMap::new();
         if let Some(identity_runtime) = entry.identity_runtime.as_ref() {
             let topology_peers =
@@ -4357,7 +4307,7 @@ async fn collect_identity_records(
                         (session.clone(), name.as_str().to_owned()),
                     );
                 }
-                if Box::pin(console_identity_record_visible(entry, &record)).await {
+                if Box::pin(console_identity_record_visible_in(&cut, &record)).await {
                     identities.push(record);
                 }
             }
@@ -4365,27 +4315,33 @@ async fn collect_identity_records(
                 continue;
             }
         }
-        let members = if entry.identity_runtime.is_some() {
+        // The live members, as `member_sources_for_entry` lists them: from
+        // the listings the records above took, or listed now, bounded for an
+        // identity runtime's entry as before (the same listings the bound
+        // always covered).
+        let members = if cut.unhidden_listed() || entry.identity_runtime.is_none() {
+            Some(Box::pin(cut.unhidden()).await)
+        } else {
             match Box::pin(tokio::time::timeout(
                 IDENTITY_FIRST_LIVE_MEMBER_REFRESH_WAIT,
-                member_sources_for_entry(entry),
+                cut.unhidden(),
             ))
             .await
             {
-                Ok(members) => members,
+                Ok(members) => Some(members),
                 Err(_) => {
                     tracing::warn!(
                         runtime_key = %entry.runtime_key,
                         "identity-first live member refresh timed out; keeping cached identity read model"
                     );
-                    Vec::new()
+                    None
                 }
             }
-        } else {
-            Box::pin(member_sources_for_entry(entry)).await
         };
-        for resolved in members {
-            if let Some(mut record) = identity_record_for_resolved_member(&resolved).await {
+        for member in members.into_iter().flatten() {
+            let resolved = &member.resolved;
+            if let Some(record) = member.record().await {
+                let mut record = record.clone();
                 record.topology_peers = resolved
                     .member
                     .wired_to
@@ -4405,8 +4361,8 @@ async fn collect_identity_records(
                 {
                     record.display_name.clone_from(name);
                 }
-                Box::pin(capture_member_provenance(inner, &resolved, &record)).await;
-                if Box::pin(resolved_member_visible(&resolved, &record)).await {
+                Box::pin(capture_member_provenance_in(inner, &cut, resolved, &record)).await;
+                if Box::pin(resolved_member_visible_in(&cut, resolved, &record)).await {
                     identities.push(record);
                 }
             }
@@ -4463,6 +4419,10 @@ async fn identity_runtime_topology_peers(
         .collect()
 }
 
+/// Ask for a session-history backfill of each listed live identity's session
+/// whose pass would read it now ([`identity_read_backfill_due`]): every read
+/// asks again for a session whose history may have moved since its last
+/// pass, and none for a session whose last pass already read what it holds.
 fn spawn_identity_backfills_for_records(
     inner: Arc<AggregatorInner>,
     records: &[ConsoleIdentityRecord],
@@ -4474,28 +4434,147 @@ fn spawn_identity_backfills_for_records(
         Ok(entries) => entries.clone(),
         Err(_) => return,
     };
-    for record in records {
-        if record.health == "dormant" || record.health == "uninitialized" {
-            continue;
-        }
-        let Some(entry) = entries.get(&record.runtime_key).cloned() else {
-            continue;
-        };
-        let Some(session_id) = record.session_id.clone() else {
-            continue;
-        };
-        spawn_session_history_backfill_target(
-            inner.clone(),
-            SessionBackfillTarget {
+    let targets = records
+        .iter()
+        .filter(|record| record.health != "dormant" && record.health != "uninitialized")
+        .filter_map(|record| {
+            Some(SessionBackfillTarget {
                 assistant_refresh: AssistantHistoryRefreshReason::PositiveOnly,
                 provenance: None,
-                entry,
+                entry: entries.get(&record.runtime_key).cloned()?,
                 record: record.clone(),
-                session_id,
-            },
-            false,
-        );
+                session_id: record.session_id.clone()?,
+            })
+        })
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return;
     }
+    let activity = BackfillActivity::begin(&inner);
+    tokio::spawn(async move {
+        let _activity = activity;
+        for target in targets {
+            if !Box::pin(identity_read_backfill_due(&inner, &target)).await {
+                continue;
+            }
+            #[cfg(test)]
+            identity_read_asks::record(target.entry.registration_id);
+            spawn_session_history_backfill_target(inner.clone(), target, false);
+        }
+    });
+}
+
+/// Test seam: the session-history passes identities reads asked for, per
+/// runtime registration.
+#[cfg(test)]
+mod identity_read_asks {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex, PoisonError};
+
+    static ASKS: LazyLock<Mutex<HashMap<uuid::Uuid, usize>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(super) fn record(registration_id: uuid::Uuid) {
+        *ASKS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(registration_id)
+            .or_default() += 1;
+    }
+
+    pub(super) fn count(registration_id: uuid::Uuid) -> usize {
+        ASKS.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&registration_id)
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+/// Whether an identities read asks for `target`'s session-history backfill:
+/// when the pass it would ask for reads the session now, by that pass's own
+/// steady-state gates (`backfill_one_session_history_with_refresh_observer`),
+/// so a read asks only where a pass reads. A retained assistant-history
+/// retry is always asked for. Otherwise the session is due unless its
+/// committed boundary (where the runtime answers it as a bounded read) is the
+/// one its last clean pass read, or its last pass's watermark is still
+/// fresh. A session whose history moved since its last pass is read again
+/// once that watermark is no longer fresh; one whose history did not move is
+/// not asked for. A watermark that cannot be read asks, as every read used
+/// to.
+async fn identity_read_backfill_due(
+    inner: &Arc<AggregatorInner>,
+    target: &SessionBackfillTarget,
+) -> bool {
+    let owner = backfill_owner(inner);
+    let Some(entry) = owner
+        .runtimes
+        .read()
+        .ok()
+        .and_then(|entries| entries.get(&target.entry.runtime_key).cloned())
+    else {
+        return false;
+    };
+    let retry_key = (
+        entry.registration_id,
+        entry.runtime_key.clone(),
+        target.record.identity.clone(),
+        target.session_id.clone(),
+    );
+    let retry_retained = owner
+        .assistant_history_retries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&retry_key);
+    if retry_retained {
+        return true;
+    }
+    let watermark_runtime_key =
+        session_history_watermark_runtime_key(&entry.runtime_key, &target.session_id);
+    if let Some(authority) = entry
+        .runtime
+        .session_boundary_authority(&target.session_id)
+        .await
+    {
+        let read_by_last_pass = owner
+            .session_backfill_authorities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&watermark_runtime_key)
+            == Some(&authority);
+        if read_by_last_pass {
+            return false;
+        }
+    }
+    match owner
+        .store
+        .source_watermark(
+            &watermark_runtime_key,
+            ConsoleFrameSourceKind::SessionHistory,
+        )
+        .await
+    {
+        Ok(watermark) => !watermark.as_deref().is_some_and(|watermark| {
+            session_history_watermark_is_fresh(watermark, &target.session_id, current_time_ms())
+        }),
+        Err(_) => true,
+    }
+}
+
+/// Whether `target`'s session is asked for by a live frame's opportunistic
+/// refresh for the first time in this process.
+async fn first_opportunistic_backfill(
+    inner: &Arc<AggregatorInner>,
+    target: &SessionBackfillTarget,
+) -> bool {
+    backfill_owner(inner)
+        .opportunistic_session_backfills
+        .lock()
+        .await
+        .insert(format!(
+            "{}:session-history:{}",
+            target.entry.runtime_key, target.session_id
+        ))
 }
 
 async fn member_sources_for_entry(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMember> {
@@ -4512,11 +4591,27 @@ async fn member_sources_for_entry_with_hidden(
     entry: &RuntimeEntry,
     include_hidden: bool,
 ) -> Vec<ResolvedConsoleMember> {
-    let mut resolved = Vec::new();
+    let mut resolved = Box::pin(primary_member_sources(entry)).await;
+    if include_hidden || entry.visibility_policy.include_implicit_delegate_members() {
+        resolved.extend(Box::pin(delegate_member_sources(entry)).await);
+    }
+    resolved
+}
+
+/// The members of the primary mob of `entry`'s runtime.
+async fn primary_member_sources(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMember> {
+    #[cfg(test)]
+    member_cut::listings::record(
+        entry.registration_id,
+        member_cut::listings::Listing::Primary,
+    );
     let primary_handle = entry.runtime.handle();
     let primary_mob_id = primary_handle.mob_id().to_string();
-    for member in primary_handle.list_members_observation_snapshot().await {
-        resolved.push(ResolvedConsoleMember {
+    primary_handle
+        .list_members_observation_snapshot()
+        .await
+        .into_iter()
+        .map(|member| ResolvedConsoleMember {
             entry: entry.clone(),
             handle: primary_handle.clone(),
             // Roster ids are comms-safe encodings (meerkat 0.7); the
@@ -4527,15 +4622,23 @@ async fn member_sources_for_entry_with_hidden(
             .into_owned(),
             source_mob_id: primary_mob_id.clone(),
             member,
-        });
-    }
+        })
+        .collect()
+}
 
+/// The members of the implicit delegate mobs `entry`'s runtime manages,
+/// mob by mob; none without a mob tool state.
+async fn delegate_member_sources(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMember> {
     let Some(state) = entry.runtime.agent_mob_mcp_state() else {
-        return resolved;
+        return Vec::new();
     };
-    if !include_hidden && !entry.visibility_policy.include_implicit_delegate_members() {
-        return resolved;
-    }
+    #[cfg(test)]
+    member_cut::listings::record(
+        entry.registration_id,
+        member_cut::listings::Listing::Delegates,
+    );
+    let primary_mob_id = entry.runtime.handle().mob_id().to_string();
+    let mut resolved = Vec::new();
     for (mob_id, handle) in Box::pin(state.mob_handles_snapshot())
         .await
         .unwrap_or_default()
@@ -4561,6 +4664,9 @@ async fn member_sources_for_entry_with_hidden(
     resolved
 }
 
+/// Deliver a Console send to `resolved` and answer the session it landed
+/// on: best effort for an identity, empty when that read fails after the
+/// delivery (the send is delivered all the same).
 async fn dispatch_message_to_resolved_member(
     resolved: &ResolvedConsoleMember,
     content: ContentInput,
@@ -4585,15 +4691,17 @@ async fn dispatch_message_to_resolved_member(
             )
             .await
             .map_err(|error| ConsoleSendError::RuntimeOperation(Box::new(error)))?;
-        return identity_runtime
+        // Delivered. The identity's session read after it only reports where
+        // the input landed: a read that fails, or names no session, must not
+        // turn the delivered send into a failed one, which a client would
+        // answer by sending it again under a new key.
+        return Ok(identity_runtime
             .status(&identity)
             .await
-            .map_err(|error| ConsoleSendError::RuntimeOperation(Box::new(error)))?
-            .session_id
+            .ok()
+            .and_then(|status| status.session_id)
             .map(|session_id| session_id.to_string())
-            .ok_or(ConsoleSendError::State(
-                "identity has no bridge session after delivery",
-            ));
+            .unwrap_or_default());
     }
     crate::mob_handle_runtime::send_console_human_on_mob(
         &resolved.handle,
@@ -4879,6 +4987,19 @@ async fn backfill_session_history(
     let members = Box::pin(member_sources_for_entry(&entry)).await;
     let mut targets = Vec::new();
     for resolved in members {
+        // A member Core holds seated and not materialized in this process
+        // (Dormant, or being woken) is not read by a runtime-wide pass: its
+        // history would be read from its durable session, and every status
+        // read the pass makes of it loads that session too, while nothing
+        // of it changes until it runs. Its wake changes the machine state,
+        // and the next pass reads it; an explicit read of its timeline reads
+        // it on demand (`session_backfill_targets_for_identity`).
+        if resolved
+            .handle
+            .member_unmaterialized(&resolved.member.agent_identity)
+        {
+            continue;
+        }
         let Some(record) = identity_record_for_resolved_member(&resolved).await else {
             continue;
         };
@@ -5290,6 +5411,9 @@ async fn observe_runtime_notice_attempts_with_cache(
     let mut after = (observation.observed_through > 0)
         .then(|| ConsoleCursor::from_seq(observation.observed_through));
     observation.observed_through = observed_through;
+    // The newest scanned row compaction may remove: the anchor only when no
+    // row that stays can be one.
+    let mut fallback_anchor = None;
     loop {
         let page = inner
             .store
@@ -5323,12 +5447,19 @@ async fn observe_runtime_notice_attempts_with_cache(
             {
                 prefix_digest.update(serde_json::to_vec(&frame)?);
             }
+            // A streamed delta row goes once its block's complete row is
+            // stored: anchor on a row that stays when there is one.
             if frame
                 .cursor
                 .seq()
                 .is_some_and(|seq| seq <= observed_through)
             {
-                observation.frontier_anchor = Some((frame.dedupe_key.clone(), frame.id.clone()));
+                let anchor = Some((frame.dedupe_key.clone(), frame.id.clone()));
+                if delta_compaction::is_compactable_delta_row(&frame) {
+                    fallback_anchor = anchor;
+                } else {
+                    observation.frontier_anchor = anchor;
+                }
             }
             if frame
                 .cursor
@@ -5438,6 +5569,11 @@ async fn observe_runtime_notice_attempts_with_cache(
             break;
         }
         after = Some(last_cursor);
+    }
+    // A prefix of delta rows alone still anchors, on its newest row: if
+    // compaction removes it, the next observation rescans once.
+    if observation.frontier_anchor.is_none() {
+        observation.frontier_anchor = fallback_anchor;
     }
     if inner.store.history_prefix_revision().await? != prefix_revision {
         return Err(std::io::Error::other(
@@ -7264,16 +7400,30 @@ fn arm_status_unknown_redrive(
     let redrive_inner = Arc::clone(inner);
     let activity = BackfillActivity::begin(inner);
     let task = tokio::spawn(async move {
-        let _activity = activity;
         use futures::StreamExt as _;
-        let woke = match handle.subscribe_agent_events(&member).await {
-            Ok(mut events) => tokio::select! {
-                event = events.next() => event.is_some(),
-                changed = changes.changed() => changed.is_ok(),
-            },
-            // Not a member of the primary mob (or not live there): the mob's
-            // own changes still wake it.
-            Err(_) => changes.changed().await.is_ok(),
+        let (woke, _activity) = if handle.member_unmaterialized(&member) {
+            // Not materialized in this process (Dormant, or being woken): it
+            // has no events to wait on and settles nothing until it runs.
+            // Wait for the change that materializes it, not for every change
+            // of the mob. The wait owes no backfill, so it holds no backfill
+            // activity: a console whose other work is done converges.
+            drop(activity);
+            let materialized = wait_for_member_materialized(&handle, &member, &mut changes).await;
+            (
+                materialized,
+                materialized.then(|| BackfillActivity::begin(&redrive_inner)),
+            )
+        } else {
+            let woke = match handle.subscribe_agent_events(&member).await {
+                Ok(mut events) => tokio::select! {
+                    event = events.next() => event.is_some(),
+                    changed = changes.changed() => changed.is_ok(),
+                },
+                // Not a member of the primary mob (or not live there): the
+                // mob's own changes still wake it.
+                Err(_) => changes.changed().await.is_ok(),
+            };
+            (woke, Some(activity))
         };
         redrive_inner
             .status_unknown_redrives
@@ -7299,6 +7449,21 @@ fn arm_status_unknown_redrive(
         .push(task);
     #[cfg(not(test))]
     drop(task);
+}
+
+/// Wait until `member` is materialized in this process: `false` when the
+/// mob's machine state stops changing first (its actor is gone).
+async fn wait_for_member_materialized(
+    handle: &MobHandle,
+    member: &AgentIdentity,
+    changes: &mut meerkat_mob::MobMachineStateChanges,
+) -> bool {
+    while handle.member_unmaterialized(member) {
+        if changes.changed().await.is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 async fn run_targeted_session_history_backfill(
@@ -7407,15 +7572,8 @@ fn spawn_opportunistic_session_history_backfill_for_identity(
     tokio::spawn(async move {
         let _activity = activity;
         for target in Box::pin(session_backfill_targets_for_identity(&inner, &identity)).await {
-            let active_key = format!(
-                "{}:session-history:{}",
-                target.entry.runtime_key, target.session_id
-            );
-            {
-                let mut seen = inner.opportunistic_session_backfills.lock().await;
-                if !seen.insert(active_key) {
-                    continue;
-                }
+            if !Box::pin(first_opportunistic_backfill(&inner, &target)).await {
+                continue;
             }
             spawn_session_history_backfill_target(inner.clone(), target, false);
         }
@@ -7703,7 +7861,7 @@ async fn project_console_event(
             "runtime console events",
         );
     } else {
-        append_and_emit_with_policy(&inner, frame, entry.visibility_policy.clone()).await?;
+        append_member_console_event(&inner, &entry, frame).await?;
     }
     inner
         .store
@@ -7725,6 +7883,73 @@ async fn project_console_event(
     }
     if let Some(identity) = application_refresh_identity {
         tool_application_projection::spawn_for_identity(inner, identity);
+    }
+    Ok(())
+}
+
+/// Append a member's console event. A streamed block's delta rows go once
+/// the block's complete row is stored (see [`delta_compaction`]): the delta
+/// append and the compaction share one lock, so a replay of a removed delta
+/// is recognised and not stored again.
+async fn append_member_console_event(
+    inner: &AggregatorInner,
+    entry: &RuntimeEntry,
+    frame: NewConsoleFrame,
+) -> ConsoleLogResult<()> {
+    let policy = entry.visibility_policy.clone();
+    match delta_compaction::BlockRow::of(&frame) {
+        None => {
+            append_and_emit_with_policy(inner, frame, policy).await?;
+        }
+        Some(delta_compaction::BlockRow::Delta {
+            key,
+            source_sequence,
+        }) => {
+            let mut blocks = inner.streamed_blocks.lock().await;
+            let now_ms = current_time_ms();
+            if blocks.replays_removed_delta(&entry.runtime_key, &key, source_sequence, now_ms) {
+                return Ok(());
+            }
+            let outcome = append_and_emit_with_policy(inner, frame, policy).await?;
+            if let Some(cursor) = outcome.frame.cursor.seq() {
+                blocks.delta_stored(&entry.runtime_key, key, cursor, now_ms);
+            }
+        }
+        Some(delta_compaction::BlockRow::Complete {
+            key,
+            source_sequence,
+        }) => {
+            let outcome = append_and_emit_with_policy(inner, frame, policy).await?;
+            if outcome.disposition != AppendDisposition::Inserted {
+                return Ok(());
+            }
+            let Some(complete) = outcome.frame.cursor.seq() else {
+                return Ok(());
+            };
+            let mut blocks = inner.streamed_blocks.lock().await;
+            let Some(first_delta) =
+                blocks.complete_stored(&entry.runtime_key, &key, current_time_ms())
+            else {
+                return Ok(());
+            };
+            let compaction = ConsoleDeltaCompaction::new(
+                entry.runtime_key.clone(),
+                key.identity.clone(),
+                key.kind,
+                key.assistant_message_id.clone(),
+                ConsoleCursor::from_seq(first_delta),
+                ConsoleCursor::from_seq(complete),
+            );
+            match inner.store.compact_message_deltas(&compaction).await {
+                Ok(0) => {}
+                Ok(_) => blocks.compacted(&entry.runtime_key, &key, source_sequence),
+                Err(error) => tracing::warn!(
+                    %error,
+                    identity = %key.identity,
+                    "console log kept a streamed block's delta rows: their removal failed"
+                ),
+            }
+        }
     }
     Ok(())
 }
@@ -9287,28 +9512,32 @@ enum CachedIdentityVisibility {
     Missing,
 }
 
+/// Whether `frame` is visible, decided as a read of its own: one frame.
 async fn frame_is_visible(
     inner: &AggregatorInner,
     frame: &ConsoleFrame,
     allow_historical_identity: bool,
     identity_records: &[ConsoleIdentityRecord],
 ) -> ConsoleLogResult<bool> {
-    let mut identity_visibility_cache = HashMap::new();
     Box::pin(frame_is_visible_cached(
         inner,
         frame,
         allow_historical_identity,
-        &mut identity_visibility_cache,
+        &mut FrameVisibilityRead::default(),
         identity_records,
     ))
     .await
 }
 
+/// Whether `frame` is visible, decided within `read`: every frame of one
+/// read is decided against the members each runtime had when the read first
+/// listed them, and each identity as the read first decided it (see
+/// `member_cut`).
 async fn frame_is_visible_cached(
     inner: &AggregatorInner,
     frame: &ConsoleFrame,
     allow_historical_identity: bool,
-    identity_visibility_cache: &mut HashMap<(String, String), CachedIdentityVisibility>,
+    read: &mut FrameVisibilityRead,
     identity_records: &[ConsoleIdentityRecord],
 ) -> ConsoleLogResult<bool> {
     // An update marker cannot reveal a frame hidden by the same policy.
@@ -9323,7 +9552,7 @@ async fn frame_is_visible_cached(
             inner,
             &updated,
             allow_historical_identity,
-            identity_visibility_cache,
+            read,
             identity_records,
         ))
         .await?
@@ -9357,39 +9586,39 @@ async fn frame_is_visible_cached(
     // ABAC still filters them per-caller in the RPC layer
     // (`timeline_frame_visible_to`).
     if !crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
+        let cut = read.cut(&entry);
         let cache_key = (frame.runtime_key.clone(), frame.identity.clone());
-        let identity_visibility =
-            if let Some(cached) = identity_visibility_cache.get(&cache_key).copied() {
-                cached
-            } else {
-                let runtime_member_id = strip_namespace(&frame.identity, &entry.identity_namespace)
-                    .unwrap_or_else(|| frame.identity.clone());
-                let visibility = match identity_records.iter().find(|record| {
-                    record.runtime_key == frame.runtime_key
-                        && (record.identity == frame.identity
-                            || record.runtime_member_id == runtime_member_id)
-                }) {
-                    Some(record) => {
-                        if Box::pin(console_identity_record_visible(&entry, record)).await {
-                            CachedIdentityVisibility::Visible
-                        } else {
-                            CachedIdentityVisibility::Hidden
-                        }
+        let identity_visibility = if let Some(cached) = read.identities.get(&cache_key).copied() {
+            cached
+        } else {
+            let runtime_member_id = strip_namespace(&frame.identity, &entry.identity_namespace)
+                .unwrap_or_else(|| frame.identity.clone());
+            let visibility = match identity_records.iter().find(|record| {
+                record.runtime_key == frame.runtime_key
+                    && (record.identity == frame.identity
+                        || record.runtime_member_id == runtime_member_id)
+            }) {
+                Some(record) => {
+                    if Box::pin(console_identity_record_visible_in(&cut, record)).await {
+                        CachedIdentityVisibility::Visible
+                    } else {
+                        CachedIdentityVisibility::Hidden
                     }
-                    None => CachedIdentityVisibility::Missing,
-                };
-                identity_visibility_cache.insert(cache_key, visibility);
-                visibility
+                }
+                None => CachedIdentityVisibility::Missing,
             };
+            read.identities.insert(cache_key, visibility);
+            visibility
+        };
         match identity_visibility {
             CachedIdentityVisibility::Visible => {
-                if Box::pin(frame_matches_hidden_member(&entry, frame)).await {
+                if Box::pin(frame_matches_hidden_member_in(&cut, frame)).await {
                     return Ok(false);
                 }
             }
             CachedIdentityVisibility::Hidden => return Ok(false),
             CachedIdentityVisibility::Missing => {
-                if Box::pin(frame_matches_hidden_member(&entry, frame)).await {
+                if Box::pin(frame_matches_hidden_member_in(&cut, frame)).await {
                     return Ok(false);
                 }
                 return Ok(
@@ -9592,8 +9821,13 @@ async fn authoritative_durable_sendable_member_index(
             let Ok(identity) = crate::identity_first::AgentIdentity::parse(&raw_identity) else {
                 continue;
             };
-            let Ok(status) = identity_runtime.status(&identity).await else {
-                continue;
+            let status = match identity_runtime.status(&identity).await {
+                Ok(status) => status,
+                Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => continue,
+                // A registered binding that cannot be read is never left out:
+                // leaving it out could make another runtime's binding the
+                // authoritative target.
+                Err(error) => return Err(ConsoleSendError::RuntimeOperation(Box::new(error))),
             };
             if status.state != crate::identity_first::IdentityLifecycleState::Active
                 || status.addressability != crate::identity_first::AgentAddressability::Addressable
@@ -10066,7 +10300,7 @@ mod tests {
         }
     }
 
-    struct CountingConsoleLogStore {
+    pub(super) struct CountingConsoleLogStore {
         inner: InMemoryConsoleLogStore,
         source_watermark_calls: AtomicUsize,
         record_watermark_calls: AtomicUsize,
@@ -10076,7 +10310,7 @@ mod tests {
     }
 
     impl CountingConsoleLogStore {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
                 inner: InMemoryConsoleLogStore::new(),
                 source_watermark_calls: AtomicUsize::new(0),
@@ -10087,7 +10321,7 @@ mod tests {
             }
         }
 
-        fn source_watermark_calls(&self) -> usize {
+        pub(super) fn source_watermark_calls(&self) -> usize {
             self.source_watermark_calls.load(Ordering::SeqCst)
         }
     }
@@ -11227,7 +11461,7 @@ mod tests {
     /// Per-test mob id: 0.8.23's fail-closed in-proc registration means
     /// concurrently running tests must not share a supervisor participant
     /// name, so every bootstrap gets its own id.
-    fn unique_console_mob_id(prefix: &str) -> String {
+    pub(super) fn unique_console_mob_id(prefix: &str) -> String {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         format!(
             "{prefix}-{}",
@@ -11277,7 +11511,7 @@ comms = true
         runtime
     }
 
-    async fn build_empty_runtime(mob_id: &str) -> UnifiedRuntime {
+    pub(super) async fn build_empty_runtime(mob_id: &str) -> UnifiedRuntime {
         let definition = MobDefinition::from_toml(&format!(
             r#"
 [mob]
@@ -11306,7 +11540,7 @@ comms = true
     /// aggregator authority tests. Public raw spawn APIs reserve
     /// `labels.agent_identity` for the identity runtime; these fixtures are
     /// modeling the already-authorized output of that runtime.
-    async fn spawn_trusted_identity_projected_member(
+    pub(super) async fn spawn_trusted_identity_projected_member(
         runtime: &UnifiedRuntime,
         mut spec: SpawnMemberSpec,
     ) {
@@ -12258,7 +12492,7 @@ comms = true
                 placement: None,
             },
             0,
-            live_session_id,
+            live_session_id.clone(),
         )
         .await?;
 
@@ -12278,10 +12512,30 @@ comms = true
                 .await?,
             "the namespaced current runtime alias must resolve"
         );
+        // The durable authority's retire is Core's release: the member stays
+        // seated on its session at its generation, so the identity reads
+        // Active, on the same runtime id and session.
         assert_eq!(
-            identity_runtime.status(&durable_identity).await?.state,
-            crate::identity_first::IdentityLifecycleState::Dormant,
-            "retirement must advance the durable lifecycle authority"
+            core_bridge.releases(),
+            vec![durable_identity.clone()],
+            "retirement must go through the durable lifecycle authority"
+        );
+        let status = identity_runtime.status(&durable_identity).await?;
+        assert_eq!(
+            (
+                status.state,
+                status
+                    .agent_runtime_id
+                    .as_ref()
+                    .map(crate::identity_first::AgentRuntimeId::as_str),
+                status.session_id,
+            ),
+            (
+                crate::identity_first::IdentityLifecycleState::Active,
+                Some(runtime_alias),
+                Some(live_session_id),
+            ),
+            "a release keeps the incarnation"
         );
         let raw_member = runtime
             .mob_handle()
@@ -12370,7 +12624,7 @@ comms = true
                 placement: None,
             },
             0,
-            live_session_id,
+            live_session_id.clone(),
         )
         .await?;
         let aggregator = MetaConsoleAggregator::in_memory();
@@ -12424,10 +12678,31 @@ comms = true
             (false, true),
             "(stale alias retired, current alias retired)"
         );
+        // The durable authority's retire is Core's release, once, for the
+        // current alias: the member stays seated on its session at its
+        // generation, so the identity reads Active, on the same runtime id and
+        // session.
         assert_eq!(
-            identity_runtime.status(&durable_identity).await?.state,
-            crate::identity_first::IdentityLifecycleState::Dormant,
+            core_bridge.releases(),
+            vec![durable_identity.clone()],
             "the current alias must retire through the durable lifecycle authority"
+        );
+        let status = identity_runtime.status(&durable_identity).await?;
+        assert_eq!(
+            (
+                status.state,
+                status
+                    .agent_runtime_id
+                    .as_ref()
+                    .map(|id| id.as_str().to_owned()),
+                status.session_id,
+            ),
+            (
+                crate::identity_first::IdentityLifecycleState::Active,
+                Some(format!("rt:{DURABLE}:0")),
+                Some(live_session_id),
+            ),
+            "a release keeps the incarnation"
         );
 
         let _ = runtime.mob_handle().stop().await;
@@ -14269,6 +14544,279 @@ comms = true
             })
             .await?;
         assert_eq!(accepted.session_id, Some(bound_session_id.to_string()));
+
+        let _ = runtime.mob_handle().stop().await;
+        Ok(())
+    }
+
+    /// Every console send guard that reads a registered identity's binding
+    /// refuses typed when that read fails, instead of taking the failure
+    /// for "no registered identity": the identity-first send's visibility
+    /// check, the member lane's stale-binding check and its authoritative
+    /// binding choice, and the shadowing check that hides a live row
+    /// labelled with an identity it is not the roster row of.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn console_send_guards_refuse_a_registered_identity_whose_binding_cannot_be_read()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let runtime = build_empty_runtime("identity-binding-unreadable-send-guards-test").await;
+        let labels = BTreeMap::from([("agent_identity".to_string(), "builder".to_string())]);
+        for generation in 0..=1 {
+            spawn_trusted_identity_projected_member(
+                &runtime,
+                SpawnMemberSpec::from_wire(
+                    "worker".to_string(),
+                    format!("rt:builder:{generation}"),
+                    Some(format!("You are Builder generation {generation}.").into()),
+                    None,
+                    None,
+                )
+                .with_labels(labels.clone()),
+            )
+            .await;
+        }
+        let bound_session_id = runtime
+            .mob_handle()
+            .resolve_bridge_session_id_observation(&crate::member_comms_id::mob_member_id(
+                "rt:builder:1",
+            ))
+            .await
+            .expect("bound generation has a bridge session");
+        let core_bridge = Arc::new(CoreReadsBridge::default());
+        let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()?
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: "console-aggregator-binding-unreadable-test".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(core_bridge.clone()),
+                default_timeout: None,
+            },
+        ));
+        register_live(
+            &identity_runtime,
+            &core_bridge.core,
+            crate::identity_first::DurableAgentSpec {
+                identity: crate::identity_first::AgentIdentity::parse("builder")?,
+                profile: meerkat_mob::ProfileName::from("worker"),
+                addressability: crate::identity_first::AgentAddressability::Addressable,
+                display_name: None,
+                labels: BTreeMap::new(),
+                context: None,
+                additional_instructions: Vec::new(),
+                initial_message: None,
+                runtime_mode_override: None,
+                backend: None,
+                binding: None,
+                placement: None,
+            },
+            1,
+            bound_session_id,
+        )
+        .await?;
+        let aggregator = MetaConsoleAggregator::in_memory();
+        aggregator
+            .inner
+            .runtimes
+            .write()
+            .expect("runtime registry")
+            .insert(
+                "default".to_string(),
+                RuntimeEntry {
+                    registration_id: uuid::Uuid::new_v4(),
+                    runtime_key: "default".to_string(),
+                    identity_namespace: String::new(),
+                    runtime: runtime.mob_runtime().clone(),
+                    identity_runtime: Some(identity_runtime),
+                    identity_owner: None,
+                    memory_panel: None,
+                    console_events: runtime.console_events(),
+                    visibility_policy: Arc::new(AllowAllConsoleVisibilityPolicy),
+                },
+            );
+        // Resolved while Core's history still reads.
+        let matches = aggregator.resolve_visible_members("builder").await;
+        let sendable = sendable_resolved_member_indices(&matches);
+        assert_eq!(sendable.len(), 2, "both labelled generations are sendable");
+        let stale = matches
+            .iter()
+            .find(|resolved| resolved.runtime_identity == "rt:builder:0")
+            .expect("the labelled stale generation resolves");
+        let stale_record = identity_record_for_resolved_member(stale)
+            .await
+            .expect("the stale generation projects a record");
+        assert_eq!(stale_record.identity, "builder");
+        assert!(
+            !live_record_shadowed_by_hidden_durable_binding(stale, &stale_record).await,
+            "a readable, visible binding shadows nothing"
+        );
+
+        core_bridge.fail_history_reads(0, u64::MAX);
+        let history_unavailable = |error: &ConsoleSendError| {
+            error
+                .structured_data()
+                .and_then(|data| data.get("kind").cloned())
+                == Some(json!("identity_history_unavailable"))
+        };
+
+        let error = match aggregator
+            .runtime_key_for_identity_first_send("builder")
+            .await
+        {
+            Ok((runtime_key, _)) => {
+                return Err(format!(
+                    "the identity-first send must not pass its visibility check unread; it \
+                     chose runtime {runtime_key}"
+                )
+                .into());
+            }
+            Err(error) => error,
+        };
+        assert!(history_unavailable(&error), "{error}");
+        let error = aggregator
+            .durable_send_binding_error("builder")
+            .await
+            .expect_err("the member lane must not pass its stale-binding check unread");
+        assert!(history_unavailable(&error), "{error}");
+        let error = authoritative_durable_sendable_member_index("builder", &matches, &sendable)
+            .await
+            .expect_err("an unread binding must not be left out of the authoritative choice");
+        assert!(history_unavailable(&error), "{error}");
+        assert!(
+            live_record_shadowed_by_hidden_durable_binding(stale, &stale_record).await,
+            "a binding that cannot be read cannot clear a labelled row"
+        );
+
+        let _ = runtime.mob_handle().stop().await;
+        Ok(())
+    }
+
+    /// A Console send the member lane delivered through the identity door
+    /// stays delivered when the identity's binding cannot be read right
+    /// after the delivery: that read only reports the session. A delivered
+    /// send reported failed invites a resend under a new key, which would
+    /// deliver it twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn member_lane_identity_send_stays_delivered_when_the_read_after_it_fails()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let runtime = build_empty_runtime("identity-send-read-after-delivery-test").await;
+        spawn_trusted_identity_projected_member(
+            &runtime,
+            SpawnMemberSpec::from_wire(
+                "worker".to_string(),
+                "builder".to_string(),
+                None,
+                None,
+                None,
+            )
+            .with_labels(BTreeMap::from([(
+                "agent_identity".to_string(),
+                "builder".to_string(),
+            )])),
+        )
+        .await;
+        let session_id = runtime
+            .mob_handle()
+            .resolve_bridge_session_id_observation(&crate::member_comms_id::mob_member_id(
+                "builder",
+            ))
+            .await
+            .expect("the identity's member has a bridge session");
+        let core_bridge = Arc::new(CoreReadsBridge::with_host_human_input());
+        let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()?
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: "console-aggregator-read-after-delivery-test".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(core_bridge.clone()),
+                default_timeout: None,
+            },
+        ));
+        register_live(
+            &identity_runtime,
+            &core_bridge.core,
+            crate::identity_first::DurableAgentSpec {
+                identity: crate::identity_first::AgentIdentity::parse("builder")?,
+                profile: meerkat_mob::ProfileName::from("worker"),
+                addressability: crate::identity_first::AgentAddressability::Addressable,
+                display_name: None,
+                labels: BTreeMap::new(),
+                context: None,
+                additional_instructions: Vec::new(),
+                initial_message: None,
+                runtime_mode_override: None,
+                backend: None,
+                binding: None,
+                placement: None,
+            },
+            0,
+            session_id,
+        )
+        .await?;
+        let aggregator = MetaConsoleAggregator::in_memory();
+        aggregator
+            .inner
+            .runtimes
+            .write()
+            .expect("runtime registry")
+            .insert(
+                "default".to_string(),
+                RuntimeEntry {
+                    registration_id: uuid::Uuid::new_v4(),
+                    runtime_key: "default".to_string(),
+                    identity_namespace: String::new(),
+                    runtime: runtime.mob_runtime().clone(),
+                    identity_runtime: Some(identity_runtime),
+                    identity_owner: None,
+                    memory_panel: None,
+                    console_events: runtime.console_events(),
+                    visibility_policy: Arc::new(AllowAllConsoleVisibilityPolicy),
+                },
+            );
+        let matches = aggregator.resolve_visible_members("builder").await;
+        let resolved = matches
+            .iter()
+            .find(|resolved| resolved.runtime_identity == "builder")
+            .expect("the identity's roster row resolves");
+
+        // The delivery reads none of Core's member history; the read after
+        // it is the first one, and it fails.
+        core_bridge.fail_history_reads(0, u64::MAX);
+        let accepted = ConsoleInteractionAccepted {
+            interaction_id: uuid::Uuid::new_v4().to_string(),
+            identity: "builder".to_string(),
+            conversation_id: None,
+            session_id: None,
+            input_frame_id: uuid::Uuid::new_v4().to_string(),
+            cursor: ConsoleCursor::from_seq(1),
+            status: ConsoleFrameStatus::Accepted,
+        };
+        let delivered = dispatch_message_to_resolved_member(
+            resolved,
+            ContentInput::Text("deliver this once".to_string()),
+            &[],
+            meerkat_core::types::HandlingMode::Steer,
+            &accepted,
+        )
+        .await;
+
+        assert_eq!(
+            core_bridge.host_human_inputs(),
+            1,
+            "the identity door delivered the input once"
+        );
+        let session = delivered
+            .map_err(|error| format!("a delivered send must not be reported failed: {error}"))?;
+        assert!(
+            session.is_empty(),
+            "a session that could not be read is reported unknown, not guessed: {session}"
+        );
 
         let _ = runtime.mob_handle().stop().await;
         Ok(())
@@ -18052,9 +18600,15 @@ comms = true
             vec![saved.clone()]
         );
         assert!(
-            frame_is_visible_cached(&reopened.inner, &saved, true, &mut HashMap::new(), &[])
-                .await
-                .expect("snapshot visibility"),
+            frame_is_visible_cached(
+                &reopened.inner,
+                &saved,
+                true,
+                &mut FrameVisibilityRead::default(),
+                &[],
+            )
+            .await
+            .expect("snapshot visibility"),
             "a valid durable removal remains visible without a new history image"
         );
         let _ = runtime.mob_handle().stop().await;

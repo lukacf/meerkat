@@ -486,10 +486,11 @@ async fn keyed_meta_send_survives_identity_respawn() {
     boot.shutdown().await;
 }
 
-/// X4: a keyed send to a retired (not live) identity wakes it through the
-/// one wake door first, then commits once; a replay names that commit.
+/// X4: a keyed send to a retired identity, whose member the retire released
+/// (seated on its session, not materialized), is materialized by Core's
+/// delivery first, then commits once; a replay names that commit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn keyed_meta_send_wakes_a_dormant_identity_then_commits_once() {
+async fn keyed_meta_send_wakes_a_released_identity_then_commits_once() {
     let temp = tempfile::TempDir::new().unwrap();
     let client = RecordingClient::default();
     let boot = Boot::start(&temp.path().join("state"), &unique_mob_id(), &client).await;

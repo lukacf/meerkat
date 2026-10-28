@@ -266,9 +266,10 @@ async fn a_resumed_mob_revives_its_member_with_the_bundle() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    // A new runtime over the same state resumes the mob; the member is revived
-    // by meerkat-mob's resume reconciliation, not spawned again, and its first
-    // model request is built by that revival.
+    // A new runtime over the same state resumes the mob; the member is
+    // restored by meerkat-mob's resume, not spawned again, and its first
+    // delivery materializes it, so its first model request is built by that
+    // materialization.
     let client = CaptureClient::new();
     let resumed = durable_runtime(state.path(), &client).await;
     assert!(

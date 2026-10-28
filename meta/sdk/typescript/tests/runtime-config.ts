@@ -21,6 +21,8 @@ const DEFAULTS = {
   accessConfigPath: null,
   meerkatConfigPath: null,
   providerCredentialsRoot: null,
+  nativeRealm: null,
+  memberAuthBinding: null,
   httpListen: null,
   httpPublicBaseUrl: null,
   allowRemote: null,

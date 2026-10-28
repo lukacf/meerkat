@@ -919,9 +919,9 @@ impl TaintObserverGuard {
 }
 
 /// Subscribe the taint observer to every active member's agent-event stream
-/// (the same observe-only `subscribe_agent_events` surface the console
-/// forwarder rides), reconciling membership whenever the mob's machine state
-/// changes.
+/// (the same observe-only subscription the console forwarder rides, from the
+/// earliest event the member's actor retains), reconciling membership
+/// whenever the mob's machine state changes.
 pub fn spawn_taint_observer(
     handle: meerkat_mob::MobHandle,
     tracker: SessionTaintTracker,
@@ -957,7 +957,15 @@ trait MemberEventSource: Send + Sync + 'static {
     /// runtime delta stream; subscribing others fails every pass (the console
     /// forwarder learned this the hard way).
     fn active_members(&self) -> impl Future<Output = Vec<meerkat_mob::AgentIdentity>> + Send;
-    /// Open the member's observe-only agent-event stream.
+    /// Whether Core holds the member seated and not materialized in this
+    /// process (dormant, or waking while its wake runs), read without an
+    /// actor round trip. Such a member is not served yet: a dormant one has
+    /// no session actor, and a waking one may be refused until its wake
+    /// ends, which changes the machine state.
+    fn unmaterialized(&self, identity: &meerkat_mob::AgentIdentity) -> bool;
+    /// Open the member's observe-only agent-event stream, from the earliest
+    /// event its current actor retains, so a run that started before the
+    /// subscription (the run its wake started) is read from its first event.
     fn subscribe(
         &self,
         identity: &meerkat_mob::AgentIdentity,
@@ -998,11 +1006,20 @@ impl MemberEventSource for meerkat_mob::MobHandle {
             .collect()
     }
 
+    fn unmaterialized(&self, identity: &meerkat_mob::AgentIdentity) -> bool {
+        self.member_unmaterialized(identity)
+    }
+
     async fn subscribe(
         &self,
         identity: &meerkat_mob::AgentIdentity,
     ) -> Result<meerkat_core::comms::EventStream, meerkat_mob::MobError> {
-        self.subscribe_agent_events(identity).await
+        self.subscribe_agent_events_from(
+            identity,
+            meerkat_core::comms::SessionEventCursor::Earliest,
+        )
+        .await
+        .map(|subscription| subscription.stream)
     }
 }
 
@@ -1077,6 +1094,14 @@ struct MemberEventSubscriptions {
         (tokio::time::Instant, crate::fallback_wake::FallbackWake),
     >,
     backoff: ObserverSubscribeBackoff,
+    /// The event ids each member's streams handed to the sinks. Every
+    /// subscription replays what the member's actor retains, which can
+    /// overlap what an earlier stream of the member delivered; the sinks see
+    /// each event once.
+    seen: std::collections::HashMap<
+        String,
+        Arc<std::sync::Mutex<crate::unified_runtime::ForwardedEventIds>>,
+    >,
 }
 
 impl MemberEventSubscriptions {
@@ -1118,7 +1143,21 @@ impl MemberEventSubscriptions {
         for member in source.active_members().await {
             let identity = member.to_string();
             active.insert(identity.clone());
-            if self.subscribed.contains(&identity) || !self.backoff.may_attempt(&identity, now) {
+            if self.subscribed.contains(&identity) {
+                continue;
+            }
+            // A member Core holds unmaterialized is not served yet (a dormant
+            // one has no session actor, and a waking one may be refused until
+            // its wake ends): the observer skips it until Core holds it live,
+            // asks the mob actor nothing for it and holds no failure against
+            // it. The end of its wake changes the machine state, which runs
+            // this pass again, and the subscription then replays the woken
+            // actor's events from its first.
+            if source.unmaterialized(&member) {
+                self.backoff.record_success(&identity);
+                continue;
+            }
+            if !self.backoff.may_attempt(&identity, now) {
                 continue;
             }
             // Sinks receive the LOGICAL identity (task #53): the roster id is
@@ -1135,6 +1174,14 @@ impl MemberEventSubscriptions {
             let sink_identity = crate::member_comms_id::logical_memory_identity(&identity);
             match source.subscribe(&member).await {
                 Ok(stream) => {
+                    let seen = Arc::clone(self.seen.entry(identity.clone()).or_default());
+                    let stream = stream.filter(move |envelope| {
+                        let first = seen
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .first_sighting(envelope.event_id);
+                        futures::future::ready(first)
+                    });
                     self.subscribed.insert(identity.clone());
                     let history = self.backoff.failures.remove(&identity).unwrap_or_default();
                     self.subscribed_at.insert(identity.clone(), (now, history));
@@ -1173,6 +1220,9 @@ impl MemberEventSubscriptions {
             }
         }
         self.backoff.retain_active(&active);
+        let subscribed = &self.subscribed;
+        self.seen
+            .retain(|identity, _| active.contains(identity) || subscribed.contains(identity));
     }
 }
 
@@ -1191,6 +1241,7 @@ async fn run_member_event_observer<S: MemberEventSource>(
         subscribed: std::collections::HashSet::new(),
         subscribed_at: std::collections::HashMap::new(),
         backoff: ObserverSubscribeBackoff::default(),
+        seen: std::collections::HashMap::new(),
     };
     subscriptions.reconcile(&source).await;
 
@@ -1945,6 +1996,11 @@ mod tests {
         subscribable: Mutex<std::collections::HashSet<String>>,
         /// Subscribable members whose stream ends as soon as it opens.
         closes_at_once: Mutex<std::collections::HashSet<String>>,
+        /// Members Core holds unmaterialized (dormant, or waking).
+        dormant: Mutex<std::collections::HashSet<String>>,
+        /// What each member's actor retains: every subscription replays it
+        /// first, as one from the earliest retained event does.
+        retained: Mutex<HashMap<String, Vec<meerkat_core::event::EventEnvelope<AgentEvent>>>>,
         attempts: Mutex<HashMap<String, Vec<tokio::time::Instant>>>,
         changes: tokio::sync::watch::Sender<()>,
     }
@@ -1969,6 +2025,8 @@ mod tests {
                 ),
                 subscribable: Mutex::new(subscribable.iter().map(ToString::to_string).collect()),
                 closes_at_once: Mutex::new(std::collections::HashSet::new()),
+                dormant: Mutex::new(std::collections::HashSet::new()),
+                retained: Mutex::new(HashMap::new()),
                 attempts: Mutex::new(HashMap::new()),
                 changes: tokio::sync::watch::channel(()).0,
             })
@@ -2005,10 +2063,16 @@ mod tests {
             self.members.lock().unwrap().clone()
         }
 
+        fn unmaterialized(&self, identity: &meerkat_mob::AgentIdentity) -> bool {
+            self.dormant.lock().unwrap().contains(identity.as_str())
+        }
+
         async fn subscribe(
             &self,
             identity: &meerkat_mob::AgentIdentity,
         ) -> Result<meerkat_core::comms::EventStream, meerkat_mob::MobError> {
+            use futures::StreamExt as _;
+
             let identity = identity.to_string();
             self.attempts
                 .lock()
@@ -2016,10 +2080,18 @@ mod tests {
                 .entry(identity.clone())
                 .or_default()
                 .push(tokio::time::Instant::now());
+            let replay = futures::stream::iter(
+                self.retained
+                    .lock()
+                    .unwrap()
+                    .get(&identity)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
             if self.closes_at_once.lock().unwrap().contains(&identity) {
-                Ok(Box::pin(futures::stream::empty()))
+                Ok(Box::pin(replay))
             } else if self.subscribable.lock().unwrap().contains(&identity) {
-                Ok(Box::pin(futures::stream::pending()))
+                Ok(Box::pin(replay.chain(futures::stream::pending())))
             } else {
                 Err(meerkat_mob::MobError::Internal(format!(
                     "no event injector for '{identity}' yet"
@@ -2180,6 +2252,91 @@ mod tests {
         task.abort();
     }
 
+    /// A member Core holds unmaterialized (dormant after a restart) costs the
+    /// observer nothing: no subscribe through any number of state changes,
+    /// and no backoff to wait out once it wakes. The change that ends its
+    /// wake subscribes it at once. RED on the base: the observer subscribed
+    /// it on the first pass, as it did every Active member.
+    #[tokio::test(start_paused = true)]
+    async fn member_event_observer_asks_nothing_for_an_unmaterialized_member_until_its_wake() {
+        let source =
+            ScriptedMemberSource::new(meerkat_mob::MobState::Running, &["sleeper"], &["sleeper"]);
+        source.dormant.lock().unwrap().insert("sleeper".to_string());
+        let task = tokio::spawn(run_member_event_observer(source.clone(), Vec::new()));
+        settle().await;
+        for _ in 0..20 {
+            source.change();
+            settle().await;
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        assert!(
+            source.attempts("sleeper").is_empty(),
+            "nothing is asked while Core holds the member unmaterialized"
+        );
+
+        let woken = tokio::time::Instant::now();
+        source.dormant.lock().unwrap().clear();
+        source.change();
+        settle().await;
+        let attempts = source.attempts("sleeper");
+        assert_eq!(attempts.len(), 1, "the wake's change subscribes it");
+        assert_eq!(attempts[0], woken, "with no backoff to wait out");
+        task.abort();
+    }
+
+    /// Records the event ids the observer hands to its sinks.
+    #[derive(Default)]
+    struct RecordingSink(Mutex<Vec<uuid::Uuid>>);
+
+    impl MemberAgentEventSink for RecordingSink {
+        fn observe(
+            &self,
+            _identity: &str,
+            envelope: &meerkat_core::event::EventEnvelope<AgentEvent>,
+        ) {
+            self.0.lock().unwrap().push(envelope.event_id);
+        }
+    }
+
+    /// Every subscription replays what the member's actor retains, so one
+    /// made after an earlier stream of the member closed repeats what that
+    /// stream delivered: the sinks still see each event once. RED on the
+    /// base: each replay reached the sinks again.
+    #[tokio::test(start_paused = true)]
+    async fn member_event_observer_hands_each_replayed_event_to_its_sinks_once() {
+        let source =
+            ScriptedMemberSource::new(meerkat_mob::MobState::Running, &["replayer"], &["replayer"]);
+        let session = SessionId::new();
+        let retained = vec![
+            meerkat_core::event::EventEnvelope::new("replayer", 1, None, run_started(&session)),
+            meerkat_core::event::EventEnvelope::new("replayer", 2, None, tool_result("web_fetch")),
+        ];
+        let ids: Vec<uuid::Uuid> = retained.iter().map(|envelope| envelope.event_id).collect();
+        source
+            .retained
+            .lock()
+            .unwrap()
+            .insert("replayer".to_string(), retained);
+        // Each stream ends right after its replay, so the observer subscribes
+        // the member again at its backoff deadlines, replaying it each time.
+        source
+            .closes_at_once
+            .lock()
+            .unwrap()
+            .insert("replayer".to_string());
+        let sink = Arc::new(RecordingSink::default());
+        let sinks: Vec<Arc<dyn MemberAgentEventSink>> = vec![sink.clone()];
+        let task = tokio::spawn(run_member_event_observer(source.clone(), sinks));
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        assert!(
+            source.attempts("replayer").len() >= 2,
+            "the member was subscribed again: {:?}",
+            source.attempts("replayer")
+        );
+        assert_eq!(*sink.0.lock().unwrap(), ids, "each replayed event once");
+        task.abort();
+    }
+
     /// When the mob actor is gone and no stream is open, the observer ends.
     #[tokio::test(start_paused = true)]
     async fn member_event_observer_ends_when_the_mob_actor_is_gone() {
@@ -2194,6 +2351,9 @@ mod tests {
             }
             async fn active_members(&self) -> Vec<meerkat_mob::AgentIdentity> {
                 Vec::new()
+            }
+            fn unmaterialized(&self, _identity: &meerkat_mob::AgentIdentity) -> bool {
+                false
             }
             async fn subscribe(
                 &self,

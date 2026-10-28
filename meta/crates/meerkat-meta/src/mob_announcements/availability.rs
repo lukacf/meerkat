@@ -90,7 +90,10 @@ pub enum SuspendCause {
     /// authorization host, which refuses host continuations. Configuration
     /// can change it.
     Governed,
-    /// The member has no live incarnation now; a respawn ends this.
+    /// Core holds no member for the identity now: it left the roster, or the
+    /// delivery named an incarnation that ended. A seated member, dormant or
+    /// live, never reads this: Core materializes it for the delivery. A
+    /// roster that lists the identity again ends this.
     MemberNotLive,
     /// The peer could not read or write its native state now. Nothing is
     /// implied: the batch's status is read next.

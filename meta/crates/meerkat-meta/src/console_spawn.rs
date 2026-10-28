@@ -562,6 +562,21 @@ pub(crate) fn merge_registered_labels(
     }
 }
 
+/// The lineage half of [`merge_registered_labels`]: copy the spawn
+/// registry's `spawned_by`, `spawned_by_session` and `via_tool` over
+/// `labels` and leave every other label as it is. For labels whose own
+/// lineage keys [`sanitize_unverified_lineage_labels`] already dropped.
+pub(crate) fn merge_registered_lineage_labels(
+    labels: &mut BTreeMap<String, String>,
+    registered: &BTreeMap<String, String>,
+) {
+    for key in [SPAWNED_BY_LABEL, SPAWNED_BY_SESSION_LABEL, VIA_TOOL_LABEL] {
+        if let Some(value) = registered.get(key) {
+            labels.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
 fn kickoff_event_id(mob_id: Option<&str>, member_id: &str, initial_message: &Value) -> String {
     format!(
         "spawn-kickoff:{}:{}:{}",

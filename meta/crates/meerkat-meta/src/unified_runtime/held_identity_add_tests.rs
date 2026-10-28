@@ -8,9 +8,9 @@
 //! inside its completion: a roster pass waits for the add and never
 //! embodies the member unheld, and one that reads the listing of an
 //! aborted add keeps the member refused. A member embodied outside the add
-//! refuses it, an identity Core already spawned (live or retired) is not
+//! refuses it, an identity Core already spawned (live or released) is not
 //! added again, a host-adopted identity is refused typed, an added member
-//! retires like any other, and a lazy roster adds its member at once. An add
+//! is released like any other, and a lazy roster adds its member at once. An add
 //! still completing cuts a shutdown's in-flight drain at its bound, before
 //! the drain stops the mob, and holds a shutdown before its Stop, by which
 //! point the shutdown has closed the cross-mob control listener.
@@ -601,18 +601,19 @@ async fn an_identity_core_spawned_is_not_added_again() {
         fixture.add(tokio::time::Instant::now() + HOLD, None).await,
         "live member",
     );
-    // Retired, the identity keeps its Core history: still not fresh.
+    // Released, the identity is still a member of Core's mob: still not
+    // fresh.
     fixture
         .context
         .runtime
         .retire_tracked(&fixture.added)
         .await
-        .expect("the added member retires");
+        .expect("the added member is released");
     refused_live(
         fixture.add(tokio::time::Instant::now() + HOLD, None).await,
-        "retired member",
+        "released member",
     );
-    assert_eq!(fixture.members().await, 1);
+    assert_eq!(fixture.members().await, 2);
     fixture.assert_running_untouched().await;
     let _ = fixture.runtime.shutdown().await;
 }
@@ -648,8 +649,10 @@ async fn a_host_adopted_identity_is_not_added() {
     let _ = fixture.runtime.shutdown().await;
 }
 
+/// A retire of the added member releases it like any other: it stays a
+/// member of Core's mob, active and seated, and Core holds it unmaterialized.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_added_member_retires_and_settles() {
+async fn an_added_member_is_released_like_any_other() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = Fixture::start(&dir, "held-add-retire").await;
     activated(
@@ -663,15 +666,25 @@ async fn an_added_member_retires_and_settles() {
         .runtime
         .retire_tracked(&fixture.added)
         .await
-        .expect("the added member retires");
+        .expect("the added member is released");
     assert_eq!(
         fixture.state(&fixture.added).await,
-        Some(IdentityLifecycleState::Dormant)
+        Some(IdentityLifecycleState::Active)
     );
     assert_eq!(
         fixture.members().await,
-        1,
-        "the added member left meerkat's roster"
+        2,
+        "the released member stays a member of Core's mob"
+    );
+    assert_eq!(
+        fixture
+            .runtime
+            .mob_handle()
+            .member_materialization_for_test(
+                &crate::member_comms_id::roster_member_id_for_identity(fixture.added.as_str())
+            ),
+        Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Dormant),
+        "Core holds the released member unmaterialized"
     );
     fixture.assert_running_untouched().await;
     let _ = fixture.runtime.shutdown().await;
@@ -709,8 +722,9 @@ async fn an_add_refuses_a_member_it_cannot_hold() {
 }
 
 /// In lazy mode, too, the add embodies its member at once, held, while the
-/// rest of the lazy roster stays dormant. The add publishes no bootstrap
-/// generation: the bootstrap status does not list the added member.
+/// rest of the lazy roster stays seated and unmaterialized. The add
+/// publishes no bootstrap generation: the bootstrap status does not list the
+/// added member.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_lazy_roster_adds_its_member_held_at_once() {
     let dir = tempfile::tempdir().unwrap();
@@ -776,10 +790,29 @@ async fn a_lazy_roster_adds_its_member_held_at_once() {
         .status(&running)
         .await
         .expect("running status");
-    assert_eq!(running_status.state, IdentityLifecycleState::Dormant);
+    assert_eq!(
+        running_status.state,
+        IdentityLifecycleState::Active,
+        "the lazy roster's member is seated"
+    );
     assert_eq!(
         runtime.mob_handle().list_members().await.len(),
-        1,
+        2,
+        "both identities are members of Core's mob"
+    );
+    let phase = |identity: &AgentIdentity| {
+        runtime.mob_handle().member_materialization_for_test(
+            &crate::member_comms_id::roster_member_id_for_identity(identity.as_str()),
+        )
+    };
+    assert_eq!(
+        phase(&running),
+        Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Dormant),
+        "the lazy roster's member is not materialized"
+    );
+    assert_eq!(
+        phase(&added),
+        Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Live),
         "only the added member is embodied"
     );
     let bootstrap = context.runtime.identity_bootstrap_status();

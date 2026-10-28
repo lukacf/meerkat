@@ -1038,11 +1038,8 @@ async fn e2e_kitchen_sink_two_mob_chaos() {
     .expect("re-wire coordinator:mc ↔ lead:critic");
 
     // Post-restore dispatch: verify agents can receive messages after rebuild.
-    // NOTE: In-process restart loses conversation history because the old mob
-    // actor's SESSION_IDENTITY_CLAIMS are not released (they're held by the
-    // detached tokio task). The bridge falls back to fresh spawn. In a real
-    // crash/restart (different process), MemberLaunchMode::Resume would work
-    // because the claims die with the process.
+    // The restored identities are members of Core's mob, not materialized
+    // yet: this dispatch materializes writer:b on its session.
     eprintln!("[Phase 4] Post-restore dispatch test...");
     author_irt2
         .dispatch_text(&id("writer:b"), "Say POST_RESTORE_OK and nothing else.")
@@ -1065,7 +1062,8 @@ async fn e2e_kitchen_sink_two_mob_chaos() {
     // ===================================================================
     eprintln!("\n--- Phase 5: writer:b dropout ---");
 
-    // Retire writer:b
+    // Retire writer:b: Core releases its member, which stays seated on its
+    // session at its generation
     author_irt2
         .retire(&id("writer:b"))
         .await
@@ -1102,8 +1100,8 @@ async fn e2e_kitchen_sink_two_mob_chaos() {
         .await
         .expect("author restore_flow v3");
 
-    // lead:author is live, so restore_flow resumes it on the session (and
-    // prompt) it runs; the new topology shows in the managed edges.
+    // lead:author is already a member, so restore_flow reports it resumed
+    // on its session; the new topology shows in the managed edges.
     assert!(
         matches!(
             author_result3.outcomes.get(&id("lead:author")),
@@ -1208,7 +1206,7 @@ async fn e2e_kitchen_sink_two_mob_chaos() {
         .await
         .expect("author restore_flow v4");
 
-    // writer:b wakes again (it was retired; Core keeps its member history)
+    // writer:b is still a member on its session (its retire released it)
     let wb_v4 = match author_result4.outcomes.get(&id("writer:b")).unwrap() {
         RestoreOutcome::Created { binding, .. } | RestoreOutcome::Resumed { binding, .. } => {
             binding

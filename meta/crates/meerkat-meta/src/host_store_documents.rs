@@ -17,6 +17,8 @@
 //! | `held/<SHA-256 of the identity>` | one held-completion mark |
 //! | `cursor/<mob id>` | the structural-events subscription cursor |
 //! | `idle/<mob id length>:<mob id><member id>` | one member's idle-retirement opt-in |
+//! | `tools/<mob id length>:<mob id><identity>` | one identity's last-published tool record |
+//! | `rotation/<mob id length>:<mob id><identity>` | one identity's pending rotation intent |
 //!
 //! Every document goes through the realm's one [`SpiRealm`] under its fence:
 //! a write is one single-scope batch, settled before it answers. A batch
@@ -38,7 +40,10 @@ use meerkat_runtime::store::spi::{
 use serde::{Deserialize, Serialize};
 
 use crate::mob_handle_runtime::DelegateIdleRetireOverride;
-use crate::runtime::{MemberIdleRetireOverrideRecord, MetadataStoreError, PersistentMetadataStore};
+use crate::runtime::{
+    IdentityRotationIntent, IdentityToolRecord, MemberIdleRetireOverrideRecord, MetadataStoreError,
+    PersistentMetadataStore, decode_identity_record, encode_identity_record,
+};
 
 /// Meta's record family on a host store realm: one record scope per
 /// document, its document the pinned entry `v`.
@@ -62,6 +67,8 @@ pub(crate) const HELD_MARK_PREFIX: &str = "held/";
 
 const CURSOR_PREFIX: &str = "cursor/";
 const IDLE_PREFIX: &str = "idle/";
+const TOOLS_PREFIX: &str = "tools/";
+const ROTATION_PREFIX: &str = "rotation/";
 
 /// The format version of the cursor and idle opt-in documents.
 const ENTRY_VERSION: u32 = 1;
@@ -84,6 +91,18 @@ fn cursor_key(mob_id: &str) -> String {
 /// Injective over (mob id, member id): the mob id's length comes first.
 fn idle_key(mob_id: &str, member_id: &str) -> String {
     format!("{IDLE_PREFIX}{}:{mob_id}{member_id}", mob_id.len())
+}
+
+/// An identity's last-published tool record, injective over (mob id,
+/// identity) as [`idle_key`] is.
+fn identity_tools_key(mob_id: &str, identity: &str) -> String {
+    format!("{TOOLS_PREFIX}{}:{mob_id}{identity}", mob_id.len())
+}
+
+/// An identity's rotation intent; with an empty identity, the prefix of
+/// every rotation intent of the mob.
+fn identity_rotation_key(mob_id: &str, identity: &str) -> String {
+    format!("{ROTATION_PREFIX}{}:{mob_id}{identity}", mob_id.len())
 }
 
 fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -660,6 +679,21 @@ impl PersistentMetadataStore for SpiMetadataStore {
         }
     }
 
+    /// Each mob's cursor write runs on a task of its own until no newer
+    /// cursor waits; a write the runtime drops at its exit poisons the
+    /// cursor's scope in the process that dropped it.
+    async fn settle_detached_writes(&self) {
+        loop {
+            let busy = lock(&self.cursors)
+                .values()
+                .any(|slot| slot.writing || slot.pending.is_some());
+            if !busy {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+    }
+
     async fn load_member_idle_retire_overrides(
         &self,
     ) -> Result<Vec<MemberIdleRetireOverrideRecord>, MetadataStoreError> {
@@ -732,6 +766,75 @@ impl PersistentMetadataStore for SpiMetadataStore {
                 };
                 Ok((change, ()))
             })
+            .await
+            .map_err(io_error)
+    }
+
+    async fn identity_tool_record(
+        &self,
+        mob_id: &str,
+        identity: &str,
+    ) -> Result<Option<IdentityToolRecord>, MetadataStoreError> {
+        let key = identity_tools_key(mob_id, identity);
+        let Some(bytes) = self.documents.read(&key).await.map_err(io_error)? else {
+            return Ok(None);
+        };
+        decode_identity_record(&bytes).map(Some)
+    }
+
+    async fn set_identity_tool_record(
+        &self,
+        record: &IdentityToolRecord,
+    ) -> Result<(), MetadataStoreError> {
+        let key = identity_tools_key(&record.mob_id, &record.identity);
+        let document = encode_identity_record(record)?.into_bytes();
+        self.documents
+            .write(&key, Some(document))
+            .await
+            .map_err(io_error)
+    }
+
+    async fn load_identity_rotation_intents(
+        &self,
+        mob_id: &str,
+    ) -> Result<Vec<IdentityRotationIntent>, MetadataStoreError> {
+        let mut intents = Vec::new();
+        for key in self
+            .documents
+            .keys_with_prefix(&identity_rotation_key(mob_id, ""))
+        {
+            let Some(bytes) = self.documents.read(&key).await.map_err(io_error)? else {
+                continue;
+            };
+            let intent: IdentityRotationIntent = decode_identity_record(&bytes)?;
+            // The key prefix carries the mob id's length, so it names
+            // exactly this mob's records.
+            if intent.mob_id == mob_id {
+                intents.push(intent);
+            }
+        }
+        Ok(intents)
+    }
+
+    async fn set_identity_rotation_intent(
+        &self,
+        intent: &IdentityRotationIntent,
+    ) -> Result<(), MetadataStoreError> {
+        let key = identity_rotation_key(&intent.mob_id, &intent.identity);
+        let document = encode_identity_record(intent)?.into_bytes();
+        self.documents
+            .write(&key, Some(document))
+            .await
+            .map_err(io_error)
+    }
+
+    async fn clear_identity_rotation_intent(
+        &self,
+        mob_id: &str,
+        identity: &str,
+    ) -> Result<(), MetadataStoreError> {
+        self.documents
+            .write(&identity_rotation_key(mob_id, identity), None)
             .await
             .map_err(io_error)
     }

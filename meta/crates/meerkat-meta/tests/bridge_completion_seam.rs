@@ -581,6 +581,20 @@ async fn a_reset_superseded_member_retires_through_core_without_a_session_copy()
         Duration::from_secs(30),
     )
     .await;
+    // The roster pass seats the member without materializing it; its first
+    // delivery materializes it, so the superseded member is live, as a
+    // reset found it.
+    bridge
+        .deliver_awaiting_commit_with_mode_context_and_system_prompt(
+            &runtime_id,
+            &meerkat_core::ContentInput::Text("committed".to_string()),
+            None,
+            &[],
+            HandlingMode::Queue,
+            None,
+        )
+        .await
+        .expect("a committed turn");
     let member = unified
         .mob_handle()
         .list_all_members()

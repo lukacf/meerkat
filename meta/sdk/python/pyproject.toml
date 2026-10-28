@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meerkat-meta"
-version = "0.9.5"
+version = "0.9.6"
 description = "Python SDK for Meta — companion orchestration platform for the Meerkat multi-agent runtime"
 requires-python = ">=3.10"
 license = {text = "MIT OR Apache-2.0"}

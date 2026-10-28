@@ -91,7 +91,7 @@ mod core_bridge;
 mod core_members;
 
 /// [`make_runtime`] with a session bridge whose Core is the members fixture,
-/// for scenarios that need Core to build members.
+/// for scenarios that need Core to seat members.
 fn make_runtime_with_core_bridge(
     store: Arc<dyn ContinuityStore>,
     lease: Arc<dyn LeaseProvider>,
@@ -558,7 +558,7 @@ async fn identity_first_e2e_14_legacy_discovery_adapter_round_trip() {
     // Use in restore flow
     let store = Arc::new(LocalContinuityStore::in_memory().unwrap());
     let lease_prov = Arc::new(LocalLeaseProvider::new());
-    // Core builds the members, so the restore creates both.
+    // Core seats the members on fresh sessions, so the restore creates both.
     let runtime = make_runtime_with_core_bridge(store.clone(), lease_prov.clone());
 
     let result = restore_flow(&runtime, &roster, None, None).await.unwrap();
@@ -579,7 +579,8 @@ async fn identity_first_e2e_14_legacy_discovery_adapter_round_trip() {
 async fn identity_first_e2e_15_customizer_receives_topology_context() {
     let store = Arc::new(LocalContinuityStore::in_memory().unwrap());
     let lease_prov = Arc::new(LocalLeaseProvider::new());
-    // The customizer runs when Core builds a member, so the restore needs a bridge.
+    // The customizer builds each member's draft when Core seats it, so the
+    // restore needs a bridge.
     let runtime = make_runtime_with_core_bridge(store.clone(), lease_prov.clone());
 
     let seen_contexts = Arc::new(tokio::sync::Mutex::new(Vec::new()));

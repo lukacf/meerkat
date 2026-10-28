@@ -429,6 +429,13 @@ the directory; after that the copy ages out like the other backups.
   helper or fork child the host made on the mob and retired, since the
   identity's wake resumes only a member the identity runtime spawned. The
   file is rewritten as rows are carried out and removed after the last one.
+  From 0.9.6 on, a roster compile carries its rows out
+  `META_IDENTITY_RESTORE_CONCURRENCY` at a time (16 by default) and rewrites
+  the file once, after its last row; a single wake that carries a row out
+  rewrites it at once. Until that rewrite, a reset, delete, wake or delivery
+  of an identity whose row the compile carried out rewrites the file first.
+  A row a boot carried out before it stopped, still in the file, reads as
+  done at the next start and is settled then.
 - The bootstrap status (`meta/status_identity_bootstrap` and
   `meta/wait_identity_bootstrap`, the SDKs' `identity_bootstrap_status()`
   and `wait_identity_bootstrap()`) lists the pending rows as
@@ -438,7 +445,7 @@ the directory; after that the copy ages out like the other backups.
   `meta/status_identity_bootstrap`, `meta/wait_identity_bootstrap` and
   `meta/member_instruction_activations` are served there, and the console
   does not serve them. Serving them read-only on the console is planned for
-  0.9.6.
+  a later release.
 - `reset`, `delete_identity` and the delivery verbs of an identity whose row
   is pending are refused (`-32014`, `first_boot_row_pending`, retryable). The
   refusal's `remedy` says what to do: `add_to_roster` when no roster lists the

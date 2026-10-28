@@ -135,7 +135,19 @@ pub(super) fn merge_unified_events(
             .then_with(|| left.event_id.cmp(&right.event_id))
             .then_with(|| left.source.cmp(&right.source))
     });
+    retain_newest_merged_events(&mut merged);
     merged
+}
+
+/// Keep at least the newest [`MERGED_EVENTS_RETAINED`] merged events: once
+/// the buffer passes that by [`MERGED_EVENTS_TRIM_SLACK`], drop the oldest
+/// down to it in one batch. The buffer is ordered oldest first, so the newest
+/// event, whose timestamp the delivery clock reads, stays.
+fn retain_newest_merged_events(events: &mut Vec<EventEnvelope<UnifiedEvent>>) {
+    if events.len() > MERGED_EVENTS_RETAINED + MERGED_EVENTS_TRIM_SLACK {
+        let excess = events.len() - MERGED_EVENTS_RETAINED;
+        events.drain(..excess);
+    }
 }
 
 /// True when a caller-supplied agent-scope filter matches a projected
@@ -237,6 +249,7 @@ pub(super) fn insert_event_sorted(
         })
         .unwrap_or_else(|index| index);
     events.insert(insertion_index, event);
+    retain_newest_merged_events(events);
 }
 
 #[cfg(test)]
@@ -267,5 +280,176 @@ mod tests {
         // The trailing segment must be a numeric generation, not arbitrary text.
         assert!(!agent_scope_filter_matches("worker", "worker:abc"));
         assert!(!agent_scope_filter_matches("worker", "worker:"));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod merged_event_buffer_tests {
+    use super::*;
+
+    fn runtime_with(agent_events: Vec<EventEnvelope<UnifiedEvent>>) -> MetaRuntimeHandle {
+        crate::start_meta_runtime(
+            crate::MetaConfig {
+                modules: vec![],
+                discovery: crate::DiscoverySpec {
+                    namespace: "merged-event-buffer".to_string(),
+                    modules: vec![],
+                },
+                pre_spawn: vec![],
+            },
+            agent_events,
+            Duration::from_secs(1),
+        )
+        .expect("runtime starts")
+    }
+
+    fn agent_event(index: u64, agent_id: &str, event_type: &str) -> EventEnvelope<UnifiedEvent> {
+        EventEnvelope {
+            event_id: format!("evt-{agent_id}-{index:06}"),
+            source: "agent".to_string(),
+            timestamp_ms: 1_000 + index,
+            event: UnifiedEvent::Agent {
+                agent_id: agent_id.to_string(),
+                event_type: event_type.to_string(),
+                payload: Some(serde_json::json!({"delta": "chunk"})),
+            },
+        }
+    }
+
+    fn event_ids(events: &[EventEnvelope<UnifiedEvent>]) -> Vec<String> {
+        events.iter().map(|event| event.event_id.clone()).collect()
+    }
+
+    fn retained() -> u64 {
+        u64::try_from(MERGED_EVENTS_RETAINED).expect("cap fits u64")
+    }
+
+    /// The most the buffer holds before it trims.
+    fn trim_point() -> u64 {
+        retained() + u64::try_from(MERGED_EVENTS_TRIM_SLACK).expect("slack fits u64")
+    }
+
+    #[test]
+    fn the_buffer_keeps_only_the_newest_events() {
+        let mut runtime = runtime_with(vec![]);
+        // Up to the trim point nothing goes; one more trims back to the cap.
+        for index in 0..trim_point() {
+            runtime
+                .append_normalized_event(agent_event(index, "worker", "text_delta"))
+                .expect("append");
+        }
+        assert_eq!(
+            runtime.merged_events().len(),
+            MERGED_EVENTS_RETAINED + MERGED_EVENTS_TRIM_SLACK
+        );
+        let extra = trim_point() + 1 - retained();
+        let total = retained() + extra;
+        for index in trim_point()..total {
+            runtime
+                .append_normalized_event(agent_event(index, "worker", "text_delta"))
+                .expect("append");
+        }
+        let expected: Vec<String> = (extra..total)
+            .map(|index| agent_event(index, "worker", "text_delta").event_id)
+            .collect();
+        assert_eq!(event_ids(runtime.merged_events()), expected);
+    }
+
+    #[test]
+    fn the_startup_merge_keeps_only_the_newest_events() {
+        let total = trim_point() + 5;
+        let extra = total - retained();
+        let runtime = runtime_with(
+            (0..total)
+                .map(|index| agent_event(index, "worker", "text_delta"))
+                .collect(),
+        );
+        let merged = runtime.merged_events();
+        assert_eq!(merged.len(), MERGED_EVENTS_RETAINED);
+        assert_eq!(
+            merged.first().map(|event| event.event_id.clone()),
+            Some(agent_event(extra, "worker", "text_delta").event_id)
+        );
+        assert_eq!(
+            merged.last().map(|event| event.event_id.clone()),
+            Some(agent_event(total - 1, "worker", "text_delta").event_id)
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_older_than_the_buffer_is_an_expired_checkpoint() {
+        let mut runtime = runtime_with(vec![]);
+        let quiet = agent_event(0, "quiet", "interaction_complete");
+        runtime
+            .append_normalized_event(quiet.clone())
+            .expect("append");
+        let request = || SubscribeRequest {
+            scope: SubscribeScope::Agent,
+            last_event_id: Some(quiet.event_id.clone()),
+            agent_id: Some("quiet".to_string()),
+        };
+        let replayed = runtime
+            .subscribe_events(request())
+            .expect("checkpoint replays");
+        assert_eq!(event_ids(&replayed.events), vec![quiet.event_id.clone()]);
+
+        for index in 1..=trim_point() {
+            runtime
+                .append_normalized_event(agent_event(index, "busy", "text_delta"))
+                .expect("append");
+        }
+
+        assert_eq!(
+            runtime.subscribe_events(request()),
+            Err(SubscribeError::UnknownCheckpoint(quiet.event_id))
+        );
+        let fresh = runtime
+            .subscribe_events(SubscribeRequest {
+                scope: SubscribeScope::Agent,
+                last_event_id: None,
+                agent_id: Some("quiet".to_string()),
+            })
+            .expect("a read without a checkpoint never fails");
+        assert!(fresh.events.is_empty());
+    }
+
+    #[test]
+    fn a_subscriber_that_keeps_up_misses_no_event_across_trims() {
+        let mut runtime = runtime_with(vec![]);
+        let total = trim_point() + 64;
+        let mut checkpoint: Option<String> = None;
+        let mut seen = Vec::new();
+        for index in 0..total {
+            runtime
+                .append_normalized_event(agent_event(index, "worker", "text_delta"))
+                .expect("append");
+            let response = runtime
+                .subscribe_events(SubscribeRequest {
+                    scope: SubscribeScope::Mob,
+                    last_event_id: checkpoint.clone(),
+                    agent_id: None,
+                })
+                .expect("the latest checkpoint stays in the window");
+            // Replay includes the checkpoint itself.
+            seen.extend(
+                response
+                    .events
+                    .into_iter()
+                    .map(|event| event.event_id)
+                    .filter(|event_id| Some(event_id) != checkpoint.as_ref()),
+            );
+            checkpoint = seen.last().cloned();
+        }
+        let expected: Vec<String> = (0..total)
+            .map(|index| agent_event(index, "worker", "text_delta").event_id)
+            .collect();
+        assert_eq!(seen, expected);
+        let held = runtime.merged_events().len();
+        assert!(
+            (MERGED_EVENTS_RETAINED..=MERGED_EVENTS_RETAINED + MERGED_EVENTS_TRIM_SLACK)
+                .contains(&held),
+            "{held} events held"
+        );
     }
 }

@@ -66,7 +66,9 @@ fn open_console_decisions() -> meerkat_meta::RuntimeDecisionState {
     .expect("decision state builds")
 }
 
-/// The members never take a turn here; the client only has to exist.
+/// No row here reads a turn. The members are AutonomousHost, so each fresh
+/// life of one (its seat, and the successor a reset seats) runs one kickoff
+/// turn; this client answers it with a short text.
 struct QuietClient;
 
 #[async_trait::async_trait]
@@ -387,25 +389,6 @@ async fn the_first_experience_read_after_a_reset_shows_the_reprofiled_successor_
     fixture.stop().await;
 }
 
-/// The keeper's rows of one experience read, if any.
-fn keeper_rows_if_any(experience: &Value) -> (Vec<Value>, Vec<Value>) {
-    let sidebar = experience["agent_sidebar"]["live_snapshot"]["agents"]
-        .as_array()
-        .expect("sidebar agents")
-        .iter()
-        .filter(|agent| agent["identity"] == IDENTITY)
-        .cloned()
-        .collect();
-    let status = experience["identity_status"]["rows"]
-        .as_array()
-        .expect("identity_status rows")
-        .iter()
-        .filter(|row| row["identity"] == IDENTITY)
-        .cloned()
-        .collect();
-    (sidebar, status)
-}
-
 /// A delete starts the identity over: a live identity moves to a fresh
 /// session at once and stays live and registered, and Core keeps the old
 /// session archived (CHANGELOG, Unreleased: "`delete_identity` starts the
@@ -453,8 +436,12 @@ async fn the_first_experience_read_after_a_delete_shows_no_row_for_the_deleted_s
     fixture.stop().await;
 }
 
+/// A retire releases the identity's member: Core keeps it seated on its
+/// session, so the first experience read after the retire, with no retry and
+/// no wait, still shows the identity active on that session, and
+/// /console/identities lists it ready.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_first_experience_read_after_a_retire_shows_no_active_row_for_the_retired_identity() {
+async fn the_first_experience_read_after_a_retire_shows_the_identity_active_on_its_session() {
     let fixture = ResetFixture::new().await;
     let bound = fixture.bound_session().await;
     let (sidebar, _) = keeper_rows(&fixture.get("/console/experience").await);
@@ -464,12 +451,6 @@ async fn the_first_experience_read_after_a_retire_shows_no_active_row_for_the_re
         .rpc("meta/retire", json!({ "identity": IDENTITY }))
         .await;
     assert!(retired["result"].is_object(), "retire succeeds: {retired}");
-    // The owner keeps the retired identity with its binding. A retired
-    // identity is dormant: the identity runtime reads Core's member history
-    // and has no retiring state (CHANGELOG, Unreleased: "A registered
-    // identity's `state` is `active`, `dormant` or `broken`; `retiring`,
-    // `suspended` and `uninitialized` are gone"), so /console/identities
-    // lists it as dormant.
     let identities = fixture.get("/console/identities").await;
     let record = identities["identities"]
         .as_array()
@@ -478,19 +459,16 @@ async fn the_first_experience_read_after_a_retire_shows_no_active_row_for_the_re
         .find(|record| record["identity"] == IDENTITY)
         .cloned()
         .unwrap_or_else(|| panic!("the retired identity stays listed: {identities}"));
-    assert_eq!(record["health"], "dormant", "{record}");
+    assert_eq!(record["health"], "ready", "{record}");
     assert_eq!(record["session_id"], bound, "{record}");
 
     // The FIRST experience read after the retire: no retry and no wait.
-    let (sidebar, status) = keeper_rows_if_any(&fixture.get("/console/experience").await);
-    assert!(
-        sidebar
-            .iter()
-            .chain(status.iter())
-            .all(|row| row["state"] != "active"),
-        "the retired identity is still listed as active: sidebar {sidebar:?}, identity_status {status:?}"
-    );
-    for row in sidebar.iter().chain(status.iter()) {
+    let (sidebar, status) = keeper_rows(&fixture.get("/console/experience").await);
+    for row in [&sidebar, &status] {
+        assert_eq!(
+            row["state"], "active",
+            "the retired identity stays a seated member: {row}"
+        );
         assert_eq!(row["session_id"], bound, "the owner's binding: {row}");
     }
     fixture.stop().await;

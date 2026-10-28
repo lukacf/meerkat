@@ -2,8 +2,8 @@
 //! restart against the same on-disk store must RESUME each agent's transcript,
 //! not fresh-spawn it empty.
 //!
-//! On cold restart the identity runtime re-creates the member and calls
-//! `bridge.resume_session` (`MemberLaunchMode::Resume`). Before meerkat 0.7.14,
+//! On cold restart Core resumes the member onto its durable session
+//! (`MemberLaunchMode::Resume`) when work first reaches it. Before meerkat 0.7.14,
 //! the re-created runtime authority re-projected a transcript that only differed
 //! from the persisted row in bookkeeping (re-stamped run identity + timestamps),
 //! and the session-store append-only continuity guard rejected it as "not a

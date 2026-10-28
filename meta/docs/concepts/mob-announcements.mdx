@@ -111,7 +111,9 @@ A subscription ends, with a typed reason, only on a final fact:
 
 A member that is not registered, or not served where its deliveries go, ends
 nothing: it may be registered or served again. Neither does a member that
-left this gateway, is governed, or has no live incarnation. Its deliveries
+left this gateway, is governed, or is no member of its mob now (it left the
+roster; a dormant member is still a member and is materialized for its
+deliveries). Its deliveries
 wait, and the subscription's `marker` says why and on what evidence (a
 verified signed answer, an unverified one, or this gateway's own fact). Its
 owed batches expire after the retention window, and `subscriptions/cancel`

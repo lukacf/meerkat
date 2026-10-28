@@ -1,8 +1,9 @@
 //! The composed gateway offers its host the agent customizer it composed, once,
 //! on the identity-first path, before the identity context is installed. The
 //! host's answer is the one customizer the gateway installs: the identity-first
-//! context's, which builds the roster bootstrap's members, and the identity
-//! runtime's, which builds a reset's fresh life, are the same `Arc`, and a host
+//! context's, which builds the drafts the roster bootstrap seats its members
+//! with, and the identity runtime's, which builds a reset's fresh life, are the
+//! same `Arc`, and a host
 //! wrapper sees the dispatcher the SDK customizer's tools were built into. A
 //! host without the hook keeps the gateway's own composition. A refusal, or an
 //! answer that adds or drops a customizer, fails init before the identity
@@ -931,8 +932,8 @@ fn a_host_that_needs_a_customizer_names_what_to_configure() {
 }
 
 /// Each build that ran the customizer tells it `after_create` once, with the
-/// session it built: the roster bootstrap's creation, a respawn (retire, then
-/// a wake onto the same session) and a reset's successor (a fresh session).
+/// session it built: the roster bootstrap's seat, a respawn (retire, then a
+/// seat onto the same session) and a reset's successor (a fresh session).
 /// The host's wrapper delegates, so the SDK customizer it wraps is told each
 /// one too.
 #[test]

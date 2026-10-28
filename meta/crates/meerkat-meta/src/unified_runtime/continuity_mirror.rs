@@ -494,7 +494,10 @@ struct MirrorBinding {
 /// runtime; the unit rows answer them from a fake.
 #[async_trait::async_trait]
 trait MirrorRead: BlobRead {
-    /// Each durable identity whose latest binding names a session.
+    /// Each durable identity whose latest binding names a session that is
+    /// not unborn. An unborn session (a seat built nothing, and the member's
+    /// first wake has not created it yet) has nothing to copy and nothing to
+    /// lose, so a round neither reads nor counts it.
     async fn bindings(&self) -> Result<Vec<MirrorBinding>, String>;
     /// The session's resume authority, without its body.
     async fn authority(
@@ -524,13 +527,16 @@ impl MirrorRead for ContinuityMirrorSource {
         Ok(history
             .durable_identity_bindings()
             .filter_map(|binding| {
-                binding.session_id().map(|session_id| MirrorBinding {
-                    identity: crate::member_comms_id::durable_identity_for_roster_member(
-                        binding.identity().as_ref(),
-                    ),
-                    session_id: session_id.clone(),
-                    generation: binding.generation().get(),
-                })
+                binding
+                    .session_id()
+                    .filter(|session_id| !history.session_unborn(session_id))
+                    .map(|session_id| MirrorBinding {
+                        identity: crate::member_comms_id::durable_identity_for_roster_member(
+                            binding.identity().as_ref(),
+                        ),
+                        session_id: session_id.clone(),
+                        generation: binding.generation().get(),
+                    })
             })
             .collect())
     }
@@ -666,7 +672,9 @@ pub struct ContinuityMirrorCounts {
     /// put that failed, panicked or passed its deadline.
     pub failures: AtomicU64,
     /// Identities seen with no session to copy (`Absent`, or archived and not
-    /// revivable) and nothing copied before: there is nothing to keep.
+    /// revivable) and nothing copied before: there is nothing to keep. An
+    /// identity whose session is unborn (its first wake has not created it
+    /// yet) is not counted: no round reads it until the session exists.
     pub not_mirrored: AtomicU64,
     /// Rounds that kept an identity's last copied rows because its session
     /// read `Absent` or archived-and-not-revivable while its binding was

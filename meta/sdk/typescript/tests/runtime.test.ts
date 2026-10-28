@@ -448,6 +448,44 @@ describe("MetaRuntime", () => {
     assert.equal("provider_credentials_root" in params.runtime_options, false);
   });
 
+  it("builds native_realm and member_auth_binding runtime options", () => {
+    const { rt } = createMockRuntime();
+    (rt as any)._config.nativeRealm = {
+      realmId: "native-team",
+      contextRoot: "/srv/native/context",
+      stateRoot: "/srv/native/realms",
+      userConfigRoot: "/srv/native/home",
+    };
+    (rt as any)._config.memberAuthBinding = {
+      realm: "native-team",
+      binding: "b",
+      origin: "configured",
+    };
+
+    const params = (rt as any)._buildInitParams();
+
+    assert.deepEqual(params.runtime_options.native_realm, {
+      realm_id: "native-team",
+      context_root: "/srv/native/context",
+      state_root: "/srv/native/realms",
+      user_config_root: "/srv/native/home",
+    });
+    assert.deepEqual(params.runtime_options.member_auth_binding, {
+      realm: "native-team",
+      binding: "b",
+      origin: "configured",
+    });
+  });
+
+  it("omits native_realm and member_auth_binding runtime options when unset", () => {
+    const { rt } = createMockRuntime();
+
+    const params = (rt as any)._buildInitParams();
+
+    assert.equal("native_realm" in params.runtime_options, false);
+    assert.equal("member_auth_binding" in params.runtime_options, false);
+  });
+
   it("builds http_listen, http_public_base_url and allow_remote runtime options", () => {
     const { rt } = createMockRuntime();
     (rt as any)._config.httpListen = "0.0.0.0:8080";

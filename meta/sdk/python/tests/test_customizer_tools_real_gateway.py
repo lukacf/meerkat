@@ -1,11 +1,10 @@
-"""customize_build tools follow an identity member across a restart (#563).
+"""customize_build tools follow an identity member across a restart.
 
-Before the fix the tools a host returned from ``customize_build`` rode only
-the per-spawn overlay of the spawn that ran the customizer. A restart restore
-rebuilt the member without them, the resumed materialization's spawn hit
-"member already exists", and the adopt branch discarded the new tools: the
-handlers stayed registered in this process, but the live session no longer
-advertised the tools.
+Each build of a member runs the host's customize_build right before it and
+publishes the tools into the member's stable dispatcher, so the member is
+never built without them. A member that is not materialized is answered
+from its last recorded build (``tools_source``), without a wake; a member
+never built yet answers ``no_build_recorded``.
 """
 from __future__ import annotations
 
@@ -25,9 +24,12 @@ _MOB_TOML = """\
 [mob]
 id = "customizer-tools-restart"
 
+# Turn-driven: the member owes no first turn, so nothing builds it until a
+# wake (an autonomous member's fresh seat is built at start).
 [profiles.domain]
 model = "gpt-5.5"
 external_addressable = true
+runtime_mode = "turn_driven"
 
 [profiles.domain.tools]
 comms = true
@@ -80,6 +82,9 @@ def _live_scope_serves_the_tool(runtime) -> bool:
 )
 @pytest.mark.asyncio
 async def test_customizer_tools_are_still_advertised_after_a_restart(tmp_path):
+    """R121 and R109: the first boot seats the identity without building it,
+    a warm builds it with its tools and records them, and after a restart the
+    record answers them without a wake; the next build publishes them again."""
     mob_toml = tmp_path / "mob.toml"
     mob_toml.write_text(_MOB_TOML)
     state_dir = tmp_path / "state"
@@ -87,22 +92,36 @@ async def test_customizer_tools_are_still_advertised_after_a_restart(tmp_path):
     first_customizer = _ToolCustomizer()
     first = await _build(mob_toml, state_dir, first_customizer)
     try:
+        # The seat of the new identity built its draft with the host.
         assert first_customizer.builds >= 1
-        assert _TOOL in await first.mob_handle().identity_resolved_tools(_IDENTITY)
+        handle = first.mob_handle()
+        never_built = await handle.identity_resolved_tools_detail(_IDENTITY)
+        assert never_built.tools_source == "no_build_recorded"
+        assert never_built.session_id, "the session is returned without a wake"
+        assert never_built.tools == []
+
+        warmed = await handle.identity_warm(_IDENTITY)
+        assert _TOOL in warmed.tools
+        assert _TOOL in await handle.identity_resolved_tools(_IDENTITY)
         assert _live_scope_serves_the_tool(first)
     finally:
         await first.shutdown()
 
-    # Same persistent state, new process: meerkat restores the member from its
-    # stored roster entry, the materialization re-runs customize_build, its
-    # spawn finds the member already there and adopts it.
+    # Same persistent state, new process: the member holds no work, so the
+    # start materializes nothing and asks the host for no build.
     second_customizer = _ToolCustomizer()
     second = await _build(mob_toml, state_dir, second_customizer)
     try:
-        assert second_customizer.builds >= 1, "the restore re-ran customize_build"
-        assert _TOOL in await second.mob_handle().identity_resolved_tools(_IDENTITY), (
-            "the restored and adopted member must still advertise its customizer tools"
-        )
+        assert second_customizer.builds == 0, "no member was built at start"
+        handle = second.mob_handle()
+        recorded = await handle.identity_resolved_tools_detail(_IDENTITY)
+        assert recorded.tools_source == "recorded"
+        assert _TOOL in recorded.tools, "the record answers the tools without a wake"
+        assert second_customizer.builds == 0, "the read built nothing"
+
+        await handle.identity_warm(_IDENTITY)
+        assert second_customizer.builds >= 1, "the build ran customize_build"
+        assert _TOOL in await handle.identity_resolved_tools(_IDENTITY)
         # The advertised tool is served by the scope the latest
         # customize_build registered in this process.
         assert _live_scope_serves_the_tool(second)

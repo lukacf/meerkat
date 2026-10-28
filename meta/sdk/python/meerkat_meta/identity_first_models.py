@@ -59,7 +59,19 @@ def _nonnegative_int(data: dict[str, Any], field_name: str) -> int:
 
 @dataclass(frozen=True)
 class IdentityBootstrapMode:
-    """Identity materialization policy used while the gateway starts."""
+    """The roster pass's mode while the gateway starts.
+
+    Under every mode each roster identity is a member of the mob from ready,
+    seated without being materialized, and is materialized when work reaches
+    it (``member_restore`` decides what is materialized at start).
+    ``eager_materialize`` is the reported default and ``lazy_materialize``
+    behaves alike; the names are kept for configuration compatibility.
+    ``lazy_with_background_warm`` also materializes each roster identity in a
+    background task once the pass is ready, off the ready path: at most
+    ``concurrency`` at once (1 to 16), or, without ``concurrency``, at the
+    member restore's bound (``META_IDENTITY_RESTORE_CONCURRENCY``, 16 by
+    default).
+    """
 
     mode: IdentityBootstrapModeName
     concurrency: int | None = None
@@ -73,6 +85,8 @@ class IdentityBootstrapMode:
         if self.mode not in supported:
             raise ValueError(f"unsupported identity bootstrap mode: {self.mode!r}")
         if self.mode == "lazy_with_background_warm":
+            if self.concurrency is None:
+                return
             if (
                 not isinstance(self.concurrency, int)
                 or isinstance(self.concurrency, bool)
@@ -99,7 +113,7 @@ class IdentityBootstrapMode:
 
     @classmethod
     def lazy_with_background_warm(
-        cls, *, concurrency: int
+        cls, *, concurrency: int | None = None
     ) -> IdentityBootstrapMode:
         return cls(mode="lazy_with_background_warm", concurrency=concurrency)
 

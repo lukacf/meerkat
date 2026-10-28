@@ -26,7 +26,7 @@ use crate::mob_handle_runtime::{
     is_recoverable_lifecycle_cleanup_error, member_entry_to_json, member_model_registry,
     model_capabilities_for_member_entry, model_capabilities_for_role_with_registry,
     model_routing_status_for_member, model_routing_status_for_session, resolved_tools_for_member,
-    resolved_tools_for_session, topology_restore_failed_peer_ids, topology_restore_warning_json,
+    topology_restore_failed_peer_ids, topology_restore_warning_json,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -54,7 +54,8 @@ use crate::console_aggregator::{
 };
 use crate::console_aggregator::{
     ConsoleSendRecovery, ConsoleSendScope, NativeSendObservation, ScopedReservation,
-    TimelineFrameDecider, TimelineFrameFilter, timeline_frame_visible_to,
+    TIMELINE_RAW_SCAN_PAGE_LIMIT, TimelineFrameDecider, TimelineFrameFilter,
+    timeline_frame_visible_to,
 };
 use crate::contact_directory::ContactDirectory;
 use crate::http_sse::{DEFAULT_KEEP_ALIVE_INTERVAL, KEEP_ALIVE_TEXT};
@@ -1947,15 +1948,17 @@ async fn console_identities_handler(
         );
     };
     let aggregator = aggregator.clone();
-    match Box::pin(aggregator.list_identities()).await {
-        Ok(mut identities) => {
-            retain_visible_identity_records(&mut identities, auth_context.access_view.as_ref());
-            (
-                StatusCode::OK,
-                Json::<Value>(json!({ "identities": identities })),
-            )
-                .into_response()
-        }
+    match Box::pin(visible_identity_records(
+        &aggregator,
+        auth_context.access_view.as_ref(),
+    ))
+    .await
+    {
+        Ok(identities) => (
+            StatusCode::OK,
+            Json::<Value>(json!({ "identities": identities })),
+        )
+            .into_response(),
         Err(err) => {
             tracing::warn!(target: "meta::console", error = %err, "console identities request failed");
             console_json_error(
@@ -2271,7 +2274,7 @@ async fn console_send_identity_candidates(
         Err(_) => false,
     };
     if !addressed_directly
-        && let Some(canonical) =
+        && let Ok(Some(canonical)) =
             Box::pin(resolve_console_send_identity_alias(aggregator, identity)).await
         && canonical != identity
     {
@@ -2741,12 +2744,15 @@ async fn console_send_identity_first_governed(
 
     let (identity, status) = match identity_runtime.status(&parsed_identity).await {
         Ok(status) => (parsed_identity, status),
-        Err(original_err) => {
+        // Only a name the identity runtime does not know can be an alias. A
+        // registered identity whose status read failed is refused with that
+        // failure: never taken for an alias, never handed to the member lane.
+        Err(original_err @ crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => {
             let Some(canonical_identity) = Box::pin(resolve_console_send_identity_alias(
                 aggregator,
                 &requested_identity,
             ))
-            .await
+            .await?
             else {
                 return Err(identity_runtime_error_to_console_send_error(
                     requested_identity.as_str(),
@@ -2757,14 +2763,33 @@ async fn console_send_identity_first_governed(
                 .map_err(|err| {
                     ConsoleSendError::InvalidRequest(format!("invalid aliased identity: {err}"))
                 })?;
-            let status = identity_runtime.status(&identity).await.map_err(|_| {
-                identity_runtime_error_to_console_send_error(
-                    requested_identity.as_str(),
-                    original_err,
-                )
-            })?;
+            let status = match identity_runtime.status(&identity).await {
+                Ok(status) => status,
+                // The alias names no registered identity either: the unknown
+                // identity stands, and the member lane may serve the name.
+                Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => {
+                    return Err(identity_runtime_error_to_console_send_error(
+                        requested_identity.as_str(),
+                        original_err,
+                    ));
+                }
+                // The alias names a registered identity whose status read
+                // failed: refused, never handed to the member lane.
+                Err(err) => {
+                    return Err(identity_runtime_error_to_console_send_error(
+                        requested_identity.as_str(),
+                        err,
+                    ));
+                }
+            };
             request.identity = canonical_identity;
             (identity, status)
+        }
+        Err(err) => {
+            return Err(identity_runtime_error_to_console_send_error(
+                requested_identity.as_str(),
+                err,
+            ));
         }
     };
     // A governed target is admitted only through the host's binder for the
@@ -3021,17 +3046,23 @@ fn parse_identity_first_handling_mode(
     }
 }
 
+/// The durable identity a console send names by an alias (its identity or
+/// its runtime member id in the console's identity listing). A listing that
+/// cannot be read is an error, never "no such alias": the send would
+/// otherwise fall to the member lane.
 async fn resolve_console_send_identity_alias(
     aggregator: &MetaConsoleAggregator,
     requested_identity: &str,
-) -> Option<String> {
-    let identities = Box::pin(aggregator.list_identities()).await.ok()?;
-    identities
+) -> Result<Option<String>, ConsoleSendError> {
+    let identities = Box::pin(aggregator.list_identities())
+        .await
+        .map_err(ConsoleSendError::Log)?;
+    Ok(identities
         .into_iter()
         .find(|record| {
             record.identity == requested_identity || record.runtime_member_id == requested_identity
         })
-        .map(|record| record.identity)
+        .map(|record| record.identity))
 }
 
 fn identity_runtime_error_to_console_send_error(
@@ -3127,20 +3158,18 @@ async fn console_timeline_stream_handler(
     let mut rx = aggregator.subscribe();
     // The snapshot pages over the frames the caller may see now; each one is
     // decided again below, as stored, under the policy committed before it
-    // is sent, and projected only then.
+    // is sent, and projected only then. Its first page is read before the
+    // response, so a cursor the log cannot replay from is answered with its
+    // HTTP status; every later page is read as the stream sends, so the
+    // first bytes follow one page, not the whole log.
     let snapshot_decider =
         timeline_frame_decider(live_view.as_ref().and_then(LiveAccessView::enforced));
-    let snapshot_filter = snapshot_decider.as_ref().map(timeline_frame_filter);
-    let snapshot = Box::pin(query_timeline_snapshot_stored(
-        &aggregator,
-        timeline_query.clone(),
-        snapshot_filter.as_deref(),
-    ))
-    .await;
-    let (snapshot_frames, snapshot_cursor) = match snapshot {
-        Ok(snapshot) => snapshot,
-        Err(err) => return console_timeline_query_error_response(err),
-    };
+    let mut snapshot = TimelineSnapshotPages::new(timeline_query.clone());
+    let first_page =
+        match Box::pin(snapshot.next_page(&aggregator, snapshot_decider.as_ref())).await {
+            Ok(page) => page.unwrap_or_default(),
+            Err(err) => return console_timeline_query_error_response(err),
+        };
     let identity = timeline_query.identity.clone();
     let conversation_id = timeline_query.conversation_id.clone();
     let snapshot_after = timeline_query.after.clone();
@@ -3151,44 +3180,82 @@ async fn console_timeline_stream_handler(
         if let Some(event) = sse_event_from_timeline_event(&ConsoleTimelineEvent::SnapshotStarted { after: snapshot_after }) {
             yield Ok::<Event, Infallible>(event);
         }
-        let mut latest_cursor = snapshot_cursor;
-        // Snapshot frames of a retired member stay unknown however often the
-        // roster is read, so each unknown member is primed for once here.
-        let mut primed_for_unknown = std::collections::HashSet::new();
-        for frame in snapshot_frames {
-            latest_cursor = Some(frame.cursor.clone());
-            if live_view
-                .as_ref()
-                .and_then(LiveAccessView::enforced)
-                .is_some_and(|view| !view.knows_agent(frame.identity.as_str()))
-                && primed_for_unknown.insert(frame.identity.clone())
-            {
-                reprime_stream_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref())
-                    .await;
-            }
-            // Settled after the last await: the frame is decided under the
-            // configuration committed before it is sent.
-            if let Some(live) = live_view.as_mut() {
-                while live.refresh() {
+        // The cursor of the last snapshot frame read, sent or not.
+        let mut last_snapshot_cursor = None;
+        let mut priming = ReplayPriming::default();
+        let mut page = first_page;
+        loop {
+            priming.start_page();
+            for frame in page {
+                last_snapshot_cursor = Some(frame.cursor.clone());
+                if live_view
+                    .as_ref()
+                    .and_then(LiveAccessView::enforced)
+                    .is_some_and(|view| !view.knows_agent(frame.identity.as_str()))
+                    && priming.primes_for(&frame.identity)
+                {
                     reprime_stream_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref())
                         .await;
                 }
+                // Settled after the last await: the frame is decided under the
+                // configuration committed before it is sent.
+                if let Some(live) = live_view.as_mut() {
+                    while live.refresh() {
+                        reprime_stream_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref())
+                            .await;
+                    }
+                }
+                if !crate::http_sse::still_authenticated(authentication.as_mut()) {
+                    return;
+                }
+                if live_view
+                    .as_ref()
+                    .and_then(LiveAccessView::enforced)
+                    .is_some_and(|view| !timeline_frame_visible_to(view, &frame))
+                {
+                    continue;
+                }
+                let frame = aggregator.project_frame_for_view(frame);
+                if let Some(event) = sse_event_from_timeline_event(&ConsoleTimelineEvent::ConsoleFrame { frame }) {
+                    yield Ok::<Event, Infallible>(event);
+                }
             }
-            if !crate::http_sse::still_authenticated(authentication.as_mut()) {
-                return;
-            }
-            if live_view
-                .as_ref()
-                .and_then(LiveAccessView::enforced)
-                .is_some_and(|view| !timeline_frame_visible_to(view, &frame))
-            {
-                continue;
-            }
-            let frame = aggregator.project_frame_for_view(frame);
-            if let Some(event) = sse_event_from_timeline_event(&ConsoleTimelineEvent::ConsoleFrame { frame }) {
-                yield Ok::<Event, Infallible>(event);
-            }
+            let next = crate::http_sse::until_stream_shutdown(
+                shutdown.as_mut(),
+                Box::pin(snapshot.next_page(&aggregator, snapshot_decider.as_ref())),
+            )
+            .await;
+            page = match next {
+                // The gateway's shutdown ends the stream between pages.
+                None => return,
+                Some(Ok(Some(next))) => next,
+                Some(Ok(None)) => break,
+                Some(Err(ConsoleTimelineQueryError::ReplayUnavailable { requested_cursor, latest_cursor })) => {
+                    // The log no longer holds what follows the frames sent
+                    // (it was cleared while the stream replayed): the client
+                    // repairs its view as it does after a live gap.
+                    if !crate::http_sse::still_authenticated(authentication.as_mut()) {
+                        return;
+                    }
+                    if let Some(event) = sse_event_from_timeline_event(&ConsoleTimelineEvent::ReplayUnavailable {
+                        requested_cursor: requested_cursor
+                            .map(|cursor| cursor.to_string())
+                            .unwrap_or_default(),
+                        latest_cursor,
+                    }) {
+                        yield Ok::<Event, Infallible>(event);
+                    }
+                    return;
+                }
+                Some(Err(error)) => {
+                    // The stream ends after the frames it sent; its client
+                    // resumes from the last one, as after any dropped stream.
+                    tracing::warn!(target: "meta::console", %error, "console timeline replay page failed; ending the stream");
+                    return;
+                }
+            };
         }
+        let mut latest_cursor = last_snapshot_cursor.or_else(|| snapshot.end_cursor());
         if !crate::http_sse::still_authenticated(authentication.as_mut()) {
             return;
         }
@@ -3318,7 +3385,36 @@ async fn reprime_stream_access_cache(
     access: Option<&AccessController>,
 ) {
     if let (Some(runtime), Some(access)) = (runtime, access) {
+        #[cfg(test)]
+        stream_primes::record(runtime.handle().mob_id().as_str());
         prime_access_cache_from_runtime(runtime, access).await;
+    }
+}
+
+/// Test seam: how often the streams over each mob read its roster again.
+#[cfg(test)]
+mod stream_primes {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex, PoisonError};
+
+    static PRIMES: LazyLock<Mutex<HashMap<String, usize>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(super) fn record(mob_id: &str) {
+        *PRIMES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(mob_id.to_owned())
+            .or_default() += 1;
+    }
+
+    pub(super) fn count(mob_id: &str) -> usize {
+        PRIMES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(mob_id)
+            .copied()
+            .unwrap_or_default()
     }
 }
 
@@ -3364,75 +3460,155 @@ fn timeline_query_from_http(
     }
 }
 
-/// [`query_timeline_snapshot_stored`] with every frame projected for the
-/// view and no caller filter.
+/// [`TimelineSnapshotPages`] read to its end with no caller decider, a
+/// `since` snapshot in pages of the query's `limit`: every frame projected
+/// for the view, and the cursor the snapshot ends at.
 #[cfg(test)]
 async fn query_timeline_snapshot(
     aggregator: &MetaConsoleAggregator,
     query: ConsoleTimelineWindowQuery,
 ) -> ConsoleTimelineQueryResult<(Vec<ConsoleFrame>, Option<ConsoleCursor>)> {
-    let (frames, cursor) =
-        Box::pin(query_timeline_snapshot_stored(aggregator, query, None)).await?;
-    Ok((
-        frames
-            .into_iter()
-            .map(|frame| aggregator.project_frame_for_view(frame))
-            .collect(),
-        cursor,
-    ))
-}
-
-/// The snapshot a timeline stream opens with: the caller's visible frames,
-/// as stored (unprojected), and the cursor the live frames continue from.
-async fn query_timeline_snapshot_stored(
-    aggregator: &MetaConsoleAggregator,
-    mut query: ConsoleTimelineWindowQuery,
-    frame_filter: Option<&TimelineFrameFilter<'_>>,
-) -> ConsoleTimelineQueryResult<(Vec<ConsoleFrame>, Option<ConsoleCursor>)> {
-    const DEFAULT_SNAPSHOT_LIMIT: usize = 200;
-    query.limit = if query.limit == 0 {
+    let page_frames = if query.limit == 0 {
         DEFAULT_SNAPSHOT_LIMIT
     } else {
         query.limit
     };
-    if query.after.is_none() && query.mode == ConsoleTimelineMode::Since {
-        query.mode = ConsoleTimelineMode::Recent;
+    let mut snapshot = TimelineSnapshotPages::with_since_page(query, page_frames);
+    let mut frames = Vec::new();
+    while let Some(page) = Box::pin(snapshot.next_page(aggregator, None)).await? {
+        frames.extend(
+            page.into_iter()
+                .map(|frame| aggregator.project_frame_for_view(frame)),
+        );
     }
-    let mode = query.mode;
-    match mode {
-        ConsoleTimelineMode::Recent => {
-            let page = Box::pin(aggregator.query_timeline_windowed_stored_for(query, frame_filter))
-                .await?;
-            Ok((page.frames, page.latest_cursor.or(page.next_cursor)))
+    Ok((frames, snapshot.end_cursor()))
+}
+
+/// A `recent` snapshot's page when the caller names no `limit`.
+const DEFAULT_SNAPSHOT_LIMIT: usize = 200;
+
+/// The snapshot a timeline stream opens with, read one page at a time: the
+/// caller's visible frames as stored (unprojected), then the cursor the
+/// live frames continue from.
+///
+/// With no `after` cursor the snapshot is the newest `limit` frames: one
+/// page. From a cursor it is every frame after it, read in pages of the
+/// aggregator's raw scan page ([`TIMELINE_RAW_SCAN_PAGE_LIMIT`]) so that
+/// each stored frame is read once; the page size only splits the read, and
+/// the caller's `limit` sizes none of it.
+struct TimelineSnapshotPages {
+    query: ConsoleTimelineWindowQuery,
+    /// Where the pages read so far end.
+    cursor: Option<ConsoleCursor>,
+    /// The newest frontier a page reported.
+    latest_cursor: Option<ConsoleCursor>,
+    complete: bool,
+}
+
+impl TimelineSnapshotPages {
+    fn new(query: ConsoleTimelineWindowQuery) -> Self {
+        Self::with_since_page(query, TIMELINE_RAW_SCAN_PAGE_LIMIT)
+    }
+
+    /// [`Self::new`] reading a `since` snapshot in pages of `page_frames`
+    /// visible frames (tests read long chains of short pages).
+    fn with_since_page(mut query: ConsoleTimelineWindowQuery, page_frames: usize) -> Self {
+        if query.after.is_none() && query.mode == ConsoleTimelineMode::Since {
+            query.mode = ConsoleTimelineMode::Recent;
         }
-        ConsoleTimelineMode::Since => {
-            let mut frames = Vec::new();
-            let mut cursor = query.after.clone();
-            let mut latest_cursor = None;
-            loop {
-                let page = Box::pin(
-                    aggregator.query_timeline_windowed_stored_for(query.clone(), frame_filter),
-                )
-                .await?;
-                latest_cursor = page.latest_cursor.clone().or(latest_cursor);
-                if !page.frames.is_empty() {
-                    cursor = page
-                        .next_cursor
-                        .clone()
-                        .or_else(|| page.frames.last().map(|frame| frame.cursor.clone()));
-                    frames.extend(page.frames);
-                } else if page.next_cursor.is_some() {
-                    cursor = page.next_cursor.clone();
-                }
-                if page.exhausted || page.next_cursor.is_none() {
-                    return Ok((frames, cursor.or(latest_cursor)));
-                }
-                if page.next_cursor == query.after {
-                    return Err(ConsoleTimelineQueryError::PaginationNoProgress);
-                }
-                query.after = page.next_cursor;
+        query.limit = match query.mode {
+            ConsoleTimelineMode::Recent if query.limit == 0 => DEFAULT_SNAPSHOT_LIMIT,
+            ConsoleTimelineMode::Recent => query.limit,
+            ConsoleTimelineMode::Since => page_frames,
+        };
+        Self {
+            cursor: query.after.clone(),
+            query,
+            latest_cursor: None,
+            complete: false,
+        }
+    }
+
+    /// The snapshot's next page, `None` once it is complete.
+    async fn next_page(
+        &mut self,
+        aggregator: &MetaConsoleAggregator,
+        decider: Option<&TimelineFrameDecider>,
+    ) -> ConsoleTimelineQueryResult<Option<Vec<ConsoleFrame>>> {
+        if self.complete {
+            return Ok(None);
+        }
+        let filter = decider.map(timeline_frame_filter);
+        let page = Box::pin(
+            aggregator.query_timeline_windowed_stored_for(self.query.clone(), filter.as_deref()),
+        )
+        .await?;
+        if self.query.mode == ConsoleTimelineMode::Recent {
+            self.complete = true;
+            self.cursor = page.latest_cursor.or(page.next_cursor);
+            return Ok(Some(page.frames));
+        }
+        if page.latest_cursor.is_some() {
+            self.latest_cursor.clone_from(&page.latest_cursor);
+        }
+        if !page.frames.is_empty() {
+            self.cursor = page
+                .next_cursor
+                .clone()
+                .or_else(|| page.frames.last().map(|frame| frame.cursor.clone()));
+        } else if page.next_cursor.is_some() {
+            self.cursor.clone_from(&page.next_cursor);
+        }
+        if page.exhausted || page.next_cursor.is_none() {
+            self.complete = true;
+        } else if page.next_cursor == self.query.after {
+            return Err(ConsoleTimelineQueryError::PaginationNoProgress);
+        } else {
+            self.query.after = page.next_cursor;
+        }
+        Ok(Some(page.frames))
+    }
+
+    /// The cursor the snapshot ends at: a `recent` page's frontier, or where
+    /// a `since` read stopped, else the newest frontier its pages reported.
+    fn end_cursor(&self) -> Option<ConsoleCursor> {
+        match self.query.mode {
+            ConsoleTimelineMode::Recent => self.cursor.clone(),
+            ConsoleTimelineMode::Since => {
+                self.cursor.clone().or_else(|| self.latest_cursor.clone())
             }
         }
+    }
+}
+
+/// When a replay reads the roster again before it decides a frame of a
+/// member its access view does not know: at the first such frame of a
+/// snapshot page, for a member it has not read the roster for yet. That one
+/// read covers every member live once the page was read, so another unknown
+/// member of the same page needs none; a later page still reads the roster
+/// for such a member once if the view still does not know it. The roster is
+/// read at most once per page, and at most once for each member.
+#[derive(Default)]
+struct ReplayPriming {
+    primed_for: std::collections::HashSet<String>,
+    primed_this_page: bool,
+}
+
+impl ReplayPriming {
+    /// A new snapshot page starts.
+    fn start_page(&mut self) {
+        self.primed_this_page = false;
+    }
+
+    /// Whether to read the roster before deciding a frame of `identity`, a
+    /// member the view does not know.
+    fn primes_for(&mut self, identity: &str) -> bool {
+        if self.primed_this_page || self.primed_for.contains(identity) {
+            return false;
+        }
+        self.primed_this_page = true;
+        self.primed_for.insert(identity.to_owned());
+        true
     }
 }
 
@@ -3487,6 +3663,7 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
             | "meta/retire_member"
             | "meta/respawn_member"
             | "meta/reload_member"
+            | "meta/identity/warm"
             | "meta/force_cancel_member"
             | "meta/stop_member_run"
             | "meta/cancel_flow"
@@ -3781,13 +3958,58 @@ fn timeline_event_visible_to(view: &AccessView, event: &ConsoleTimelineEvent) ->
     }
 }
 
+/// `agent.view` on one member row of a list call (`meta/list_members`,
+/// `meta/find_members`, `meta/console/list_identities` and
+/// `GET /console/identities`), decided as `/console/experience` decides its
+/// member rows: the row's own attributes, then its spawn ancestors, in one
+/// decision, so a deny on any ancestor wins. A row with no registered
+/// spawner is decided by its own attributes alone.
+///
+/// Only the spawn registry asserts lineage: `registered` is the registry's
+/// labels for the row's identity, and the lineage labels the row carries
+/// itself (`spawned_by`, `spawned_by_session`, `via_tool`) give way to the
+/// registry's. List rows carry labels a caller can set, and a lineage claim
+/// no spawn made must neither list a member nor hide it.
+fn listed_member_visible(
+    view: &AccessView,
+    resource: &AccessResource<'_>,
+    registered: Option<&BTreeMap<String, String>>,
+) -> bool {
+    let Some(identity) = resource.identity else {
+        // A row that names no agent has no lineage to follow.
+        return view.decide(ACTION_AGENT_VIEW, resource).is_allow();
+    };
+    let mut labels = resource.labels.cloned().unwrap_or_default();
+    crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
+    if let Some(registered) = registered {
+        crate::console_spawn::merge_registered_lineage_labels(&mut labels, registered);
+    }
+    view.decide_agent_with_attributes(
+        ACTION_AGENT_VIEW,
+        &AgentResourceAttributes {
+            identity: identity.to_string(),
+            agent_id: resource.agent_id.map(ToString::to_string),
+            role: resource.role.map(ToString::to_string),
+            labels,
+        },
+    )
+    .is_allow()
+}
+
 /// Filter serialized member rows (`meta/list_members`, `find_members`)
-/// down to the agents the caller may view. Field names cover both the
-/// meerkat roster entry shape and the console projection shape.
-fn retain_visible_member_rows(rows: &mut Vec<Value>, view: Option<&AccessView>) {
+/// down to the agents the caller may view, each by [`listed_member_visible`]
+/// with `runtime`'s spawn registry. Field names cover both the meerkat
+/// roster entry shape and the console projection shape.
+async fn retain_visible_member_rows(
+    rows: &mut Vec<Value>,
+    runtime: &MobRuntime,
+    view: Option<&AccessView>,
+) {
     let Some(view) = view.filter(|view| view.enforced()) else {
         return;
     };
+    // Keyed by console identity, as the console's member projection reads it.
+    let registered = runtime.console_identity_labels().await;
     rows.retain(|row| {
         let labels: Option<std::collections::BTreeMap<String, String>> = row
             .get("labels")
@@ -3806,38 +4028,59 @@ fn retain_visible_member_rows(rows: &mut Vec<Value>, view: Option<&AccessView>) 
             .get("role")
             .or_else(|| row.get("profile"))
             .and_then(Value::as_str);
-        view.decide(
-            ACTION_AGENT_VIEW,
+        listed_member_visible(
+            view,
             &AccessResource {
                 identity,
                 agent_id,
                 role,
                 labels: labels.as_ref(),
             },
+            identity.and_then(|identity| registered.get(identity)),
         )
-        .is_allow()
     });
 }
 
-fn retain_visible_identity_records(
-    identities: &mut Vec<ConsoleIdentityRecord>,
+/// The role a console identity record is shown and decided with: its `role`
+/// label, which the record of a live member always carries, else `identity`.
+/// A Console without a local runtime lists its sidebar rows with this role
+/// ([`build_aggregator_live_snapshot`]), and the identity list calls decide
+/// each record with it ([`visible_identity_records`]).
+fn console_identity_record_role(labels: &BTreeMap<String, String>) -> &str {
+    labels.get("role").map_or("identity", String::as_str)
+}
+
+/// The console aggregator's identity records (`GET /console/identities`,
+/// `meta/console/list_identities`) the caller may view, each by
+/// [`listed_member_visible`] with the record's role and the spawn registry
+/// of the record's own runtime.
+async fn visible_identity_records(
+    aggregator: &MetaConsoleAggregator,
     view: Option<&AccessView>,
-) {
+) -> ConsoleLogResult<Vec<ConsoleIdentityRecord>> {
+    let mut identities = Box::pin(aggregator.list_identities()).await?;
     let Some(view) = view.filter(|view| view.enforced()) else {
-        return;
+        return Ok(identities);
     };
+    let registered = aggregator
+        .spawn_registry_labels_for_identities(&identities)
+        .await?;
+    // In record order: `retain` visits each record once, in order.
+    let mut registered = registered.into_iter();
     identities.retain(|record| {
-        view.decide(
-            ACTION_AGENT_VIEW,
+        let registry_labels = registered.next().flatten();
+        listed_member_visible(
+            view,
             &AccessResource {
                 identity: Some(record.identity.as_str()),
                 agent_id: Some(record.runtime_member_id.as_str()),
-                role: None,
+                role: Some(console_identity_record_role(&record.labels)),
                 labels: Some(&record.labels),
             },
+            registry_labels.as_ref(),
         )
-        .is_allow()
     });
+    Ok(identities)
 }
 
 /// Maps a console RPC method to the access actions it requires, each with
@@ -3948,8 +4191,9 @@ fn console_rpc_access_requirements(
         "meta/respawn" | "meta/respawn_member" => one(ACTION_AGENT_RESPAWN, target),
         // Non-destructive cold reload: strictly less than a respawn (same
         // session, same generation), so the respawn grant covers it and no new
-        // action vocabulary is needed.
-        "meta/reload_member" => one(ACTION_AGENT_RESPAWN, target),
+        // action vocabulary is needed. A warm materializes the member on its
+        // own session with no turn: less again, under the same grant.
+        "meta/reload_member" | "meta/identity/warm" => one(ACTION_AGENT_RESPAWN, target),
         "meta/reset" | "meta/reset_all" => one(ACTION_AGENT_RESET, target),
         // A fork's source member, and the session `meta/attach_existing_session`
         // (or `meta/ensure_member` with `resume_session_id`) attaches, are
@@ -7338,7 +7582,9 @@ async fn resolve_console_identity_control_target(
 /// roster row), so it answers the typed stale-binding refusal the member
 /// routes give for the same id, naming the registered binding. A hidden
 /// identity answers hidden by policy and names no binding. An identity the
-/// identity runtime does not know keeps "identity not found" (`None`).
+/// identity runtime does not know keeps "identity not found" (`None`). A
+/// binding that cannot be read is refused typed and retryable: the id is
+/// never let through on a failed read.
 async fn stale_generated_alias_error(
     operation: &str,
     identity_runtime: &crate::identity_first::IdentityRuntime,
@@ -7346,11 +7592,29 @@ async fn stale_generated_alias_error(
     alias: &str,
 ) -> Option<JsonRpcError> {
     let identity = identity_from_runtime_alias(alias)?;
-    let status = identity_runtime.status(&identity).await.ok()?;
+    let status = match identity_runtime.status(&identity).await {
+        Ok(status) => status,
+        Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => return None,
+        Err(error) => return Some(unreadable_binding_json_rpc_error(operation, &error)),
+    };
     if !identity_status_visible_to_console(visibility_policy, &status) {
         return Some(identity_hidden_by_policy_error(alias));
     }
     stale_runtime_alias_error_for_status(operation, &identity, Some(&status), alias)
+}
+
+/// A stale-alias guard's refusal when the binding it compares a runtime id
+/// with cannot be read: the identity runtime's typed refusal (`-32052`,
+/// `identity_history_unavailable`, retryable). A failed read is never taken
+/// as the current binding, as a stale id with no registered binding, or as
+/// an unknown identity.
+fn unreadable_binding_json_rpc_error(
+    operation: &str,
+    error: &crate::identity_first::IdentityRuntimeError,
+) -> JsonRpcError {
+    let mut refusal = crate::rpc::identity_json_rpc_error(error);
+    refusal.message = format!("{operation} failed: {}", refusal.message);
+    refusal
 }
 
 fn live_alias_matches_status_runtime(
@@ -7389,8 +7653,20 @@ async fn stale_live_alias_json_rpc_error(
     live_alias: Option<&ConsoleRuntimeIdentityAlias>,
 ) -> Option<JsonRpcError> {
     let live_alias = live_alias?;
-    let Ok(status) = identity_runtime.status(identity).await else {
-        return None;
+    let status = match identity_runtime.status(identity).await {
+        Ok(status) => status,
+        // No registered binding to compare: a live-only target, which the
+        // routes decide on their live-only paths.
+        Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => return None,
+        // A binding that cannot be read never passes for current: refused
+        // as the route refuses its own failed status read.
+        Err(err) => {
+            return Some(JsonRpcError {
+                code: -32000,
+                message: format!("{operation} failed: {err}"),
+                data: err.structured_data(),
+            });
+        }
     };
     if live_alias_matches_status_runtime(Some(live_alias), &status) {
         return None;
@@ -7419,6 +7695,11 @@ fn identity_from_runtime_alias(alias: &str) -> Option<crate::identity_first::Age
     crate::identity_first::AgentIdentity::parse(identity).ok()
 }
 
+/// The refusal of a generated runtime id `alias` that is not its identity's
+/// registered binding: typed stale, naming the registered binding (none for
+/// an identity the identity runtime does not know), or typed retryable when
+/// the binding cannot be read; `None` for the current binding and for an id
+/// that is no generated runtime id.
 async fn stale_runtime_alias_json_rpc_error(
     operation: &str,
     identity_runtime: Option<&Arc<crate::identity_first::IdentityRuntime>>,
@@ -7427,7 +7708,11 @@ async fn stale_runtime_alias_json_rpc_error(
     let identity_runtime = identity_runtime?;
     let alias = crate::member_comms_id::runtime_alias_str(alias).into_owned();
     let identity = identity_from_runtime_alias(&alias)?;
-    let status = identity_runtime.status(&identity).await.ok();
+    let status = match identity_runtime.status(&identity).await {
+        Ok(status) => Some(status),
+        Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => None,
+        Err(error) => return Some(unreadable_binding_json_rpc_error(operation, &error)),
+    };
     stale_runtime_alias_error_for_status(operation, &identity, status.as_ref(), &alias)
 }
 
@@ -8103,9 +8388,8 @@ async fn handle_console_aggregator_rpc(
             let Some(aggregator) = &console_aggregator else {
                 return console_aggregator_unavailable(response_id);
             };
-            match Box::pin(aggregator.list_identities()).await {
-                Ok(mut identities) => {
-                    retain_visible_identity_records(&mut identities, access_view);
+            match Box::pin(visible_identity_records(aggregator, access_view)).await {
+                Ok(identities) => {
                     response_value(response_id, Some(json!({ "identities": identities })), None)
                 }
                 Err(err) => internal_error(response_id, format!("list_identities failed: {err}")),
@@ -8426,6 +8710,7 @@ async fn handle_console_runtime_rpc_with_visibility(
             &handle,
             identity_runtime.as_ref(),
             runtime.speaks_for_composition(),
+            runtime.member_auth_binding(),
             request.method.as_str(),
             response_id.clone(),
             &request.params,
@@ -8503,7 +8788,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     }
                 }
                 if can_mutate {
-                    methods.push("meta/delete_identity");
+                    methods.extend_from_slice(&["meta/delete_identity", "meta/identity/warm"]);
                 }
             } else if console_aggregator.is_some() {
                 methods.extend_from_slice(&["meta/status_identity", "meta/inspect_identity"]);
@@ -9142,9 +9427,8 @@ async fn handle_console_runtime_rpc_with_visibility(
                     }),
                 );
             };
-            match Box::pin(aggregator.list_identities()).await {
-                Ok(mut identities) => {
-                    retain_visible_identity_records(&mut identities, access_view);
+            match Box::pin(visible_identity_records(aggregator, access_view)).await {
+                Ok(identities) => {
                     response_value(response_id, Some(json!({ "identities": identities })), None)
                 }
                 Err(err) => internal_error(response_id, format!("list_identities failed: {err}")),
@@ -9375,7 +9659,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     member_entry_to_console_json(runtime, model_registry.as_ref(), entry).await,
                 );
             }
-            retain_visible_member_rows(&mut members, access_view);
+            retain_visible_member_rows(&mut members, runtime, access_view).await;
             response_value(response_id, Some(Value::Array(members)), None)
         })
         .await,
@@ -9456,7 +9740,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     member_entry_to_console_json(runtime, model_registry.as_ref(), entry).await,
                 );
             }
-            retain_visible_member_rows(&mut matches, access_view);
+            retain_visible_member_rows(&mut matches, runtime, access_view).await;
             response_value(response_id, Some(Value::Array(matches)), None)
         })
         .await,
@@ -10310,10 +10594,10 @@ async fn handle_console_runtime_rpc_with_visibility(
                     // runs it now; a dormant one wakes onto it later.
                     let agent_runtime_id = crate::identity_first::live_binding_runtime_id(&binding)
                         .map(|runtime_id| runtime_id.as_str().to_string());
-                    // The reset's successor transition retired the previous
-                    // live member, so there is no cleanup to report (as for
-                    // reset_all). Keep the legacy warning field, always null,
-                    // for wire compatibility, as respawn does.
+                    // The reset's rotation retired the previous incarnation
+                    // in Core's own step, so there is no cleanup to report
+                    // (as for reset_all). Keep the legacy warning field,
+                    // always null, for wire compatibility, as respawn does.
                     let cleanup_warning: Option<Value> = None;
                     if let Some(store) = &console_events {
                         store
@@ -10833,6 +11117,13 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .await
             {
                 return response_value(response_id, None, Some(error));
+            }
+            if let Some(session_id) = resume_session_id.as_ref()
+                && let Some(refusal) = runtime
+                    .attach_binding_refusal("meta/ensure_member", session_id)
+                    .await
+            {
+                return response_value(response_id, None, Some(refusal.json_rpc_error()));
             }
             let additional_instructions = match request.params.get("additional_instructions") {
                 None | Some(Value::Null) => None,
@@ -11567,20 +11858,25 @@ async fn handle_console_runtime_rpc_with_visibility(
             {
                 return response_value(response_id, None, Some(error));
             }
+            // A registered identity answers from its live session, or, when
+            // Core holds it Dormant, from its tool record: the read never
+            // wakes it (`tools_source` says which).
             if let Some(identity_runtime) = identity_runtime.as_ref()
                 && let Ok(parsed) = crate::identity_first::AgentIdentity::parse(&identity)
                 && let Ok(status) = identity_runtime.status(&parsed).await
                 && let Some(session_id) = status.session_id
             {
-                match resolved_tools_for_session(runtime.session_service(), &identity, session_id)
+                match identity_runtime
+                    .resolved_tools_answer(
+                        &parsed,
+                        &identity,
+                        session_id,
+                        runtime.session_service(),
+                    )
                     .await
                 {
-                    Ok(snapshot) => {
-                        return response_value(
-                            response_id,
-                            Some(serde_json::to_value(&snapshot).unwrap_or(Value::Null)),
-                            None,
-                        );
+                    Ok(answer) => {
+                        return response_value(response_id, Some(answer), None);
                     }
                     Err(err) => {
                         return internal_error(
@@ -11595,10 +11891,104 @@ async fn handle_console_runtime_rpc_with_visibility(
             {
                 Ok(snapshot) => response_value(
                     response_id,
-                    Some(serde_json::to_value(&snapshot).unwrap_or(Value::Null)),
+                    Some(crate::mob_handle_runtime::resolved_tools_answer(
+                        &snapshot,
+                        crate::mob_handle_runtime::ResolvedToolsSource::Live,
+                    )),
                     None,
                 ),
                 Err(err) => internal_error(response_id, format!("resolved_tools failed: {err}")),
+            }
+        })
+        .await,
+        // A no-turn warm of one identity: the unified plane's warm, behind
+        // the console's own identity resolution and visibility, answering the
+        // unified plane's result and codes. Core builds the member through
+        // the wake a delivery takes, delivers no input, and its live tools
+        // are written to its tool record.
+        "meta/identity/warm" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            let Some(identity) = request.params.get("identity").and_then(Value::as_str) else {
+                return invalid_params(response_id, "identity required");
+            };
+            let Some(identity_runtime) = &identity_runtime else {
+                return response_value(
+                    response_id,
+                    None,
+                    Some(JsonRpcError {
+                        code: -32601,
+                        message: "Method not found".to_string(),
+                        data: None,
+                    }),
+                );
+            };
+            let handle = runtime.handle();
+            let (parsed_identity, _was_registered, live_alias) =
+                match resolve_console_identity_control_target(
+                    "identity_warm",
+                    &handle,
+                    Some(identity_runtime),
+                    visibility_policy,
+                    identity,
+                )
+                .await
+                {
+                    Ok(Some(target)) => target,
+                    Ok(None) => {
+                        return response_value(
+                            response_id,
+                            None,
+                            Some(JsonRpcError {
+                                code: -32001,
+                                message: format!("unknown identity: {identity}"),
+                                data: None,
+                            }),
+                        );
+                    }
+                    Err(err) => return response_value(response_id, None, Some(err)),
+                };
+            match identity_runtime.status(&parsed_identity).await {
+                Ok(status) if !identity_status_visible_to_console(visibility_policy, &status) => {
+                    return identity_hidden_by_policy_response(response_id, identity);
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    return response_value(
+                        response_id,
+                        None,
+                        Some(crate::rpc::identity_json_rpc_error(&err)),
+                    );
+                }
+            }
+            if let Some(error) = stale_live_alias_json_rpc_error(
+                "identity_warm",
+                identity_runtime,
+                &parsed_identity,
+                live_alias.as_ref(),
+            )
+            .await
+            {
+                return response_value(response_id, None, Some(error));
+            }
+            match identity_runtime
+                .warm_tracked(&parsed_identity, runtime.session_service().cloned())
+                .await
+            {
+                Ok(record) => response_value(
+                    response_id,
+                    Some(json!({
+                        "identity": parsed_identity.as_str(),
+                        "session_id": record.session_id.to_string(),
+                        "tools": record.tools,
+                        "record_revision": record.record_revision,
+                        "published_at_ms": record.published_at_ms,
+                    })),
+                    None,
+                ),
+                Err(err) => response_value(
+                    response_id,
+                    None,
+                    Some(crate::rpc::identity_json_rpc_error(&err)),
+                ),
             }
         })
         .await,
@@ -12012,7 +12402,10 @@ async fn handle_console_runtime_rpc_with_visibility(
                 Err(crate::flow_role_targets::RoleTargetsRefusal::Invalid(message)) => {
                     return invalid_params(response_id, message);
                 }
-                Err(crate::flow_role_targets::RoleTargetsRefusal::StaleAlias(error)) => {
+                Err(
+                    crate::flow_role_targets::RoleTargetsRefusal::StaleAlias(error)
+                    | crate::flow_role_targets::RoleTargetsRefusal::Unreadable(error),
+                ) => {
                     return response_value(response_id, None, Some(error));
                 }
             };
@@ -12021,7 +12414,7 @@ async fn handle_console_runtime_rpc_with_visibility(
             {
                 return internal_error(
                     response_id,
-                    format!("identity-first flow materialization failed: {err}"),
+                    format!("identity-first flow membership failed: {err}"),
                 );
             }
             let echo = role_targets
@@ -12308,6 +12701,12 @@ async fn handle_console_runtime_rpc_with_visibility(
             .await
             {
                 return response_value(response_id, None, Some(error));
+            }
+            if let Some(refusal) = runtime
+                .attach_binding_refusal("meta/attach_existing_session", &bridge_session_id)
+                .await
+            {
+                return response_value(response_id, None, Some(refusal.json_rpc_error()));
             }
             let raw_reservation = match crate::member_comms_id::reserve_raw_member_target(
                 identity_runtime.as_ref(),
@@ -13451,19 +13850,28 @@ async fn reset_all_live_console_agents(
     let mut reset_details = Vec::new();
     let mut failures = Vec::new();
     // Kept in the body for shape stability. Nothing on the reset path warns
-    // today: a registered identity resets through the bridge's successor
-    // transition (meerkat's respawn), which terminally retires the
-    // predecessor row, so there is no stale live member left to warn about.
+    // today: a registered identity resets through Core's rotation, which
+    // retires the current incarnation and seats the fresh one in one step,
+    // so there is no stale live member left to warn about.
     let warnings: Vec<Value> = Vec::new();
 
     for identity in &main_identities {
         let parsed_identity = crate::identity_first::AgentIdentity::parse(identity).ok();
-        let registered_status = if let (Some(identity_runtime), Some(parsed_identity)) =
-            (identity_runtime, parsed_identity.as_ref())
-        {
-            identity_runtime.status(parsed_identity).await.ok()
-        } else {
-            None
+        let registered_status = match (identity_runtime, parsed_identity.as_ref()) {
+            (Some(identity_runtime), Some(parsed_identity)) => {
+                match identity_runtime.status(parsed_identity).await {
+                    Ok(status) => Some(status),
+                    Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => None,
+                    // A registered identity whose binding cannot be read is
+                    // never taken for an unregistered live member: it fails
+                    // the call before any member is touched.
+                    Err(err) => {
+                        failures.push(json!({ "identity": identity, "error": err.to_string() }));
+                        continue;
+                    }
+                }
+            }
+            _ => None,
         };
         let baseline_identity_runtime_registered = registered_status.is_some();
         if baseline_identities.contains(identity)
@@ -13672,7 +14080,7 @@ async fn reset_all_live_console_agents(
         }
         if let Some(identity_runtime) = identity_runtime
             && let Ok(parsed_identity) = crate::identity_first::AgentIdentity::parse(&identity)
-            && identity_runtime.status(&parsed_identity).await.is_ok()
+            && identity_runtime.contains(&parsed_identity).await
         {
             continue;
         }
@@ -13712,7 +14120,17 @@ async fn reset_all_live_console_agents(
         let parsed_identity = crate::identity_first::AgentIdentity::parse(&identity).ok();
         let registered_status = match (identity_runtime, parsed_identity.as_ref()) {
             (Some(identity_runtime), Some(parsed_identity)) => {
-                identity_runtime.status(parsed_identity).await.ok()
+                match identity_runtime.status(parsed_identity).await {
+                    Ok(status) => Some(status),
+                    Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => None,
+                    // A registered identity whose binding cannot be read is
+                    // never retired as an unregistered live member: the
+                    // identity fails, the others still reset.
+                    Err(err) => {
+                        failures.push(json!({ "identity": identity, "error": err.to_string() }));
+                        continue;
+                    }
+                }
             }
             _ => None,
         };
@@ -14788,10 +15206,7 @@ async fn build_aggregator_live_snapshot(
         let wired_to = identity.topology_peers.clone();
         members.push(ConsoleMember {
             agent_identity: identity.identity.clone(),
-            role: labels
-                .get("role")
-                .cloned()
-                .unwrap_or_else(|| "identity".to_string()),
+            role: console_identity_record_role(&identity.labels).to_string(),
             state: identity.health.clone(),
             model_capabilities: ConsoleModelCapabilities::default(),
             runtime_mode: Some("console_aggregator".to_string()),
@@ -14888,6 +15303,10 @@ pub async fn console_frontend_app_css_handler() -> impl IntoResponse {
 #[cfg(test)]
 #[path = "http_console_tests/query_faults.rs"]
 mod query_fault_tests;
+
+#[cfg(test)]
+#[path = "http_console_tests/timeline_replay.rs"]
+mod timeline_replay_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::large_futures)]
@@ -15380,10 +15799,10 @@ mod tests {
     }
 
     /// Reset double: mints the successor binding a real bridge commits through
-    /// respawn, without touching the mob plane. It lets the destructive reset
-    /// path (`reset_tracked`) run in-process, which is what `reset_all` takes
-    /// for every registered identity. Core's member history follows: the
-    /// successor binding is committed in `core`.
+    /// Core's rotation, without touching the mob plane. It lets the
+    /// destructive reset path (`reset_tracked`) run in-process, which is what
+    /// `reset_all` takes for every registered identity. Core's member history
+    /// follows: the successor binding is committed in `core`.
     #[derive(Default)]
     struct SuccessorMintingIdentityBridge {
         core: Arc<CoreTestMembers>,
@@ -15407,20 +15826,21 @@ mod tests {
             Ok(binding)
         }
 
-        async fn reset_member_to_successor(
+        async fn rotate_member(
             &self,
             identity: &AgentIdentity,
             spec: &DurableAgentSpec,
             _draft: &AgentBuildDraft,
-        ) -> Result<MemberRuntimeBinding, BridgeError> {
+        ) -> Result<meerkat_core::types::SessionId, BridgeError> {
             let agent_runtime_id = AgentRuntimeId::parse(&format!("rt:{}:1", identity.as_str()))
                 .map_err(|err| BridgeError::Mob(format!("mint successor runtime id: {err}")))?;
+            let session_id = meerkat_core::types::SessionId::new();
             let binding = MemberRuntimeBinding {
                 agent_runtime_id,
-                session_id: Some(meerkat_core::types::SessionId::new()),
+                session_id: Some(session_id.clone()),
             };
             self.core.bind(identity, &binding, &spec.profile);
-            Ok(binding)
+            Ok(session_id)
         }
 
         async fn resume_session(
@@ -17896,6 +18316,185 @@ message = "review"
         Ok(())
     }
 
+    /// The console's stale-live-alias guard never lets a live alias through
+    /// unchecked: when the identity's binding cannot be read, the guard
+    /// refuses as the route refuses its own failed status read, so a
+    /// retire, respawn, reset or delete never acts on a live member it could
+    /// not match to the binding.
+    #[tokio::test]
+    async fn console_live_alias_guard_refuses_typed_when_the_binding_cannot_be_read()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (_temp_dir, runtime) =
+            build_empty_console_test_runtime("console-live-alias-guard-unreadable").await?;
+        let runtime_member_id = "rt:review:guard:1";
+        spawn_identity_control_test_member(&runtime, runtime_member_id, "review:guard").await?;
+        let handle = runtime.handle();
+        let session_id = handle
+            .resolve_bridge_session_id_observation(&crate::member_comms_id::mob_member_id(
+                runtime_member_id,
+            ))
+            .await
+            .expect("spawned member has a bridge session");
+        let identity_runtime =
+            empty_identity_control_test_runtime("console-live-alias-guard-unreadable")?;
+        register_identity_control_test_binding(
+            &identity_runtime,
+            "review:guard",
+            runtime_member_id,
+            session_id,
+        )
+        .await?;
+        let (identity, registered, live_alias) = resolve_console_identity_control_target(
+            "retire",
+            &handle,
+            Some(&identity_runtime),
+            &AllowAllConsoleVisibilityPolicy,
+            "review:guard",
+        )
+        .await
+        .map_err(|error| format!("the identity resolves: {error:?}"))?
+        .ok_or("the identity resolves to a target")?;
+        assert!(registered, "the identity runtime knows the identity");
+        assert_eq!(
+            live_alias
+                .as_ref()
+                .map(|live| live.runtime_member_id.as_str()),
+            Some(runtime_member_id)
+        );
+        assert!(
+            super::stale_live_alias_json_rpc_error(
+                "retire",
+                &identity_runtime,
+                &identity,
+                live_alias.as_ref()
+            )
+            .await
+            .is_none(),
+            "the live alias is the registered binding while the binding reads"
+        );
+
+        identity_runtime.bridge.fail_history_reads(0, u64::MAX);
+        let error = super::stale_live_alias_json_rpc_error(
+            "retire",
+            &identity_runtime,
+            &identity,
+            live_alias.as_ref(),
+        )
+        .await
+        .ok_or("a live alias whose binding cannot be read must be refused, not passed")?;
+        assert_eq!(error.code, -32000, "{error:?}");
+        assert!(
+            error.message.starts_with("retire failed: "),
+            "the route's own refusal form: {error:?}"
+        );
+        assert_eq!(
+            error.data,
+            Some(json!({
+                "kind": "identity_history_unavailable",
+                "identity": "review:guard",
+                "retryable": true,
+            }))
+        );
+
+        let _ = handle.stop().await;
+        Ok(())
+    }
+
+    /// The console's guards on a generated runtime id fail closed on a read
+    /// fault. When the binding the id is compared with cannot be read, the
+    /// guard refuses the id with the identity runtime's typed, retryable
+    /// refusal: it never lets the id through to the route (which would go on
+    /// with it, as `meta/console/inspect_identity` does to the aggregator
+    /// lookup), and never calls it stale with no registered binding.
+    #[tokio::test]
+    async fn console_stale_alias_guard_fails_closed_on_a_read_fault()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let identity_runtime =
+            empty_identity_control_test_runtime("console-stale-alias-guard-unreadable")?;
+        register_identity_control_test_binding(
+            &identity_runtime,
+            "review:guard",
+            "rt:review:guard:1",
+            meerkat_core::types::SessionId::new(),
+        )
+        .await?;
+        let visibility = AllowAllConsoleVisibilityPolicy;
+        // While the binding reads, the current id passes and the
+        // predecessor's is stale, naming the registered binding.
+        assert!(
+            super::stale_generated_alias_error(
+                "inspect_identity",
+                &identity_runtime,
+                &visibility,
+                "rt:review:guard:1",
+            )
+            .await
+            .is_none(),
+            "the registered binding passes"
+        );
+        let stale = super::stale_generated_alias_error(
+            "inspect_identity",
+            &identity_runtime,
+            &visibility,
+            "rt:review:guard:0",
+        )
+        .await
+        .ok_or("the predecessor's runtime id is stale")?;
+        assert_eq!(
+            stale
+                .data
+                .as_ref()
+                .map(|data| (&data["kind"], &data["registered_runtime_member_id"])),
+            Some((
+                &json!("stale_identity_runtime_binding"),
+                &json!("rt:review:guard:1")
+            )),
+            "{stale:?}"
+        );
+
+        // Every read of Core's member history from here on fails.
+        identity_runtime.bridge.fail_history_reads(0, u64::MAX);
+        let unreadable = Some(json!({
+            "kind": "identity_history_unavailable",
+            "identity": "review:guard",
+            "retryable": true,
+        }));
+        for alias in ["rt:review:guard:1", "rt:review:guard:0"] {
+            let generated = super::stale_generated_alias_error(
+                "inspect_identity",
+                &identity_runtime,
+                &visibility,
+                alias,
+            )
+            .await
+            .ok_or_else(|| {
+                format!("{alias} must be refused when its binding cannot be read, not let through")
+            })?;
+            assert_eq!(
+                (generated.code, &generated.data),
+                (crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE, &unreadable),
+                "{alias}: {generated:?}"
+            );
+            assert!(
+                generated.message.starts_with("inspect_identity failed: "),
+                "{generated:?}"
+            );
+            let member = super::stale_runtime_alias_json_rpc_error(
+                "get_member",
+                Some(&identity_runtime.runtime),
+                alias,
+            )
+            .await
+            .ok_or_else(|| format!("{alias} must be refused when its binding cannot be read"))?;
+            assert_eq!(
+                (member.code, &member.data),
+                (crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE, &unreadable),
+                "{alias}: {member:?}"
+            );
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn console_runtime_identity_controls_resolve_durable_member_aliases()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -18657,6 +19256,7 @@ message = "review"
             "meta/respawn",
             "meta/reset",
             "meta/delete_identity",
+            "meta/identity/warm",
         ] {
             let response = Box::pin(handle_console_runtime_rpc_with_visibility(
                 &runtime,
@@ -19492,6 +20092,70 @@ message = "review"
         })))
     }
 
+    /// `reset_all` never takes a registered identity whose binding cannot be
+    /// read for an unregistered live member: the identity fails the call
+    /// before any member is touched, where it used to fall to the member
+    /// lane's raw retire of the identity's live member. The call's own read
+    /// of every status answers; each identity's read after it fails.
+    #[tokio::test]
+    async fn reset_all_fails_a_registered_identity_whose_binding_cannot_be_read()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (_temp_dir, runtime) =
+            build_empty_console_test_runtime("console-reset-all-binding-unreadable").await?;
+        spawn_identity_control_test_member(&runtime, "review:active", "review:active").await?;
+        let live_session = runtime
+            .handle()
+            .resolve_bridge_session_id_observation(&crate::member_comms_id::mob_member_id(
+                "review:active",
+            ))
+            .await
+            .expect("spawned member has a bridge session");
+        let identity_runtime =
+            empty_identity_control_test_runtime("console-reset-all-binding-unreadable")?;
+        register_identity_control_test_binding(
+            &identity_runtime,
+            "review:active",
+            "rt:review:active:0",
+            live_session,
+        )
+        .await?;
+
+        identity_runtime.bridge.fail_history_reads(1, u64::MAX);
+        let result = Box::pin(super::reset_all_live_console_agents(
+            &runtime,
+            None,
+            None,
+            Some(&identity_runtime.runtime),
+            &AllowAllConsoleVisibilityPolicy,
+        ))
+        .await?;
+
+        let failed = result["failed"]
+            .as_array()
+            .ok_or("reset_all reports its failures")?;
+        assert_eq!(failed.len(), 1, "{result:#?}");
+        assert_eq!(failed[0]["identity"], json!("review:active"), "{result:#?}");
+        assert!(
+            failed[0]["error"]
+                .as_str()
+                .is_some_and(|error| error.starts_with("identity review:active:")),
+            "the binding read's own failure: {result:#?}"
+        );
+        assert_eq!(result["reset"], json!([]), "{result:#?}");
+        assert_eq!(result["retired_delegates"], json!([]), "{result:#?}");
+        assert!(
+            runtime
+                .handle()
+                .get_member(&crate::member_comms_id::mob_member_id("review:active"))
+                .await?
+                .is_some(),
+            "the identity's live member is never retired through the member lane"
+        );
+
+        let _ = runtime.handle().stop().await;
+        Ok(())
+    }
+
     /// A single identity reset reports no cleanup warning: its successor
     /// transition retired the previous live member. The response and the
     /// `identity_reset` lifecycle frame keep the field, always null, for wire
@@ -19577,12 +20241,12 @@ message = "review"
         Ok(())
     }
 
-    /// Item R7, round 2, on Core. A registered identity with no live member
-    /// is reset by starting a fresh life that keeps its liveness: Core binds
-    /// it to a fresh session and retires that member at once, so the identity
-    /// stays Dormant and wakes onto the fresh session later. The active
-    /// identity beside it is reset through Core's successor respawn. Both are
-    /// reset, and each gets one lifecycle frame.
+    /// Item R7, round 2, on Core. A registered identity Core holds no member
+    /// for is reset by Core's rotation like any other: Core seats it on a
+    /// fresh session at the next generation, unmaterialized, so it is a
+    /// member of Core's mob (active) and its next delivery materializes it on
+    /// that session. The active identity beside it is rotated the same way.
+    /// Both are reset, and each gets one lifecycle frame.
     #[tokio::test]
     async fn reset_all_starts_a_fresh_life_for_a_registered_identity_without_a_live_member()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -19628,26 +20292,26 @@ message = "review"
         reset.sort_unstable();
         assert_eq!(reset, vec!["review:active", "review:lazy"], "{response:#?}");
 
-        // The dormant identity stays Dormant: Core's last binding of it is
-        // the fresh life, on a fresh session, already retired. The active one
-        // moved to Core's successor.
+        // The formerly dormant identity is now a member: Core's last binding
+        // of it is the fresh life, seated on a fresh session at the next
+        // generation. The active one moved to Core's successor.
         let lazy_binding = core
             .last_member_binding(&lazy)
             .map_err(|error| format!("Core's last binding of {lazy}: {error}"))?
             .ok_or("Core binds the dormant identity's fresh life")?;
-        assert!(!lazy_binding.is_live(), "{lazy_binding:#?}");
-        assert_eq!(lazy_binding.generation().get(), 0, "{lazy_binding:#?}");
+        assert!(lazy_binding.is_live(), "{lazy_binding:#?}");
+        assert_eq!(lazy_binding.generation().get(), 1, "{lazy_binding:#?}");
         assert!(lazy_binding.session_id().is_some(), "{lazy_binding:#?}");
         let lazy_status = identity_runtime.status(&lazy).await?;
         assert_eq!(
             lazy_status.state,
-            IdentityLifecycleState::Dormant,
-            "{lazy_status:#?}"
+            IdentityLifecycleState::Active,
+            "the rotation seats it: {lazy_status:#?}"
         );
         assert_eq!(
             lazy_status.session_id.as_ref(),
             lazy_binding.session_id(),
-            "it wakes onto the fresh session: {lazy_status:#?}"
+            "its next delivery materializes it on the fresh session: {lazy_status:#?}"
         );
         let active_status = identity_runtime.status(&active).await?;
         assert_eq!(active_status.state, IdentityLifecycleState::Active);
@@ -19836,6 +20500,7 @@ message = "review"
             "meta/respawn",
             "meta/reset",
             "meta/delete_identity",
+            "meta/identity/warm",
         ] {
             assert!(
                 methods.iter().any(|candidate| candidate == method),
@@ -19869,6 +20534,24 @@ message = "review"
             send_status["error"].is_object() && send_status["error"]["code"] != json!(-32601),
             "{send_status:#?}"
         );
+        let warm = Box::pin(handle_console_runtime_rpc(
+            &runtime,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(identity_runtime.clone()),
+            None,
+            None,
+            rpc_request_with_params("meta/identity/warm", json!({ "identity": "review:nobody" })),
+            true,
+        ))
+        .await;
+        assert!(
+            warm["error"].is_object() && warm["error"]["code"] != json!(-32601),
+            "{warm:#?}"
+        );
         for method in crate::rpc::MOBPACK_AUTHORING_METHODS {
             assert!(
                 !methods.iter().any(|candidate| candidate == method),
@@ -19894,6 +20577,109 @@ message = "review"
             mobpack_response["error"]["code"],
             json!(-32601),
             "console runtime RPC must not handle flow-editor authoring methods: {mobpack_response:#?}"
+        );
+
+        let _ = runtime.handle().stop().await;
+        Ok(())
+    }
+
+    /// The Console's `meta/identity/warm` warms a known identity and answers
+    /// the stdio gateway's result: the identity, the identity's session and
+    /// its tool record. The member is live afterwards.
+    #[tokio::test]
+    async fn console_identity_warm_answers_a_known_identity_with_its_tool_record()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (_temp_dir, runtime) =
+            build_empty_console_test_runtime("console-identity-warm").await?;
+        let identity = AgentIdentity::parse("review:warmed")?;
+        let member = crate::member_comms_id::roster_member_id_for_identity(identity.as_str());
+        // Seated as an identity-first spawn seats it: the label names the
+        // identity.
+        runtime
+            .handle()
+            .ensure_member(
+                SpawnMemberSpec::new(ProfileName::from("worker"), member.clone()).with_labels(
+                    BTreeMap::from([("agent_identity".to_string(), identity.as_str().to_string())]),
+                ),
+            )
+            .await?;
+        let session_service = runtime
+            .session_service()
+            .cloned()
+            .ok_or("the runtime's session service")?;
+        let identity_runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: "console-identity-warm".to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(Arc::new(
+                crate::identity_first::MobSessionBridge::with_session_service(
+                    runtime.handle(),
+                    session_service,
+                ),
+            )),
+            default_timeout: None,
+        }));
+        identity_runtime
+            .register(DurableAgentSpec {
+                identity: identity.clone(),
+                profile: ProfileName::from("worker"),
+                addressability: AgentAddressability::Addressable,
+                display_name: None,
+                labels: BTreeMap::new(),
+                context: None,
+                additional_instructions: Vec::new(),
+                initial_message: None,
+                runtime_mode_override: None,
+                backend: None,
+                binding: None,
+                placement: None,
+            })
+            .await;
+        let session_id = identity_runtime
+            .status(&identity)
+            .await?
+            .session_id
+            .ok_or("the identity's session")?;
+
+        let response = Box::pin(handle_console_runtime_rpc(
+            &runtime,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(identity_runtime.clone()),
+            None,
+            None,
+            rpc_request_with_params(
+                "meta/identity/warm",
+                json!({ "identity": identity.as_str() }),
+            ),
+            true,
+        ))
+        .await;
+        assert_eq!(response["error"], Value::Null, "{response:#?}");
+        let result = &response["result"];
+        assert_eq!(result["identity"], json!(identity.as_str()), "{result:#?}");
+        assert_eq!(
+            result["session_id"],
+            json!(session_id.to_string()),
+            "{result:#?}"
+        );
+        assert!(result["tools"].is_array(), "{result:#?}");
+        assert!(
+            result["record_revision"]
+                .as_u64()
+                .is_some_and(|revision| revision >= 1),
+            "{result:#?}"
+        );
+        assert!(result["published_at_ms"].as_u64().is_some(), "{result:#?}");
+        assert_eq!(
+            runtime.handle().member_materialization_for_test(&member),
+            Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Live),
+            "the warmed member is live"
         );
 
         let _ = runtime.handle().stop().await;
@@ -20527,12 +21313,12 @@ message = "review"
                 "plain runtime capabilities should advertise {method}: {methods:#?}"
             );
         }
-        assert!(
-            !methods
-                .iter()
-                .any(|candidate| candidate == "meta/delete_identity"),
-            "delete_identity requires an identity runtime: {methods:#?}"
-        );
+        for method in ["meta/delete_identity", "meta/identity/warm"] {
+            assert!(
+                !methods.iter().any(|candidate| candidate == method),
+                "{method} requires an identity runtime: {methods:#?}"
+            );
+        }
 
         // Unauthenticated callers keep the read-only projection: no lifecycle
         // mutations advertised.
@@ -21124,6 +21910,7 @@ message = "review"
                 Box::pin(async move {
                     Ok(crate::http_sse::AgentEventReplay {
                         epoch: None,
+                        attached_epoch: None,
                         stream: Box::pin(futures::stream::iter(vec![
                             meerkat_core::event::EventEnvelope::new(
                                 "stream-visibility",
@@ -21295,6 +22082,7 @@ message = "review"
                 Box::pin(async move {
                     Ok(crate::http_sse::AgentEventReplay {
                         epoch: None,
+                        attached_epoch: None,
                         stream: Box::pin(futures::stream::iter(Vec::new())),
                     })
                 })
@@ -23203,6 +23991,96 @@ message = "review"
         Ok(())
     }
 
+    /// A console send naming a registered identity by an alias (its live
+    /// runtime member id) is refused when the identity's binding cannot be
+    /// read: the failed read is the send's answer, never taken for an
+    /// unknown identity and handed to the member lane, which delivers
+    /// without the identity's guards. The identity runtime is given to the
+    /// send but not to the aggregator's registry, so the console listing
+    /// that resolves the alias reads no identity history and the fault lands
+    /// on exactly the binding read under test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn identity_first_console_send_by_alias_refuses_when_the_binding_cannot_be_read()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (_temp_dir, mob_runtime) =
+            build_empty_console_test_runtime("console-send-alias-unreadable").await?;
+        let runtime_member_id = "rt:builder:1";
+        spawn_identity_control_test_member(&mob_runtime, runtime_member_id, "builder").await?;
+        let session_id = mob_runtime
+            .handle()
+            .resolve_bridge_session_id_observation(&crate::member_comms_id::mob_member_id(
+                runtime_member_id,
+            ))
+            .await
+            .expect("spawned member has a bridge session");
+        let identity_runtime =
+            empty_identity_control_test_runtime("console-send-alias-unreadable")?;
+        register_identity_control_test_binding(
+            &identity_runtime,
+            "builder",
+            runtime_member_id,
+            session_id,
+        )
+        .await?;
+        let aggregator = MetaConsoleAggregator::in_memory();
+        let events = ConsoleEventStore::new();
+        aggregator.register_runtime_handles_with_policy(
+            "identity-first",
+            "",
+            mob_runtime.clone(),
+            None,
+            events.clone(),
+            Arc::new(AllowAllConsoleVisibilityPolicy),
+        );
+
+        identity_runtime.bridge.fail_history_reads(0, u64::MAX);
+        let sent = console_send_with_identity_first_fallback(
+            &aggregator,
+            identity_runtime.runtime.clone(),
+            Some(&events),
+            crate::console_aggregator::ConsoleSendRequest {
+                identity: runtime_member_id.to_string(),
+                content: serde_json::to_value(meerkat_core::ContentInput::Text(
+                    "an operator note".to_string(),
+                ))?,
+                origin: "test".to_string(),
+                idempotency_key: "alias-unreadable-idem-1".to_string(),
+                handling_mode: None,
+                origin_kind: None,
+                skill_refs: Vec::new(),
+            },
+        )
+        .await;
+        let error = match sent {
+            Ok(accepted) => {
+                return Err(format!(
+                    "the member lane must not take a send whose identity's binding cannot be \
+                     read: {accepted:?}"
+                )
+                .into());
+            }
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                error,
+                super::ConsoleSendError::Dispatch(ref detail)
+                    if detail.starts_with("identity builder:")
+            ),
+            "the binding read's own failure, never an unknown identity: {error:?}"
+        );
+        let page = aggregator
+            .query_timeline(ConsoleTimelineQuery::default())
+            .await?;
+        assert!(
+            page.frames.iter().all(|frame| frame.kind != "user_input"),
+            "a refused send records no input: {page:#?}"
+        );
+
+        let _ = mob_runtime.handle().stop().await;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn identity_first_console_send_returns_before_bridge_delivery_completes()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -23364,12 +24242,12 @@ message = "review"
     /// A queued console send to a member that is mid-turn on a long tool
     /// call gets its durable admission receipt at once: meerkat admits it in
     /// Queue mode behind the running turn and the console frame reaches
-    /// `Delivered` while that turn is still in flight. Before the fix the
-    /// detached dispatch hydrated the member's peer neighbourhood first, so
-    /// admission parked behind topology reconcile (here: wiring inspection
-    /// that cannot settle until the turn ends) and the console sat on
-    /// "Awaiting acceptance" with no SubmitWork ever issued. The peer
-    /// hydration still runs, after admission, once the turn releases it.
+    /// `Delivered` while that turn is still in flight. The send takes no
+    /// topology step on the way: admission never parks behind the member's
+    /// peer wiring (here a wiring inspection that cannot settle until the
+    /// turn ends), and no peer hydration runs after it either. Once the turn
+    /// ends, the member's desired peer edge is still not wired by the send,
+    /// and the admitted input is not admitted a second time.
     #[tokio::test]
     async fn identity_first_console_queue_send_is_admitted_while_member_is_mid_turn()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -23495,25 +24373,18 @@ message = "review"
         assert_eq!(
             wired_edges.load(Ordering::SeqCst),
             0,
-            "peer hydration must not have completed before the turn released it"
+            "the send wired no peer edge while the member's turn was in flight"
         );
 
-        // The turn ends; the post-admission peer hydration it was holding up
-        // converges the neighbourhood, and nothing is admitted a second time.
+        // The turn ends. Nothing was owed behind the admission: no peer
+        // hydration runs after it, so the send wires no edge, and the
+        // admitted input is never admitted a second time.
         finish_turn.send_replace(true);
-        if tokio::time::timeout(Duration::from_secs(5), async {
-            while wired_edges.load(Ordering::SeqCst) == 0 {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .is_err()
-        {
-            return Err("post-admission peer hydration should wire the peer edge".into());
-        }
-        assert!(
-            wire_inspections.load(Ordering::SeqCst) >= 1,
-            "the hydration reached topology reconcile"
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            wired_edges.load(Ordering::SeqCst),
+            0,
+            "no peer wiring runs after the admission once the turn ends"
         );
         assert_eq!(
             admissions
@@ -23521,7 +24392,7 @@ message = "review"
                 .map_err(|_| "admissions mutex poisoned")?
                 .len(),
             1,
-            "hydration never re-delivers the admitted input"
+            "the admitted input is admitted once; nothing delivers it again after the turn"
         );
         Ok(())
     }
@@ -29828,5 +30699,506 @@ mod console_access_priming_tests {
             "the roster priming alone recorded the console's projection of the helper"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod console_list_lineage_access_tests {
+    //! The list calls (`meta/list_members`, `meta/find_members`,
+    //! `meta/console/list_identities` and `GET /console/identities`) decide
+    //! each member row along its recorded spawn lineage, as the console
+    //! experience decides its member rows: a grant on a spawner lists the
+    //! members it spawned, a deny on a spawner hides them under a broad
+    //! grant, and a `spawned_by` roster label no spawn recorded does neither.
+    //! The caller is the open console's anonymous viewer, as in the router
+    //! access rows of `tests/access_control.rs`; each row reads a list under
+    //! two policies committed in turn.
+    use super::*;
+    use crate::access::{AccessControlConfig, AccessEffect};
+    use crate::console_aggregator::AllowAllConsoleVisibilityPolicy;
+    use crate::console_spawn::ConsoleSpawnSeed;
+    use meerkat_client::TestClient;
+    use meerkat_mob::MobDefinition;
+    use tower::ServiceExt;
+
+    /// The label every fixture member carries, for `meta/find_members`.
+    const TEAM: (&str, &str) = ("team", "lineage");
+
+    /// A list surface, `meta/console/list_identities` on both of the routes
+    /// that serve it.
+    #[derive(Clone, Copy, Debug)]
+    enum Surface {
+        ListMembers,
+        FindMembers,
+        ListIdentities,
+        AggregatorListIdentities,
+        IdentitiesRoute,
+    }
+
+    const SURFACES: [Surface; 5] = [
+        Surface::ListMembers,
+        Surface::FindMembers,
+        Surface::ListIdentities,
+        Surface::AggregatorListIdentities,
+        Surface::IdentitiesRoute,
+    ];
+
+    struct Fixture {
+        runtime: crate::UnifiedRuntime,
+        controller: AccessController,
+        /// The reference app, as a gateway serves it.
+        app: Router,
+        /// A console that serves registered runtimes only, over the same
+        /// runtime: it answers `meta/console/list_identities` on its own
+        /// route.
+        aggregator: MetaConsoleAggregator,
+    }
+
+    /// A runtime whose roster holds `ops-lead`, `ops-worker`, `secret-lead`,
+    /// `secret-worker`, `imposter` and `evader`. The spawn registry records
+    /// that `ops-lead` spawned `ops-worker` and `secret-lead` spawned
+    /// `secret-worker`, as an agent-tool spawn records it. Three roster rows
+    /// claim a spawner no spawn recorded: `secret-worker` and `imposter`
+    /// claim `ops-lead`, and `evader` claims `secret-lead`.
+    async fn lineage_fixture(mob_id: &str) -> Fixture {
+        let definition = MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "{mob_id}"
+
+[profiles.lead]
+model = "gpt-5.5"
+external_addressable = true
+
+[profiles.lead.tools]
+comms = true
+
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+
+[profiles.worker.tools]
+comms = true
+"#
+        ))
+        .expect("definition parses");
+        let mut runtime = Box::pin(
+            crate::UnifiedRuntime::builder()
+                .definition(definition)
+                .default_llm_client(Arc::new(TestClient::for_provider(
+                    meerkat_core::Provider::OpenAI,
+                )))
+                .build(),
+        )
+        .await
+        .expect("runtime builds");
+        for (member, profile, claimed_spawner) in [
+            ("ops-lead", "lead", None),
+            ("ops-worker", "worker", None),
+            ("secret-lead", "lead", None),
+            ("secret-worker", "worker", Some("ops-lead")),
+            ("imposter", "worker", Some("ops-lead")),
+            ("evader", "worker", Some("secret-lead")),
+        ] {
+            let mut labels = BTreeMap::from([(TEAM.0.to_string(), TEAM.1.to_string())]);
+            if let Some(spawner) = claimed_spawner {
+                labels.insert("spawned_by".to_string(), spawner.to_string());
+            }
+            let mut spec = SpawnMemberSpec::from_wire(
+                profile.to_string(),
+                member.to_string(),
+                None,
+                None,
+                None,
+            );
+            spec.labels = Some(labels);
+            Box::pin(runtime.spawn(spec)).await.expect("member spawns");
+        }
+        let sink = runtime
+            .mob_runtime()
+            .console_spawn_sink()
+            .expect("the unified runtime installs the console spawn sink");
+        for (member, spawner) in [("ops-worker", "ops-lead"), ("secret-worker", "secret-lead")] {
+            sink.project_spawned_member(&ConsoleSpawnSeed {
+                mob_id: Some(mob_id.to_string()),
+                member_id: member.to_string(),
+                identity: member.to_string(),
+                initial_message: None,
+                labels: BTreeMap::new(),
+                spawned_by: Some(spawner.to_string()),
+                spawned_by_session: None,
+                via_tool: "mob_spawn_member".to_string(),
+            })
+            .await;
+        }
+        let controller = AccessController::new(only_the_spawner()).expect("access controller");
+        runtime.set_access_controller(controller.clone());
+        // Both consoles are built over the complete roster and registry, so
+        // their identity read models list every member.
+        let app = runtime.build_reference_app_router(RuntimeDecisionState::local_console(
+            crate::ConsolePolicy {
+                require_app_auth: false,
+                ..Default::default()
+            },
+            None,
+        ));
+        let aggregator = MetaConsoleAggregator::in_memory();
+        aggregator.register_runtime_handles_with_policy(
+            "list-lineage",
+            "",
+            runtime.mob_runtime().clone(),
+            None,
+            runtime.console_events(),
+            Arc::new(AllowAllConsoleVisibilityPolicy),
+        );
+        Fixture {
+            runtime,
+            controller,
+            app,
+            aggregator,
+        }
+    }
+
+    /// The open console's viewer may view `agent`.
+    fn view_rule(id: &str, agent: &str) -> AccessRule {
+        AccessRule {
+            id: id.to_string(),
+            actions: vec![ACTION_AGENT_VIEW.to_string()],
+            agents: vec![agent.to_string()],
+            ..AccessRule::default()
+        }
+    }
+
+    fn enforced_policy(rules: Vec<AccessRule>) -> AccessControlConfig {
+        AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules,
+            ..AccessControlConfig::default()
+        }
+    }
+
+    /// The viewer is granted the `ops-lead` spawner alone.
+    fn only_the_spawner() -> AccessControlConfig {
+        enforced_policy(vec![view_rule("view-the-ops-lead", "ops-lead")])
+    }
+
+    /// The viewer is granted every agent, and the `secret-lead` spawner is
+    /// denied.
+    fn all_but_a_denied_spawner() -> AccessControlConfig {
+        enforced_policy(vec![
+            view_rule("view-every-agent", "*"),
+            AccessRule {
+                id: "hide-the-secret-lead".to_string(),
+                effect: AccessEffect::Deny,
+                actions: vec!["agent.*".to_string()],
+                agents: vec!["secret-lead".to_string()],
+                ..AccessRule::default()
+            },
+        ])
+    }
+
+    /// The viewer is granted every agent, and every worker is denied.
+    fn all_but_the_workers() -> AccessControlConfig {
+        enforced_policy(vec![
+            view_rule("view-every-agent", "*"),
+            AccessRule {
+                id: "hide-the-workers".to_string(),
+                effect: AccessEffect::Deny,
+                actions: vec![ACTION_AGENT_VIEW.to_string()],
+                roles: vec!["worker".to_string()],
+                ..AccessRule::default()
+            },
+        ])
+    }
+
+    /// The viewer is granted the workers alone.
+    fn only_the_workers() -> AccessControlConfig {
+        enforced_policy(vec![AccessRule {
+            id: "view-the-workers".to_string(),
+            actions: vec![ACTION_AGENT_VIEW.to_string()],
+            roles: vec!["worker".to_string()],
+            ..AccessRule::default()
+        }])
+    }
+
+    impl Fixture {
+        /// Commit `config` as the live policy, as the Access panel does.
+        fn commit(&self, config: AccessControlConfig) {
+            self.controller
+                .replace_config(config)
+                .expect("the policy commits");
+        }
+
+        /// The members `surface` lists to the viewer, sorted.
+        async fn listed(&self, surface: Surface) -> Vec<String> {
+            let (answer, rows, key) = match surface {
+                Surface::ListMembers => (
+                    self.rpc("meta/list_members", json!({})).await,
+                    "/result",
+                    "agent_identity",
+                ),
+                Surface::FindMembers => (
+                    self.rpc(
+                        "meta/find_members",
+                        json!({ "label_key": TEAM.0, "label_value": TEAM.1 }),
+                    )
+                    .await,
+                    "/result",
+                    "agent_identity",
+                ),
+                Surface::ListIdentities => (
+                    self.rpc("meta/console/list_identities", json!({})).await,
+                    "/result/identities",
+                    "identity",
+                ),
+                Surface::AggregatorListIdentities => {
+                    let view = self.controller.view_for_subject(None);
+                    let answer = Box::pin(handle_console_aggregator_rpc(
+                        Some(self.aggregator.clone()),
+                        JsonRpcRequest {
+                            jsonrpc: JSONRPC_VERSION.to_string(),
+                            id: Some(json!(1)),
+                            method: "meta/console/list_identities".to_string(),
+                            params: json!({}),
+                        },
+                        true,
+                        false,
+                        Some(&self.controller),
+                        Some(&view),
+                        &ConsoleSendScope::Anonymous,
+                    ))
+                    .await;
+                    (answer, "/result/identities", "identity")
+                }
+                Surface::IdentitiesRoute => (
+                    self.get("/console/identities").await,
+                    "/identities",
+                    "identity",
+                ),
+            };
+            let mut names = answer
+                .pointer(rows)
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("{surface:?} lists rows: {answer}"))
+                .iter()
+                .map(|row| {
+                    row[key]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{surface:?} names each row: {row}"))
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        }
+
+        /// Call `method` on the console route as the open console's viewer.
+        async fn rpc(&self, method: &str, params: Value) -> Value {
+            let response = self
+                .app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/console/rpc")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(axum::body::Body::from(
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": "list-lineage",
+                                "method": method,
+                                "params": params,
+                            })
+                            .to_string(),
+                        ))
+                        .expect("console request"),
+                )
+                .await
+                .expect("console response");
+            assert_eq!(response.status(), StatusCode::OK, "{method}");
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("console body");
+            serde_json::from_slice(&body).expect("console answer")
+        }
+
+        /// Read `uri` as the open console's viewer.
+        async fn get(&self, uri: &str) -> Value {
+            let response = self
+                .app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("GET")
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .expect("console request"),
+                )
+                .await
+                .expect("console response");
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("console body");
+            serde_json::from_slice(&body).expect("console answer")
+        }
+
+        /// The identities the console experience's sidebar lists to the
+        /// viewer, sorted.
+        async fn sidebar(&self) -> Vec<String> {
+            let experience = self.get("/console/experience").await;
+            let mut names = experience
+                .pointer("/agent_sidebar/live_snapshot/agents")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("the experience lists sidebar rows: {experience}"))
+                .iter()
+                .map(|agent| {
+                    agent["identity"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("each sidebar row names an identity: {agent}"))
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        }
+
+        async fn stop(self) {
+            let _ = self.runtime.mob_handle().stop().await;
+        }
+    }
+
+    /// `surfaces` list each member along its recorded spawn lineage. Under a
+    /// grant on `ops-lead` alone the viewer gets `ops-lead` and the member it
+    /// spawned. Under a grant on every agent with `secret-lead` denied it
+    /// gets neither `secret-lead` nor the member it spawned, and each member
+    /// whose roster alone claims a spawner is decided by its own attributes.
+    async fn assert_rows_follow_the_spawn_lineage(mob_id: &str, surfaces: &[Surface]) {
+        let fixture = Box::pin(lineage_fixture(mob_id)).await;
+        for &surface in surfaces {
+            fixture.commit(only_the_spawner());
+            assert_eq!(
+                fixture.listed(surface).await,
+                ["ops-lead", "ops-worker"],
+                "{surface:?}: a grant on the spawner lists the member it spawned"
+            );
+            fixture.commit(all_but_a_denied_spawner());
+            assert_eq!(
+                fixture.listed(surface).await,
+                ["evader", "imposter", "ops-lead", "ops-worker"],
+                "{surface:?}: a deny on the spawner hides the member it spawned under a broad grant"
+            );
+        }
+        fixture.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_members_rows_follow_their_spawn_lineage() {
+        assert_rows_follow_the_spawn_lineage("list-lineage-list-members", &[Surface::ListMembers])
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn find_members_rows_follow_their_spawn_lineage() {
+        assert_rows_follow_the_spawn_lineage("list-lineage-find-members", &[Surface::FindMembers])
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_identities_rows_follow_their_spawn_lineage() {
+        assert_rows_follow_the_spawn_lineage(
+            "list-lineage-list-identities",
+            &[Surface::ListIdentities, Surface::AggregatorListIdentities],
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn identities_route_rows_follow_their_spawn_lineage() {
+        assert_rows_follow_the_spawn_lineage(
+            "list-lineage-identities-route",
+            &[Surface::IdentitiesRoute],
+        )
+        .await;
+    }
+
+    /// A `spawned_by` label the roster carries and no spawn recorded neither
+    /// lists a member nor hides it, on any list surface. The rows
+    /// `meta/list_members` serves carry the claims; each member is decided by
+    /// its own attributes and the spawn the registry recorded for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_roster_spawned_by_label_neither_lists_nor_hides_a_member() {
+        let fixture = Box::pin(lineage_fixture("list-lineage-roster-claims")).await;
+        fixture.commit(enforced_policy(vec![view_rule("view-every-agent", "*")]));
+        let rows = fixture.rpc("meta/list_members", json!({})).await;
+        for (member, claimed) in [
+            ("secret-worker", "ops-lead"),
+            ("imposter", "ops-lead"),
+            ("evader", "secret-lead"),
+        ] {
+            let row = rows["result"]
+                .as_array()
+                .and_then(|served| served.iter().find(|row| row["agent_identity"] == member))
+                .unwrap_or_else(|| panic!("{member} is listed: {rows}"));
+            assert_eq!(
+                row["labels"]["spawned_by"], claimed,
+                "{member}'s row carries the claim"
+            );
+        }
+        for surface in SURFACES {
+            fixture.commit(only_the_spawner());
+            let listed = fixture.listed(surface).await;
+            for member in ["imposter", "secret-worker"] {
+                assert!(
+                    !listed.iter().any(|name| name.as_str() == member),
+                    "{surface:?}: a claimed spawner grants {member} nothing: {listed:?}"
+                );
+            }
+            fixture.commit(all_but_a_denied_spawner());
+            let listed = fixture.listed(surface).await;
+            assert!(
+                listed.iter().any(|name| name.as_str() == "evader"),
+                "{surface:?}: a claimed spawner denies evader nothing: {listed:?}"
+            );
+            assert!(
+                !listed.iter().any(|name| name.as_str() == "secret-worker"),
+                "{surface:?}: the recorded spawner's deny holds whatever the roster claims: \
+                 {listed:?}"
+            );
+        }
+        fixture.stop().await;
+    }
+
+    /// Every list surface decides a member with its role, as the sidebar
+    /// does: a role deny hides the members of that role from both, and a
+    /// role grant lists them alone in both.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_rows_are_decided_with_the_members_role() {
+        let fixture = Box::pin(lineage_fixture("list-lineage-roles")).await;
+        for (policy, expected, what) in [
+            (
+                all_but_the_workers(),
+                vec!["ops-lead", "secret-lead"],
+                "a role deny hides the members of that role",
+            ),
+            (
+                only_the_workers(),
+                vec!["evader", "imposter", "ops-worker", "secret-worker"],
+                "a role grant lists the members of that role",
+            ),
+        ] {
+            fixture.commit(policy);
+            assert_eq!(fixture.sidebar().await, expected, "the sidebar: {what}");
+            for surface in SURFACES {
+                assert_eq!(
+                    fixture.listed(surface).await,
+                    expected,
+                    "{surface:?}: {what}"
+                );
+            }
+        }
+        fixture.stop().await;
     }
 }

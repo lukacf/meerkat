@@ -1053,6 +1053,10 @@ class MetaRuntime:
             runtime_options["meerkat_config_path"] = self._config.meerkat_config_path
         if self._config.provider_credentials_root:
             runtime_options["provider_credentials_root"] = self._config.provider_credentials_root
+        if self._config.native_realm is not None:
+            runtime_options["native_realm"] = self._config.native_realm.to_wire()
+        if self._config.member_auth_binding is not None:
+            runtime_options["member_auth_binding"] = self._config.member_auth_binding.to_wire()
         if self._config.workgraph_enabled is not None:
             runtime_options["workgraph"] = self._config.workgraph_enabled
         if self._config.mob_announcements is not None:
@@ -1107,6 +1111,8 @@ class MetaRuntime:
             runtime_options["identity_bootstrap_mode"] = (
                 self._config.identity_bootstrap_mode.to_dict()
             )
+        if self._config.member_restore is not None:
+            runtime_options["member_restore"] = self._config.member_restore
         if self._config.experimental_live_config is not None:
             runtime_options["experimental_live"] = (
                 self._config.experimental_live_config.to_dict()
@@ -5556,13 +5562,37 @@ class MobHandle:
         return [str(tool) for tool in raw.get("tools", [])]
 
     async def identity_resolved_tools_detail(self, identity: str):
-        """Return the full resolved-tools diagnostic payload for an identity."""
+        """Return the full resolved-tools diagnostic payload for an identity.
+
+        A member live in this process answers its live session's tools
+        (``tools_source`` ``"live"``). A member that is not materialized
+        answers, without being woken, the tools its last build on its session
+        had (``"recorded"``, with the record's ``record_revision`` and
+        ``published_at_ms``), or ``"no_build_recorded"`` with empty ``tools``
+        when no build of it is recorded yet. ``session_id`` is returned in
+        every case.
+        """
         from .types import IdentityResolvedToolsResult
         raw = await self._runtime._rpc(
             "meta/identity/resolved_tools",
             {"identity": identity},
         )
         return IdentityResolvedToolsResult.from_dict(raw)
+
+    async def identity_warm(self, identity: str):
+        """Materialize an identity's member without a turn and record its tools.
+
+        Calls ``meta/identity/warm``: the member is built (no input is
+        delivered and nothing is added to its transcript), and its live tools
+        are written to its tool record, so a later
+        ``identity_resolved_tools_detail`` answers them without a wake. Returns
+        once the member is live and the record is written; a member that is
+        already live is not built again. Raises the gateway's typed refusal
+        when the member cannot be materialized.
+        """
+        from .types import IdentityWarmResult
+        raw = await self._runtime._rpc("meta/identity/warm", {"identity": identity})
+        return IdentityWarmResult.from_dict(raw)
 
     async def identity_routing_status(self, identity: str):
         """Return meerkat's typed model-routing status for an identity's session.

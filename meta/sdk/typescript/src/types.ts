@@ -1574,10 +1574,29 @@ export interface RichMemberSnapshot {
   readonly progress: MemberProgressSnapshot | null;
 }
 
+/**
+ * Where a resolved-tools answer's `tools` come from: the member's live session
+ * (`"live"`), the identity's tool record while the member is not
+ * materialized (`"recorded"`), or nothing yet (`"no_build_recorded"`: no
+ * build of it is recorded, and `tools` is empty). The vocabulary may grow:
+ * a value this SDK does not know is kept as its raw string.
+ */
+export type ResolvedToolsSource = "live" | "recorded" | "no_build_recorded" | (string & {});
+
 export interface IdentityResolvedToolsResult {
   readonly identity: string;
   readonly sessionId: string;
   readonly tools: readonly string[];
+  /** Where `tools` come from; `"live"` from a gateway that predates the field. */
+  readonly toolsSource: ResolvedToolsSource;
+  /**
+   * How many times the identity's tool record was written, for a
+   * `"recorded"` answer. It counts record writes; it is not the identity's
+   * generation.
+   */
+  readonly recordRevision: number | null;
+  /** When the recorded build was published, in Unix milliseconds, for a `"recorded"` answer. */
+  readonly publishedAtMs: number | null;
 }
 
 export function parseIdentityResolvedToolsResult(raw: unknown): IdentityResolvedToolsResult {
@@ -1586,6 +1605,33 @@ export function parseIdentityResolvedToolsResult(raw: unknown): IdentityResolved
     identity: String(d.identity ?? ""),
     sessionId: String(d.session_id ?? ""),
     tools: asStringArray(d.tools),
+    toolsSource: typeof d.tools_source === "string" && d.tools_source !== "" ? d.tools_source : "live",
+    recordRevision: typeof d.record_revision === "number" ? d.record_revision : null,
+    publishedAtMs: typeof d.published_at_ms === "number" ? d.published_at_ms : null,
+  };
+}
+
+/** Result of `meta/identity/warm`: the member is live and its tool record is written. */
+export interface IdentityWarmResult {
+  readonly identity: string;
+  readonly sessionId: string;
+  readonly tools: readonly string[];
+  /**
+   * How many times the identity's tool record was written, this write
+   * included. It counts record writes; it is not the identity's generation.
+   */
+  readonly recordRevision: number;
+  readonly publishedAtMs: number;
+}
+
+export function parseIdentityWarmResult(raw: unknown): IdentityWarmResult {
+  const d = asRecord(raw);
+  return {
+    identity: String(d.identity ?? ""),
+    sessionId: String(d.session_id ?? ""),
+    tools: asStringArray(d.tools),
+    recordRevision: typeof d.record_revision === "number" ? d.record_revision : 0,
+    publishedAtMs: typeof d.published_at_ms === "number" ? d.published_at_ms : 0,
   };
 }
 

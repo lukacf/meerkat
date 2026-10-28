@@ -1506,19 +1506,74 @@ class IdentityRoutingStatusResult:
         )
 
 
+#: ``tools_source`` of a resolved-tools answer read from the member's live
+#: session.
+TOOLS_SOURCE_LIVE = "live"
+#: ``tools_source`` of a resolved-tools answer read from the identity's tool
+#: record: the member is not materialized, and the tools are those of its last
+#: build on this session.
+TOOLS_SOURCE_RECORDED = "recorded"
+#: ``tools_source`` of a member that is not materialized and has no build
+#: recorded yet: ``tools`` is empty.
+TOOLS_SOURCE_NO_BUILD_RECORDED = "no_build_recorded"
+
+
 @dataclass(frozen=True)
 class IdentityResolvedToolsResult:
-    """Resolved per-identity tool surface from meta/identity/resolved_tools."""
+    """Resolved per-identity tool surface from meta/identity/resolved_tools.
+
+    ``tools_source`` says where ``tools`` comes from: ``TOOLS_SOURCE_LIVE``,
+    ``TOOLS_SOURCE_RECORDED`` (with ``record_revision`` and
+    ``published_at_ms``) or ``TOOLS_SOURCE_NO_BUILD_RECORDED``. The
+    vocabulary may grow: a value this SDK does not know is kept as the raw
+    string. A gateway that predates the field answers only live reads, so its
+    answers read ``"live"``. ``record_revision`` counts the writes of the
+    identity's tool record; it is not the identity's generation.
+    """
     identity: str
     session_id: str
     tools: list[str]
+    tools_source: str = TOOLS_SOURCE_LIVE
+    record_revision: int | None = None
+    published_at_ms: int | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> IdentityResolvedToolsResult:
+        record_revision = data.get("record_revision")
+        published_at_ms = data.get("published_at_ms")
         return cls(
             identity=str(data.get("identity", "")),
             session_id=str(data.get("session_id", "")),
             tools=[str(tool) for tool in data.get("tools", [])],
+            tools_source=str(data.get("tools_source") or TOOLS_SOURCE_LIVE),
+            record_revision=(
+                int(record_revision) if isinstance(record_revision, int) else None
+            ),
+            published_at_ms=(
+                int(published_at_ms) if isinstance(published_at_ms, int) else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class IdentityWarmResult:
+    """Result of meta/identity/warm: the member is live and its tool record
+    is written. ``record_revision`` counts the writes of the identity's tool
+    record; it is not the identity's generation."""
+    identity: str
+    session_id: str
+    tools: list[str]
+    record_revision: int
+    published_at_ms: int
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> IdentityWarmResult:
+        return cls(
+            identity=str(data.get("identity", "")),
+            session_id=str(data.get("session_id", "")),
+            tools=[str(tool) for tool in data.get("tools", [])],
+            record_revision=int(data.get("record_revision", 0)),
+            published_at_ms=int(data.get("published_at_ms", 0)),
         )
 
 

@@ -58,6 +58,12 @@ export interface MemoryPanelProps {
   canReviewQuarantine?: boolean;
   unavailable?: boolean;
   error?: string | null;
+  /// False while the panel renders before its first records page has
+  /// landed, when `records` and `realms` are an empty placeholder rather than
+  /// the store's listing. The lattice page-walk waits for the listing: a walk
+  /// over the placeholder would settle a verdict before the records arrive,
+  /// and their arrival would then walk the same store again.
+  loaded?: boolean;
   /// Cursor from the initial records page (single-realm only, keyset).
   nextCursor?: string | null;
   /// Per-section -32030 outcomes: the section data is empty because the
@@ -2042,6 +2048,7 @@ export function MemoryPanel({
   canReviewQuarantine = false,
   unavailable = false,
   error,
+  loaded = true,
   nextCursor = null,
   recordsDenied = false,
   dreamsDenied = false,
@@ -2118,9 +2125,13 @@ export function MemoryPanel({
   // CONTENT fingerprint (not array identity): content-identical debounced
   // live refreshes skip the walk entirely. While a re-check runs, the prior
   // result is retained so a settled tile never flickers to UNVERIFIABLE.
+  // Nothing walks before the first records page lands: the panel can render
+  // first with an empty placeholder, and a verdict settled over it would
+  // make the first page's arrival walk the same store a second time, in the
+  // middle of whatever the operator does next.
   const latticeRanForRef = React.useRef<string | null>(null);
   React.useEffect(() => {
-    if (tab !== "holdings" || !onQueryRecords || recordsDenied) return;
+    if (tab !== "holdings" || !onQueryRecords || recordsDenied || !loaded) return;
     const fingerprint = latticeFingerprint(records, realms, nextCursor);
     if (latticeRanForRef.current === fingerprint) return;
     latticeRanForRef.current = fingerprint;
@@ -2161,7 +2172,7 @@ export function MemoryPanel({
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, records, recordsDenied, realms, nextCursor]);
+  }, [tab, records, recordsDenied, realms, nextCursor, loaded]);
 
   // Holdings stays anchored on the base page (its label says "over the N
   // loaded records"); the Records list renders from the accumulated view.

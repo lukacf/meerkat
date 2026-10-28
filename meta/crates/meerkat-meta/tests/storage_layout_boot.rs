@@ -17,6 +17,12 @@
 //! 0.9.3 session projection: every surface refuses it typed before any
 //! store opens, names `meta_gateway storage-migrate-native`, and leaves it
 //! where it lies.
+//!
+//! The stdio gateway's boot-time member route is covered here too: the
+//! native realm a launch's members read their configuration from
+//! (`runtime_options.native_realm`) and the auth binding they build with
+//! (`runtime_options.member_auth_binding`), resolved at boot or refused
+//! typed.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
@@ -1065,4 +1071,1219 @@ fn rpc_gateway_refuses_predecessor_environment() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(&variable), "{stderr}");
+}
+
+// ---------------------------------------------------------------------------
+// rpc_gateway: members built from a native realm with a member auth binding
+// ---------------------------------------------------------------------------
+
+/// The native realm the member route rows launch against.
+const NATIVE_REALM: &str = "native-team";
+
+/// The realm's own document, as a native host keeps it: three OpenAI API key
+/// bindings, `a` the realm's default and `b` and `c` the ones the launches
+/// bind their members to, each reading its key from its own environment
+/// variable. The backend points at a closed local port, so nothing in these
+/// rows can reach a provider.
+const NATIVE_REALM_DOCUMENT: &str = r#"
+[realm.native-team]
+default_binding = "a"
+
+[realm.native-team.backend.openai_main]
+provider = "openai"
+backend_kind = "openai_api"
+base_url = "http://127.0.0.1:9/v1"
+
+[realm.native-team.auth.key_a]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "env", env = "NATIVE_REALM_TEST_KEY_A" }
+
+[realm.native-team.auth.key_b]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "env", env = "NATIVE_REALM_TEST_KEY_B" }
+
+[realm.native-team.auth.key_c]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "env", env = "NATIVE_REALM_TEST_KEY_C" }
+
+[realm.native-team.binding.a]
+backend_profile = "openai_main"
+auth_profile = "key_a"
+
+[realm.native-team.binding.b]
+backend_profile = "openai_main"
+auth_profile = "key_b"
+
+[realm.native-team.binding.c]
+backend_profile = "openai_main"
+auth_profile = "key_c"
+"#;
+
+/// The environment variables of the realm's three keys.
+const NATIVE_REALM_KEYS: [&str; 3] = [
+    "NATIVE_REALM_TEST_KEY_A",
+    "NATIVE_REALM_TEST_KEY_B",
+    "NATIVE_REALM_TEST_KEY_C",
+];
+
+/// Variables a launch must not inherit: an ambient provider key, with which
+/// a member built without a binding could still find a credential; the
+/// `RKAT_`-prefixed overrides of the realm's own keys, which win over the
+/// keys a launch sets; and the debug-build test client switch, which skips
+/// credential resolution altogether.
+const AMBIENT_PROVIDER_KEYS: [&str; 10] = [
+    "RKAT_OPENAI_API_KEY",
+    "OPENAI_API_KEY",
+    "RKAT_ANTHROPIC_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "RKAT_GEMINI_API_KEY",
+    "GEMINI_API_KEY",
+    "RKAT_NATIVE_REALM_TEST_KEY_A",
+    "RKAT_NATIVE_REALM_TEST_KEY_B",
+    "RKAT_NATIVE_REALM_TEST_KEY_C",
+    "RKAT_TEST_CLIENT",
+];
+
+fn current_thread_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a test runtime")
+}
+
+/// A native realm on disk under `root`, as a native host keeps one: its
+/// manifest written with the store's own realm API and its document beside
+/// it, with an empty user configuration root. Returns the
+/// `runtime_options.native_realm` naming it.
+fn write_native_realm(root: &Path) -> Value {
+    let realms = root.join("realms");
+    current_thread_runtime()
+        .block_on(meerkat_store::ensure_realm_manifest_in(
+            &realms,
+            NATIVE_REALM,
+            None,
+            None,
+        ))
+        .expect("the native realm's manifest");
+    std::fs::write(
+        meerkat_store::realm_paths_in(&realms, NATIVE_REALM).config_path,
+        NATIVE_REALM_DOCUMENT,
+    )
+    .expect("the native realm's document");
+    std::fs::create_dir_all(root.join("native-home")).expect("the user configuration root");
+    std::fs::create_dir_all(root.join("context")).expect("the context root");
+    json!({
+        "realm_id": NATIVE_REALM,
+        "context_root": root.join("context"),
+        "state_root": realms,
+        "user_config_root": root.join("native-home"),
+    })
+}
+
+/// The members' definition: one OpenAI profile, turn-driven so no member
+/// starts a turn of its own. Per call, like `rpc_mob_config`.
+fn member_route_mob_config() -> String {
+    format!(
+        r#"
+[mob]
+id = "native-realm-members-{}"
+
+[profiles.worker]
+model = "gpt-5.5"
+provider = "openai"
+runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+comms = true
+"#,
+        NEXT_TEST_MOB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+/// The member auth binding naming `binding` in the native realm.
+fn native_binding(binding: &str) -> Value {
+    json!({ "realm": NATIVE_REALM, "binding": binding })
+}
+
+/// The init params of a member route launch, with an identity roster when
+/// `roster` is set.
+fn member_route_init(
+    mob_config: &str,
+    state: Option<&Path>,
+    runtime_options: Value,
+    roster: bool,
+) -> Value {
+    let mut params = json!({ "mob_config": mob_config, "runtime_options": runtime_options });
+    if let Some(state) = state {
+        params["persistent_state"] = json!(state);
+    }
+    if roster {
+        params["has_roster_provider"] = json!(true);
+        params["runtime_options"]["identity_bootstrap_mode"] =
+            json!({ "mode": "eager_materialize" });
+    }
+    params
+}
+
+/// One `rpc_gateway --persistent` launch over real stdio, playing the SDK:
+/// it answers the roster callback with its roster, the one identity
+/// `keeper` (profile `worker`) unless a row sets another, whenever the
+/// gateway asks. Its HOME and XDG directories lie in the scratch directory,
+/// no ambient provider key reaches it, and of the realm's keys only those
+/// `keys` names are set.
+struct MemberRouteGateway {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    lines: mpsc::Receiver<String>,
+    log: std::path::PathBuf,
+    roster: Value,
+}
+
+impl MemberRouteGateway {
+    fn launch(scratch: &Path, name: &str, keys: &[&str]) -> Self {
+        let log = scratch.join(format!("{name}.log"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rpc_gateway"));
+        command
+            .arg("--persistent")
+            .env("HOME", scratch.join("process-home"))
+            .env("XDG_CONFIG_HOME", scratch.join("process-config"))
+            .env("XDG_STATE_HOME", scratch.join("process-state"))
+            .env("XDG_DATA_HOME", scratch.join("process-data"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(std::fs::File::create(&log).expect("the gateway log"));
+        for key in AMBIENT_PROVIDER_KEYS {
+            command.env_remove(key);
+        }
+        for key in NATIVE_REALM_KEYS {
+            if keys.contains(&key) {
+                command.env(key, format!("sk-test-{key}"));
+            } else {
+                command.env_remove(key);
+            }
+        }
+        let mut child = command.spawn().expect("spawn rpc_gateway");
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().expect("the gateway stdout");
+        let (tx, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            child,
+            stdin,
+            lines,
+            log,
+            roster: json!([{ "identity": "keeper", "profile": "worker" }]),
+        }
+    }
+
+    /// Answer the gateway's next roster callbacks with `roster`.
+    fn set_roster(&mut self, roster: Value) {
+        self.roster = roster;
+    }
+
+    fn log(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
+    fn send(&mut self, message: &Value) {
+        let stdin = self.stdin.as_mut().expect("the gateway stdin is open");
+        writeln!(stdin, "{message}").expect("write to the gateway");
+        stdin.flush().expect("flush to the gateway");
+    }
+
+    /// Send `method` with `params` and read until its response, answering
+    /// every callback on the way.
+    fn call(&mut self, method: &str, params: Value) -> Value {
+        let id = json!(format!("{method}-request"));
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        loop {
+            let Ok(line) = self.lines.recv_timeout(Duration::from_mins(3)) else {
+                panic!(
+                    "rpc_gateway did not answer {method}; its log:\n{}",
+                    self.log()
+                );
+            };
+            let Some(message) = line
+                .find('{')
+                .and_then(|start| serde_json::from_str::<Value>(&line[start..]).ok())
+            else {
+                continue;
+            };
+            if let (Some(callback), Some(callback_id)) = (
+                message.get("method").and_then(Value::as_str),
+                message.get("id").cloned(),
+            ) {
+                let reply = if callback == "callback/roster_provider/roster" {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": callback_id,
+                        "result": self.roster.clone(),
+                    })
+                } else {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": callback_id,
+                        "error": { "code": -32601, "message": format!("no handler for {callback}") },
+                    })
+                };
+                self.send(&reply);
+                continue;
+            }
+            if message.get("method").is_none() && message["id"] == id {
+                return message;
+            }
+        }
+    }
+
+    /// [`Self::call`], asserting the request succeeded; returns its result.
+    fn call_ok(&mut self, method: &str, params: Value) -> Value {
+        let response = self.call(method, params);
+        assert!(
+            response.get("error").is_none(),
+            "{method} must succeed: {response}; the gateway log:\n{}",
+            self.log()
+        );
+        response["result"].clone()
+    }
+
+    /// The keeper's identity status, asserting it is live, and its session.
+    fn live_keeper_session(&mut self, step: &str) -> Value {
+        self.live_identity_session("keeper", step)
+    }
+
+    /// `identity`'s status, asserting it is live, and its session.
+    fn live_identity_session(&mut self, identity: &str, step: &str) -> Value {
+        let status = self.call_ok("meta/status_identity", json!({ "identity": identity }));
+        assert_eq!(
+            status["state"],
+            json!("active"),
+            "{step}: {identity} is live: {status}; the gateway log:\n{}",
+            self.log()
+        );
+        assert!(status["session_id"].is_string(), "{step}: {status}");
+        status["session_id"].clone()
+    }
+
+    /// Wake the keeper without a turn (`meta/identity/warm`): Meerkat builds
+    /// its member when it is not live, and a seated member's first wake
+    /// creates its session. Returns the session the warm answered.
+    fn warm_keeper(&mut self, step: &str) -> Value {
+        self.warm_identity("keeper", step)
+    }
+
+    /// [`Self::warm_keeper`] for `identity`.
+    fn warm_identity(&mut self, identity: &str, step: &str) -> Value {
+        let warmed = self.call_ok("meta/identity/warm", json!({ "identity": identity }));
+        assert!(warmed["session_id"].is_string(), "{step}: {warmed}");
+        warmed["session_id"].clone()
+    }
+
+    /// A raw member's state, asserting it is live: Core restores or spawns a
+    /// member it cannot build as broken, never live.
+    fn live_member(&mut self, step: &str, member: &str) {
+        let entry = self.call_ok("meta/get_member", json!({ "member_id": member }));
+        assert_eq!(
+            entry["state"],
+            json!("active"),
+            "{step}: {member} is live: {entry}; the gateway log:\n{}",
+            self.log()
+        );
+    }
+
+    /// One tracked turn of the keeper, waited until it completes.
+    fn keeper_turn(&mut self) {
+        let sent = self.call_ok(
+            "meta/send",
+            json!({ "identity": "keeper", "content": "Answer with one word.", "track_turn": true }),
+        );
+        let ticket = sent["turn"]["ticket"].clone();
+        assert!(ticket.is_string(), "a tracked turn: {sent}");
+        let waited = self.call_ok(
+            "meta/wait_for_turn",
+            json!({ "identity": "keeper", "ticket": ticket, "timeout_ms": 120_000 }),
+        );
+        assert_eq!(
+            waited["state"],
+            json!("completed"),
+            "the turn completes: {waited}"
+        );
+    }
+
+    /// Close stdin and wait for the gateway's graceful exit.
+    fn finish(mut self) {
+        drop(self.stdin.take());
+        let deadline = std::time::Instant::now() + Duration::from_mins(3);
+        while self.child.try_wait().expect("poll the gateway").is_none()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let exited = self.child.try_wait().expect("poll the gateway").is_some();
+        if !exited {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+        assert!(
+            exited,
+            "the gateway ends once its stdin closes; its log:\n{}",
+            self.log()
+        );
+    }
+}
+
+/// One member session's own record of how its member was built.
+#[derive(Debug)]
+struct RecordedMemberSession {
+    /// The roster member the session belongs to.
+    member: String,
+    /// The session's id.
+    session_id: String,
+    /// The auth binding the member's build recorded, as JSON.
+    binding: Value,
+}
+
+/// Every member session in `state`'s session store that records how its
+/// member was built, read from the member's own session record, the
+/// metadata Core writes for the member's build (a build persists the
+/// session it built), never from the options a launch sent.
+fn member_session_bindings(state: &Path) -> Vec<RecordedMemberSession> {
+    current_thread_runtime().block_on(async {
+        use meerkat::SessionStore as _;
+        let store = meerkat_store::SqliteSessionStore::open(state.join("runtime.sqlite"))
+            .expect("open the session store");
+        let mut members = Vec::new();
+        for meta in store
+            .list(meerkat::SessionFilter::default())
+            .await
+            .expect("list the sessions")
+        {
+            let Some(session) = store.load(&meta.id).await.expect("load a session") else {
+                continue;
+            };
+            let Some(metadata) = session
+                .try_session_metadata()
+                .expect("decode the session metadata")
+            else {
+                continue;
+            };
+            let Some(member) = metadata.mob_member_binding.as_ref() else {
+                continue;
+            };
+            members.push(RecordedMemberSession {
+                member: member.member.clone(),
+                session_id: meta.id.to_string(),
+                binding: serde_json::to_value(&metadata.auth_binding).expect("the binding as JSON"),
+            });
+        }
+        members
+    })
+}
+
+/// The auth binding the member session `session_id` recorded in `recorded`,
+/// if it is a member session there.
+fn recorded_binding<'a>(
+    recorded: &'a [RecordedMemberSession],
+    session_id: &str,
+) -> Option<&'a Value> {
+    recorded
+        .iter()
+        .find(|entry| entry.session_id == session_id)
+        .map(|entry| &entry.binding)
+}
+
+/// The member sessions `member` recorded in `recorded`.
+fn sessions_of<'a>(
+    recorded: &'a [RecordedMemberSession],
+    member: &str,
+) -> Vec<&'a RecordedMemberSession> {
+    recorded
+        .iter()
+        .filter(|entry| entry.member == member)
+        .collect()
+}
+
+/// What the first launch of the native realm rows leaves for a second
+/// launch: the scratch directory (kept alive), the state directory, the
+/// `native_realm` option, the mob definition, the keeper's session and the
+/// spawned member's.
+struct FirstLaunchUnderB {
+    scratch: TempDir,
+    state: std::path::PathBuf,
+    native_realm: Value,
+    mob_config: String,
+    keeper_session: Value,
+    spawned_session: String,
+}
+
+/// The first launch of the native realm rows, binding `b` and only `b`'s
+/// key: the initial roster member and the successor of an identity reset,
+/// each built at its first wake (`meta/identity/warm`: a seat and a rotation
+/// build nothing, and the wake creates the member's session), a
+/// `meta/spawn_member` member and an identity respawn (which rebuilds the
+/// member on its own session) each come up live, and every member session it
+/// records (the keeper's two and the spawned member's) names binding `b`.
+fn first_launch_under_binding_b() -> FirstLaunchUnderB {
+    let scratch = TempDir::new().expect("scratch dir");
+    let state = scratch.path().join("state");
+    let native_realm = write_native_realm(scratch.path());
+    let mob_config = member_route_mob_config();
+
+    let mut first =
+        MemberRouteGateway::launch(scratch.path(), "first", &["NATIVE_REALM_TEST_KEY_B"]);
+    let init = first.call(
+        "meta/init",
+        member_route_init(
+            &mob_config,
+            Some(&state),
+            json!({
+                "native_realm": native_realm,
+                "member_auth_binding": {
+                    "realm": NATIVE_REALM,
+                    "binding": "b",
+                    "origin": "configured",
+                },
+            }),
+            true,
+        ),
+    );
+    assert!(
+        init["result"]["contract_version"].is_string(),
+        "the first launch starts: {init}; its log:\n{}",
+        first.log()
+    );
+    let seated = first.live_keeper_session("the initial roster member");
+    assert_eq!(
+        first.warm_keeper("the initial roster member's first wake"),
+        seated,
+        "the first wake builds the member on its seat's session"
+    );
+    let spawned = first.call_ok(
+        "meta/spawn_member",
+        json!({ "profile": "worker", "meerkat_id": "spawned" }),
+    );
+    assert_eq!(spawned["accepted"], json!(true), "{spawned}");
+    first.live_member("the spawned member", "spawned");
+    let spawned_status = first.call_ok("meta/member_status", json!({ "member_id": "spawned" }));
+    let spawned_session = spawned_status["current_session_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the spawned member's session: {spawned_status}"))
+        .to_string();
+    first.call_ok("meta/reset", json!({ "identity": "keeper" }));
+    let keeper_session = first.live_keeper_session("the reset successor");
+    assert_eq!(
+        first.warm_keeper("the reset successor's first wake"),
+        keeper_session,
+        "the first wake builds the reset successor on its own session"
+    );
+    first.call_ok("meta/respawn", json!({ "identity": "keeper" }));
+    assert_eq!(
+        first.live_keeper_session("the respawned member"),
+        keeper_session,
+        "a respawn rebuilds the member on its own session"
+    );
+    first.finish();
+
+    let b = native_binding("b");
+    let recorded = member_session_bindings(&state);
+    assert!(
+        sessions_of(&recorded, "keeper").len() >= 2,
+        "the keeper records its first session and its reset successor: {recorded:?}"
+    );
+    for session in [&seated, &keeper_session] {
+        let session = session.as_str().expect("a session id");
+        assert_eq!(
+            recorded_binding(&recorded, session),
+            Some(&b),
+            "keeper session {session} names binding b: {recorded:?}"
+        );
+    }
+    assert_eq!(
+        recorded_binding(&recorded, &spawned_session),
+        Some(&b),
+        "the spawned member records its session: {recorded:?}"
+    );
+    assert!(
+        recorded.iter().all(|entry| entry.binding == b),
+        "every member session the first launch recorded names binding b: {recorded:?}"
+    );
+
+    FirstLaunchUnderB {
+        scratch,
+        state,
+        native_realm,
+        mob_config,
+        keeper_session,
+        spawned_session,
+    }
+}
+
+/// A launch whose members build from a native realm with a member auth
+/// binding resolves every member it constructs through that binding in the
+/// realm's own configuration, on each construction path that runs no model
+/// turn: the first wake of the initial roster member and of the successor of
+/// an identity reset (a seat and a rotation build nothing, and the first
+/// wake builds the member), a `meta/spawn_member` member, and an identity
+/// respawn (which rebuilds the member on its own session).
+///
+/// Each build resolves the member's provider key for real. The binding and
+/// its key exist only in the realm's own document and the variable the
+/// launch sets, the realm's default binding `a` has no key, and no ambient
+/// provider key, key override or test client switch reaches the gateway, so
+/// a member builds only with the launch's binding resolved in the realm's
+/// configuration. Every member session of the launch (the keeper's two and
+/// the spawned member's) records the launch's binding.
+#[test]
+fn rpc_gateway_resolves_every_member_through_the_native_realm_binding() {
+    first_launch_under_binding_b();
+}
+
+/// Under a member auth binding a roster identity's seat, its reset and its
+/// delete build nothing, and each first wake builds the member with the
+/// binding: Meerkat creates a seated member's session at its first wake,
+/// through the gateway's spawn customizers, which carry the launch's
+/// binding, so the gateway's build check, which refuses every member build
+/// off the binding, passes it. The keeper is seated at init and woken
+/// (`meta/identity/warm`), reset and woken, deleted and woken; every step
+/// answers, and the session each of those wakes created records the
+/// binding.
+#[test]
+fn rpc_gateway_seats_resets_and_deletes_a_roster_identity_under_the_binding() {
+    let scratch = TempDir::new().expect("scratch dir");
+    let state = scratch.path().join("state");
+    let native_realm = write_native_realm(scratch.path());
+
+    let mut gateway =
+        MemberRouteGateway::launch(scratch.path(), "rotations", &["NATIVE_REALM_TEST_KEY_B"]);
+    let init = gateway.call(
+        "meta/init",
+        member_route_init(
+            &member_route_mob_config(),
+            Some(&state),
+            json!({
+                "native_realm": native_realm,
+                "member_auth_binding": native_binding("b"),
+            }),
+            true,
+        ),
+    );
+    assert!(
+        init["result"]["contract_version"].is_string(),
+        "the launch starts: {init}; its log:\n{}",
+        gateway.log()
+    );
+    let seated = gateway.live_keeper_session("the seated roster identity");
+    assert_eq!(
+        gateway.warm_keeper("the seated identity's first wake"),
+        seated,
+        "the first wake builds the member on its seat's session"
+    );
+    gateway.call_ok("meta/reset", json!({ "identity": "keeper" }));
+    let reset = gateway.live_keeper_session("the reset successor");
+    assert_ne!(reset, seated, "a reset moves the keeper to a fresh session");
+    assert_eq!(
+        gateway.warm_keeper("the reset successor's first wake"),
+        reset,
+        "the first wake builds the reset successor on its own session"
+    );
+    gateway.call_ok("meta/delete_identity", json!({ "identity": "keeper" }));
+    let deleted = gateway.live_keeper_session("the delete successor");
+    assert_ne!(
+        deleted, reset,
+        "a delete moves the keeper to a fresh session"
+    );
+    assert_eq!(
+        gateway.warm_keeper("the delete successor's first wake"),
+        deleted,
+        "the first wake builds the delete successor on its own session"
+    );
+    gateway.finish();
+
+    let b = native_binding("b");
+    let recorded = member_session_bindings(&state);
+    let keeper = sessions_of(&recorded, "keeper");
+    assert!(
+        keeper.len() >= 3,
+        "the keeper records the session each first wake created: {recorded:?}"
+    );
+    for session in [&seated, &reset, &deleted] {
+        let session = session.as_str().expect("a session id");
+        assert_eq!(
+            recorded_binding(&recorded, session),
+            Some(&b),
+            "keeper session {session} names binding b: {recorded:?}"
+        );
+    }
+}
+
+/// An identity retired before its first wake can be seated and built again.
+/// A seat builds nothing (Meerkat Core 0.9.7), so a respawn, or a roster
+/// refresh that drops an identity nothing has woken, retires an incarnation
+/// whose session was never created; the identity's next seat (the
+/// respawn's, or the roster pass that lists it again) must still let its
+/// first wake create the session. Persistent launch, roster `keeper` and
+/// `drifter`, no member auth binding, the demo client:
+/// - `meta/respawn keeper` with nothing woken before it answers, and
+///   `meta/identity/warm keeper` then builds the member;
+/// - a roster refresh (`meta/reconcile_identity`) that drops `drifter` and
+///   one that lists it again, with no wake in between, answer, and
+///   `meta/identity/warm drifter` then builds it.
+///
+/// RED until Meerkat re-seats a never-built identity so that its first wake
+/// creates the session: Meerkat answers the re-seat on the session that
+/// never existed `Absent`, which Meta reads as retryable, so the respawn and
+/// every later warm are refused.
+#[test]
+fn rpc_gateway_respawns_and_relists_an_identity_before_its_first_wake() {
+    let scratch = TempDir::new().expect("scratch dir");
+    let state = scratch.path().join("state");
+    let both = json!([
+        { "identity": "keeper", "profile": "worker" },
+        { "identity": "drifter", "profile": "worker" },
+    ]);
+
+    let mut gateway = MemberRouteGateway::launch(scratch.path(), "never-woken", &[]);
+    gateway.set_roster(both.clone());
+    let init = gateway.call(
+        "meta/init",
+        member_route_init(
+            &member_route_mob_config(),
+            Some(&state),
+            json!({ "demo_llm": true }),
+            true,
+        ),
+    );
+    assert!(
+        init["result"]["contract_version"].is_string(),
+        "the launch starts: {init}; its log:\n{}",
+        gateway.log()
+    );
+    gateway.live_identity_session("keeper", "the seated keeper");
+    gateway.live_identity_session("drifter", "the seated drifter");
+
+    gateway.call_ok("meta/respawn", json!({ "identity": "keeper" }));
+    let respawned = gateway.live_keeper_session("the keeper respawned before its first wake");
+    assert_eq!(
+        gateway.warm_keeper("the respawned keeper's first wake"),
+        respawned,
+        "the first wake builds the respawned keeper on its seat's session"
+    );
+
+    gateway.set_roster(json!([{ "identity": "keeper", "profile": "worker" }]));
+    gateway.call_ok("meta/reconcile_identity", json!({}));
+    gateway.set_roster(both);
+    gateway.call_ok("meta/reconcile_identity", json!({}));
+    let relisted = gateway.live_identity_session("drifter", "the relisted drifter");
+    assert_eq!(
+        gateway.warm_identity("drifter", "the relisted drifter's first wake"),
+        relisted,
+        "the first wake builds the relisted drifter on its seat's session"
+    );
+    gateway.finish();
+}
+
+/// A new launch that names another binding restores every member through
+/// it: after the first launch (binding `b`), the second launch names binding
+/// `c`, sets only `c`'s key and restores eagerly (`member_restore:
+/// "eager"`), so Core rebuilds the keeper and the non-roster member (Core's
+/// restore alone rebuilds it) on their own sessions at start, and the
+/// keeper's respawn rebuilds it again. Each rebuild builds only by taking the
+/// second launch's binding in place of the durable `b`: a rebuild on `b`
+/// would be refused (`member_auth_binding_uncarried`) and read broken.
+///
+/// A rebuild persists the session with the binding it was built with, so
+/// after the second launch the keeper's session and the spawned member's
+/// record `c`. A launch that rebuilt neither (under the default on-demand
+/// restore nothing wakes them, and a seated member reads active) would
+/// leave both at `b`, so the row cannot pass without the rebuilds.
+#[test]
+fn rpc_gateway_restores_every_member_through_a_changed_native_realm_binding() {
+    let FirstLaunchUnderB {
+        scratch,
+        state,
+        native_realm,
+        mob_config,
+        keeper_session,
+        spawned_session,
+    } = first_launch_under_binding_b();
+
+    let mut second =
+        MemberRouteGateway::launch(scratch.path(), "second", &["NATIVE_REALM_TEST_KEY_C"]);
+    let init = second.call(
+        "meta/init",
+        member_route_init(
+            &mob_config,
+            Some(&state),
+            json!({
+                "native_realm": native_realm,
+                "member_auth_binding": native_binding("c"),
+                "member_restore": "eager",
+            }),
+            true,
+        ),
+    );
+    assert!(
+        init["result"]["contract_version"].is_string(),
+        "the second launch restores its members with binding c: {init}; its log:\n{}",
+        second.log()
+    );
+    assert_eq!(
+        second.live_keeper_session("the restored member"),
+        keeper_session,
+        "the restore rebuilds the keeper on its own session"
+    );
+    second.live_member("the restored non-roster member", "spawned");
+    second.call_ok("meta/respawn", json!({ "identity": "keeper" }));
+    assert_eq!(
+        second.live_keeper_session("the member respawned by the second launch"),
+        keeper_session,
+        "a respawn rebuilds the member on its own session"
+    );
+    second.finish();
+
+    let c = native_binding("c");
+    let recorded = member_session_bindings(&state);
+    let keeper_session = keeper_session.as_str().expect("the keeper's session id");
+    for (member, session) in [
+        ("keeper", keeper_session),
+        ("spawned", spawned_session.as_str()),
+    ] {
+        assert_eq!(
+            recorded_binding(&recorded, session),
+            Some(&c),
+            "{member}'s session {session} was rebuilt with binding c: {recorded:?}"
+        );
+    }
+}
+
+/// Under a launch binding, attaching a session that recorded another binding
+/// (`meta/attach_existing_session`) builds the member with the launch's
+/// binding, forced, never the binding the session recorded. The first launch
+/// (binding `b`, only `b`'s key) spawns `source` and retires it, which
+/// archives its session with binding `b` recorded; the second launch
+/// (binding `c`, only `c`'s key) attaches that session back to `source`,
+/// which comes up live only by taking `c` in place of the recorded `b`, and
+/// the session then records `c`. The attach names the member the session
+/// records: Meerkat never moves a session to another member identity, and
+/// refuses such a resume before any binding is resolved.
+#[test]
+fn rpc_gateway_attaches_a_session_under_the_launch_binding() {
+    let scratch = TempDir::new().expect("scratch dir");
+    let state = scratch.path().join("state");
+    let native_realm = write_native_realm(scratch.path());
+    let mob_config = member_route_mob_config();
+
+    let mut first =
+        MemberRouteGateway::launch(scratch.path(), "first", &["NATIVE_REALM_TEST_KEY_B"]);
+    let init = first.call(
+        "meta/init",
+        member_route_init(
+            &mob_config,
+            Some(&state),
+            json!({
+                "native_realm": native_realm,
+                "member_auth_binding": native_binding("b"),
+            }),
+            false,
+        ),
+    );
+    assert!(
+        init["result"]["contract_version"].is_string(),
+        "the first launch starts: {init}; its log:\n{}",
+        first.log()
+    );
+    let spawned = first.call_ok(
+        "meta/spawn_member",
+        json!({ "profile": "worker", "meerkat_id": "source" }),
+    );
+    assert_eq!(spawned["accepted"], json!(true), "{spawned}");
+    first.live_member("the source member", "source");
+    let status = first.call_ok("meta/member_status", json!({ "member_id": "source" }));
+    let session_id = status["current_session_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the source member's session: {status}"))
+        .to_string();
+    first.call_ok("meta/retire_member", json!({ "member_id": "source" }));
+    first.finish();
+
+    let mut second =
+        MemberRouteGateway::launch(scratch.path(), "second", &["NATIVE_REALM_TEST_KEY_C"]);
+    let init = second.call(
+        "meta/init",
+        member_route_init(
+            &mob_config,
+            Some(&state),
+            json!({
+                "native_realm": native_realm,
+                "member_auth_binding": native_binding("c"),
+            }),
+            false,
+        ),
+    );
+    assert!(
+        init["result"]["contract_version"].is_string(),
+        "the second launch starts: {init}; its log:\n{}",
+        second.log()
+    );
+    second.call_ok(
+        "meta/attach_existing_session",
+        json!({ "role": "worker", "agent_identity": "source", "session_id": session_id }),
+    );
+    second.live_member("the attached session", "source");
+    second.finish();
+
+    let recorded = member_session_bindings(&state);
+    assert_eq!(
+        recorded_binding(&recorded, &session_id),
+        Some(&native_binding("c")),
+        "the attach rebuilt the session with binding c: {recorded:?}"
+    );
+}
+
+/// Each member session records the binding its member was built with, read
+/// from the session itself: the initial roster member and its reset
+/// successor after a turn each, a helper and a fork helper, which answer only
+/// once their turn has run. The deterministic demo client serves the turns.
+#[test]
+fn rpc_gateway_records_the_member_binding_on_every_member_session() {
+    let scratch = TempDir::new().expect("scratch dir");
+    let state = scratch.path().join("state");
+    let native_realm = write_native_realm(scratch.path());
+
+    let mut gateway =
+        MemberRouteGateway::launch(scratch.path(), "recorded", &["NATIVE_REALM_TEST_KEY_B"]);
+    let init = gateway.call(
+        "meta/init",
+        member_route_init(
+            &member_route_mob_config(),
+            Some(&state),
+            json!({
+                "native_realm": native_realm,
+                "member_auth_binding": native_binding("b"),
+                "demo_llm": true,
+            }),
+            true,
+        ),
+    );
+    assert!(
+        init["result"]["contract_version"].is_string(),
+        "the launch starts: {init}; its log:\n{}",
+        gateway.log()
+    );
+    gateway.keeper_turn();
+    let helper_options = json!({ "role": "worker", "runtime_mode": "turn_driven" });
+    gateway.call_ok(
+        "meta/spawn_helper",
+        json!({
+            "agent_identity": "helper",
+            "task": "Answer with one word.",
+            "result_label": "answer",
+            "max_text_bytes": 4096,
+            "options": helper_options,
+        }),
+    );
+    gateway.call_ok(
+        "meta/fork_helper",
+        json!({
+            "source_member_id": "keeper",
+            "agent_identity": "forked",
+            "task": "Answer with one word.",
+            "result_label": "answer",
+            "max_text_bytes": 4096,
+            "options": helper_options,
+        }),
+    );
+    gateway.call_ok("meta/reset", json!({ "identity": "keeper" }));
+    gateway.keeper_turn();
+    gateway.finish();
+
+    let b = native_binding("b");
+    let recorded = member_session_bindings(&state);
+    for (member, sessions) in [("keeper", 2_usize), ("helper", 1), ("forked", 1)] {
+        assert!(
+            sessions_of(&recorded, member).len() >= sessions,
+            "{member} records {sessions} session(s): {recorded:?}"
+        );
+    }
+    assert!(
+        recorded.iter().all(|entry| entry.binding == b),
+        "every member session records binding b: {recorded:?}"
+    );
+}
+
+/// A `meta/fork_helper` fork of a member the launch has not woken yet,
+/// after the launch's binding changed, is built with the launch's binding:
+/// the helper is a new member the gateway builds, through its spawn
+/// customizers, that only reads its source's history, so it never copies
+/// the binding the source's session recorded. The first launch (binding
+/// `b`) runs one keeper turn; the second launch (binding `c`, the default
+/// on-demand restore) forks the keeper before any delivery reaches it. The
+/// fork answers, its session records `c`, and the keeper's session, which
+/// nothing woke, still records `b`. The deterministic demo client serves the
+/// turns.
+#[test]
+fn rpc_gateway_forks_a_member_the_launch_has_not_woken_under_a_changed_binding() {
+    let scratch = TempDir::new().expect("scratch dir");
+    let state = scratch.path().join("state");
+    let native_realm = write_native_realm(scratch.path());
+    let mob_config = member_route_mob_config();
+
+    let mut first =
+        MemberRouteGateway::launch(scratch.path(), "first", &["NATIVE_REALM_TEST_KEY_B"]);
+    let init = first.call(
+        "meta/init",
+        member_route_init(
+            &mob_config,
+            Some(&state),
+            json!({
+                "native_realm": native_realm,
+                "member_auth_binding": native_binding("b"),
+                "demo_llm": true,
+            }),
+            true,
+        ),
+    );
+    assert!(
+        init["result"]["contract_version"].is_string(),
+        "the first launch starts: {init}; its log:\n{}",
+        first.log()
+    );
+    first.keeper_turn();
+    let keeper_session = first.live_keeper_session("the keeper after its turn");
+    first.finish();
+
+    let mut second =
+        MemberRouteGateway::launch(scratch.path(), "second", &["NATIVE_REALM_TEST_KEY_C"]);
+    let init = second.call(
+        "meta/init",
+        member_route_init(
+            &mob_config,
+            Some(&state),
+            json!({
+                "native_realm": native_realm,
+                "member_auth_binding": native_binding("c"),
+                "demo_llm": true,
+            }),
+            true,
+        ),
+    );
+    assert!(
+        init["result"]["contract_version"].is_string(),
+        "the second launch starts: {init}; its log:\n{}",
+        second.log()
+    );
+    let forked = second.call_ok(
+        "meta/fork_helper",
+        json!({
+            "source_member_id": "keeper",
+            "agent_identity": "forked",
+            "task": "Answer with one word.",
+            "result_label": "answer",
+            "max_text_bytes": 4096,
+            "options": { "role": "worker", "runtime_mode": "turn_driven" },
+        }),
+    );
+    let forked_session = forked["session_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the fork answers with its session: {forked}"))
+        .to_string();
+    second.finish();
+
+    let recorded = member_session_bindings(&state);
+    assert_eq!(
+        recorded_binding(&recorded, &forked_session),
+        Some(&native_binding("c")),
+        "the fork of a member the launch has not woken records the launch's binding: \
+         {recorded:?}"
+    );
+    let keeper_session = keeper_session.as_str().expect("the keeper's session id");
+    assert_eq!(
+        recorded_binding(&recorded, keeper_session),
+        Some(&native_binding("b")),
+        "nothing woke the source: its session still records the first launch's binding: \
+         {recorded:?}"
+    );
+}
+
+/// A member route the gateway cannot carry refuses init, typed, before any
+/// factory is built: the native realm beside the host config file, a realm
+/// the state root does not hold, a binding the realm's configuration does
+/// not define, an origin other than `configured`, and a profile the binding
+/// does not serve.
+#[test]
+fn rpc_gateway_refuses_a_member_route_it_cannot_carry() {
+    let scratch = TempDir::new().expect("scratch dir");
+    let native_realm = write_native_realm(scratch.path());
+    let mut absent_realm = native_realm.clone();
+    absent_realm["realm_id"] = json!("absent-team");
+    let mob_config = member_route_mob_config();
+    let anthropic_mob_config = format!(
+        "[mob]\nid = \"native-realm-refusal-{}\"\n\n[profiles.lead]\n\
+         model = \"claude-sonnet-4-5\"\nprovider = \"anthropic\"\n",
+        NEXT_TEST_MOB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let cases = [
+        (
+            "both-config-sources",
+            mob_config.as_str(),
+            json!({
+                "native_realm": native_realm,
+                "member_auth_binding": native_binding("b"),
+                "meerkat_config_path": scratch.path().join("config.toml"),
+            }),
+            -32602,
+            "native_realm_config_conflict",
+        ),
+        (
+            "unknown-realm",
+            mob_config.as_str(),
+            json!({ "native_realm": absent_realm, "member_auth_binding": native_binding("b") }),
+            meerkat_meta::STORAGE_RESOLUTION_CODE,
+            "native_realm_unknown",
+        ),
+        (
+            "missing-binding",
+            mob_config.as_str(),
+            json!({
+                "native_realm": native_realm,
+                "member_auth_binding": native_binding("absent"),
+            }),
+            -32602,
+            "member_auth_binding_unknown",
+        ),
+        (
+            "origin",
+            mob_config.as_str(),
+            json!({
+                "native_realm": native_realm,
+                "member_auth_binding": {
+                    "realm": NATIVE_REALM,
+                    "binding": "b",
+                    "origin": "synthetic_env_default",
+                },
+            }),
+            -32602,
+            "member_auth_binding_origin",
+        ),
+        (
+            "provider-mismatch",
+            anthropic_mob_config.as_str(),
+            json!({ "native_realm": native_realm, "member_auth_binding": native_binding("b") }),
+            -32602,
+            "member_auth_binding_mismatch",
+        ),
+    ];
+    for (case, mob_config, runtime_options, code, kind) in cases {
+        let mut gateway = MemberRouteGateway::launch(scratch.path(), case, &[]);
+        let init = gateway.call(
+            "meta/init",
+            member_route_init(mob_config, None, runtime_options, false),
+        );
+        gateway.finish();
+        assert_eq!(
+            (
+                init["error"]["code"].clone(),
+                init["error"]["data"]["kind"].clone()
+            ),
+            (json!(code), json!(kind)),
+            "{case}: {init}"
+        );
+    }
+}
+
+/// The launch's state is checked against the binding at init, through the
+/// gateway's own wiring: a realm profile the mob storage of an earlier
+/// launch without the binding holds, referenced by the definition, that
+/// enables image generation refuses a launch with a member auth binding
+/// over the same state (`member_auth_binding_uncarried`, naming the realm
+/// profile), before any member is built.
+#[test]
+fn rpc_gateway_checks_the_stored_state_against_the_binding_at_init() {
+    let scratch = TempDir::new().expect("scratch dir");
+    let state = scratch.path().join("state");
+    let native_realm = write_native_realm(scratch.path());
+    let mob_config = format!(
+        r#"
+[mob]
+id = "native-realm-stored-state-{}"
+
+[profiles.worker]
+model = "gpt-5.5"
+provider = "openai"
+runtime_mode = "turn_driven"
+
+[profiles.imaging]
+realm_profile = "imaging"
+"#,
+        NEXT_TEST_MOB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+
+    let mut unbound = MemberRouteGateway::launch(scratch.path(), "unbound", &[]);
+    let init = unbound.call(
+        "meta/init",
+        member_route_init(&mob_config, Some(&state), json!({}), false),
+    );
+    assert!(
+        init["result"]["contract_version"].is_string(),
+        "a launch without the binding starts: {init}; its log:\n{}",
+        unbound.log()
+    );
+    unbound.finish();
+
+    let imaging = meerkat_mob::MobDefinition::from_toml(
+        "[mob]\nid = \"imaging-profile\"\n\n[profiles.imaging]\nmodel = \"gpt-5.5\"\n\
+         provider = \"openai\"\n\n[profiles.imaging.tools]\nimage_generation = true\n",
+    )
+    .expect("the realm profile's definition")
+    .profiles["imaging"]
+        .as_inline()
+        .cloned()
+        .expect("an inline profile");
+    let realm_profiles =
+        meerkat_mob::store::SqliteRealmProfileStore::open(&state.join("event_log.sqlite3"))
+            .expect("the mob storage's realm profiles");
+    current_thread_runtime()
+        .block_on(meerkat_mob::RealmProfileStore::create(
+            &realm_profiles,
+            "imaging",
+            &imaging,
+        ))
+        .expect("store the realm profile");
+    drop(realm_profiles);
+
+    let mut bound =
+        MemberRouteGateway::launch(scratch.path(), "bound", &["NATIVE_REALM_TEST_KEY_B"]);
+    let init = bound.call(
+        "meta/init",
+        member_route_init(
+            &mob_config,
+            Some(&state),
+            json!({ "native_realm": native_realm, "member_auth_binding": native_binding("b") }),
+            false,
+        ),
+    );
+    bound.finish();
+    assert_eq!(
+        (
+            init["error"]["code"].clone(),
+            init["error"]["data"]["kind"].clone()
+        ),
+        (json!(-32602), json!("member_auth_binding_uncarried")),
+        "{init}"
+    );
+    assert!(
+        init["error"]["data"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("realm profile 'imaging'")),
+        "{init}"
+    );
 }

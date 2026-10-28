@@ -784,8 +784,8 @@ export class IdentityUnresumableError extends RpcError {
  * wake failed transiently (resuming `sessionId`, or starting fresh when
  * `sessionId` is `null`), or `"identity_session_absent"` when a delivery
  * reached a member whose session `sessionId` Core holds no durable copy of:
- * nothing was delivered, and the next delivery starts the identity's fresh
- * session. A failed read of the whole roster's history names no `identity`.
+ * nothing was delivered, and Core settles the member; deliver again. A failed
+ * read of the whole roster's history names no `identity`.
  * `kind`, `identity` and `sessionId` are `null` when the gateway did not send
  * them.
  */

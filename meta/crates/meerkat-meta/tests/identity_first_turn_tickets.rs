@@ -119,7 +119,8 @@ struct TicketBridge {
     /// Every `inspect_member` call: the member-session read a completion
     /// poll must not make.
     inspections: AtomicUsize,
-    /// Every member build (`create_session`) or resume (`resume_session`).
+    /// Every member build (`create_session`), resume (`resume_session`) or
+    /// seat (`seat_dormant_members`).
     materializations: AtomicUsize,
     /// The members Core holds, as this double's creates, resumes and retires
     /// leave them (or as a test bound them).
@@ -271,6 +272,42 @@ impl SessionBridge for TicketBridge {
             session_id: session_id.clone(),
             agent_runtime_id,
         })
+    }
+
+    /// Core seats each identity at generation 0, on the session the request
+    /// names or on a fresh one.
+    async fn seat_dormant_members(
+        &self,
+        requests: Vec<meerkat_meta::identity_first::bridge::DormantSeatRequest>,
+    ) -> Result<
+        Vec<(
+            AgentIdentity,
+            meerkat_meta::identity_first::bridge::DormantSeatResult,
+        )>,
+        BridgeError,
+    > {
+        let mut seated = Vec::with_capacity(requests.len());
+        for request in requests {
+            self.materializations.fetch_add(1, Ordering::SeqCst);
+            let agent_runtime_id = AgentRuntimeId::parse(&format!("rt:{}:0", request.identity))
+                .map_err(|error| BridgeError::Mob(error.to_string()))?;
+            let session_id = request
+                .session
+                .unwrap_or_else(meerkat_core::types::SessionId::new);
+            self.core.bind(
+                &request.identity,
+                &meerkat_meta::identity_first::MemberRuntimeBinding {
+                    agent_runtime_id,
+                    session_id: Some(session_id.clone()),
+                },
+                &request.spec.profile,
+            );
+            seated.push((
+                request.identity,
+                meerkat_meta::identity_first::bridge::DormantSeatResult::Seated { session_id },
+            ));
+        }
+        Ok(seated)
     }
 
     async fn live_member(
@@ -2339,11 +2376,11 @@ async fn a_send_naming_a_superseded_registered_row_is_refused_before_delivery() 
     runtime.shutdown().await;
 }
 
-/// A Dormant identity is not woken for an input authored from a superseded
-/// registered row: the row is checked in the lifecycle-owned embodiment
-/// decision, under the identity's lifecycle lock, so the refusal spawns,
-/// builds or resumes nothing and leaves the identity's readiness untouched.
-/// The current row wakes it and is delivered.
+/// A Dormant identity is not seated or woken for an input authored from a
+/// superseded registered row: the row is checked in the lifecycle-owned
+/// admission decision, under the identity's lifecycle lock, so the refusal
+/// seats, builds or resumes nothing and leaves the identity's readiness
+/// untouched. The current row seats it and is delivered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_superseded_row_does_not_wake_a_dormant_identity() {
     let session = meerkat_core::types::SessionId::new();
@@ -2398,7 +2435,7 @@ async fn a_superseded_row_does_not_wake_a_dormant_identity() {
     assert_eq!(
         bridge.materializations.load(Ordering::SeqCst),
         0,
-        "the refusal built and resumed nothing"
+        "the refusal seated, built and resumed nothing"
     );
     assert!(bridge.ingress.lock().unwrap().is_empty());
     assert!(bridge.tracked.lock().unwrap().is_empty());
@@ -2418,7 +2455,7 @@ async fn a_superseded_row_does_not_wake_a_dormant_identity() {
             &current.spec_digest,
         )
         .await
-        .expect("the current row wakes the identity and is delivered");
+        .expect("the current row seats the identity and is delivered");
     assert_eq!(
         runtime.status(&identity).await.expect("status").state,
         IdentityLifecycleState::Active

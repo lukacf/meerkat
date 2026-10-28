@@ -50,6 +50,10 @@ pub(crate) enum RoleTargetsRefusal {
     /// incarnation: the typed `stale_identity_runtime_binding` refusal every
     /// other member action answers for it.
     StaleAlias(crate::rpc::JsonRpcError),
+    /// A generated runtime alias whose identity's binding could not be read:
+    /// the identity runtime's typed, retryable refusal (`-32052`), never a
+    /// stale alias with no registered binding.
+    Unreadable(crate::rpc::JsonRpcError),
 }
 
 /// Read the optional `role_targets` parameter of `meta/run_flow` and resolve
@@ -62,10 +66,10 @@ pub(crate) enum RoleTargetsRefusal {
 /// refused; a durable identity or plain member name names its own row; a
 /// generated runtime alias names its identity's durable row only when the
 /// identity runtime confirms it is the current incarnation, is refused typed
-/// when it is stale, and without an identity runtime keeps its exact
-/// spelling, which names no row (the mob actor then refuses it as
-/// `not_a_member`). Membership, role and lifecycle are not checked here; the
-/// mob actor admits the binding.
+/// when it is stale or when its identity's binding cannot be read, and
+/// without an identity runtime keeps its exact spelling, which names no row
+/// (the mob actor then refuses it as `not_a_member`). Membership, role and
+/// lifecycle are not checked here; the mob actor admits the binding.
 pub(crate) async fn resolve_role_targets(
     params: &Value,
     identity_runtime: Option<&Arc<crate::identity_first::IdentityRuntime>>,
@@ -150,7 +154,15 @@ async fn role_target_roster_id(
     let Ok(identity) = crate::identity_first::AgentIdentity::parse(&durable) else {
         return Ok(mob_member_id(&alias));
     };
-    let status = identity_runtime.status(&identity).await.ok();
+    let status = match identity_runtime.status(&identity).await {
+        Ok(status) => Some(status),
+        Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => None,
+        Err(error) => {
+            let mut refusal = crate::rpc::identity_json_rpc_error(&error);
+            refusal.message = format!("{RUN_FLOW_FAILED}{}", refusal.message);
+            return Err(RoleTargetsRefusal::Unreadable(refusal));
+        }
+    };
     let registered = status
         .as_ref()
         .and_then(|status| status.agent_runtime_id.as_ref())
@@ -319,7 +331,7 @@ mod tests {
             .await
             .map_err(|refusal| match refusal {
                 RoleTargetsRefusal::Invalid(message) => message,
-                RoleTargetsRefusal::StaleAlias(error) => {
+                RoleTargetsRefusal::StaleAlias(error) | RoleTargetsRefusal::Unreadable(error) => {
                     panic!("no identity runtime, no stale refusal: {error:?}")
                 }
             })

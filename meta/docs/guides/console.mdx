@@ -312,7 +312,7 @@ Each agent row shows:
 
 Non-addressable agents (e.g., Gate, Health Monitor) appear dimmed and cannot be messaged.
 
-An identity-first agent whose identity binding moved (after a reset, retire or
+An identity-first agent whose identity binding moved (after a reset or a
 delete), and that the console could not collect again within 2 s, has state
 unknown and offers no send or retire until a later read collects it. Its
 records carry an `unobserved` marker with reason `refresh_pending` (see
@@ -869,6 +869,13 @@ Identity-first status and inspect payloads use lowercase wire enums for addressa
     in the [JSON-RPC reference](/api/rpc)).
 
     If a requested cursor is no longer replayable, the stream returns `409 replay_unavailable`; refetch a recent page and resume from its `latest_cursor`.
+
+    A replay from a cursor is sent as it is read, one page at a time. If the
+    log stops holding what follows while the stream replays (it was
+    cleared), the stream sends a `replay_unavailable` event and ends: handle
+    it as the `409`. If a later page cannot be read, the stream ends after the
+    frames it sent: reconnect with the last frame's cursor as
+    `Last-Event-ID`.
   </Step>
 </Steps>
 
@@ -902,21 +909,24 @@ Primary RPC methods on `/console/rpc`:
   `meta/member_health` is the matching read (`agent.view`): lifecycle
   state, last delivery error class, and the actor-loop probe verdict with the
   open `stall_id`, from in-process reads that answer during a stall.
+- `meta/identity/warm` - builds one identity's member without a turn and
+  writes its tool record, with the result and error codes of the stdio
+  gateway's [`meta/identity/warm`](/api/rpc#meta%2Fidentity%2Fwarm). Gated by the
+  `agent.respawn` action.
 - `meta/retire`, `meta/respawn`, `meta/reset`, and `meta/reset_all` -
-  operator lifecycle actions. `reset_all` resets every identity the identity
-  runtime knows (generation advance, one `identity_reset` lifecycle frame
-  each, listed under `reset`) and retires only members with no registered
-  identity, such as raw delegates (listed under `retired_delegates`); a
+  operator lifecycle actions. `meta/retire` releases the member, which stays
+  seated on its session at its generation. `reset_all` resets every identity
+  the identity runtime knows, whatever its state (generation advance, one
+  `identity_reset` lifecycle frame each, listed under `reset`): each reset is
+  Core's rotation, which seats a `dormant` identity Core holds no member for
+  on a fresh session too, and starts a `broken` one over. It retires only
+  members with no registered identity, such as raw delegates (listed under
+  `retired_delegates`); a member that is retiring appears in no list. A
   registered identity on a runtime without a session bridge fails the
   preflight with `identity_reset_requires_session_bridge` and nothing is
-  touched. Registered identities are classified by lifecycle state first: a
-  `retiring` identity is leaving the fleet and appears in no list, and a
-  registered identity with no live member (`dormant` before its first send,
-  `broken` after a failed materialize) is listed under `failed` with
-  `kind: identity_not_resettable_in_state` and its `state`, because a reset
-  is the bridge's successor transition and needs a live member to replace;
-  the identities beside it are still reset, and the call answers `-32000`
-  with the full body in `error.data`
+  touched. An identity whose own reset fails is listed under `failed`, the
+  identities beside it are still reset, and the call answers `-32000` with
+  the full body in `error.data`
 - `meta/send_message` - legacy member-addressed send path
 - `meta/topology/query`, `meta/topology/plan`, `meta/topology/apply`,
   `meta/topology/operation/get`, and `meta/topology/audit/query` - optional,
@@ -930,7 +940,13 @@ runtime id is refused with `-32000` and `error.data.kind`
 runtime id answers `identity_hidden_by_policy`, and a runtime id of an
 identity the runtime does not know answers `identity not found`.
 `meta/console/inspect_identity` refuses a stale runtime id the same way
-before it looks the identity up in the console aggregator.
+before it looks the identity up in the console aggregator. A runtime id
+whose identity's binding cannot be read right now is never let through: it
+is refused as unreadable, retryable, with `error.data.kind`
+`identity_history_unavailable`. The code is `-32052` when the route's
+identity lookup or its runtime id check meets the failed read, and can be
+`-32000` when the route's own status read fails after its lookup, or when
+the id names a live member whose binding cannot be read.
 
 Topology management is opt-in at the runtime. With the default disabled
 policy, the stock console remains a passive topology viewer and does not show

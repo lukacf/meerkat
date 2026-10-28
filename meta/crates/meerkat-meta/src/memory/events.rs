@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! {
-//!   "event_id":   "console-evt-<seq>"      // minted by the store
+//!   "event_id":   "console-evt-<uuid>"     // minted by the store
 //!   "identity":   <affected identity, or "_system" for realm-level events>
 //!   "event_type": "memory.<kind>"          // `MemoryTimelineEvent::event_type`
 //!   "timestamp_ms": <now>,

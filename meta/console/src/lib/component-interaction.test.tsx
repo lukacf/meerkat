@@ -24,9 +24,9 @@ import { buildSidebarViewState, buildWorkGraphOperatorResultFrame, mapFramesToTi
 import { CONSOLE_COMMAND_NAMES } from "./headless";
 import { resolveWorkGraphGoalItemRevision, type WorkGraphCommandRunner } from "./workgraph-actions";
 import { Sidebar } from "../panels/Sidebar";
-import { MemoryLiveStrip } from "../panels/MemoryPanel";
+import { MemoryLiveStrip, MemoryPanel } from "../panels/MemoryPanel";
 import { WorkGraphPanel, type WorkGraphPanelData } from "../panels/WorkGraphPanel";
-import type { ConsoleAgent, ConsoleFrame } from "../types";
+import type { ConsoleAgent, ConsoleFrame, MemoryPanelRecord, MemoryPanelRecordsResult } from "../types";
 
 test("ConversationRichContent preserves its rendered nodes when streaming becomes final", () => {
   const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>");
@@ -346,6 +346,93 @@ test("MemoryLiveStrip pause-on-scroll freezes, jump-to-live resumes, top auto-un
     assert.equal(query("[data-testid='memory-live-jump']"), null);
   } finally {
     root.unmount();
+    globalThis.window = previousWindow;
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
+test("MemoryPanel walks the lattice over its first records page, never over the placeholder before it", async () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>");
+  const previousWindow = globalThis.window;
+  const previousDocument = globalThis.document;
+  const previousActEnv = (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  globalThis.window = dom.window as unknown as Window & typeof globalThis;
+  globalThis.document = dom.window.document;
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+  // A new copy per read, as every refresh delivers one.
+  const page = (): MemoryPanelRecordsResult => ({
+    records: [{
+      id: "memory-1",
+      title: "Release checklist",
+      kind: "fact",
+      trust: "agent_verified",
+      status: { status: "active" },
+      scope: { scope: "identity", realm: "default", identity: "router:main" },
+      updated_at_ms: 1792368000000,
+    }],
+    realms: ["default"],
+    next_cursor: null,
+  });
+  const walkReads: Record<string, unknown>[] = [];
+  const onQueryRecords = async (params: Record<string, unknown>): Promise<MemoryPanelRecordsResult> => {
+    walkReads.push(params);
+    return page();
+  };
+  const panel = (records: MemoryPanelRecord[], realms: string[], loaded: boolean) => (
+    <MemoryPanel
+      records={records}
+      realms={realms}
+      loaded={loaded}
+      quarantineRecords={[]}
+      pendingPromotions={[]}
+      dreams={[]}
+      detail={null}
+      onRefresh={() => undefined}
+      onSelectRecord={() => undefined}
+      onClearDetail={() => undefined}
+      onQueryRecords={onQueryRecords}
+    />
+  );
+  const host = dom.window.document.createElement("div");
+  dom.window.document.body.appendChild(host);
+  const root = createRoot(host);
+  const latticeStatus = () =>
+    host.querySelector("[data-testid='memory-verdict:lattice']")?.getAttribute("data-status");
+  // Renders, then lets a walk that the render started settle.
+  const render = async (element: React.ReactElement) => {
+    await React.act(async () => {
+      root.render(element);
+    });
+    await React.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+
+  try {
+    // The panel shows before its first records page lands, over an empty
+    // placeholder. A verdict settled over it would make the page's arrival
+    // walk the same store again.
+    await render(panel([], [], false));
+    assert.equal(walkReads.length, 0, "the panel walked the placeholder before its records loaded");
+    assert.equal(latticeStatus(), "unverifiable");
+
+    const first = page();
+    await render(panel(first.records, first.realms, true));
+    assert.equal(walkReads.length, 1, "the first records page walks once");
+    assert.equal(latticeStatus(), "holding");
+
+    // A good refresh brings the same records in new arrays.
+    const again = page();
+    await render(panel(again.records, again.realms, true));
+    assert.equal(walkReads.length, 1, "a refresh with the same records walked them again");
+    assert.equal(latticeStatus(), "holding");
+  } finally {
+    await React.act(async () => {
+      root.unmount();
+    });
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = previousActEnv;
     globalThis.window = previousWindow;
     globalThis.document = previousDocument;
     dom.window.close();

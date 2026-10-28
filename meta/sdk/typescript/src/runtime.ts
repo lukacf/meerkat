@@ -95,7 +95,13 @@ import {
   type AgentEventEnvelope,
   type MobEventEnvelope,
 } from "./events.js";
-import { discoverySpecToDict, toolArtifactRefToWire, type DiscoverySpec } from "./models.js";
+import {
+  authBindingRefToWire,
+  discoverySpecToDict,
+  nativeRealmToWire,
+  toolArtifactRefToWire,
+  type DiscoverySpec,
+} from "./models.js";
 import {
   LIVE_EXECUTION_IDENTITY_V1,
   activeLiveChannelHandleToWire,
@@ -157,6 +163,7 @@ import {
   parseMobRun,
   parseRichMemberSnapshot,
   parseIdentityResolvedToolsResult,
+  parseIdentityWarmResult,
   parseIdentityRoutingStatusResult,
   parseHelperResult,
   parseMobRunSnapshot,
@@ -256,6 +263,7 @@ import {
   type MobRun,
   type RichMemberSnapshot,
   type IdentityResolvedToolsResult,
+  type IdentityWarmResult,
   type IdentityRoutingStatusResult,
   type HelperResult,
   type MobRunSnapshot,
@@ -1396,6 +1404,9 @@ export class MetaRuntime {
     if (this._config.forkInstructionPolicy !== null) {
       runtimeOptions.fork_instruction_policy = this._config.forkInstructionPolicy;
     }
+    if (this._config.memberRestore != null) {
+      runtimeOptions.member_restore = this._config.memberRestore;
+    }
     if (this._config.memoryConfig) {
       runtimeOptions.memory_config = serializeConfig(this._config.memoryConfig);
     }
@@ -1426,6 +1437,14 @@ export class MetaRuntime {
     if (this._config.providerCredentialsRoot) {
       runtimeOptions.provider_credentials_root =
         this._config.providerCredentialsRoot;
+    }
+    if (this._config.nativeRealm) {
+      runtimeOptions.native_realm = nativeRealmToWire(this._config.nativeRealm);
+    }
+    if (this._config.memberAuthBinding) {
+      runtimeOptions.member_auth_binding = authBindingRefToWire(
+        this._config.memberAuthBinding,
+      );
     }
     if (this._config.consoleRequireAppAuth !== null) {
       runtimeOptions.console_require_app_auth =
@@ -3265,9 +3284,32 @@ export class MobHandle {
     return result.tools;
   }
 
+  /**
+   * The identity's resolved tools. A member live in this process answers its
+   * live session's tools (`toolsSource` `"live"`). A member that is not
+   * materialized answers, without being woken, the tools its last build on
+   * its session had (`"recorded"`, with `recordRevision` and `publishedAtMs`), or
+   * `"no_build_recorded"` with empty `tools` when no build of it is recorded
+   * yet. `sessionId` is returned in every case.
+   */
   async identityResolvedToolsDetail(identity: string): Promise<IdentityResolvedToolsResult> {
     return parseIdentityResolvedToolsResult(
       await this._runtime._rpc("meta/identity/resolved_tools", { identity }),
+    );
+  }
+
+  /**
+   * Materialize an identity's member without a turn and record its tools
+   * (`meta/identity/warm`): the member is built, no input is delivered and
+   * nothing is added to its transcript, and its live tools are written to its
+   * tool record, so a later `identityResolvedToolsDetail` answers them without
+   * a wake. Resolves once the member is live and the record is written; a
+   * member that is already live is not built again. Rejects with the
+   * gateway's typed refusal when the member cannot be materialized.
+   */
+  async identityWarm(identity: string): Promise<IdentityWarmResult> {
+    return parseIdentityWarmResult(
+      await this._runtime._rpc("meta/identity/warm", { identity }),
     );
   }
 

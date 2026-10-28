@@ -523,8 +523,9 @@ fn the_identity_bootstraps_retirement_reaches_the_host() {
 }
 
 /// A host error leaves the retirement standing: the retire answers, the
-/// member is retired, and the SDK receives one `retired_member_release_failed`
-/// error event naming the incarnation, its cause and the host's error.
+/// member is released (it stays seated, so the identity reads active), and
+/// the SDK receives one `retired_member_release_failed` error event naming
+/// the incarnation, its cause and the host's error.
 #[test]
 fn a_host_error_keeps_the_retire_and_reaches_the_sdk() {
     serve_if_host_process();
@@ -552,8 +553,8 @@ fn a_host_error_keeps_the_retire_and_reaches_the_sdk() {
     run.succeeded("retire");
     let status = run.succeeded("status");
     assert_eq!(
-        status["state"], "dormant",
-        "the member is retired: {status}"
+        status["state"], "active",
+        "the retire released the member, which stays seated: {status}"
     );
     let retired = run.retired();
     assert_eq!(retired.len(), 1, "{:?}", run.lines);

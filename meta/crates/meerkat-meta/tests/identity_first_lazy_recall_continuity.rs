@@ -6,13 +6,12 @@
 //! Two deterministic guards cover the EAGER bootstrap arm
 //! (`identity_first_cold_restart_continuity`,
 //! `identity_first_respawn_continuity`) and both are green. Nothing paired the
-//! LAZY arm with a recall assertion, and the two arms diverge in
-//! `apply_roster_controlled`: `EagerMaterialize` runs
-//! `orchestrator::restore_flow` (resume at bootstrap), while
-//! `LazyMaterialize | LazyWithBackgroundWarm` run
-//! `orchestrator::lazy_register_flow`, which registers the roster and asks
-//! Core for no session. The member wakes at the first `send`/`dispatch` (or
-//! from the background warmer) through the shared `embody_identity` door.
+//! LAZY arm with a recall assertion. `EagerMaterialize` runs
+//! `orchestrator::restore_flow` and `LazyMaterialize | LazyWithBackgroundWarm`
+//! run `orchestrator::lazy_register_flow`; both seat every roster identity in
+//! Core's mob without materializing it. Core materializes the member on its
+//! first `send`/`dispatch`, or when the background warmer asks Core to wake
+//! it.
 //!
 //! The field report: boot A takes a turn and the post-turn document lands in
 //! the store with correctly-ordered messages; after a kill -9 and boot B every
@@ -48,6 +47,7 @@ use meerkat_meta::identity_first::{
     DurableAgentSpec, IdentityLifecycleState, RosterContext, RosterError,
 };
 use meerkat_meta::{IdentityBootstrapMode, UnifiedRuntimeBuilder};
+use meerkat_mob::machines::mob_machine::MemberMaterializationPhase;
 use meerkat_mob::{MobDefinition, ProfileName};
 use tokio::time::sleep;
 
@@ -178,10 +178,11 @@ impl RosterProvider for OneMemberRoster {
 /// Installs a marker system prompt at build time.
 ///
 /// On the lazy arm the customizer is not passed to `lazy_register_flow` at
-/// all; `embody_identity` reads it from runtime state (installed by the
-/// builder via `set_agent_customizer`) when the first send materializes the
-/// member. A lazily materialized agent losing its host prompt would be a
-/// second, independent defect, so both boots assert the marker.
+/// all: the seat reads it from runtime state (installed by the builder via
+/// `set_agent_customizer`) to build the draft it records, and Core builds
+/// the member from that draft when the first send materializes it. A lazily
+/// materialized agent losing its host prompt would be a second, independent
+/// defect, so both boots assert the marker.
 struct MarkerPromptCustomizer;
 
 #[async_trait]
@@ -526,6 +527,39 @@ async fn wait_for_turn(capture: &CaptureClient, want: usize, what: &str) {
     }
 }
 
+/// The materialization phase Core's mob holds for `name`'s member in this
+/// process: `Dormant` while it is seated and not materialized, `Live` once
+/// Core materialized it. Read from the machine without waking anything.
+fn materialization(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    name: &str,
+) -> Option<MemberMaterializationPhase> {
+    runtime.mob_handle().member_materialization_for_test(
+        &meerkat_meta::member_comms_id::roster_member_id_for_identity(name),
+    )
+}
+
+/// Wait until Core's mob holds `name`'s member at `phase`.
+async fn wait_for_materialization(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    name: &str,
+    phase: MemberMaterializationPhase,
+    what: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let current = materialization(runtime, name);
+        if current.as_ref() == Some(&phase) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}: the member's phase is {current:?}"
+        );
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -534,11 +568,14 @@ async fn wait_for_turn(capture: &CaptureClient, want: usize, what: &str) {
 /// materializes the member ON FIRST SEND must replay the persisted transcript
 /// into the LLM request.
 ///
-/// Both boots prove the lazy arm was genuinely taken rather than silently
-/// falling back to eager restore: the bootstrap pass reports the member
-/// Dormant (`ready == false`, `counts.dormant == 1`) with no session yet, and
-/// the identity only becomes Active AFTER the send. Without those assertions a
-/// green run could be the eager path wearing a lazy label, proving nothing.
+/// X8 and R43: the identity stays Dormant across the restart. Both boots
+/// prove the lazy arm materializes nothing: the bootstrap pass seats the
+/// member (it is a member of Core's mob, so the pass is ready and the view
+/// reads it active) while Core holds it Dormant, and only the first send
+/// materializes it. The member is left as it is at the stop: Core keeps it
+/// seated, and boot 2 restores it Dormant on the same session. Without those
+/// assertions a green run could be an eager wake wearing a lazy label,
+/// proving nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn lazy_materialize_cross_boot_recall_replays_the_transcript() {
     const TOKEN: &str = "MARKER-LAZY-RECALL-3-XRAY";
@@ -550,7 +587,7 @@ async fn lazy_materialize_cross_boot_recall_replays_the_transcript() {
     let state = temp.path().join("state");
     let member = id(MEMBER);
 
-    // --- Boot 1: lazy register, then materialize on demand from turn 1 ---
+    // --- Boot 1: lazy seat, then materialize on demand from turn 1 ---
     let session_id;
     {
         let capture = CaptureClient::default();
@@ -573,28 +610,27 @@ async fn lazy_materialize_cross_boot_recall_replays_the_transcript() {
             "the runtime must be running the lazy arm; bootstrap: {bootstrap:?}"
         );
         assert!(
-            bootstrap.complete,
-            "the lazy bootstrap pass must have finished; bootstrap: {bootstrap:?}"
-        );
-        assert!(
-            !bootstrap.ready,
-            "lazy bootstrap must leave the roster UNmaterialized (ready == false); \
-             bootstrap: {bootstrap:?}"
+            bootstrap.complete && bootstrap.ready,
+            "the lazy bootstrap pass must have seated the roster; bootstrap: {bootstrap:?}"
         );
         assert_eq!(
             (bootstrap.counts.dormant, bootstrap.counts.active),
-            (1, 0),
-            "lazy bootstrap must register the member dormant and materialize nothing; \
-             bootstrap: {bootstrap:?}"
+            (0, 1),
+            "the lazy pass makes the member a member of Core's mob; bootstrap: {bootstrap:?}"
+        );
+        assert_eq!(
+            materialization(&runtime, MEMBER),
+            Some(MemberMaterializationPhase::Dormant),
+            "boot 1 must seat the member without materializing it"
         );
         let before = identity_runtime
             .status(&member)
             .await
-            .expect("dormant identity is inspectable");
+            .expect("a seated identity is inspectable");
         assert_eq!(
             before.state,
-            IdentityLifecycleState::Dormant,
-            "boot 1 must start Dormant, not eagerly restored; status: {before:?}"
+            IdentityLifecycleState::Active,
+            "a seated identity reads active; status: {before:?}"
         );
 
         identity_runtime
@@ -605,6 +641,13 @@ async fn lazy_materialize_cross_boot_recall_replays_the_transcript() {
             .await
             .expect("send turn 1");
         wait_for_turn(&capture, 1, "boot 1's turn").await;
+        wait_for_materialization(
+            &runtime,
+            MEMBER,
+            MemberMaterializationPhase::Live,
+            "the FIRST SEND to materialize the member",
+        )
+        .await;
 
         let after = identity_runtime
             .status(&member)
@@ -613,13 +656,17 @@ async fn lazy_materialize_cross_boot_recall_replays_the_transcript() {
         assert_eq!(
             after.state,
             IdentityLifecycleState::Active,
-            "the FIRST SEND is what must have materialized the member (on-demand \
-             materialization from Dormant); status: {after:?}"
+            "status: {after:?}"
+        );
+        assert_eq!(
+            after.session_id, before.session_id,
+            "the first send materializes the member on the session its seat bound; \
+             status: {after:?}"
         );
         session_id = after
             .session_id
             .as_ref()
-            .expect("a materialized identity owns a durable session")
+            .expect("a seated identity owns a durable session")
             .to_string();
 
         // The customizer must reach a freshly materialized member, otherwise
@@ -638,14 +685,7 @@ async fn lazy_materialize_cross_boot_recall_replays_the_transcript() {
             head, session_id,
             "the durable document must belong to the materialized session"
         );
-        // Retire the identity before the stop: Core keeps its history, so boot
-        // 2 registers it Dormant and the first send's lazy wake resumes this
-        // session. A member left live at a clean stop is restored live by
-        // Core's mob at the next start, which the lazy arm cannot make dormant.
-        identity_runtime
-            .retire(&member)
-            .await
-            .expect("retire the identity before the stop");
+        // The member stays as it is: Core keeps it seated across the stop.
         runtime.shutdown().await;
     }
 
@@ -660,7 +700,8 @@ async fn lazy_materialize_cross_boot_recall_replays_the_transcript() {
          census: {census:?}"
     );
 
-    // --- Boot 2: lazy again. First send must materialize AND recall. ---
+    // --- Boot 2: lazy again. Dormant until the first send, which must
+    // materialize AND recall. ---
     {
         let capture = CaptureClient::default(); // fresh: only boot-2 requests
         let runtime = boot(
@@ -684,19 +725,24 @@ async fn lazy_materialize_cross_boot_recall_replays_the_transcript() {
         eprintln!("PROBE boot 2 bootstrap: {bootstrap:?}");
         assert_eq!(
             (bootstrap.counts.dormant, bootstrap.counts.active),
-            (1, 0),
-            "boot 2 must ALSO take the lazy arm (dormant registration, nothing \
-             materialized) — otherwise this test silently exercises eager restore; \
+            (0, 1),
+            "boot 2 must ALSO take the lazy arm: the member is seated; \
              bootstrap: {bootstrap:?}"
+        );
+        assert_eq!(
+            materialization(&runtime, MEMBER),
+            Some(MemberMaterializationPhase::Dormant),
+            "the member must stay Dormant across the restart: nothing materializes it \
+             before the first send"
         );
         let before = identity_runtime
             .status(&member)
             .await
-            .expect("dormant identity is inspectable after restart");
+            .expect("a seated identity is inspectable after restart");
         assert_eq!(
-            before.state,
-            IdentityLifecycleState::Dormant,
-            "boot 2 must start Dormant: registered, with no member yet; status: {before:?}"
+            before.session_id.as_ref().map(ToString::to_string),
+            Some(session_id.clone()),
+            "boot 2 must hold the member seated on its boot-1 session; status: {before:?}"
         );
 
         identity_runtime
@@ -720,7 +766,7 @@ async fn lazy_materialize_cross_boot_recall_replays_the_transcript() {
         );
         // Independent second property: resume AUTHORS NOTHING (the bridge
         // clears the prompt override; meerkat preserves every ordered System
-        // byte-for-byte) — so this pins that the host prompt survives a lazy
+        // byte-for-byte) - so this pins that the host prompt survives a lazy
         // restart purely as preserved durable transcript, not by any
         // boot-time re-application.
         assert!(
@@ -729,6 +775,13 @@ async fn lazy_materialize_cross_boot_recall_replays_the_transcript() {
              request: {last}"
         );
 
+        wait_for_materialization(
+            &runtime,
+            MEMBER,
+            MemberMaterializationPhase::Live,
+            "the post-restart send to materialize the member",
+        )
+        .await;
         let after = identity_runtime
             .status(&member)
             .await
@@ -736,7 +789,7 @@ async fn lazy_materialize_cross_boot_recall_replays_the_transcript() {
         assert_eq!(
             after.state,
             IdentityLifecycleState::Active,
-            "the post-restart send must have materialized the member; status: {after:?}"
+            "status: {after:?}"
         );
         assert_eq!(
             after.session_id.as_ref().map(ToString::to_string),
@@ -761,7 +814,9 @@ async fn lazy_with_background_warm_cross_boot_recall_replays_the_transcript() {
         return;
     }
     let _serial = SERIAL_WINDOW.lock().await;
-    let mode = IdentityBootstrapMode::LazyWithBackgroundWarm { concurrency: 1 };
+    let mode = IdentityBootstrapMode::LazyWithBackgroundWarm {
+        concurrency: Some(1),
+    };
     let temp = tempfile::TempDir::new().expect("temp dir");
     let state = temp.path().join("state");
     let member = id(MEMBER);
@@ -788,9 +843,15 @@ async fn lazy_with_background_warm_cross_boot_recall_replays_the_transcript() {
         assert_eq!(
             (bootstrap.counts.active, bootstrap.counts.broken),
             (1, 0),
-            "the warmer must materialize the roster it registered dormant; \
-             bootstrap: {bootstrap:?}"
+            "the pass must seat the roster; bootstrap: {bootstrap:?}"
         );
+        wait_for_materialization(
+            &runtime,
+            MEMBER,
+            MemberMaterializationPhase::Live,
+            "the warmer to materialize the member it seated",
+        )
+        .await;
 
         identity_runtime
             .send(
@@ -842,8 +903,15 @@ async fn lazy_with_background_warm_cross_boot_recall_replays_the_transcript() {
         assert_eq!(
             (bootstrap.counts.active, bootstrap.counts.broken),
             (1, 0),
-            "the warmer must re-materialize the persisted member; bootstrap: {bootstrap:?}"
+            "the pass must seat the persisted member again; bootstrap: {bootstrap:?}"
         );
+        wait_for_materialization(
+            &runtime,
+            MEMBER,
+            MemberMaterializationPhase::Live,
+            "the warmer to re-materialize the persisted member",
+        )
+        .await;
 
         identity_runtime
             .send(
@@ -1275,9 +1343,9 @@ async fn deleted_identity_starts_a_fresh_life_and_a_cold_boot_does_not_resurrect
         runtime.shutdown().await;
     }
 
-    // --- Cold pod: nothing to mint or resume. The first send fresh-spawns
-    // under a NEW session id and its request must NOT replay the deleted
-    // transcript. ---
+    // --- Cold pod: the delete's rotation bound the identity's fresh life to
+    // a NEW session id. The first send materializes it there, and its
+    // request must NOT replay the deleted transcript. ---
     {
         let capture = CaptureClient::default();
         let runtime = boot_lazy_runtime(&state, capture.clone()).await;
@@ -1291,7 +1359,7 @@ async fn deleted_identity_starts_a_fresh_life_and_a_cold_boot_does_not_resurrect
                 &meerkat_core::ContentInput::Text("What token did I give you earlier?".to_string()),
             )
             .await
-            .expect("the post-delete cold send must fresh-spawn, not wedge or resurrect");
+            .expect("the post-delete cold send must start the fresh life, not wedge or resurrect");
         wait_for_turn(&capture, 1, "the post-delete turn").await;
         let last = capture.last().expect("a post-delete request was captured");
         assert!(
@@ -1305,7 +1373,7 @@ async fn deleted_identity_starts_a_fresh_life_and_a_cold_boot_does_not_resurrect
         assert_ne!(
             after.session_id.as_ref().map(ToString::to_string),
             Some(deleted_session_id.to_string()),
-            "the cold boot must fresh-spawn a NEW session, not resume the deleted id; \
+            "the cold boot must run the fresh life's NEW session, not resume the deleted id; \
              status: {after:?}"
         );
         runtime.shutdown().await;

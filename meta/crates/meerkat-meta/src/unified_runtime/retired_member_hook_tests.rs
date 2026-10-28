@@ -1,21 +1,24 @@
 //! The gateway host's retirement hook
 //! (`GatewayHostComposition::identity_member_retired`, the identity
 //! runtime's crate-private retired-member observer): which retires reach it,
-//! with which incarnation and cause, and with no Meta lock held.
+//! with which incarnation, registration and cause, and with no Meta lock
+//! held.
 //!
-//! Every cause ends exactly one incarnation. An explicit or scoped retire
-//! leaves a still listed identity to return at the next generation on the
-//! same session; only a roster pass that no longer lists the identity
-//! retires it as `Unlisted`. A roster pass hands its retirements to the hook
-//! after the bootstrap controller is released, also when a later step of
-//! the pass fails, so a hook may refresh the roster itself. Replacements,
+//! An explicit or scoped retire releases the member: the identity stays a
+//! member of Core's mob, active on the same session at the same generation,
+//! and its next delivery materializes it again under a new registration.
+//! Only a roster pass that no longer lists the identity ends its incarnation,
+//! as `Unlisted`. A roster pass hands its retirements to the hook after the
+//! bootstrap controller is released, also when a later step of the pass
+//! fails, so a hook may refresh the roster itself. Replacements, reprofiles,
 //! held aborts and shutdowns never reach it, and a hook error leaves the
 //! retirement standing and reaches the error hook once.
 //!
-//! Each retired incarnation names the exact Core registration it held,
-//! read before the retire. A registration still current after Core's
-//! retire answered is not named, and a successor, even one registered on
-//! the same session before the hook returns, never holds the named one.
+//! Each call names the exact Core registration the retire or release ended,
+//! read before it. A registration still current after Core answered is not
+//! named, and neither is one when the release ended none; a later
+//! registration, even one on the same session before the hook returns, never
+//! is the named one.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
@@ -241,11 +244,14 @@ impl Fixture {
     }
 }
 
-/// An explicit retire reaches the hook once, cause `Retire`, with the
-/// incarnation it retired and with the identity's lifecycle lock released;
-/// a second retire retires nothing and calls nothing.
+/// An explicit retire releases the member and reaches the hook once, cause
+/// `Retire`, with the incarnation it released (its generation unchanged) and
+/// with the identity's lifecycle lock released. The identity stays active on
+/// the same session at the same generation. A second retire releases
+/// nothing (the member is not materialized) and reaches the hook naming no
+/// registration.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_explicit_retire_reaches_the_hook_once() {
+async fn an_explicit_retire_releases_the_member_and_reaches_the_hook() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = Fixture::start(&dir, "retired-hook-explicit").await;
     let before = fixture.status(&fixture.kept).await;
@@ -302,25 +308,32 @@ async fn an_explicit_retire_reaches_the_hook_once() {
         Some(true),
         "the hook runs with the identity's lifecycle lock released"
     );
+    let after = fixture.status(&fixture.kept).await;
+    assert_eq!(after.state, IdentityLifecycleState::Active, "{after:?}");
+    assert_eq!(after.session_id, before.session_id, "the same session");
+    assert_eq!(after.generation, before.generation, "the same generation");
 
     fixture
         .identities()
         .retire_tracked(&fixture.kept)
         .await
-        .expect_err("a dormant identity has no live member to retire");
+        .expect("a released member has nothing to release");
+    let calls = fixture.seen.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[1].cause, RetiredIdentityCause::Retire);
+    assert_eq!(calls[1].generation, calls[0].generation);
     assert_eq!(
-        fixture.seen.calls().len(),
-        1,
-        "a second retire calls nothing"
+        calls[1].registration, None,
+        "a release that ended no registration names none: {calls:?}"
     );
     let _ = fixture.runtime.shutdown().await;
 }
 
-/// A retired identity the roster still lists returns at the next
-/// generation on the same session at the next roster pass, and the hook saw
-/// only the one `Retire`: the pass retires nothing.
+/// A released identity the roster still lists stays a member through the
+/// next roster pass, on the same session at the same generation, and the
+/// hook saw only the one `Retire`: the pass retires nothing.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_retired_listed_identity_returns_at_the_next_generation() {
+async fn a_released_listed_identity_keeps_its_session_and_generation() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = Fixture::start(&dir, "retired-hook-return").await;
     let before = fixture.status(&fixture.kept).await;
@@ -328,7 +341,7 @@ async fn a_retired_listed_identity_returns_at_the_next_generation() {
         .identities()
         .retire_tracked(&fixture.kept)
         .await
-        .expect("the member retires");
+        .expect("the member is released");
     fixture
         .context
         .refresh_desired_topology_tracked()
@@ -337,11 +350,7 @@ async fn a_retired_listed_identity_returns_at_the_next_generation() {
     let after = fixture.status(&fixture.kept).await;
     assert_eq!(after.state, IdentityLifecycleState::Active, "{after:?}");
     assert_eq!(after.session_id, before.session_id, "the same session");
-    assert_eq!(
-        after.generation.map(meerkat_mob::Generation::get),
-        before.generation.map(|g| g.get() + 1),
-        "the next generation"
-    );
+    assert_eq!(after.generation, before.generation, "the same generation");
     let calls = fixture.seen.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(calls[0].cause, RetiredIdentityCause::Retire);
@@ -542,8 +551,9 @@ async fn an_aborted_held_add_never_reaches_the_hook() {
 }
 
 /// A hook error leaves the retirement standing: the retire answers `Ok`,
-/// Core's member is retired, the error reaches the error hook once as
-/// `RetiredMemberReleaseFailed`, and nothing is retried.
+/// Core's member is released (the identity stays active), the error reaches
+/// the error hook once as `RetiredMemberReleaseFailed`, and nothing is
+/// retried.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hook_error_is_reported_apart_from_the_retirement() {
     let dir = tempfile::tempdir().unwrap();
@@ -567,7 +577,8 @@ async fn a_hook_error_is_reported_apart_from_the_retirement() {
         .expect("the retirement stands");
     assert_eq!(
         fixture.status(&fixture.kept).await.state,
-        IdentityLifecycleState::Dormant
+        IdentityLifecycleState::Active,
+        "a released member stays seated"
     );
     assert_eq!(seen.calls().len(), 1, "called once, never retried");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -594,12 +605,14 @@ async fn a_hook_error_is_reported_apart_from_the_retirement() {
     let _ = fixture.runtime.shutdown().await;
 }
 
-/// A scoped retire of the live member reaches the hook once, cause
-/// `Scoped`. The same scope again retires nothing (no incarnation is
-/// current, Core answers `Ok`) and an old scope after the identity returned
-/// is stale: neither calls the hook.
+/// A scoped retire of the live member releases it and reaches the hook,
+/// cause `Scoped`, while its scope names the current incarnation. A release
+/// keeps the incarnation, so the same scope stays current: a second scoped
+/// retire releases nothing and reaches the hook naming no registration. Once
+/// a reset rotates the identity to its next incarnation the old scope is
+/// stale, and neither the reset nor the stale scope calls the hook.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_scoped_retire_reaches_the_hook_only_for_the_live_member() {
+async fn a_scoped_retire_reaches_the_hook_while_its_scope_names_the_current_incarnation() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = Fixture::start(&dir, "retired-hook-scoped").await;
     let scope = fixture
@@ -620,23 +633,33 @@ async fn a_scoped_retire_reaches_the_hook_only_for_the_live_member() {
         .identities()
         .retire_at_scope_tracked(&fixture.kept, &scope)
         .await
-        .expect("no incarnation is current: Core answers Ok");
-    assert_eq!(fixture.seen.calls().len(), 1, "nothing was retired");
+        .expect("the scope still names the current incarnation");
+    let calls = fixture.seen.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[1].cause, RetiredIdentityCause::Scoped);
+    assert_eq!(
+        calls[1].registration, None,
+        "a release that ended no registration names none: {calls:?}"
+    );
 
     fixture
-        .context
-        .refresh_desired_topology_tracked()
+        .identities()
+        .reset_tracked(&fixture.kept)
         .await
-        .expect("the identity returns");
+        .expect("the reset rotates the identity to its next incarnation");
     match fixture
         .identities()
         .retire_at_scope_tracked(&fixture.kept, &scope)
         .await
     {
         Err(ScopedRetireError::StaleScope { .. }) => {}
-        other => panic!("an old scope is stale once the identity returned: {other:?}"),
+        other => panic!("an old scope is stale once the identity rotated: {other:?}"),
     }
-    assert_eq!(fixture.seen.calls().len(), 1, "a stale scope calls nothing");
+    assert_eq!(
+        fixture.seen.calls().len(),
+        2,
+        "neither the reset nor a stale scope calls the hook"
+    );
     let _ = fixture.runtime.shutdown().await;
 }
 
@@ -700,9 +723,9 @@ fn fixture_machine(fixture: &Fixture) -> Arc<meerkat_runtime::MeerkatMachine> {
     .expect("the runtime machine")
 }
 
-/// A retire hands the hook the exact Core registration the incarnation held:
-/// the machine's registration of its session right before the retire. Once
-/// the hook runs, that registration is no longer current.
+/// A retire hands the hook the exact Core registration its release ended:
+/// the machine's registration of the member's session right before the
+/// retire. Once the hook runs, that registration is no longer current.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_retired_member_carries_the_registration_it_held() {
     let dir = tempfile::tempdir().unwrap();
@@ -732,11 +755,11 @@ async fn the_retired_member_carries_the_registration_it_held() {
     let _ = fixture.runtime.shutdown().await;
 }
 
-/// A successor that registers before the hook returns (here the still listed
-/// identity, resumed at the next generation on the same session by the
-/// hook's own roster pass) holds another registration than the one the hook
-/// was handed: a host that releases what it bound to that registration never
-/// releases the successor's.
+/// A later registration made before the hook returns (here the hook's own
+/// materialization of the released identity, on the same session at the
+/// same generation) is another registration than the one the hook was
+/// handed: a host that releases what it bound to that registration never
+/// releases the later one.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_successor_registered_before_the_hook_returns_holds_another_registration() {
     let dir = tempfile::tempdir().unwrap();
@@ -749,22 +772,24 @@ async fn a_successor_registered_before_the_hook_returns_holds_another_registrati
         .expect("the member's session");
     let successor = Arc::new(Mutex::new(None));
     let seen = fixture.seen.clone();
-    let context = Arc::downgrade(&fixture.context);
+    let identities = Arc::downgrade(fixture.identities());
+    let kept = fixture.kept.clone();
     let observed = Arc::clone(&successor);
     let hook_machine = Arc::clone(&machine);
     let hook_session = session.clone();
     let observer: RetiredMemberObserver = Arc::new(move |retired| {
         seen.0.lock().unwrap().push(retired);
-        let context = context.clone();
+        let identities = identities.clone();
+        let kept = kept.clone();
         let observed = Arc::clone(&observed);
         let machine = Arc::clone(&hook_machine);
         let session = hook_session.clone();
         Box::pin(async move {
-            let context = context
+            let identities = identities
                 .upgrade()
-                .ok_or_else(|| "the identity context is gone".to_string())?;
-            context
-                .refresh_desired_topology_tracked()
+                .ok_or_else(|| "the identity runtime is gone".to_string())?;
+            identities
+                .materialize(&kept)
                 .await
                 .map_err(|error| error.to_string())?;
             let current = machine.current_session_registration_witness(&session).await;
@@ -790,7 +815,7 @@ async fn a_successor_registered_before_the_hook_returns_holds_another_registrati
         .lock()
         .unwrap()
         .clone()
-        .expect("the hook's roster pass registered the same session again");
+        .expect("the hook's materialization registered the same session again");
     assert_eq!(
         successor.session_id(),
         retired.session_id(),
@@ -805,12 +830,12 @@ async fn a_successor_registered_before_the_hook_returns_holds_another_registrati
 }
 
 /// A Core-reads bridge whose members hold real registrations on `machine`:
-/// it reads them, and its retire ends the retired member's registration
-/// only when `retire_ends_registration`.
+/// it reads them, and its retire or release ends the member's registration
+/// only when `ends_registration`.
 struct MachineReadsBridge {
     reads: CoreReadsBridge,
     machine: Arc<meerkat_runtime::MeerkatMachine>,
-    retire_ends_registration: bool,
+    ends_registration: bool,
 }
 
 #[async_trait::async_trait]
@@ -901,7 +926,25 @@ impl SessionBridge for MachineReadsBridge {
             .live_incarnation(runtime_id)
             .and_then(|(session, _)| session);
         self.reads.retire_member(runtime_id).await?;
-        if self.retire_ends_registration
+        if self.ends_registration
+            && let Some(session) = session
+        {
+            self.machine
+                .unregister_session(&session)
+                .await
+                .map_err(|error| BridgeError::Mob(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn release_member(&self, identity: &AgentIdentity) -> Result<(), BridgeError> {
+        let session = self
+            .reads
+            .core
+            .live_member(identity)?
+            .and_then(|binding| binding.session_id);
+        self.reads.release_member(identity).await?;
+        if self.ends_registration
             && let Some(session) = session
         {
             self.machine
@@ -929,9 +972,9 @@ impl SessionBridge for MachineReadsBridge {
     }
 }
 
-/// Retire `prefix`'s one live registered member, bound to `session`, through
-/// `bridge` (whose Core member reads are `core`) with the recording hook
-/// installed, and answer what the hook saw.
+/// Retire (release) `prefix`'s one live registered member, bound to
+/// `session`, through `bridge` (whose Core member reads are `core`) with the
+/// recording hook installed, and answer what the hook saw.
 async fn retire_one_through(
     bridge: Arc<dyn SessionBridge>,
     core: &CoreTestMembers,
@@ -956,16 +999,16 @@ async fn retire_one_through(
     identities
         .retire_tracked(&identity)
         .await
-        .expect("the member retires");
+        .expect("the member is released");
     seen.calls()
 }
 
-/// The hook names only a registration Core's retire ended. A registration
-/// still current after the retire answered was not ended by it and is not
+/// The hook names only a registration Core's release ended. A registration
+/// still current after the release answered was not ended by it and is not
 /// named; neither is any registration when the bridge observes none.
 #[tokio::test(flavor = "multi_thread")]
 async fn only_a_registration_the_retire_ended_is_named() {
-    for (prefix, retire_ends_registration) in [
+    for (prefix, ends_registration) in [
         ("retired-hook-ended", true),
         ("retired-hook-still-current", false),
     ] {
@@ -973,7 +1016,7 @@ async fn only_a_registration_the_retire_ended_is_named() {
         let bridge = Arc::new(MachineReadsBridge {
             reads: CoreReadsBridge::default(),
             machine: Arc::clone(&machine),
-            retire_ends_registration,
+            ends_registration,
         });
         let session = meerkat_core::types::SessionId::new();
         machine
@@ -992,7 +1035,7 @@ async fn only_a_registration_the_retire_ended_is_named() {
         )
         .await;
         assert_eq!(calls.len(), 1, "{prefix}: {calls:?}");
-        if retire_ends_registration {
+        if ends_registration {
             assert_eq!(
                 calls[0].registration.as_ref(),
                 Some(&held),
@@ -1001,7 +1044,7 @@ async fn only_a_registration_the_retire_ended_is_named() {
         } else {
             assert!(
                 machine.session_registration_use(&held).await.is_some(),
-                "{prefix}: the registration outlived the retire"
+                "{prefix}: the registration outlived the release"
             );
             assert_eq!(calls[0].registration, None, "{prefix}: {calls:?}");
         }
@@ -1019,11 +1062,11 @@ async fn only_a_registration_the_retire_ended_is_named() {
     assert_eq!(calls[0].registration, None, "{calls:?}");
 }
 
-/// End to end with the host's Core registration hook: each retirement hands
+/// End to end with the host's Core registration hook: each release hands
 /// the hook the registration the registration hook was given for that
-/// incarnation's build, never another. The still listed identity's successor
-/// resumes on the same session and its build is given a registration of its
-/// own, which the successor's retirement then hands over.
+/// build, never another. The released identity, materialized again on the
+/// same session at the same generation, is given a registration of its own
+/// at that build, which its next retire then hands over.
 #[tokio::test(flavor = "multi_thread")]
 async fn each_retirement_hands_over_the_registration_its_build_was_given() {
     let dir = tempfile::tempdir().unwrap();
@@ -1034,50 +1077,56 @@ async fn each_retirement_hands_over_the_registration_its_build_was_given() {
         .session_id
         .expect("the member's session");
     let first = fixture.builds.registrations_on(&session);
-    assert_eq!(first.len(), 1, "the first incarnation's build: {first:?}");
+    assert_eq!(first.len(), 1, "the first build: {first:?}");
     fixture
         .identities()
         .retire_tracked(&fixture.kept)
         .await
-        .expect("the member retires");
+        .expect("the member is released");
     fixture
-        .context
-        .refresh_desired_topology_tracked()
+        .identities()
+        .materialize(&fixture.kept)
         .await
-        .expect("the roster pass resumes the still listed identity");
+        .expect("the released identity is materialized again");
     let both = fixture.builds.registrations_on(&session);
     assert_eq!(
         both.len(),
         2,
-        "the successor's build on the same session: {both:?}"
+        "the second build on the same session: {both:?}"
     );
     assert_ne!(
         both[1], both[0],
-        "the successor's build was given its own registration"
+        "the second build was given its own registration"
     );
     fixture
         .identities()
         .retire_tracked(&fixture.kept)
         .await
-        .expect("the successor retires");
+        .expect("the member is released again");
     let calls = fixture.seen.calls();
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert_eq!(
         calls[0].registration.as_ref(),
         Some(&both[0]),
-        "the first retirement hands over its build's registration"
+        "the first release hands over its build's registration"
     );
     assert_eq!(
         calls[1].registration.as_ref(),
         Some(&both[1]),
-        "the successor's retirement hands over the successor build's registration"
+        "the second release hands over the second build's registration"
+    );
+    assert_eq!(
+        calls[1].generation, calls[0].generation,
+        "a release keeps the incarnation"
     );
     let _ = fixture.runtime.shutdown().await;
 }
 
-/// A reprofile retires the live member in the roster pass, beside the
-/// pass's unlisted retirements, and never reaches the hook: the identity
-/// keeps its place in the roster.
+/// A reprofile releases the live member in the roster pass (it no longer
+/// retires it) and never reaches the hook: the identity keeps its place in
+/// the roster, seated on its session at its generation under its previous
+/// role, and the role move this activation did not declare is held typed
+/// until the host declares it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reprofile_never_reaches_the_hook() {
     let dir = tempfile::tempdir().unwrap();
@@ -1087,14 +1136,45 @@ async fn a_reprofile_never_reaches_the_hook() {
     let mut reprofiled = member(&fixture.kept);
     reprofiled.profile = "reviewer".into();
     fixture.roster.upsert(reprofiled);
-    // The pass retires the live member. Whether its resume under the new
-    // profile is refused (no declared role migration) is not this row's
-    // subject.
+    // The pass releases the live member, and its seat step holds the
+    // undeclared role move typed.
     let _ = fixture.context.refresh_desired_topology_tracked().await;
     let after = fixture.status(&fixture.kept).await;
-    assert!(
-        after.state != IdentityLifecycleState::Active || after.generation != before.generation,
-        "the reprofile retired the member: {before:?} -> {after:?}"
+    assert_eq!(
+        (
+            after.agent_runtime_id.as_ref(),
+            after.session_id.as_ref(),
+            after.generation
+        ),
+        (
+            before.agent_runtime_id.as_ref(),
+            before.session_id.as_ref(),
+            before.generation
+        ),
+        "the reprofile releases the member and keeps its incarnation: {before:?} -> {after:?}"
+    );
+    // Meta's spec names the new profile; Core still holds the member under
+    // its previous role.
+    assert_eq!(
+        after.profile,
+        Some(meerkat_mob::ProfileName::from("reviewer")),
+        "{after:?}"
+    );
+    let kept = crate::member_comms_id::roster_member_id_for_identity(fixture.kept.as_str());
+    let roles = fixture
+        .runtime
+        .mob_handle()
+        .list_members()
+        .await
+        .into_iter()
+        .filter(|member| member.agent_identity == kept)
+        .map(|member| member.role.as_str().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(roles, vec!["worker".to_string()], "{after:?}");
+    assert_eq!(
+        after.wake_refusal.as_ref().map(|refusal| refusal.remedy),
+        Some(crate::identity_first::WakeRefusalRemedy::ResolveRoleMigration),
+        "the undeclared role move is held typed: {after:?}"
     );
     let calls = fixture.seen.calls();
     assert!(calls.is_empty(), "{calls:?}");

@@ -373,6 +373,12 @@ impl RuntimeStore for BodyReadCountingRuntimeStore {
         self.inner.list_runtime_delivery_authorities().await
     }
 
+    async fn list_runtimes_with_recovery_work(
+        &self,
+    ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
+        self.inner.list_runtimes_with_recovery_work().await
+    }
+
     async fn list_runtime_delivery_records(
         &self,
         runtime_id: &LogicalRuntimeId,

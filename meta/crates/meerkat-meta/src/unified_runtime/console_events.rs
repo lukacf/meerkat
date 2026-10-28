@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use serde_json::{Value, json};
@@ -11,13 +10,26 @@ use crate::console_contracts::{
 };
 use crate::types::{EventEnvelope, UnifiedEvent};
 
-const IDENTITY_REPLAY_CAP: usize = 1024;
-const ALL_EVENTS_REPLAY_CAP: usize = 4096;
+const OBSERVED_RUNS_PER_IDENTITY_CAP: usize = 1024;
+pub(crate) const ALL_EVENTS_REPLAY_CAP: usize = 4096;
 const EVENT_CHANNEL_BASE_CAP: usize = 4096;
 const EVENT_CHANNEL_CAP_PER_MEMBER: usize = 128;
 const EVENT_CHANNEL_DEFAULT_MEMBER_BUDGET: usize = 256;
 const EVENT_CHANNEL_MAX_CAP: usize = 65_536;
+/// The most events by which a console event can reach a projection again
+/// after its first delivery: a replay reads at most the buffered window, and
+/// a lagging live receiver holds at most the largest broadcast channel.
+pub(crate) const CONSOLE_EVENT_REDELIVERY_HORIZON: usize =
+    ALL_EVENTS_REPLAY_CAP + EVENT_CHANNEL_MAX_CAP;
 pub(crate) const PENDING_INTERACTION_CAP: usize = 256;
+
+/// A store-minted event id, unique to this process and every other one. The
+/// console log keeps the ids of earlier processes' events and stores each
+/// event once per id, so an id that repeats across a restart would name a
+/// new event after an old one, and the log would drop it as already stored.
+fn mint_console_event_id() -> String {
+    format!("console-evt-{}", uuid::Uuid::new_v4())
+}
 
 pub(crate) fn event_channel_capacity_for_members(member_count: usize) -> usize {
     EVENT_CHANNEL_BASE_CAP
@@ -27,7 +39,6 @@ pub(crate) fn event_channel_capacity_for_members(member_count: usize) -> usize {
 
 #[derive(Clone)]
 pub(crate) struct ConsoleEventStore {
-    next_event_seq: Arc<AtomicU64>,
     state: Arc<RwLock<ConsoleEventReplayState>>,
     projection_lock: Arc<Mutex<()>>,
     event_tx: broadcast::Sender<ConsoleIdentityEventEnvelope>,
@@ -38,8 +49,8 @@ pub(crate) struct ConsoleEventStore {
 }
 
 struct ConsoleEventReplayState {
+    /// The newest events of every identity, the only events the store keeps.
     all_events: VecDeque<ConsoleIdentityEventEnvelope>,
-    by_identity: BTreeMap<String, VecDeque<ConsoleIdentityEventEnvelope>>,
     pending_by_identity: BTreeMap<String, VecDeque<PendingInteraction>>,
     // Legacy content-match association, retained only for old boundaries.
     active_interaction_by_identity: BTreeMap<String, String>,
@@ -90,7 +101,7 @@ impl ConsoleEventStore {
     pub(crate) fn with_member_capacity(member_count: usize) -> Self {
         let (event_tx, _) = broadcast::channel(event_channel_capacity_for_members(member_count));
         let bootstrap = ConsoleIdentityEventEnvelope {
-            event_id: "console-evt-1".to_string(),
+            event_id: mint_console_event_id(),
             interaction_id: None,
             identity: SYSTEM_EVENT_IDENTITY.to_string(),
             event_type: "runtime_bootstrapped".to_string(),
@@ -99,17 +110,10 @@ impl ConsoleEventStore {
                 "source": "unified_runtime",
             }),
         };
-        let mut by_identity = BTreeMap::new();
-        by_identity.insert(
-            bootstrap.identity.clone(),
-            VecDeque::from([bootstrap.clone()]),
-        );
         Self {
-            next_event_seq: Arc::new(AtomicU64::new(2)),
             projection_lock: Arc::new(Mutex::new(())),
             state: Arc::new(RwLock::new(ConsoleEventReplayState {
                 all_events: VecDeque::from([bootstrap]),
-                by_identity,
                 pending_by_identity: BTreeMap::new(),
                 active_interaction_by_identity: BTreeMap::new(),
                 active_run_by_identity: BTreeMap::new(),
@@ -171,10 +175,7 @@ impl ConsoleEventStore {
         data: Value,
     ) -> ConsoleIdentityEventEnvelope {
         ConsoleIdentityEventEnvelope {
-            event_id: format!(
-                "console-evt-{}",
-                self.next_event_seq.fetch_add(1, Ordering::Relaxed)
-            ),
+            event_id: mint_console_event_id(),
             interaction_id,
             identity,
             event_type,
@@ -215,13 +216,6 @@ impl ConsoleEventStore {
             }
             state.all_events.push_back(envelope.clone());
             trim_deque(&mut state.all_events, ALL_EVENTS_REPLAY_CAP);
-
-            let replay = state
-                .by_identity
-                .entry(envelope.identity.clone())
-                .or_insert_with(VecDeque::new);
-            replay.push_back(envelope.clone());
-            trim_deque(replay, IDENTITY_REPLAY_CAP);
         }
         let _ = self.event_tx.send(envelope);
         true
@@ -812,6 +806,12 @@ impl ConsoleEventStore {
             .unwrap_or_default()
     }
 
+    /// Every event envelope the store holds in memory.
+    #[cfg(test)]
+    pub(crate) async fn retained_envelope_count(&self) -> usize {
+        self.state.read().await.all_events.len()
+    }
+
     /// Snapshot known activity under one read lock. A present null phase is
     /// known quiet; an absent identity has no recorded activity observation.
     pub(crate) async fn response_phases_snapshot(&self) -> HashMap<String, Option<String>> {
@@ -933,7 +933,7 @@ fn select_interaction_for_run_started(
                 return interaction_id;
             }
             seen.push_back(run_id.clone());
-            trim_deque(seen, IDENTITY_REPLAY_CAP);
+            trim_deque(seen, OBSERVED_RUNS_PER_IDENTITY_CAP);
             state
                 .active_run_by_identity
                 .insert(identity.to_string(), lineage);
@@ -1405,6 +1405,81 @@ mod tests {
             replay.first().and_then(|event| event.data["idx"].as_u64()),
             Some(8)
         );
+    }
+
+    /// A restarted runtime's store mints ids no earlier store minted: the
+    /// console log stores each event once per id, so a repeated id would
+    /// drop the new event as already stored.
+    #[tokio::test]
+    async fn store_minted_event_ids_never_repeat_across_stores() {
+        let mut ids = BTreeSet::new();
+        for _process in 0..2 {
+            let store = ConsoleEventStore::new();
+            for idx in 0..3 {
+                store
+                    .append("worker", None, "member_spawned", json!({ "idx": idx }))
+                    .await;
+            }
+            store
+                .append_runtime_plane_event("memory.dream_skipped", json!({}))
+                .await;
+            for event in store.replay_all(None).await.expect("replay") {
+                assert!(
+                    ids.insert(event.event_id.clone()),
+                    "{} minted twice",
+                    event.event_id
+                );
+            }
+        }
+        // Two bootstrap events, three appends and one runtime event each.
+        assert_eq!(ids.len(), 10);
+    }
+
+    /// Helpers and forks come and go: the store keeps no events for an
+    /// identity outside its one shared window, however many identities it
+    /// has seen.
+    #[tokio::test]
+    async fn identity_churn_keeps_no_events_outside_the_shared_window() {
+        let store = ConsoleEventStore::new();
+        for helper in 0..2_000 {
+            for idx in 0..3 {
+                store
+                    .append(
+                        format!("helper-{helper}"),
+                        None,
+                        "text_delta",
+                        json!({ "idx": idx }),
+                    )
+                    .await;
+            }
+        }
+        assert_eq!(store.retained_envelope_count().await, ALL_EVENTS_REPLAY_CAP);
+    }
+
+    /// The shared window is the store's only read path: a live identity's
+    /// newest events stay readable after many other identities came and went.
+    #[tokio::test]
+    async fn a_live_identity_keeps_its_newest_events_readable() {
+        let store = ConsoleEventStore::new();
+        for helper in 0..2_000 {
+            store
+                .append(format!("helper-{helper}"), None, "run_started", json!({}))
+                .await;
+        }
+        for idx in 0..3 {
+            store
+                .append("live-worker", None, "text_delta", json!({ "idx": idx }))
+                .await;
+        }
+        let live: Vec<u64> = store
+            .replay_all(None)
+            .await
+            .expect("all-events replay should succeed")
+            .iter()
+            .filter(|event| event.identity == "live-worker")
+            .filter_map(|event| event.data["idx"].as_u64())
+            .collect();
+        assert_eq!(live, vec![0, 1, 2]);
     }
 
     #[tokio::test]

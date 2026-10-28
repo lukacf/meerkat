@@ -42,9 +42,10 @@
 //! member work (neither a turn the store kept open nor an input queued
 //! behind it, in its own mob or in a mob a member created) and admits no
 //! member input, its graceful shutdown leaves every stored input row as
-//! it found it, and it retires no member its roster drops. The
-//! authoritative launch that follows does each once, after a candidate
-//! that was killed as well.
+//! it found it (but for the input of a run that died, which the ordinary
+//! recovery of every start moves from staged back to queued), and it
+//! retires no member its roster drops. The authoritative launch that
+//! follows does each once, after a candidate that was killed as well.
 
 #![cfg(feature = "announcement-test-faults")]
 #![allow(
@@ -240,6 +241,25 @@ fn announcer_roster_spec() -> Value {
     json!({
         "identity": ANNOUNCER,
         "profile": "announcer",
+        "addressability": "addressable",
+        "display_name": null,
+        "labels": {},
+        "context": null,
+        "additional_instructions": []
+    })
+}
+
+/// An identity whose member runs a turn before the roster drops it, so its
+/// stored session is born.
+const RECORDER: &str = "agent:recorder";
+/// The recorder's turn.
+const RECORDER_MARKER: &str = "RECORDER-FIRST-TURN";
+
+/// A roster row for [`RECORDER`].
+fn recorder_roster_spec() -> Value {
+    json!({
+        "identity": RECORDER,
+        "profile": "specialist",
         "addressability": "addressable",
         "display_name": null,
         "labels": {},
@@ -1282,9 +1302,10 @@ fn a_burst_lost_acknowledgment_and_crash_mid_turn_deliver_exactly_once() {
 /// ever be admitted: a subscription for it is refused typed, and nothing is
 /// created. A member the gateway serves subscribes on the same gateway.
 ///
-/// The roster is registered without materializing anyone: the refusal reads
-/// the registered roster row alone, and no host is bound here for the placed
-/// member to run on.
+/// The refusal reads the registered roster row alone. Under
+/// `lazy_materialize` the roster pass leaves the placed member for its
+/// first use, as the lazy modes always did, so nothing is created through
+/// its host (none is bound here).
 #[test]
 fn a_subscription_for_a_member_placed_on_a_host_is_refused() {
     let state = tempfile::tempdir().expect("state dir");
@@ -2971,6 +2992,47 @@ fn stored_input_rows(state: &Path) -> Vec<(String, String, rusqlite::types::Valu
         .expect("decode the input rows")
 }
 
+/// A stored input row's state document, decoded.
+fn stored_input_document(state_json: &rusqlite::types::Value) -> Value {
+    let bytes = match state_json {
+        rusqlite::types::Value::Blob(bytes) => bytes.as_slice(),
+        rusqlite::types::Value::Text(text) => text.as_bytes(),
+        other => panic!("a stored input row holds no state document: {other:?}"),
+    };
+    serde_json::from_slice(bytes).expect("decode a stored input row's state document")
+}
+
+/// Assert that a candidate's graceful shutdown left the stored input rows
+/// `before`, which the authoritative launch before it kept, byte for byte
+/// as `after` holds them. A candidate materializes no member: Meerkat keeps
+/// every member of a non-authoritative composition dormant, so no member
+/// runtime registers there, and not even the recovery a registration makes
+/// (an input staged for a run that died with the launch before goes back
+/// to queued) runs. That recovery is the authoritative launch's. Any change
+/// is the candidate's.
+fn assert_rows_kept_byte_for_byte(
+    before: &[(String, String, rusqlite::types::Value)],
+    after: &[(String, String, rusqlite::types::Value)],
+) {
+    let documents = |rows: &[(String, String, rusqlite::types::Value)]| {
+        rows.iter()
+            .map(|(runtime_id, input_id, state_json)| {
+                format!(
+                    "{runtime_id} {input_id}: {}",
+                    stored_input_document(state_json)
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        after == before,
+        "the candidate's graceful shutdown leaves every stored input row byte for byte as \
+         it found it\nas kept: {:#?}\nas left: {:#?}",
+        documents(before),
+        documents(after)
+    );
+}
+
 /// How a candidate boot ends.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CandidateEnd {
@@ -2985,12 +3047,16 @@ enum CandidateEnd {
 /// input queued behind it runs neither. The authoritative launch holds the
 /// specialist's turn open and queues a second input behind it; its
 /// graceful shutdown keeps both for the next start, as Meerkat 0.9.5 keeps
-/// a durable member's work. The candidate over that state holds every
-/// stored member's run starts, so the model gets no request, and it
-/// refuses member input typed, so nothing is admitted behind the hold. Its
-/// graceful shutdown leaves every stored input row byte for byte as it
-/// found it. The authoritative launch that follows resumes the run and
-/// runs the queued input, once each, and nothing the candidate refused.
+/// a durable member's work. The candidate over that state materializes no
+/// member (Meerkat keeps every member of a non-authoritative composition
+/// dormant and refuses its wakes) and holds the run starts of every stored
+/// session, so the model gets no request, and it refuses member input
+/// typed, so nothing is admitted. Its graceful shutdown leaves every stored
+/// input row byte for byte as it found it: with no member runtime
+/// registered there, not even the recovery of the held turn's input, staged
+/// for a run that died with the launch before, runs. The authoritative
+/// launch that follows makes that recovery and runs that input and the
+/// queued one, once each, and nothing the candidate refused.
 #[test]
 fn a_candidate_launch_runs_no_stored_member_work_and_the_authoritative_launch_runs_it_once() {
     held_work_across_a_candidate("held-work", CandidateEnd::Shutdown);
@@ -3130,17 +3196,14 @@ fn held_work_across_a_candidate(label: &str, end: CandidateEnd) {
     if end == CandidateEnd::Shutdown {
         candidate.shutdown_and_reap();
         drop(candidate);
-        assert_eq!(
-            stored_input_rows(state.path()),
-            rows_before,
-            "the candidate's shutdown leaves every stored input row as it found it"
-        );
+        assert_rows_kept_byte_for_byte(&rows_before, &stored_input_rows(state.path()));
     } else {
         // Drop kills the gateway process.
         drop(candidate);
     }
 
-    // Boot 3, authoritative: the run resumes, then the queued input runs.
+    // Boot 3, authoritative: the held turn's input runs again, then the queued
+    // input runs.
     let mut third = boot(&format!("{label}-3"), state.path(), &host_config, None);
     // It passes a module call through: the module is not loaded here.
     let module_call = third.request(MODULE_CALL, json!({}), RPC_TIMEOUT);
@@ -3162,8 +3225,8 @@ fn held_work_across_a_candidate(label: &str, end: CandidateEnd) {
             turns_on(&log, REFUSED_INPUT_MARKER)
         ),
         (2, 1, 0),
-        "the authoritative launch resumes the held turn and runs the queued input, once \
-         each, and nothing the candidate refused ever runs"
+        "the authoritative launch runs the held turn's input again and the queued input, \
+         once each, and nothing the candidate refused ever runs"
     );
     third.shutdown_and_reap();
 }
@@ -3325,9 +3388,13 @@ fn mob_journal_kinds(state: &Path) -> Vec<String> {
         .query_map([], |row| row.get::<_, String>(0))
         .expect("read the journal")
         .map(|event| {
+            // A stored row is `{"schema_version": .., "event": <MobEvent>}`.
             let event: Value = serde_json::from_str(&event.expect("a journal row"))
                 .expect("a journal row is JSON");
-            event["kind"]["type"].as_str().unwrap_or("?").to_string()
+            event["event"]["kind"]["type"]
+                .as_str()
+                .unwrap_or("?")
+                .to_string()
         })
         .collect()
 }
@@ -3337,16 +3404,23 @@ fn mob_journal_kinds(state: &Path) -> Vec<String> {
 /// left the mob stopped, as that launch's own next start would.
 const MOB_LIFT_MARKER: &str = "placed_completion_lifecycle_quiesce_ended";
 
-/// A candidate launch in eager_materialize over a store with a live member
-/// and a dormant identity (the announcer, retired, its session kept by
-/// Core). The live member Core restores stays active. The dormant identity
-/// is not resumed: its wake would spawn a member onto its stored session,
-/// which Core journals in the shared mob store, so it is deferred as
-/// resume_member. The candidate's bootstrap completes with no broken
+/// A candidate launch in eager_materialize over a store with a member and
+/// two dormant identities, which a roster pass retired when its roster no
+/// longer listed them, their sessions kept by Core (a retire of the
+/// identity only releases its member, which stays a member). The member Core
+/// restores stays active. Neither dormant identity is seated, and each is
+/// deferred with the change its seat would make. The announcer was seated
+/// and never woken, so its session is unborn (Core's lazy residency: a seat
+/// builds nothing, and the first wake creates the session): the runtime
+/// store holds none, and its wake would start one, so it is deferred as
+/// fresh_session. The recorder ran a turn before the roster dropped it, so
+/// its session is born: its seat would bind a member to that stored
+/// session, which Core journals in the shared mob store, so it is deferred
+/// as resume_member. The candidate's bootstrap completes with no broken
 /// identity, and the one event it adds to the mob journal is the lift of
 /// the mob the authoritative launch's graceful shutdown left stopped: it
-/// spawns no member and stops nothing. The authoritative launch that
-/// follows wakes the dormant identity.
+/// seats no member and stops nothing. The authoritative launch that follows
+/// seats both dormant identities again.
 #[test]
 fn a_candidate_launch_defers_a_dormant_identity_instead_of_resuming_it() {
     let state = tempfile::tempdir().expect("state dir");
@@ -3355,15 +3429,22 @@ fn a_candidate_launch_defers_a_dormant_identity_instead_of_resuming_it() {
     let base_url = start_model(Arc::clone(&log));
     let host_config = config_dir.path().join("config.toml");
     std::fs::write(&host_config, host_config_text(&base_url)).expect("write host config");
-    let both = || vec![roster_spec(), announcer_roster_spec()];
+    let all = || {
+        vec![
+            roster_spec(),
+            announcer_roster_spec(),
+            recorder_roster_spec(),
+        ]
+    };
 
-    // Boot 1, authoritative: both members live, then the announcer retired.
+    // Boot 1, authoritative: every identity is a member, and only the
+    // recorder runs a turn, which creates its session.
     let mut first = boot_with(
         "dormant-1",
         state.path(),
         &host_config,
         None,
-        both(),
+        all(),
         "eager_materialize",
         HELD_DELAY_MS,
     );
@@ -3375,13 +3456,50 @@ fn a_candidate_launch_defers_a_dormant_identity_instead_of_resuming_it() {
         (
             bootstrap["identities"][IDENTITY]["state"].clone(),
             bootstrap["identities"][ANNOUNCER]["state"].clone(),
+            bootstrap["identities"][RECORDER]["state"].clone(),
         ),
-        (json!("active"), json!("active")),
+        (json!("active"), json!("active"), json!("active")),
         "{bootstrap}"
     );
-    first.call("meta/retire", json!({ "identity": ANNOUNCER }));
+    first.call(
+        "meta/send",
+        json!({ "identity": RECORDER, "content": format!("{RECORDER_MARKER}: say ok") }),
+    );
+    wait_until(
+        "the recorder's turn to reach the model",
+        SETTLE_TIMEOUT,
+        || turns_on(&log, RECORDER_MARKER) > 0,
+    );
     first.shutdown_and_reap();
     drop(first);
+    // Boot 1b, authoritative, with a roster that lists neither the
+    // announcer nor the recorder: its roster pass retires their members,
+    // and Core keeps their sessions.
+    let mut dropping = boot_with(
+        "dormant-1b",
+        state.path(),
+        &host_config,
+        None,
+        vec![roster_spec()],
+        "eager_materialize",
+        HELD_DELAY_MS,
+    );
+    let bootstrap = dropping.call(
+        "meta/wait_identity_bootstrap",
+        json!({ "timeout_ms": 60_000 }),
+    );
+    assert_eq!(
+        (
+            bootstrap["ready"].clone(),
+            bootstrap["identities"][IDENTITY]["state"].clone(),
+            bootstrap["identities"].get(ANNOUNCER).is_none(),
+            bootstrap["identities"].get(RECORDER).is_none(),
+        ),
+        (json!(true), json!("active"), true, true),
+        "the roster pass retired the identities it no longer lists: {bootstrap}"
+    );
+    dropping.shutdown_and_reap();
+    drop(dropping);
     let journal = mob_journal_kinds(state.path());
 
     // Boot 2, a candidate over the same state.
@@ -3392,13 +3510,14 @@ fn a_candidate_launch_defers_a_dormant_identity_instead_of_resuming_it() {
         HELD_DELAY_MS,
     );
     params["runtime_options"]["mob_composition"] = json!({ "authority": "candidate" });
-    let mut candidate = boot_with_params("dormant-2", None, both(), params);
+    let mut candidate = boot_with_params("dormant-2", None, all(), params);
     let bootstrap = candidate.call(
         "meta/wait_identity_bootstrap",
         json!({ "timeout_ms": 60_000 }),
     );
     let specialist = candidate.call("meta/status_identity", json!({ "identity": IDENTITY }));
     let announcer = candidate.call("meta/status_identity", json!({ "identity": ANNOUNCER }));
+    let recorder = candidate.call("meta/status_identity", json!({ "identity": RECORDER }));
     assert_eq!(
         (
             bootstrap["complete"].clone(),
@@ -3409,28 +3528,35 @@ fn a_candidate_launch_defers_a_dormant_identity_instead_of_resuming_it() {
             bootstrap["deferred"].clone(),
             specialist["state"].clone(),
             announcer["state"].clone(),
+            recorder["state"].clone(),
         ),
         (
             json!(true),
             json!(true),
             json!(false),
             json!(0),
-            json!(1),
-            json!([{ "identity": ANNOUNCER, "reason": "resume_member" }]),
+            json!(2),
+            json!([
+                { "identity": ANNOUNCER, "reason": "fresh_session" },
+                { "identity": RECORDER, "reason": "resume_member" },
+            ]),
             json!("active"),
             json!("dormant"),
+            json!("dormant"),
         ),
-        "the candidate defers the dormant identity and keeps the restored member: \
-         {bootstrap}\n{specialist}\n{announcer}"
+        "the candidate defers the dormant identities, the unborn seat as fresh_session and \
+         the born one as resume_member, and keeps the restored member: \
+         {bootstrap}\n{specialist}\n{announcer}\n{recorder}"
     );
     candidate.wait_for_stderr("these identities are deferred", SETTLE_TIMEOUT);
     assert!(
         candidate.stderr_has_line(&[
             "candidate launch roster census",
-            "deferred=1",
-            &format!("{ANNOUNCER} (resume_member)"),
+            "deferred=2",
+            &format!("{ANNOUNCER} (fresh_session)"),
+            &format!("{RECORDER} (resume_member)"),
         ]),
-        "the census names the deferred identity\n{}",
+        "the census names the deferred identities\n{}",
         candidate.stderr_tail()
     );
     candidate.shutdown_and_reap();
@@ -3442,13 +3568,13 @@ fn a_candidate_launch_defers_a_dormant_identity_instead_of_resuming_it() {
         "the candidate journals exactly one event, the lift of the stopped mob: {added:?}"
     );
 
-    // Boot 3, authoritative: it wakes the dormant identity.
+    // Boot 3, authoritative: it seats both dormant identities again.
     let mut third = boot_with(
         "dormant-3",
         state.path(),
         &host_config,
         None,
-        both(),
+        all(),
         "eager_materialize",
         HELD_DELAY_MS,
     );
@@ -3462,9 +3588,16 @@ fn a_candidate_launch_defers_a_dormant_identity_instead_of_resuming_it() {
             bootstrap["counts"]["broken"].clone(),
             bootstrap.get("deferred").cloned(),
             bootstrap["identities"][ANNOUNCER]["state"].clone(),
+            bootstrap["identities"][RECORDER]["state"].clone(),
         ),
-        (json!(true), json!(0), None, json!("active")),
-        "the authoritative launch wakes the dormant identity: {bootstrap}"
+        (
+            json!(true),
+            json!(0),
+            None,
+            json!("active"),
+            json!("active")
+        ),
+        "the authoritative launch seats the dormant identities again: {bootstrap}"
     );
     third.shutdown_and_reap();
 }

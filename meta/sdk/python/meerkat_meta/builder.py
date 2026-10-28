@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
 from .identity_first_models import IdentityBootstrapMode, RoleMigrationDeclaration
 from .live import ExperimentalLiveGatewayConfig, OpenAiLiveGatewayConfig
-from .models import ToolArtifactRef
+from .models import AuthBindingRef, NativeRealm, ToolArtifactRef
 
 
 @dataclass
@@ -33,6 +33,10 @@ class MetaBuilderConfig:
     access_config_path: str | None = None
     meerkat_config_path: str | None = None
     provider_credentials_root: str | None = None
+    # ``runtime_options.native_realm``; ``None`` sends nothing.
+    native_realm: NativeRealm | None = None
+    # ``runtime_options.member_auth_binding``; ``None`` sends nothing.
+    member_auth_binding: AuthBindingRef | None = None
     workgraph_enabled: bool | str | None = None
     # ``runtime_options.mob_announcements``, sent as given; ``None`` sends nothing.
     mob_announcements: dict[str, Any] | None = None
@@ -65,6 +69,8 @@ class MetaBuilderConfig:
     topology_provider: Any | None = None
     agent_customizer: Any | None = None
     identity_bootstrap_mode: IdentityBootstrapMode | None = None
+    # runtime_options.member_restore; None sends nothing (on demand).
+    member_restore: str | None = None
     experimental_live_config: ExperimentalLiveGatewayConfig | None = None
     openai_live_config: OpenAiLiveGatewayConfig | None = None
     console_voice_config: OpenAiLiveGatewayConfig | None = None
@@ -309,6 +315,74 @@ class MetaBuilder:
         if not text.strip():
             raise ValueError("provider_credentials_root path must not be empty")
         self._config.provider_credentials_root = text
+        return self
+
+    def native_realm(
+        self,
+        realm_id: str,
+        *,
+        context_root: str | Path,
+        state_root: str | Path,
+        user_config_root: str | Path,
+    ) -> MetaBuilder:
+        """Build every agent from a native realm's effective configuration.
+
+        Emitted as ``runtime_options.native_realm``. ``realm_id`` names a realm
+        a native host keeps under ``state_root``, the realms root it lives
+        under; ``user_config_root`` is the home-like root whose
+        ``.rkat/config.toml`` is the ``global`` realm's document, and
+        ``context_root`` the native host's context root. Each root is an
+        absolute path. The gateway reads the realm's whole configuration
+        once at init with Meerkat's own native reader, copying and writing
+        nothing, and every agent it builds starts from it in place of a host
+        config file: this and :meth:`meerkat_config` are refused together.
+        A realm the state root does not hold, or a configuration that cannot
+        be read or does not validate, refuses init; it never falls back to
+        the default configuration. Requires :meth:`member_auth_binding`, the
+        binding the members build with. Opt-in: without this call nothing is
+        sent. Mirrors the TypeScript builder's ``nativeRealm``.
+        """
+        self._config.native_realm = NativeRealm(
+            realm_id=realm_id,
+            context_root=str(context_root),
+            state_root=str(state_root),
+            user_config_root=str(user_config_root),
+        )
+        return self
+
+    def member_auth_binding(self, binding: AuthBindingRef) -> MetaBuilder:
+        """Build every member with ``binding``.
+
+        Emitted as ``runtime_options.member_auth_binding``: a configured
+        binding of the members' configuration (a :meth:`native_realm`'s, or
+        the :meth:`meerkat_config` file's). Its ``origin``, when set, is
+        ``"configured"``. At init the gateway refuses a binding the
+        configuration does not define, a definition profile whose model or
+        provider the binding does not serve, and anything that would make
+        provider calls off the binding: an automatic spawn policy, a model
+        fallback target off the binding, image generation, or the agent
+        memory engines, in the definition, a realm profile it references or
+        a stored child mob, and an identity declaration an earlier launch
+        adopted that was sealed with no binding or another one. Every member
+        it builds then uses exactly this binding, or its build is refused:
+        roster members, helpers and forks, later spawns and ``spawn_member``
+        members, respawns and resets, members rebuilt on their sessions
+        after a restart, and the members of child mobs. A member Meerkat
+        rebuilds from its own records (a fork seated before the launch named
+        the binding) keeps the binding its session recorded, so one recorded
+        off this binding is refused at its rebuild and must be re-created. A
+        spawn that names another binding is refused, as are identity
+        declaration changes, an attach of a session whose live actor runs
+        another binding, and a child mob that would make provider calls off
+        the binding. It never falls back to a default binding. A running
+        gateway never changes it: a new binding takes effect in a new
+        launch. Opt-in: without this call nothing is sent and the members
+        keep Meerkat's default binding selection. Mirrors the TypeScript
+        builder's ``memberAuthBinding``.
+        """
+        if not isinstance(binding, AuthBindingRef):
+            raise TypeError("member_auth_binding requires an AuthBindingRef")
+        self._config.member_auth_binding = binding
         return self
 
     def openai_live(self, config: OpenAiLiveGatewayConfig) -> MetaBuilder:
@@ -1111,6 +1185,27 @@ class MetaBuilder:
         if not isinstance(mode, IdentityBootstrapMode):
             raise TypeError("mode must be an IdentityBootstrapMode")
         self._config.identity_bootstrap_mode = mode
+        return self
+
+    def member_restore(self, restore: str) -> MetaBuilder:
+        """Set how the mob materializes its seated members when it starts.
+
+        Emitted as ``runtime_options.member_restore``: ``"on_demand"`` (the
+        gateway default when unset: only the members that hold work are
+        materialized at start, every other member on its first delivery),
+        ``"on_demand_verified"`` (as ``"on_demand"``, plus one read-only
+        check of every other member before ready, so a member whose session
+        cannot be resumed reads broken at ready) or ``"eager"`` (every member
+        is materialized at start). Under every value each roster identity is
+        a member of the mob, listed, addressable and reported active from
+        ready, and a read never materializes a member. A gateway older than
+        this option refuses it as an unsupported runtime option.
+        """
+        if restore not in ("on_demand", "on_demand_verified", "eager"):
+            raise ValueError(
+                "member_restore must be 'on_demand', 'on_demand_verified' or 'eager'"
+            )
+        self._config.member_restore = restore
         return self
 
     async def build(self) -> MetaRuntime:

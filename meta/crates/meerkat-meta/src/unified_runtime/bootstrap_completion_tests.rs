@@ -180,7 +180,9 @@ async fn a_failed_identity_bootstrap_mints_nothing() {
         None,
         Some(runtime.mob_handle().definition().clone()),
         // Refused by the roster pass's own validation.
-        IdentityBootstrapMode::LazyWithBackgroundWarm { concurrency: 0 },
+        IdentityBootstrapMode::LazyWithBackgroundWarm {
+            concurrency: Some(0),
+        },
     ));
     let Err(error) = runtime
         .install_and_bootstrap_identity_first_context(context, &[])

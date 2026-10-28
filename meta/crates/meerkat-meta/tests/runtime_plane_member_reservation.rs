@@ -457,8 +457,9 @@ impl meerkat_mob::SpawnMemberCustomizer for ResumeRecorder {
 }
 
 /// The guard composes over a host customizer without hiding its resume ask:
-/// a restart still hands the host customizer each restored member with the
-/// session it is rebuilt on.
+/// after a restart the host customizer is handed each restored member with
+/// the session it is rebuilt on, when Core materializes it (the restart
+/// restores it unbuilt; here an operator wake builds it).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_host_customizer_still_sees_every_restored_member_resume() {
     let dir = tempfile::tempdir().unwrap();
@@ -481,6 +482,11 @@ async fn a_host_customizer_still_sees_every_restored_member_resume() {
     )
     .await;
     assert!(roster_has(&second, "alice").await, "alice is restored");
+    second
+        .handle()
+        .ensure_member_live(&meerkat_mob::AgentIdentity::from("alice"))
+        .await
+        .expect("Core materializes alice on her session");
     let resumed = recorder
         .0
         .lock()

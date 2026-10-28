@@ -203,6 +203,154 @@ export function parseToolArtifactRef(raw: unknown): ToolArtifactRef {
   });
 }
 
+/** The one origin a member auth binding may name. */
+export const CONFIGURED_AUTH_BINDING_ORIGIN = "configured" as const;
+
+/**
+ * A configured auth binding of a realm: Meerkat's `AuthBindingRef`.
+ *
+ * `realm` and `binding` name the binding, and `profile` one of its auth
+ * profiles when set. `origin` may be left out or be `"configured"`, the only
+ * origin a member binding takes. The gateway resolves the binding in the
+ * members' configuration at init; the SDK checks only its shape.
+ */
+export interface AuthBindingRef {
+  readonly realm: string;
+  readonly binding: string;
+  readonly profile?: string;
+  readonly origin?: typeof CONFIGURED_AUTH_BINDING_ORIGIN;
+}
+
+/**
+ * A realm a native host keeps, whose configuration a gateway's members build
+ * from (`runtime_options.native_realm`): `realmId` under `stateRoot`, the
+ * realms root it lives under; `userConfigRoot`, the home-like root whose
+ * `.rkat/config.toml` is the `global` realm's document; and `contextRoot`,
+ * the native host's context root. The gateway requires each root to be an
+ * absolute path and resolves the realm at init; the SDK checks only that
+ * every field is a non-empty string.
+ */
+export interface NativeRealm {
+  readonly realmId: string;
+  readonly contextRoot: string;
+  readonly stateRoot: string;
+  readonly userConfigRoot: string;
+}
+
+function requireNonEmpty(value: unknown, context: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${context} must be a non-empty string`);
+  }
+  return value;
+}
+
+function requireClosedObject(
+  raw: unknown,
+  keys: readonly string[],
+  context: string,
+): Record<string, unknown> {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new TypeError(`${context} must be an object`);
+  }
+  const extra = Object.keys(raw).filter((key) => !keys.includes(key)).sort();
+  if (extra.length > 0) {
+    throw new Error(`${context} has unknown fields: ${extra.join(", ")}`);
+  }
+  return raw as Record<string, unknown>;
+}
+
+/** Validate an {@link AuthBindingRef}; throws on a malformed field. */
+export function validateAuthBindingRef(binding: AuthBindingRef): AuthBindingRef {
+  const checked = requireClosedObject(
+    binding,
+    ["realm", "binding", "profile", "origin"],
+    "auth binding",
+  );
+  const validated: {
+    realm: string;
+    binding: string;
+    profile?: string;
+    origin?: typeof CONFIGURED_AUTH_BINDING_ORIGIN;
+  } = {
+    realm: requireNonEmpty(checked.realm, "auth binding realm"),
+    binding: requireNonEmpty(checked.binding, "auth binding binding"),
+  };
+  if (checked.profile !== undefined) {
+    validated.profile = requireNonEmpty(checked.profile, "auth binding profile");
+  }
+  if (checked.origin !== undefined) {
+    if (checked.origin !== CONFIGURED_AUTH_BINDING_ORIGIN) {
+      throw new Error(
+        `auth binding origin must be "${CONFIGURED_AUTH_BINDING_ORIGIN}" or absent, got ${JSON.stringify(checked.origin)}`,
+      );
+    }
+    validated.origin = CONFIGURED_AUTH_BINDING_ORIGIN;
+  }
+  return validated;
+}
+
+/** The wire form of an {@link AuthBindingRef}: the fields set, as sent. */
+export function authBindingRefToWire(binding: AuthBindingRef): Record<string, string> {
+  const validated = validateAuthBindingRef(binding);
+  const wire: Record<string, string> = {
+    realm: validated.realm,
+    binding: validated.binding,
+  };
+  if (validated.profile !== undefined) {
+    wire.profile = validated.profile;
+  }
+  if (validated.origin !== undefined) {
+    wire.origin = validated.origin;
+  }
+  return wire;
+}
+
+/** Read an {@link AuthBindingRef} from its wire form, which is closed. */
+export function parseAuthBindingRef(raw: unknown): AuthBindingRef {
+  return validateAuthBindingRef(raw as AuthBindingRef);
+}
+
+/** Validate a {@link NativeRealm}; throws on a malformed field. */
+export function validateNativeRealm(realm: NativeRealm): NativeRealm {
+  const checked = requireClosedObject(
+    realm,
+    ["realmId", "contextRoot", "stateRoot", "userConfigRoot"],
+    "native realm",
+  );
+  return {
+    realmId: requireNonEmpty(checked.realmId, "native realm realmId"),
+    contextRoot: requireNonEmpty(checked.contextRoot, "native realm contextRoot"),
+    stateRoot: requireNonEmpty(checked.stateRoot, "native realm stateRoot"),
+    userConfigRoot: requireNonEmpty(checked.userConfigRoot, "native realm userConfigRoot"),
+  };
+}
+
+/** The wire form of a {@link NativeRealm} (`runtime_options.native_realm`). */
+export function nativeRealmToWire(realm: NativeRealm): Record<string, string> {
+  const validated = validateNativeRealm(realm);
+  return {
+    realm_id: validated.realmId,
+    context_root: validated.contextRoot,
+    state_root: validated.stateRoot,
+    user_config_root: validated.userConfigRoot,
+  };
+}
+
+/** Read a {@link NativeRealm} from its wire form, which is closed. */
+export function parseNativeRealm(raw: unknown): NativeRealm {
+  const wire = requireClosedObject(
+    raw,
+    ["realm_id", "context_root", "state_root", "user_config_root"],
+    "native realm",
+  );
+  return validateNativeRealm({
+    realmId: wire.realm_id as string,
+    contextRoot: wire.context_root as string,
+    stateRoot: wire.state_root as string,
+    userConfigRoot: wire.user_config_root as string,
+  });
+}
+
 export type ToolHandler = (
   args: Record<string, unknown>,
 ) => unknown | Promise<unknown>;

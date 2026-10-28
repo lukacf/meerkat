@@ -1,8 +1,8 @@
 use meerkat_meta::{
-    AppendOutcome, ConsoleCursor, ConsoleFrame, ConsoleFrameSource, ConsoleFrameSourceKind,
-    ConsoleFrameStatus, ConsoleLogResult, ConsoleLogStore, ConsoleTimelinePage,
-    ConsoleTimelineQuery, ConsoleTimelineQueryError, ConsoleTimelineWindowPage,
-    ConsoleTimelineWindowQuery, NewConsoleFrame,
+    AppendOutcome, ConsoleCursor, ConsoleDeltaCompaction, ConsoleFrame, ConsoleFrameSource,
+    ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleLogResult, ConsoleLogStore,
+    ConsoleTimelinePage, ConsoleTimelineQuery, ConsoleTimelineQueryError,
+    ConsoleTimelineWindowPage, ConsoleTimelineWindowQuery, NewConsoleFrame,
 };
 use std::sync::{
     Arc,
@@ -121,6 +121,18 @@ impl ConsoleLogStore for FaultStore {
     }
     async fn clear_frames(&self) -> ConsoleLogResult<()> {
         self.inner.clear_frames().await
+    }
+    // The wrapped store's delta compaction and its prefix revision pass
+    // through, so the acceptance runtime reads the log a production store
+    // leaves behind.
+    async fn compact_message_deltas(
+        &self,
+        compaction: &ConsoleDeltaCompaction,
+    ) -> ConsoleLogResult<usize> {
+        self.inner.compact_message_deltas(compaction).await
+    }
+    async fn history_prefix_revision(&self) -> ConsoleLogResult<Option<String>> {
+        self.inner.history_prefix_revision().await
     }
     async fn record_source_watermark(
         &self,

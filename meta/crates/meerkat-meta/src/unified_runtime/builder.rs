@@ -93,6 +93,9 @@ pub struct UnifiedRuntimeBuilder {
     /// The host's fork instruction policy, applied to every builder-owned
     /// mob spec. `None` keeps Meerkat's default.
     fork_instruction_policy: Option<meerkat_core::ForkInstructionPolicy>,
+    /// How the mob materializes its seated members when it starts. `None`
+    /// keeps the spec's own setting, which defaults to on demand.
+    member_restore: Option<crate::identity_first::MemberRestore>,
     /// Host-level compaction policy composed over `meerkat_config`'s
     /// compaction slot at spec-resolve time. Separate from `meerkat_config`
     /// so tuning compaction does not require an embedder to author a whole
@@ -691,6 +694,17 @@ impl UnifiedRuntimeBuilder {
     /// policy, so the builder refuses this override; set it on that spec.
     pub fn fork_instruction_policy(mut self, policy: meerkat_core::ForkInstructionPolicy) -> Self {
         self.fork_instruction_policy = Some(policy);
+        self
+    }
+
+    /// Set how the mob materializes its seated members when it starts (see
+    /// [`crate::identity_first::MemberRestore`]): only the members that hold
+    /// work (`OnDemand`, the default), the same plus a read-only check of
+    /// every other member before ready (`OnDemandVerified`), or every member
+    /// (`Eager`). It applies under every identity bootstrap mode, and to a
+    /// supplied mob spec too.
+    pub fn member_restore(mut self, restore: crate::identity_first::MemberRestore) -> Self {
+        self.member_restore = Some(restore);
         self
     }
 
@@ -2007,6 +2021,20 @@ impl UnifiedRuntimeBuilder {
                     )),
                 ));
         }
+        // Core asks this preparer before every identity member it builds, on
+        // both start paths and at every wake: it publishes the member's
+        // customizer tools with the identity runtime's real context, holds a
+        // build that comes before that runtime is composed until the roster
+        // pass publishes, and records each build's tools.
+        let member_build_preparer = wants_identity_first.then(|| {
+            crate::identity_first::IdentityBuildPreparer::new(customizer_tool_registry.is_some())
+        });
+        if let Some(preparer) = member_build_preparer.as_ref() {
+            mob_spec = mob_spec.with_member_build_preparer(preparer.clone());
+        }
+        if let Some(restore) = self.member_restore {
+            mob_spec = mob_spec.with_member_restore(restore);
+        }
 
         // The structural-events subscription cursor lives in the
         // persistent metadata adapter. For ephemeral builds this can be
@@ -2050,12 +2078,10 @@ impl UnifiedRuntimeBuilder {
         // attaches - their decorators read the slot per call).
         let dispatch_taint_slot = mob_spec.dispatch_taint_slot();
         let live_plan = self.live_plan(&mut mob_spec)?;
-        // Resolve one roster for this boot before preparing the mob. A dirty
-        // Running log can restore members inside prepare, before the identity
-        // runtime itself is constructed: the mob build's early customizer
-        // publication, the run-start holds it stages for those members and
-        // the identity bootstrap all use this one roster, so a hold never
-        // names an identity the bootstrap's roster lacks.
+        // Resolve one roster for this boot before preparing the mob. The
+        // members the mob leaves to the roster pass's preparation and the
+        // identity bootstrap both use this one roster, so the mob never waits
+        // on an identity the bootstrap's roster lacks.
         //
         // The roster is resolved from the definition the mob runs: on a
         // resume the stored one, judged against the supplied composition
@@ -2063,7 +2089,7 @@ impl UnifiedRuntimeBuilder {
         // roster provider sees its definition. Preparation then resumes
         // exactly what was judged here, even when the supplied definition
         // differs (a candidate launch that boots the stored one knowingly).
-        let identity_roster_specs = if wants_identity_first {
+        let (identity_roster_specs, launch_mob_id) = if wants_identity_first {
             let provider = self.roster_provider.as_ref().ok_or_else(|| {
                 UnifiedRuntimeBuilderError::Bootstrap(UnifiedRuntimeBootstrapError::IdentityFirst(
                     "identity-first validation requires roster_provider".to_string(),
@@ -2072,74 +2098,60 @@ impl UnifiedRuntimeBuilder {
             let launch_definition = mob_spec.read_launch_definition().await.map_err(|error| {
                 UnifiedRuntimeBuilderError::Bootstrap(UnifiedRuntimeBootstrapError::Mob(error))
             })?;
-            Some(
-                provider
-                    .roster(&RosterContext {
-                        mob_definition: Some(launch_definition),
-                        previous_identities: Vec::new(),
-                    })
-                    .await
-                    .map_err(|error| {
-                        UnifiedRuntimeBuilderError::Bootstrap(
-                            UnifiedRuntimeBootstrapError::IdentityFirst(format!(
-                                "roster provider failed before mob preparation: {error}"
-                            )),
-                        )
-                    })?,
+            let launch_mob_id = launch_definition.id.to_string();
+            (
+                Some(
+                    provider
+                        .roster(&RosterContext {
+                            mob_definition: Some(launch_definition),
+                            previous_identities: Vec::new(),
+                        })
+                        .await
+                        .map_err(|error| {
+                            UnifiedRuntimeBuilderError::Bootstrap(
+                                UnifiedRuntimeBootstrapError::IdentityFirst(format!(
+                                    "roster provider failed before mob preparation: {error}"
+                                )),
+                            )
+                        })?,
+                ),
+                Some(launch_mob_id),
             )
         } else {
-            None
+            (None, None)
         };
-        // A persistent mob can be restored while `bootstrap` builds it (a log
-        // that was left Running revives every member inside meerkat's own
-        // resume), before any identity activation step. Publish each roster
-        // identity's customizer tools first, so those builds carry them (#563).
-        // The mob is durable under a state directory or in a host store realm.
-        let durable_mob = storage_layout.is_some() || self.host_store.is_some();
-        let mut early_customizer_tools_pending = match (
-            customizer_tool_registry.as_ref(),
-            identity_roster_specs.as_ref(),
-            agent_customizer.as_ref(),
-            durable_mob,
-        ) {
-            (Some(registry), Some(roster), Some(customizer), true) => {
-                crate::identity_first::customizer_tools::prepublish_before_mob_build(
-                    registry,
-                    roster,
-                    customizer.as_ref(),
-                    AgentRuntimeServices::empty(),
-                )
-                .await
-            }
-            _ => BTreeMap::new(),
-        };
-        // That resume revives a member whose identity this roster no longer
-        // lists as well, and no publication covers it: it is held until the
-        // roster pass retires it. A host-adopted identity's member, which the
-        // roster pass never retires, is not held.
-        if let (Some(_), Some(roster), true) = (
-            customizer_tool_registry.as_ref(),
-            identity_roster_specs.as_ref(),
-            durable_mob,
-        ) {
-            let stored = mob_spec
-                .stored_command_driven_identity_members()
-                .await
-                .map_err(|error| {
-                    UnifiedRuntimeBuilderError::Bootstrap(UnifiedRuntimeBootstrapError::Mob(error))
-                })?;
-            early_customizer_tools_pending.extend(
-                crate::identity_first::customizer_tools::unpublished_before_mob_build(
-                    crate::identity_first::customizer_tools::unlisted_stored_identities(
-                        roster, &stored,
+        // Each identity with a pending first-boot row or a rotation a crash
+        // interrupted waits for the roster pass's seat step: the mob
+        // materializes none of them at start, and refuses their wakes
+        // retryable until the seat step for each ends the mark. The identity
+        // runtime keeps the seeded set, so every seat step ends each mark.
+        let mut host_pending_seeded = Vec::new();
+        if let (Some(roster), Some(mob_id)) =
+            (identity_roster_specs.as_ref(), launch_mob_id.as_deref())
+        {
+            let first_boot = match self.host_store.as_ref() {
+                Some(host) => Some(
+                    crate::identity_first::first_boot_manifest::FirstBootLocation::HostStore(
+                        host.realm.documents().clone(),
                     ),
                 ),
-            );
+                None => self
+                    .persistent_state_path
+                    .clone()
+                    .map(crate::identity_first::first_boot_manifest::FirstBootLocation::StateDir),
+            };
+            let host_pending = crate::identity_first::runtime::host_pending_members_before_build(
+                first_boot.as_ref(),
+                Some((persistent_metadata.as_ref(), mob_id)),
+                roster,
+            )
+            .await;
+            host_pending_seeded.clone_from(&host_pending);
+            mob_spec = mob_spec.with_host_pending_members(host_pending);
         }
-        // A restored member without its tools must not start a run before its
-        // materialization publishes them: meerkat holds its run starts from
-        // registration until the identity runtime releases the hold.
-        mob_spec = mob_spec.with_restored_members_awaiting_tools(&early_customizer_tools_pending);
+        // The identity runtime keeps its identity records (each build's tool
+        // record, each rotation's intent) in the composition's metadata store.
+        let identity_record_store = Arc::clone(&persistent_metadata);
         let module_agent_events = self.module_agent_events;
         let options = self.options;
         #[allow(unused_mut)]
@@ -2295,11 +2307,23 @@ impl UnifiedRuntimeBuilder {
             identity_runtime
                 .set_customizer_tool_registry(customizer_tool_registry.clone())
                 .await;
-            identity_runtime.record_customizer_tools_pending(early_customizer_tools_pending);
+            identity_runtime.set_identity_records(identity_record_store, runtime.mob_id());
+            identity_runtime.seed_host_pending(host_pending_seeded);
             // A candidate launch's mob build held every stored member's run
             // starts, and it releases none of them.
             if !runtime.mob_runtime.speaks_for_composition() {
                 identity_runtime.mark_candidate_launch();
+            }
+            // The preparer meets the identity runtime once its customizer,
+            // registry and records are installed: the builds it held before
+            // are pending on the runtime, and the roster pass publishes them.
+            if let Some(preparer) = member_build_preparer.as_ref() {
+                preparer
+                    .bind(
+                        &identity_runtime,
+                        runtime.mob_runtime.session_service().cloned(),
+                    )
+                    .await;
             }
             identity_runtime
                 .set_agent_memory(agent_memory_injector.clone())
@@ -5089,9 +5113,12 @@ model = "gpt-5.5"
             (true, "credential-store-recorded"),
             (false, "credential-store-default"),
         ] {
+            // A build validates its definition, which needs a profile.
             let mut builder = UnifiedRuntimeBuilder::default().definition(
-                MobDefinition::from_toml(&format!("[mob]\nid = \"{id}\"\n"))
-                    .expect("fixture definition"),
+                MobDefinition::from_toml(&format!(
+                    "[mob]\nid = \"{id}\"\n[profiles.worker]\nmodel = \"gpt-5.5\"\n"
+                ))
+                .expect("fixture definition"),
             );
             if named {
                 builder = builder.provider_auth_persistence(credential_store(&dir.path().join(id)));

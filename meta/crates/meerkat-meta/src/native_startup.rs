@@ -29,7 +29,16 @@
 //!    a session, by a continuity record or by Core's durable member binding
 //!    in the composition's mob store, while `runtime.sqlite` is missing or
 //!    holds no session are refused; restoring the runtime store is the
-//!    remedy. A composition whose runtime store is a storage provider's
+//!    remedy. A binding whose session is unborn does not count: a seat (or a
+//!    rotation's next life) builds nothing, and the member's first wake
+//!    creates its session, so a directory whose members were seated and
+//!    never woken has no session to lose (Core's member history answers
+//!    which sessions are unborn, from the journal rows its restart restores
+//!    the fact from). Core's binding of every session since the mob's latest
+//!    reset counts, not only each identity's last: an identity reset and not
+//!    woken since has its next life unborn, and the session of the life
+//!    before it, created and then archived, is still the runtime store's to
+//!    keep. A composition whose runtime store is a storage provider's
 //!    backend ([`RuntimeStoreLocation::StorageProvider`]) has no
 //!    `runtime.sqlite` here to compare with, so the claim skips this file
 //!    check; the builder runs `refuse_lost_runtime_store` instead, through
@@ -368,11 +377,11 @@ fn lock_table_names_another_holder(table: &str, file_id: &str, this_process: &st
         .any(|pid| pid != this_process)
 }
 
-/// How many distinct identities are bound to a session: by a row of
-/// `continuity_records` that names one, or by Core's durable member binding
-/// in `mob_store` (each durable identity's last binding since the latest mob
-/// reset, live or retired) that names one. A missing database, table or mob
-/// store binds none.
+/// How many distinct identities are bound to a session that exists or
+/// existed: by a row of `continuity_records` that names one, or by Core's
+/// durable member binding in `mob_store` (of any session since the latest
+/// mob reset, live, moved or retired) that names a session Core does not
+/// hold unborn. A missing database, table or mob store binds none.
 async fn bound_identity_count(
     state_dir: &Path,
     mob_store: Option<&Path>,
@@ -395,20 +404,37 @@ async fn bound_identity_count(
     Ok(bound.len())
 }
 
-/// The durable identities whose last binding in the mob store at `path`
-/// names a session, read through Core's read-only member history reader (it
-/// never creates, migrates or writes the store). Core names a member by its
-/// roster id, the comms-safe encoding of the identity, so each is decoded to
-/// the identity a continuity record names: an identity bound both ways counts
-/// once. A missing store binds none; a store this build cannot read refuses.
+/// The durable identities that had a session created since the latest
+/// reset of the mob store at `path`, read through Core's read-only member
+/// history reader (it never creates, migrates or writes the store): Core's
+/// binding of each session since that reset
+/// (`MemberBindingHistory::session_bindings_since_reset`) whose spawn was
+/// durable and whose session is not unborn. Not only each identity's last
+/// binding: a member reset (a rotation) seats the next life on a session
+/// that is unborn until its first wake, and archives the session of the
+/// life before it, which the runtime store still holds. An unborn session
+/// (`MemberBindingHistory::session_unborn`: a seat or a rotation built
+/// nothing and the member's first wake has not created it yet) is in no
+/// store, so a binding to it alone loses nothing when `runtime.sqlite` is
+/// empty. Core names a member by its roster id, the comms-safe encoding of
+/// the identity, so each is decoded to the identity a continuity record
+/// names: an identity bound by several sessions, or both ways, counts once.
+/// A missing store binds none; a store this build cannot read refuses.
 async fn mob_store_bound_identities(
     state_dir: &Path,
     path: &Path,
 ) -> Result<Vec<String>, StorageLayoutError> {
     match meerkat_mob::MobStorage::read_member_binding_history(path).await {
         Ok(history) => Ok(history
-            .durable_identity_bindings()
-            .filter(|binding| binding.session_id().is_some())
+            .session_bindings_since_reset()
+            .filter(|binding| {
+                matches!(
+                    binding.continuity_intent(),
+                    meerkat_mob::SpawnContinuityIntent::DurableIdentity { .. }
+                ) && binding
+                    .session_id()
+                    .is_some_and(|session| !history.session_unborn(session))
+            })
             .map(|binding| {
                 crate::member_comms_id::durable_identity_for_roster_member(
                     binding.identity().as_ref(),
@@ -1003,6 +1029,185 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A durable identity seated and never woken binds a session no store
+    /// holds yet: its seat built nothing, and Core holds the session unborn
+    /// until the member's first wake creates it. Its binding loses nothing
+    /// when `runtime.sqlite` is gone, so it does not count; the identity
+    /// woken beside it does, and the refusal names that one alone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unborn_seat_binding_needs_no_runtime_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = dir.path();
+        let mob_store = state.join(crate::storage_layout::EVENT_LOG_DB_FILE_NAME);
+        {
+            let (storage, provenance) =
+                crate::mob_composition_manifest::persistent_mob_storage(mob_store.clone())
+                    .expect("persistent mob storage");
+            let mut spec = crate::MobBootstrapSpec::persistent(
+                durable_member_definition(),
+                storage,
+                provenance,
+                state.to_path_buf(),
+                4,
+            )
+            .await
+            .expect("persistent composition");
+            spec.options.default_llm_client =
+                Some(std::sync::Arc::new(meerkat_client::TestClient::default()));
+            let runtime = Box::pin(crate::MobRuntime::bootstrap(spec))
+                .await
+                .expect("bootstrap the mob runtime");
+            let seat = |identity: &str| {
+                let member_id = crate::member_comms_id::mob_member_id(identity);
+                let mut member = meerkat_mob::SpawnMemberSpec::new("lead", member_id);
+                member.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+                    continuity_key: identity.to_string(),
+                };
+                member
+            };
+            let outcomes = Box::pin(
+                runtime
+                    .handle()
+                    .seat_dormant_members(vec![seat("domain:woken"), seat("domain:unborn")]),
+            )
+            .await
+            .expect("seat both identities");
+            assert!(
+                outcomes.iter().all(|outcome| matches!(
+                    outcome,
+                    meerkat_mob::DormantSeatOutcome::Seated { .. }
+                )),
+                "{outcomes:?}"
+            );
+            Box::pin(
+                runtime
+                    .handle()
+                    .ensure_member_live(&crate::member_comms_id::mob_member_id("domain:woken")),
+            )
+            .await
+            .expect("the first wake creates the woken identity's session");
+            runtime
+                .handle()
+                .shutdown()
+                .await
+                .expect("shut the mob down");
+        }
+        assert_eq!(
+            bound_identity_count(state, Some(&mob_store))
+                .await
+                .expect("count Core bindings"),
+            1,
+            "only the woken identity's session exists"
+        );
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = state.join(RUNTIME_DB_FILE_NAME).into_os_string();
+            path.push(suffix);
+            match std::fs::remove_file(PathBuf::from(path)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("remove the runtime store: {error}"),
+            }
+        }
+        assert!(matches!(
+            refuse_unready_state_dir(state, Some(&mob_store)).await,
+            Err(StorageLayoutError::RuntimeStoreMissing {
+                bound_identities: 1,
+                ..
+            })
+        ));
+    }
+
+    /// A member reset (a rotation) seats the identity's next life on a new
+    /// session, unborn until its first wake, and archives the session of the
+    /// life before it, which the runtime store still holds. Stopped before
+    /// that wake, with `runtime.sqlite` gone, the next start's check (the one
+    /// the gateway runs before it composes, and every persistent composition
+    /// runs) refuses typed, counting the identity: the start does not go on
+    /// over an empty runtime store that lost the previous life's transcript.
+    /// Control: while the runtime store still holds that session, the same
+    /// directory passes the check.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reset_identity_not_woken_since_still_needs_its_runtime_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = dir.path();
+        let mob_store = state.join(crate::storage_layout::EVENT_LOG_DB_FILE_NAME);
+        let durable = || {
+            let mut member = meerkat_mob::SpawnMemberSpec::new(
+                "lead",
+                crate::member_comms_id::mob_member_id("domain:reset-member"),
+            );
+            member.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+                continuity_key: "domain:reset-member".to_string(),
+            };
+            member
+        };
+        {
+            let (storage, provenance) =
+                crate::mob_composition_manifest::persistent_mob_storage(mob_store.clone())
+                    .expect("persistent mob storage");
+            let mut spec = crate::MobBootstrapSpec::persistent(
+                durable_member_definition(),
+                storage,
+                provenance,
+                state.to_path_buf(),
+                4,
+            )
+            .await
+            .expect("persistent composition");
+            spec.options.default_llm_client =
+                Some(std::sync::Arc::new(meerkat_client::TestClient::default()));
+            let runtime = Box::pin(crate::MobRuntime::bootstrap(spec))
+                .await
+                .expect("bootstrap the mob runtime");
+            Box::pin(runtime.handle().ensure_member(durable()))
+                .await
+                .expect("spawn the durable identity");
+            let next_life = Box::pin(runtime.handle().rotate_member(durable()))
+                .await
+                .expect("reset the durable identity");
+            assert!(
+                runtime.handle().session_unborn(&next_life),
+                "the reset seats the next life unborn"
+            );
+            runtime
+                .handle()
+                .shutdown()
+                .await
+                .expect("shut the mob down");
+        }
+        assert_eq!(
+            bound_identity_count(state, Some(&mob_store))
+                .await
+                .expect("count Core bindings"),
+            1,
+            "the previous life's session was created"
+        );
+        refuse_unready_state_dir(state, Some(&mob_store))
+            .await
+            .expect("the runtime store holds the previous life's session");
+
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = state.join(RUNTIME_DB_FILE_NAME).into_os_string();
+            path.push(suffix);
+            match std::fs::remove_file(PathBuf::from(path)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("remove the runtime store: {error}"),
+            }
+        }
+        let restarted = refuse_unready_state_dir(state, Some(&mob_store)).await;
+        assert!(
+            matches!(
+                restarted,
+                Err(StorageLayoutError::RuntimeStoreMissing {
+                    bound_identities: 1,
+                    ..
+                })
+            ),
+            "{restarted:?}"
+        );
     }
 
     /// An unmigrated directory refuses typed before any store opens, naming

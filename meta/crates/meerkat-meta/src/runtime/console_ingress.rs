@@ -1,7 +1,7 @@
 //! Console ingress types and JSON request/response structures.
 
 use super::*;
-use crate::access::{AccessController, AccessResource, AccessView, AgentResourceAttributes};
+use crate::access::{AccessController, AccessView, AgentResourceAttributes};
 use crate::auth::session_fence::ConsoleSessionFences;
 use crate::rpc::META_CONTRACT_VERSION;
 use crate::unobserved::{UnobservedFacts, UnobservedReason};
@@ -534,23 +534,17 @@ pub(crate) fn console_member_access_attributes(
     }
 }
 
-fn member_access_resource(member: &ConsoleMember) -> AccessResource<'_> {
-    AccessResource {
-        identity: Some(console_member_console_identity(member)),
-        agent_id: Some(member.agent_identity.as_str()),
-        role: Some(member.role.as_str()),
-        labels: Some(&member.labels),
-    }
-}
-
 fn filter_snapshot_for_access(snapshot: &mut ConsoleLiveSnapshot, view: &AccessView) {
     if !view.enforced() {
         return;
     }
+    // Each member is judged by the attributes its row carries, then along
+    // its spawn lineage, as every agent-scoped check judges it: a member an
+    // agent spawned follows its spawner.
     snapshot.members.retain(|member| {
-        view.decide(
+        view.decide_agent_with_attributes(
             crate::access::ACTION_AGENT_VIEW,
-            &member_access_resource(member),
+            &console_member_access_attributes(&member.agent_identity, &member.role, &member.labels),
         )
         .is_allow()
     });

@@ -28,7 +28,7 @@
 // -- Builder + Runtime ----------------------------------------------------
 
 export { Meta, MetaBuilder } from "./builder.js";
-export type { ForkInstructionPolicy, MetaBuilderConfig } from "./builder.js";
+export type { ForkInstructionPolicy, MemberRestore, MetaBuilderConfig } from "./builder.js";
 export {
   LIVE_EXECUTION_CLIENT_CONTEXT_V1,
   LIVE_EXECUTION_FUNCTION_BRIDGE_V1,
@@ -124,6 +124,18 @@ export {
   type ForkBuildSource,
   type ToolArtifactRef,
   type MobMemberBinding,
+} from "./models.js";
+// The members' native realm and auth binding (`runtime_options`).
+export {
+  CONFIGURED_AUTH_BINDING_ORIGIN,
+  authBindingRefToWire,
+  nativeRealmToWire,
+  parseAuthBindingRef,
+  parseNativeRealm,
+  validateAuthBindingRef,
+  validateNativeRealm,
+  type AuthBindingRef,
+  type NativeRealm,
 } from "./models.js";
 export type {
   DiscoverySpec,
@@ -289,6 +301,7 @@ export {
   parseMemberProgressSnapshot,
   parseRichMemberSnapshot,
   parseIdentityResolvedToolsResult,
+  parseIdentityWarmResult,
   parseIdentityRoutingStatusResult,
   parseHelperResult,
   parseMobRunSnapshot,
@@ -513,6 +526,8 @@ export type {
   MemberProgressSnapshot,
   RichMemberSnapshot,
   IdentityResolvedToolsResult,
+  IdentityWarmResult,
+  ResolvedToolsSource,
   IdentityRoutingStatusResult,
   HelperResult,
   MobRunSnapshot,

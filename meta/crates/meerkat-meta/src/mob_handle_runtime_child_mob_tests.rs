@@ -2521,3 +2521,684 @@ fn an_offered_bundle_is_forwarded_to_child_mob_creation() {
         meerkat_mob_mcp::ChildToolBundleAvailability::HostOnly
     ));
 }
+
+// ---------------------------------------------------------------------------
+// The launch's member auth binding reaches the root mob and the child mobs
+// ---------------------------------------------------------------------------
+
+/// A member auth binding goes on the root mob's spawn customizer and is child
+/// policy too: the agent mob-tool state is rebuilt with it at bootstrap, so
+/// the child mobs agents create build their members with the binding.
+#[tokio::test]
+async fn a_member_auth_binding_reaches_the_root_and_the_child_mobs() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let binding = meerkat_core::AuthBindingRef {
+        realm: meerkat_core::RealmId::parse("native-team").expect("realm id"),
+        binding: meerkat_core::BindingId::parse("b").expect("binding id"),
+        profile: None,
+        origin: meerkat_core::BindingOrigin::Configured,
+    };
+    let mut spec =
+        composed_spec(dir.path(), custody_free_storage()).with_member_auth_binding(binding.clone());
+    assert!(
+        spec.spawn_member_customizer.is_some(),
+        "the root mob's spawns carry the binding"
+    );
+    let policy = spec.agent_mob_child_policy();
+    assert_eq!(policy.member_auth_binding, Some(binding));
+    assert!(!policy.is_empty(), "the binding is child policy to forward");
+    let initial = spec.agent_mob_mcp_state.clone().expect("initial state");
+    spec.apply_agent_mob_child_policy()
+        .expect("apply the child policy");
+    let state = spec.agent_mob_mcp_state.as_ref().expect("final state");
+    assert!(
+        !Arc::ptr_eq(&initial, state),
+        "the agent mob-tool state is rebuilt with the binding"
+    );
+}
+
+/// The realm document the end-to-end binding row builds its members from:
+/// binding `b`, on the realm whose default is `a`. The scripted model answers
+/// every turn, so no key is ever resolved.
+const BOUND_REALM_DOCUMENT: &str = r#"
+[realm.native-team]
+default_binding = "a"
+
+[realm.native-team.backend.openai_main]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.native-team.auth.key_a]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "env", env = "CHILD_MOB_BINDING_TEST_KEY_A" }
+
+[realm.native-team.auth.key_b]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "env", env = "CHILD_MOB_BINDING_TEST_KEY_B" }
+
+[realm.native-team.binding.a]
+backend_profile = "openai_main"
+auth_profile = "key_a"
+
+[realm.native-team.binding.b]
+backend_profile = "openai_main"
+auth_profile = "key_b"
+"#;
+
+fn native_team_binding(binding: &str) -> meerkat_core::AuthBindingRef {
+    meerkat_core::AuthBindingRef {
+        realm: meerkat_core::RealmId::parse("native-team").expect("realm id"),
+        binding: meerkat_core::BindingId::parse(binding).expect("binding id"),
+        profile: None,
+        origin: meerkat_core::BindingOrigin::Configured,
+    }
+}
+
+/// The members' configuration as a launch with `runtime_options.native_realm`
+/// reads it: the realm document above, on disk under `root`, read through
+/// the gateway's native realm reader.
+async fn native_team_config(root: &Path) -> Config {
+    let realms = root.join("realms");
+    meerkat_store::ensure_realm_manifest_in(&realms, "native-team", None, None)
+        .await
+        .expect("the realm manifest");
+    std::fs::write(
+        meerkat_store::realm_paths_in(&realms, "native-team").config_path,
+        BOUND_REALM_DOCUMENT,
+    )
+    .expect("the realm document");
+    std::fs::create_dir_all(root.join("home")).expect("the user configuration root");
+    std::fs::create_dir_all(root.join("context")).expect("the context root");
+    let selection = crate::native_realm::NativeRealmSelection::parse(&json!({
+        "realm_id": "native-team",
+        "context_root": root.join("context"),
+        "state_root": realms,
+        "user_config_root": root.join("home"),
+    }))
+    .expect("a native realm");
+    crate::native_realm::read_native_realm_config(&selection)
+        .await
+        .expect("the native realm's configuration")
+}
+
+/// A persistent lifetime whose members build from `config` with `binding`:
+/// the stock persistent composition with the scripted model, a durable
+/// child root, and the launch's member auth binding.
+async fn bound_lifetime(
+    dir: &Path,
+    mob_id: &str,
+    host: &Host,
+    config: Config,
+    binding: meerkat_core::AuthBindingRef,
+) -> MobRuntime {
+    let (storage, provenance) =
+        crate::mob_composition_manifest::persistent_mob_storage(dir.join("mob.sqlite3"))
+            .expect("root mob storage");
+    let mut spec = MobBootstrapSpec::persistent_inner(
+        root_definition(mob_id),
+        storage,
+        provenance,
+        dir.to_path_buf(),
+        8,
+        None,
+        false,
+        None,
+        None,
+        None,
+        CapabilityFlags::default(),
+        None,
+        Some(config),
+    )
+    .await
+    .expect("persistent spec")
+    .with_child_mob_storage(durable(dir))
+    .with_member_auth_binding(binding);
+    let model: Arc<dyn LlmClient> = host.model.clone();
+    spec.options.default_llm_client = Some(model);
+    Box::pin(MobRuntime::bootstrap(spec))
+        .await
+        .expect("bootstrap the bound lifetime")
+}
+
+/// One plain turn of `worker` in `child`, so its session commits a
+/// checkpoint.
+async fn run_plain_turn(child: &MobHandle, worker: &str) {
+    let spec = BoundedResultSpec::new("turn", 4096).expect("bounded result spec");
+    let work = child
+        .start_work_for_identity_bounded(
+            AgentIdentity::from(worker),
+            WorkSpec::new(ContentInput::Text("go".to_string()), WorkOrigin::Internal),
+            HandlingMode::Queue,
+            spec.clone(),
+        )
+        .await
+        .expect("start a turn");
+    tokio::time::timeout(Duration::from_mins(1), work.wait_bounded(spec))
+        .await
+        .expect("turn completes within the failure bound")
+        .expect("turn succeeds");
+}
+
+/// `(mob, member, auth binding)` of every member session the lifetime's
+/// session store holds, read from each session's own record: the binding
+/// the member was built with, never the option a launch sent.
+async fn recorded_member_bindings(
+    dir: &Path,
+) -> Vec<(String, String, Option<meerkat_core::AuthBindingRef>)> {
+    use meerkat::SessionStore as _;
+    let store = meerkat_store::SqliteSessionStore::open(dir.join("runtime.sqlite"))
+        .expect("open the session store");
+    let mut recorded = Vec::new();
+    for meta in store
+        .list(meerkat::SessionFilter::default())
+        .await
+        .expect("list the sessions")
+    {
+        let Some(session) = store.load(&meta.id).await.expect("load a session") else {
+            continue;
+        };
+        let Some(metadata) = session
+            .try_session_metadata()
+            .expect("decode the session metadata")
+        else {
+            continue;
+        };
+        if let Some(member) = metadata.mob_member_binding {
+            recorded.push((member.mob_id, member.member, metadata.auth_binding));
+        }
+    }
+    recorded
+}
+
+/// End to end, with the binding customizer composed as the stdio gateway
+/// composes it: the root mob's member and the members of a child mob an
+/// agent creates through the agent mob-tool state each record the launch's
+/// binding on their own session, and a spawn into the child that names
+/// another binding is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_auth_binding_is_recorded_by_the_members_of_a_child_mob() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let native = tempfile::tempdir().expect("native realm root");
+    let host = Host::new();
+    let binding = native_team_binding("b");
+    let runtime = bound_lifetime(
+        dir.path(),
+        &unique("bound-root"),
+        &host,
+        native_team_config(native.path()).await,
+        binding.clone(),
+    )
+    .await;
+    let coordinator = coordinator_session(&runtime).await;
+    let child_id = MobId::from(unique("bound-child").as_str());
+    let child = create_child(&runtime, &child_id, coordinator).await;
+    for worker in CHILD_WORKERS {
+        run_plain_turn(&child, worker).await;
+    }
+
+    let refused = runtime
+        .agent_mob_mcp_state()
+        .expect("agent mob state")
+        .mob_spawn_spec(
+            &child_id,
+            SpawnMemberSpec::new(ProfileName::from("worker"), AgentIdentity::from("rogue"))
+                .with_auth_binding(native_team_binding("a")),
+        )
+        .await;
+    assert!(
+        refused.is_err(),
+        "a child spawn that names another binding is refused: {refused:?}"
+    );
+    drop(child);
+    stand_down_released(runtime, 1).await;
+
+    let recorded = recorded_member_bindings(dir.path()).await;
+    let child_mob = child_id.to_string();
+    for worker in CHILD_WORKERS {
+        assert!(
+            recorded
+                .iter()
+                .any(|(mob, member, _)| *mob == child_mob && member == worker),
+            "{worker} of the child mob records its session: {recorded:?}"
+        );
+    }
+    assert!(
+        recorded
+            .iter()
+            .any(|(mob, member, _)| *mob != child_mob && member == "coordinator"),
+        "the root mob's member records its session: {recorded:?}"
+    );
+    assert!(
+        recorded
+            .iter()
+            .all(|(_, _, recorded_binding)| recorded_binding.as_ref() == Some(&binding)),
+        "every member session records the launch binding: {recorded:?}"
+    );
+    assert!(
+        recorded.iter().all(|(_, member, _)| member != "rogue"),
+        "the refused spawn built nothing: {recorded:?}"
+    );
+}
+
+/// Under a member auth binding a spawn whose build would get Meerkat's
+/// fallback web search (web search enabled on a model the provider serves
+/// without its own search) is refused at its build, and the spawn caller
+/// meets the refusal typed: the message names `member_auth_binding_uncarried`
+/// with the reason, and the error keeps the kind and reason as data, which
+/// `meta/spawn_member` answers in `error.data`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spawn_refused_at_its_build_reaches_the_caller_typed() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let native = tempfile::tempdir().expect("native realm root");
+    let host = Host::new();
+    let runtime = bound_lifetime(
+        dir.path(),
+        &unique("bound-search"),
+        &host,
+        native_team_config(native.path()).await,
+        native_team_binding("b"),
+    )
+    .await;
+    let mut spec = SpawnMemberSpec::new(
+        ProfileName::from("coordinator"),
+        AgentIdentity::from("searcher"),
+    );
+    spec.override_profile = MobDefinition::from_toml(
+        "[mob]\nid = \"override\"\n\n[profiles.searcher]\nmodel = \"gpt-5.3-codex\"\n\
+         provider = \"openai\"\nruntime_mode = \"turn_driven\"\n\
+         [profiles.searcher.tools]\ncomms = true\n",
+    )
+    .expect("the override definition")
+    .profiles["searcher"]
+        .as_inline()
+        .cloned();
+    spec.tool_category_overrides.web_search = meerkat_core::ToolCategoryOverride::Enable;
+    let refused = Box::pin(runtime.handle().spawn_spec(spec))
+        .await
+        .expect_err("the fallback web search is refused at the build");
+    assert!(
+        refused
+            .to_string()
+            .contains("member_auth_binding_uncarried:"),
+        "{refused}"
+    );
+    let data = crate::native_realm::member_build_refusal_data(&MobRuntimeError::Mob(refused))
+        .expect("the refusal keeps its data");
+    assert_eq!(data["kind"], json!("member_auth_binding_uncarried"));
+    assert!(
+        data["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("fallback web search")),
+        "{data}"
+    );
+    stand_down_released(runtime, 0).await;
+}
+
+/// A host's member registration hook, as a host composing the stdio gateway
+/// installs one: it selects each member's own session document as its
+/// destination and the host's policy for its prepared surface, and records
+/// the tool names of every prepared surface it decides.
+#[derive(Default)]
+struct SurfaceRecordingHook {
+    prepared: Mutex<Vec<Vec<String>>>,
+}
+
+impl SurfaceRecordingHook {
+    /// The tool names of each prepared surface the hook decided, in order.
+    fn prepared(&self) -> Vec<Vec<String>> {
+        self.prepared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait]
+impl meerkat_mob::MemberRuntimeRegistrationHook for SurfaceRecordingHook {
+    async fn select_destination(
+        &self,
+        identity: &meerkat_mob::MemberRuntimeBuildIdentity,
+    ) -> Result<meerkat_mob::MemberDestinationSelection, meerkat_mob::MobError> {
+        Ok(crate::unified_runtime::held_identity_test_support::destination(identity))
+    }
+
+    async fn expected_destination(
+        &self,
+        identity: &meerkat_mob::MemberRuntimeBuildIdentity,
+    ) -> Result<meerkat_mob::MemberDestinationSelection, meerkat_mob::MobError> {
+        Ok(crate::unified_runtime::held_identity_test_support::destination(identity))
+    }
+
+    async fn verify_member_surface(
+        &self,
+        _identity: &meerkat_mob::MemberRuntimeBuildIdentity,
+        _surface: &[meerkat_core::ToolDef],
+    ) -> Result<(), meerkat_mob::MobError> {
+        Ok(())
+    }
+
+    async fn prepare_member_surface(
+        &self,
+        _identity: &meerkat_mob::MemberRuntimeBuildIdentity,
+        surface: &meerkat_core::PreparedToolSurface,
+    ) -> Result<meerkat_core::ToolSurfaceSelection, meerkat_mob::MobError> {
+        let tools: Vec<String> = surface
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str().to_string())
+            .collect();
+        self.prepared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(tools);
+        Ok(meerkat_core::ToolSurfaceSelection {
+            binding: host_policy(),
+            compiled_against: surface.clone(),
+        })
+    }
+}
+
+/// [`bound_lifetime`] composed as a governing host composes the stdio
+/// gateway: the runtime machine carries the host's governed work host, and
+/// after the launch's member auth binding the host's `prepare_bootstrap`
+/// adds its policy registry and, with `hook`, its member registration hook
+/// (a hooked member's destination needs the governed work host). With and
+/// without `hook` the composition is otherwise the same, so the hook is the
+/// only difference between the two.
+async fn governed_bound_lifetime(
+    dir: &Path,
+    mob_id: &str,
+    host: &Host,
+    config: Config,
+    binding: meerkat_core::AuthBindingRef,
+    hook: Option<Arc<dyn meerkat_mob::MemberRuntimeRegistrationHook>>,
+) -> MobRuntime {
+    let (storage, provenance) =
+        crate::mob_composition_manifest::persistent_mob_storage(dir.join("mob.sqlite3"))
+            .expect("root mob storage");
+    let meerkat_realm = MetaStorageLayout::with_injected_roots(dir.to_path_buf(), None)
+        .meerkat_level_realm()
+        .expect("the state directory's meerkat-level realm")
+        .clone();
+    let mut spec = MobBootstrapSpec::persistent_inner_with_provider_stores(
+        root_definition(mob_id),
+        storage,
+        provenance,
+        dir.to_path_buf(),
+        8,
+        None,
+        false,
+        None,
+        None,
+        None,
+        CapabilityFlags::default(),
+        None,
+        Some(config),
+        None,
+        meerkat_realm,
+        Some(crate::unified_runtime::held_identity_test_support::host_configuration()),
+        None,
+        None,
+        None,
+        PersistentAuthority::StateDir,
+        None,
+        None,
+    )
+    .await
+    .expect("persistent spec")
+    .with_child_mob_storage(durable(dir))
+    .with_member_auth_binding(binding)
+    .with_tool_consequence_policy_registry(host_registry());
+    if let Some(hook) = hook {
+        spec = spec.with_member_runtime_registration_hook(hook);
+    }
+    let model: Arc<dyn LlmClient> = host.model.clone();
+    spec.options.default_llm_client = Some(model);
+    Box::pin(MobRuntime::bootstrap(spec))
+        .await
+        .expect("bootstrap the governed bound lifetime")
+}
+
+/// [`native_team_config`] whose `global` realm holds a default OpenAI
+/// credential (an inline key that is never sent): the one Meerkat's default
+/// binding selection finds for a member's mob realm, which defines no
+/// binding, as its fallback web search executor selects it. It is not the
+/// launch binding `b`.
+async fn native_team_config_with_default_credential(root: &Path) -> Config {
+    let mut config = native_team_config(root).await;
+    config.realm.insert(
+        meerkat_core::connection::GLOBAL_REALM_SLUG.to_string(),
+        meerkat_core::RealmConfigSection::from_inline_api_keys(&[(
+            "openai",
+            "sk-default-credential-test",
+        )]),
+    );
+    config
+}
+
+/// A spawn of the root's `coordinator` profile as `member`, with web search
+/// enabled: `gpt-5.5`, whose own web search the binding's OpenAI backend
+/// serves, with no dispatch admission, no tool restriction and an unmanaged
+/// application tool policy.
+fn web_search_spawn(member: &str) -> SpawnMemberSpec {
+    let mut spec = SpawnMemberSpec::new(
+        ProfileName::from("coordinator"),
+        AgentIdentity::from(member),
+    );
+    spec.tool_category_overrides.web_search = meerkat_core::ToolCategoryOverride::Enable;
+    spec
+}
+
+/// Under a member auth binding, a member that a host's registration hook
+/// registers is built through its registration's tool-surface gate: Meerkat
+/// prepares it for the host's decision with the provider's native tools off,
+/// its unmanaged application tool policy included, so its enabled web search
+/// would be Meerkat's fallback executor on default selection (here the
+/// members' `global` default credential), never on the launch binding, for
+/// the member's whole life. The spawn is refused at its build, typed
+/// (`member_auth_binding_uncarried`), before its host decides any surface,
+/// and nothing is built, although its model's own search would serve it
+/// without the hook (the row below).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hooked_member_build_refuses_the_fallback_web_search_typed() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let native = tempfile::tempdir().expect("native realm root");
+    let host = Host::new();
+    let hook = Arc::new(SurfaceRecordingHook::default());
+    let runtime = governed_bound_lifetime(
+        dir.path(),
+        &unique("hooked-search"),
+        &host,
+        native_team_config_with_default_credential(native.path()).await,
+        native_team_binding("b"),
+        Some(Arc::clone(&hook) as Arc<dyn meerkat_mob::MemberRuntimeRegistrationHook>),
+    )
+    .await;
+    let refused = Box::pin(runtime.handle().spawn_spec(web_search_spawn("searcher")))
+        .await
+        .expect_err("the hooked member's fallback web search is refused at its build");
+    assert!(
+        refused
+            .to_string()
+            .contains("member_auth_binding_uncarried:"),
+        "{refused}"
+    );
+    let data = crate::native_realm::member_build_refusal_data(&MobRuntimeError::Mob(refused))
+        .expect("the refusal keeps its data");
+    assert_eq!(data["kind"], json!("member_auth_binding_uncarried"));
+    assert!(
+        data["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("fallback web search")),
+        "{data}"
+    );
+    assert!(
+        hook.prepared().is_empty(),
+        "no construction reached its host: {:?}",
+        hook.prepared()
+    );
+    stand_down_released(runtime, 0).await;
+    let recorded = recorded_member_bindings(dir.path()).await;
+    assert!(
+        recorded.iter().all(|(_, member, _)| member != "searcher"),
+        "the refused spawn built nothing: {recorded:?}"
+    );
+}
+
+/// The control of the row above: the same governed composition (the host's
+/// governed work host and policy registry), launch binding, members'
+/// configuration, model, enabled web search and unmanaged application tool
+/// policy; only the host's registration hook is missing, so no registration
+/// carries a tool-surface gate. Meerkat completes the member's build in one
+/// step, so the provider's own search serves it on the member's binding: the
+/// spawn passes the build check, the member's tools carry no fallback
+/// `web_search` tool, and its session records the launch binding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unhooked_member_build_keeps_native_web_search() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let native = tempfile::tempdir().expect("native realm root");
+    let host = Host::new();
+    let binding = native_team_binding("b");
+    let runtime = governed_bound_lifetime(
+        dir.path(),
+        &unique("unhooked-search"),
+        &host,
+        native_team_config_with_default_credential(native.path()).await,
+        binding.clone(),
+        None,
+    )
+    .await;
+    Box::pin(runtime.handle().spawn_spec(web_search_spawn("searcher")))
+        .await
+        .expect("the provider's own web search passes the build check");
+    let session_id = runtime
+        .handle()
+        .resolve_bridge_session_id(&AgentIdentity::from("searcher"))
+        .await
+        .expect("the member's session");
+    let resolved = resolved_tools_for_session(runtime.session_service(), "searcher", session_id)
+        .await
+        .expect("the member's tools");
+    assert!(
+        !resolved.tools.iter().any(|tool| tool == "web_search"),
+        "the provider's own search serves the member, not Meerkat's fallback tool: {:?}",
+        resolved.tools
+    );
+    stand_down_released(runtime, 0).await;
+    let recorded = recorded_member_bindings(dir.path()).await;
+    assert!(
+        recorded.iter().any(|(_, member, recorded_binding)| {
+            member == "searcher" && recorded_binding.as_ref() == Some(&binding)
+        }),
+        "the member's session records the launch binding: {recorded:?}"
+    );
+}
+
+/// A durable child mob an agent created before a launch named a member auth
+/// binding is restored with the definition it was created with, so a bound
+/// launch reads every stored child definition first: one that would build
+/// members off the binding (an inline profile with image generation here)
+/// refuses the launch typed and is named; a child on the binding is not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stored_child_mob_off_the_binding_refuses_a_bound_launch() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let host = Host::new();
+    let runtime = lifetime(dir.path(), &unique("unbound-root"), &host, |spec| {
+        spec.with_child_mob_storage(durable(dir.path()))
+    })
+    .await
+    .expect("a lifetime without a member auth binding");
+    let state = runtime.agent_mob_mcp_state().expect("agent mob state");
+    let plain = MobId::from(unique("plain-child").as_str());
+    state
+        .mob_create_definition(child_definition(&plain))
+        .await
+        .expect("create a child on the binding");
+    let imaging = MobId::from(unique("imaging-child").as_str());
+    let imaging_definition: MobDefinition = serde_json::from_value(json!({
+        "id": imaging.to_string(),
+        "profiles": { "worker": {
+            "model": "gpt-5.5",
+            "runtime_mode": "turn_driven",
+            "tools": { "comms": true, "image_generation": true }
+        } }
+    }))
+    .expect("child definition with image generation");
+    state
+        .mob_create_definition(imaging_definition)
+        .await
+        .expect("create a child with image generation");
+    stand_down_released(runtime, 2).await;
+
+    let refusal = crate::native_realm::validate_stored_child_mobs(
+        dir.path(),
+        &native_team_binding("b"),
+        None,
+    )
+    .await
+    .expect_err("the stored child off the binding refuses a bound launch");
+    assert_eq!(
+        refusal.data()["kind"],
+        json!("member_auth_binding_uncarried")
+    );
+    let reason = refusal.data()["reason"].as_str().expect("a reason");
+    assert!(
+        reason.contains(&format!("child mob '{imaging}'"))
+            && reason.contains("tools.image_generation")
+            && !reason.contains(&format!("child mob '{plain}'")),
+        "{reason}"
+    );
+}
+
+/// A stored child mob whose destroy is pending is one Meerkat only finishes
+/// destroying, rebuilding none of its members, so a bound launch's scan
+/// skips it: the same child off the binding refuses the launch until its
+/// store records the admitted destroy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stored_child_mob_whose_destroy_is_pending_is_skipped() {
+    use meerkat_mob::MobEventStore as _;
+    let dir = tempfile::tempdir().expect("state dir");
+    let host = Host::new();
+    let runtime = lifetime(dir.path(), &unique("unbound-root"), &host, |spec| {
+        spec.with_child_mob_storage(durable(dir.path()))
+    })
+    .await
+    .expect("a lifetime without a member auth binding");
+    let state = runtime.agent_mob_mcp_state().expect("agent mob state");
+    let destroying = MobId::from(unique("destroying-child").as_str());
+    let definition: MobDefinition = serde_json::from_value(json!({
+        "id": destroying.to_string(),
+        "profiles": { "worker": {
+            "model": "gpt-5.5",
+            "runtime_mode": "turn_driven",
+            "tools": { "comms": true, "image_generation": true }
+        } }
+    }))
+    .expect("child definition with image generation");
+    state
+        .mob_create_definition(definition)
+        .await
+        .expect("create a child with image generation");
+    stand_down_released(runtime, 1).await;
+
+    let binding = native_team_binding("b");
+    crate::native_realm::validate_stored_child_mobs(dir.path(), &binding, None)
+        .await
+        .expect_err("the child off the binding refuses a bound launch");
+    let stores = child_event_logs(dir.path());
+    assert_eq!(stores.len(), 1, "the one child's store: {stores:?}");
+    meerkat_mob::SqliteMobStores::open(&stores[0])
+        .expect("open the child store")
+        .event_store()
+        .append(meerkat_mob::NewMobEvent::for_test(
+            destroying,
+            meerkat_mob::MobEventKind::MobDestroying,
+        ))
+        .await
+        .expect("record an admitted destroy");
+    crate::native_realm::validate_stored_child_mobs(dir.path(), &binding, None)
+        .await
+        .expect("a child whose destroy is pending is skipped");
+}

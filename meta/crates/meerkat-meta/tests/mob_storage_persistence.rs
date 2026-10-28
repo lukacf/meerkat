@@ -256,7 +256,7 @@ async fn boot_unified(
             outcome,
             RestoreOutcome::Created { .. } | RestoreOutcome::Resumed { .. }
         ),
-        "lead-1 must be materialized, got {outcome:?}"
+        "lead-1 must be a member of Core's mob, got {outcome:?}"
     );
     (runtime, identity_runtime)
 }
@@ -2631,6 +2631,122 @@ fn activation_identity_context(
     (context, bridge)
 }
 
+/// A restart over `AutonomousHost` members Core holds Dormant: the startup
+/// gate a host waits on (`meta/wait_identity_bootstrap` with target
+/// `startup_ready`) answers ready at once, and nothing is materialized to
+/// answer it. A Dormant member's startup is owed only at its wake, so it
+/// counts as started.
+#[tokio::test]
+async fn startup_ready_answers_at_once_over_dormant_autonomous_members() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    const MOB_ID: &str = "startup-ready-dormant-autonomous";
+    let roster = activation_identity_roster()
+        .into_iter()
+        .map(|mut spec| {
+            spec.runtime_mode_override = Some(meerkat_mob::MobRuntimeMode::AutonomousHost);
+            spec
+        })
+        .collect::<Vec<_>>();
+
+    // Boot 1 seats both members; each runs its kickoff once.
+    let mut first = boot_raw_activation_fixture(temp.path(), MOB_ID).await;
+    let (context, _bridge) = activation_identity_context(
+        &first,
+        temp.path(),
+        &roster,
+        IdentityBootstrapMode::EagerMaterialize,
+    );
+    first
+        .install_and_bootstrap_identity_first_context(context, &roster)
+        .await
+        .expect("seat the autonomous roster");
+    // Each member's kickoff resolves before the restart, so boot 2 owes
+    // neither member any work: a kickoff still running would make boot 2
+    // wake that member, whatever the ready gate does.
+    first
+        .mob_handle()
+        .wait_for_kickoff_complete(Some(Duration::from_secs(30)))
+        .await
+        .expect("each member's kickoff resolves");
+    let shutdown = first.shutdown().await;
+    assert!(shutdown.cleanup_completed(), "{shutdown:?}");
+    drop(first);
+
+    // Boot 2: Core holds both seated, and the start materializes neither.
+    let mut second = boot_raw_activation_fixture(temp.path(), MOB_ID).await;
+    let (context, _bridge) = activation_identity_context(
+        &second,
+        temp.path(),
+        &roster,
+        IdentityBootstrapMode::EagerMaterialize,
+    );
+    second
+        .install_and_bootstrap_identity_first_context(context, &roster)
+        .await
+        .expect("seat the autonomous roster again");
+    // The identity RPC methods answer through the identity context the host
+    // hands the dispatcher, as a gateway does once its bootstrap succeeds.
+    let rpc_ctx = meerkat_meta::rpc::IdentityFirstContext {
+        runtime: second
+            .identity_runtime()
+            .expect("identity runtime installed"),
+        roster_provider: Arc::new(MutableRosterProvider::new(roster.clone())),
+        topology_provider: None,
+        customizer: None,
+        agent_memory_provider: None,
+        mob_definition: Some(second.mob_handle().definition().clone()),
+        transcript_edit_service: None,
+        compaction_floors: None,
+    };
+    let started = std::time::Instant::now();
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "startup-ready",
+        "method": "meta/wait_identity_bootstrap",
+        "params": { "target": "startup_ready", "timeout_ms": 20_000 },
+    })
+    .to_string();
+    let response: serde_json::Value = serde_json::from_str(
+        &meerkat_meta::handle_unified_rpc_json(
+            &second,
+            &request,
+            Duration::from_secs(30),
+            None,
+            Some(&rpc_ctx),
+        )
+        .await,
+    )
+    .expect("json-rpc response");
+    assert_eq!(
+        response["result"]["startup_ready"],
+        serde_json::json!(true),
+        "{response:#?}"
+    );
+    assert_eq!(
+        response["result"]["timed_out"],
+        serde_json::json!(false),
+        "{response:#?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the gate answers at once, not at its timeout: {:?}",
+        started.elapsed()
+    );
+    for spec in &roster {
+        let member =
+            meerkat_meta::member_comms_id::roster_member_id_for_identity(spec.identity.as_str());
+        assert_eq!(
+            second.mob_handle().member_materialization_for_test(&member),
+            Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Dormant),
+            "{}: the startup gate materializes nothing",
+            spec.identity
+        );
+    }
+    drop(rpc_ctx);
+    let shutdown = second.shutdown().await;
+    assert!(shutdown.cleanup_completed(), "{shutdown:?}");
+}
+
 #[tokio::test]
 async fn eager_identity_restore_reports_edges_after_persisted_members_attach() {
     let temp = tempfile::tempdir().expect("temp dir");
@@ -2655,7 +2771,7 @@ async fn eager_identity_restore_reports_edges_after_persisted_members_attach() {
             .outcomes
             .values()
             .all(|outcome| matches!(outcome, RestoreOutcome::Created { .. })),
-        "both fixture members must really materialize: {:?}",
+        "both fixture members must be seated on fresh sessions: {:?}",
         created.outcomes
     );
     assert_eq!(
@@ -2768,8 +2884,12 @@ async fn eager_identity_restore_reports_edges_after_persisted_members_attach() {
     assert_eq!(report.retained_edges, vec![expected_edge]);
 }
 
+/// `lazy_materialize` seats every roster identity as the default does: both
+/// identities are members of Core's mob, read active and ready, and their
+/// declared edge is wired between the two seated members, while Core holds
+/// both Dormant (the pass materializes neither).
 #[tokio::test]
-async fn lazy_identity_restore_keeps_unmaterialized_edges_pending() {
+async fn lazy_identity_restore_seats_both_members_and_wires_their_edge() {
     let temp = tempfile::tempdir().expect("temp dir");
     const MOB_ID: &str = "lazy-restore-edge-observation";
     let first = boot_raw_activation_fixture(temp.path(), MOB_ID).await;
@@ -2784,6 +2904,7 @@ async fn lazy_identity_restore_keeps_unmaterialized_edges_pending() {
     );
     assert!(second.bootstrap_edges_report().await.is_none());
     let roster = activation_identity_roster();
+    let expected_edge = DesiredPeerEdge::new("lead-1", "worker-1").expect("fixture edge");
     let (context, bridge) = activation_identity_context(
         &second,
         temp.path(),
@@ -2793,33 +2914,51 @@ async fn lazy_identity_restore_keeps_unmaterialized_edges_pending() {
     second
         .install_and_bootstrap_identity_first_context(context.clone(), &roster)
         .await
-        .expect("register lazy identity roster");
+        .expect("seat the lazy identity roster");
     let bootstrap = context.runtime().identity_bootstrap_status();
     assert!(bootstrap.complete);
-    assert!(!bootstrap.ready);
-    assert_eq!(bootstrap.counts.dormant, 2);
-    assert_eq!(bootstrap.counts.active, 0);
-    assert!(second.mob_handle().list_members().await.is_empty());
+    assert!(bootstrap.ready, "{bootstrap:?}");
+    assert_eq!(bootstrap.counts.dormant, 0);
+    assert_eq!(bootstrap.counts.active, 2);
+    let members = second.mob_handle().list_members().await;
+    assert_eq!(members.len(), 2, "{members:?}");
     assert!(
+        members.iter().all(|member| member.wired_to.len() == 1),
+        "the declared edge is wired between the seated members: {members:?}"
+    );
+    for spec in &roster {
+        let member =
+            meerkat_meta::member_comms_id::roster_member_id_for_identity(spec.identity.as_str());
+        assert_eq!(
+            second.mob_handle().member_materialization_for_test(&member),
+            Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Dormant),
+            "{}: the lazy pass materializes nothing",
+            spec.identity
+        );
+    }
+    assert_eq!(
         bridge
             .current_member_wires()
             .await
-            .expect("empty physical topology")
-            .is_empty()
+            .expect("the seated members' wire")
+            .len(),
+        1
     );
     let report = second
         .bootstrap_edges_report()
         .await
-        .expect("pending bootstrap edge observation");
+        .expect("final bootstrap edge observation");
     let shutdown = second.shutdown().await;
     assert!(shutdown.cleanup_completed(), "{shutdown:?}");
     assert!(
-        !report.is_complete(),
-        "unmaterialized endpoints cannot be reported wired"
+        report.is_complete(),
+        "seated endpoints are members, so their edge is reported wired: {report:?}"
     );
     assert!(report.failures.is_empty(), "{report:?}");
-    assert_eq!(
-        report.skipped_missing_members,
-        vec![DesiredPeerEdge::new("lead-1", "worker-1").expect("fixture edge")]
+    assert_eq!(report.desired_edges, vec![expected_edge.clone()]);
+    assert!(
+        report.wired_edges.contains(&expected_edge)
+            || report.retained_edges.contains(&expected_edge),
+        "the edge between the seated members is wired: {report:?}"
     );
 }

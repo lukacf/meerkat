@@ -1,8 +1,9 @@
 //! Test fixture: a session bridge whose Core is the members fixture
-//! ([`super::core_members`]). Creates and resumes bind there, retires retire
-//! there, Core's member reads answer from there, and peer wiring is accepted
-//! and recorded nowhere. Delivery is refused: a scenario that only needs Core
-//! to build members uses this double.
+//! ([`super::core_members`]). Seats, rotations, creates and resumes bind
+//! there, retires retire there, a release leaves the member as it is (a seat
+//! holds no materialization here), Core's member reads answer from there,
+//! and peer wiring is accepted and recorded nowhere. Delivery is refused: a
+//! scenario that only needs Core to seat or build members uses this double.
 //!
 //! A test crate that uses it also declares `mod core_members` from
 //! `support/core_members.rs`.
@@ -10,6 +11,7 @@
 #![allow(dead_code)]
 
 use async_trait::async_trait;
+use meerkat_meta::identity_first::bridge::{DormantSeatRequest, DormantSeatResult};
 use meerkat_meta::identity_first::{
     AgentBuildDraft, AgentIdentity, AgentRuntimeId, BridgeDelivery, BridgeError, DurableAgentSpec,
     MemberRuntimeBinding, ResumeSessionOutcome, SessionBridge, SessionSnapshot,
@@ -150,5 +152,74 @@ impl SessionBridge for CoreBridge {
         _identity: &AgentIdentity,
     ) -> Result<meerkat_mob::MemberIdentityManagement, BridgeError> {
         Ok(meerkat_mob::MemberIdentityManagement::CommandDriven)
+    }
+
+    /// Core seats each identity: on the request's session (a re-seat of a
+    /// retired identity, at its next generation), or fresh on a new session.
+    /// An identity Core already holds on exactly that session is answered
+    /// `AlreadySeated`, and nothing is written.
+    async fn seat_dormant_members(
+        &self,
+        requests: Vec<DormantSeatRequest>,
+    ) -> Result<Vec<(AgentIdentity, DormantSeatResult)>, BridgeError> {
+        let mut answered = Vec::with_capacity(requests.len());
+        for request in requests {
+            let live = self.core.live_member(&request.identity)?;
+            if let (Some(live), Some(session)) = (live, request.session.as_ref())
+                && live.session_id.as_ref() == Some(session)
+            {
+                answered.push((
+                    request.identity,
+                    DormantSeatResult::AlreadySeated {
+                        session_id: session.clone(),
+                    },
+                ));
+                continue;
+            }
+            let generation = self
+                .core
+                .last_member_binding(&request.identity)?
+                .map_or(0, |binding| binding.generation().get() + 1);
+            let session_id = request
+                .session
+                .clone()
+                .unwrap_or_else(meerkat_core::types::SessionId::new);
+            self.core.bind_live(
+                &request.identity,
+                &request.spec.profile,
+                generation,
+                Some(session_id.clone()),
+            );
+            answered.push((request.identity, DormantSeatResult::Seated { session_id }));
+        }
+        Ok(answered)
+    }
+
+    /// Core's rotation: the identity is seated at its next generation on a
+    /// fresh session.
+    async fn rotate_member(
+        &self,
+        identity: &AgentIdentity,
+        spec: &DurableAgentSpec,
+        _draft: &AgentBuildDraft,
+    ) -> Result<meerkat_core::types::SessionId, BridgeError> {
+        let generation = self
+            .core
+            .last_member_binding(identity)?
+            .map_or(0, |binding| binding.generation().get() + 1);
+        let session_id = meerkat_core::types::SessionId::new();
+        self.core.bind_live(
+            identity,
+            &spec.profile,
+            generation,
+            Some(session_id.clone()),
+        );
+        Ok(session_id)
+    }
+
+    /// A seated member holds no materialization here: a release leaves it
+    /// seated, on the same session at the same generation.
+    async fn release_member(&self, _identity: &AgentIdentity) -> Result<(), BridgeError> {
+        Ok(())
     }
 }

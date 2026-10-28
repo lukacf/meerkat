@@ -401,6 +401,62 @@ async fn an_edge_the_topology_dropped_is_unwired_after_a_restart() {
     booted.unified.shutdown().await;
 }
 
+/// A reset starts the identity's fresh life through Core's rotation, which
+/// ends every edge of the old incarnation. The reset wires the identity's
+/// managed edges again itself: right after it, with no roster refresh,
+/// Core's roster holds the edge for the new incarnation, so a peer message
+/// reaches it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_identity_keeps_its_managed_edges_with_no_roster_refresh() {
+    let mob_id = next_mob_id("edge-reset");
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state_path = temp.path().join("state");
+    let lead = id("identity:lead-1");
+    let member = id("identity:member-1");
+    let roster = vec![spec("identity:lead-1"), spec("identity:member-1")];
+    let topology = Arc::new(TeamTopology {
+        edges: Mutex::new(vec![
+            ManagedPeerEdge::new(lead.clone(), member.clone()).unwrap(),
+        ]),
+    });
+    let (unified, _bridge, _outcomes) = boot_in_mode(
+        &state_path,
+        definition(&mob_id),
+        &roster,
+        Some(topology as Arc<dyn TopologyProvider>),
+        IdentityBootstrapMode::EagerMaterialize,
+    )
+    .await;
+    assert_eq!(
+        roster_identity_edges(&unified).await,
+        BTreeSet::from([pair(&lead, &member)]),
+        "the boot wires the declared edge"
+    );
+
+    let identity_runtime = unified.identity_runtime().expect("identity runtime");
+    let before = identity_runtime
+        .status(&member)
+        .await
+        .expect("the member's status")
+        .generation;
+    identity_runtime
+        .reset(&member)
+        .await
+        .expect("reset the member");
+    let after = identity_runtime
+        .status(&member)
+        .await
+        .expect("the member's status")
+        .generation;
+    assert_ne!(before, after, "the reset started a fresh life");
+    assert_eq!(
+        roster_identity_edges(&unified).await,
+        BTreeSet::from([pair(&lead, &member)]),
+        "the reset wires the identity's managed edge again, with no roster refresh"
+    );
+    unified.shutdown().await;
+}
+
 fn fight_definition(mob_id: &str) -> MobDefinition {
     MobDefinition::from_toml(&format!(
         r#"

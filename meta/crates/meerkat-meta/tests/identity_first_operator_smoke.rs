@@ -1069,10 +1069,10 @@ async fn e2e_smoke_05_async_checkpoint_durability() {
 // ===========================================================================
 // SMOKE-07: Delete a subscriber's continuity
 //
-// Create 2 personal agents and delete one. Since 0.9.4 a delete starts the
-// identity's next life at once on a fresh session (Core's last binding) and
-// keeps it registered and live; the old session is never resumed. Re-run
-// restore_flow: bob runs on the fresh session, alice keeps hers.
+// Create 2 personal agents and delete one. A delete seats the identity's
+// next life at once on a fresh session (Core's last binding), in one Core
+// rotation, and keeps it registered; the old session is never resumed. Re-run
+// restore_flow: bob is on the fresh session, alice keeps hers.
 // ===========================================================================
 
 #[tokio::test]
@@ -1182,7 +1182,8 @@ async fn e2e_smoke_07_delete_and_recreate() {
     }
     eprintln!("[SMOKE-07] alice responded");
 
-    // Delete bob: his next life starts at once on a fresh session
+    // Delete bob: one Core rotation seats his next life on a fresh session
+    // at once, unmaterialized until his next delivery
     eprintln!("[SMOKE-07] Deleting bob...");
     let fresh = identity_rt
         .delete_identity(&id("personal:bob"))
@@ -1195,7 +1196,8 @@ async fn e2e_smoke_07_delete_and_recreate() {
         "delete should start bob on a fresh session"
     );
 
-    // A delete keeps liveness, as a reset does: bob stays registered
+    // A delete keeps the identity a member, as a reset does: bob stays
+    // registered
     assert!(
         identity_rt.contains(&id("personal:bob")).await,
         "bob should stay registered after delete"
@@ -1208,8 +1210,8 @@ async fn e2e_smoke_07_delete_and_recreate() {
         .expect("alice status");
     assert_eq!(alice_status.state, IdentityLifecycleState::Active);
 
-    // Re-bootstrap with the full roster: bob runs on the session his delete
-    // started, and alice keeps hers.
+    // Re-bootstrap with the full roster: bob is seated on the session his
+    // delete started, and alice keeps hers.
     eprintln!("[SMOKE-07] Re-bootstrapping with full roster...");
     let result2 = restore_flow(
         &identity_rt,
@@ -1513,9 +1515,9 @@ async fn e2e_smoke_08_customizer_topology_prompts() {
         other => panic!("expected Created for dave, got {other:?}"),
     }
 
-    // alpha and beta are live, so restore_flow resumes them on the sessions
-    // (and prompts) they were built with: the customizer runs at build time
-    // only. The new topology shows in the restore's managed edges.
+    // alpha and beta are already members of the mob, so restore_flow
+    // reports them resumed on the sessions (and prompts) they were seated
+    // with. The new topology shows in the restore's managed edges.
     for name in ["review:alpha", "review:beta"] {
         assert!(
             matches!(

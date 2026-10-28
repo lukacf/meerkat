@@ -69,6 +69,38 @@ Consequences:
   identity-side cancel at all — that wrapper is part of this doctrine's
   follow-up work.
 
+**Update for Meta 0.9.6: long-lived members an agent creates.** Two things
+changed since this decision. Meerkat 0.9.5 added durable worker profiles
+(`durable = true`): a member spawned from one keeps its session across a
+restart and continues its open run. And Meta 0.9.6 keeps a member spawned at
+runtime: the roster pass retires only the identities the roster
+materialized, so a member no roster lists ends only through its own
+lifecycle (its work's completion or supersession, an explicit retire, or the
+idle-retirement policy where the spawn opted in). The worker plane therefore
+has a resume story for the members agents create, and D1 reads as follows:
+
+- Durable members the host owns (per-user agents, long-lived coordinators,
+  any population the host declares) live on the identity plane, as decided.
+- An agent creates a long-lived agent as a mob member, never as a Meta
+  identity: a member of its own mob, or of a child mob it creates, spawned
+  from a `durable = true` profile. Identities stay host-declared (a roster
+  provider, the `identity_roster` init param, `meta/ensure_member`). This is
+  the primitive. No new concept and no identity-lite tier is added.
+- Such a member has none of what the identity plane adds: no identity status
+  (`meta/status_identity`, `meta/inspect_identity`, the identity bootstrap
+  report), no Console identity, no agent memory (it is identity-scoped), and
+  no identity delivery (`meta/send`, `meta/interact`, `meta/dispatch`). The
+  host reaches it by member id (`meta/send_message`); its creator reaches it
+  through comms when the two are wired, which `mob_spawn_member` into the
+  creator's own mob does by default (Meta sets `auto_wire_parent`).
+- The phase 3 deprecation above is about durable populations the host owns
+  on the mob plane. It does not cover members agents create.
+- On a host store realm, child mobs are process-bound, so a long-lived member
+  an agent creates there is spawned into the realm's root mob.
+
+`docs/concepts/roster.mdx` ("Long-lived members an agent creates") is the
+user-facing statement.
+
 Deployment census at decision time (audit-verified):
 
 - **The operator deployment** (production, 100+ users): dual-plane already — eternal fleet

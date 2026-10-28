@@ -16,7 +16,7 @@ description = "Storage conformance harness for Meta store backends (console time
 # adding it to release.yml - at which point this line comes out and the gate
 # in scripts/verify-crate-publication.py starts asserting the new answer.
 publish = false
-version = "0.9.5"
+version = "0.9.6"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true

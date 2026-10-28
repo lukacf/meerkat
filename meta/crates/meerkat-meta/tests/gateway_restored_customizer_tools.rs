@@ -1,25 +1,27 @@
-//! A persistent gateway's mob can be restored while the gateway's bootstrap
-//! builds it: a mob log left Running revives every member inside meerkat's
-//! own resume, before the identity bootstrap publishes any member's
-//! customizer tools. As on the library builder, each such member holds its
-//! run starts (`HostRunStartHoldReason::ToolsNotPublished`) until the identity
-//! runtime publishes its tools and releases the hold, so it starts no run (a
-//! restored queued input, a kickoff, a peer message) without them. A
-//! process-local gateway restores nothing at its bootstrap: its member is
-//! built with its tools and nothing is held. Each boot is a separate gateway
-//! process over real stdio, answering the SDK callbacks itself; the first
-//! persistent boot ends with a kill, so its mob log stays Running.
+//! A persistent gateway's mob is resumed while the gateway's bootstrap
+//! builds it, and Core builds a member then only when the start restores
+//! it: a member that owes work, or every seated member when the start asks
+//! for that (`runtime_options.member_restore = "eager"`). Core asks the
+//! mob's member build preparer before each member it builds, and a build
+//! that comes before the identity runtime is composed is held: the member
+//! holds its run starts (`HostRunStartHoldReason::ToolsNotPublished`) until
+//! the roster pass publishes its customizer tools and releases the hold, so
+//! it starts no run (a restored queued input, a kickoff, a peer message)
+//! without them. A restart that restores no member builds nothing and calls
+//! the SDK customizer for none. A process-local gateway restores nothing at
+//! its bootstrap, and its roster pass seats its member without building it.
+//! Each boot is a separate gateway process over real stdio, answering the
+//! SDK callbacks itself; a first boot that ends with a kill leaves its mob
+//! log Running.
 //!
-//! The holds come from one roster per boot, read before the mob build from
-//! the definition the mob runs, and the identity bootstrap takes that same
-//! roster: a roster callback that fails before it does not leave a member
-//! unheld, and a candidate restart that runs the stored definition holds the
-//! members that definition's roster names, and never releases them. A
-//! restored member the roster no
-//! longer lists stays held until the roster pass retires it, on an eager and
-//! a lazy restart. Reading that roster before the build keeps what the
-//! roster provider is handed (the booted definition) and the init failures a
-//! refused composition answers with.
+//! The holds come from no roster read, so a roster callback that fails
+//! before the boot's roster is read leaves no restored member unheld. A
+//! candidate composition acts nowhere: it restores no member and builds
+//! nothing. A restored member the roster no longer lists stays held until
+//! the roster pass retires it, on an eager and a lazy restart. The boot's
+//! roster is read before the mob build from the definition the mob runs,
+//! which keeps what the roster provider is handed (the booted definition)
+//! and the init failures a refused composition answers with.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -39,12 +41,14 @@ use serde_json::{Value, json};
 const HOST_PROCESS: &str = "META_GATEWAY_RESTORED_TOOLS_HOST";
 const RECORD: &str = "META_GATEWAY_RESTORED_TOOLS_RECORD";
 const PERSISTENT_TEST: &str =
-    "a_member_restored_at_a_persistent_gateway_bootstrap_holds_its_runs_until_its_tools_publish";
-const PROCESS_LOCAL_TEST: &str = "a_process_local_gateway_bootstrap_holds_no_member";
+    "a_member_restored_while_a_persistent_gateway_builds_its_mob_is_held_until_its_tools_publish";
+const RESTORE_NONE_TEST: &str =
+    "a_restart_that_restores_no_member_calls_the_sdk_customizer_for_none";
+const PROCESS_LOCAL_TEST: &str = "a_process_local_gateway_bootstrap_builds_and_holds_no_member";
 const FAILED_ROSTER_CALL_TEST: &str =
     "a_restart_whose_first_roster_callback_fails_still_holds_its_restored_member";
 const CANDIDATE_TEST: &str =
-    "a_candidate_restart_holds_the_member_the_roster_of_its_stored_definition_names";
+    "a_candidate_restart_of_the_stored_definition_builds_and_holds_no_member";
 const DROPPED_TEST: &str =
     "a_restored_member_the_roster_no_longer_lists_stays_held_until_it_is_retired";
 const LAZY_DROPPED_TEST: &str =
@@ -112,33 +116,9 @@ fn append(record: &Path, line: &str) {
     writeln!(file, "{line}").expect("append");
 }
 
-/// Whether meerkat holds each session's run starts, in session order
-/// (`None` for a session its runtime does not register).
-async fn run_starts_held(service: &Arc<dyn MobSessionService>) -> Vec<Option<bool>> {
-    let Some(machine) = service
-        .acquire_runtime_adapter(None)
-        .expect("acquire the gateway's runtime adapter")
-    else {
-        return Vec::new();
-    };
-    let mut sessions = service
-        .list(meerkat_core::service::SessionQuery::default())
-        .await
-        .expect("sessions")
-        .into_iter()
-        .map(|summary| summary.session_id)
-        .collect::<Vec<_>>();
-    sessions.sort_by_key(ToString::to_string);
-    let mut held = Vec::new();
-    for session in &sessions {
-        held.push(machine.run_starts_held_for_test(session).await);
-    }
-    held
-}
-
 /// Whether meerkat holds the run starts of each member of the mob, as
 /// `member=held` in member order (`None` for a member whose session its
-/// runtime does not register).
+/// runtime does not register: one Core has not built).
 async fn members_held(
     handle: &meerkat_mob::MobHandle,
     service: &Arc<dyn MobSessionService>,
@@ -158,7 +138,7 @@ async fn members_held(
     members.join(" ")
 }
 
-/// Records whether meerkat holds the run starts of the members it restored,
+/// Records whether meerkat holds the run starts of each member of the mob,
 /// once when the gateway binds the runtime (after the mob build, before the
 /// identity bootstrap) and once after the Ready publication (after the
 /// identity bootstrap), and each member the identity runtime retires.
@@ -190,10 +170,8 @@ impl GatewayHostComposition for HoldProbeHost {
             .cloned()
             .expect("the gateway's session service");
         let handle = runtime.mob_handle();
-        let held = run_starts_held(&service).await;
         let members = members_held(&handle, &service).await;
         append(&self.record, &format!("bind members={members}"));
-        append(&self.record, &format!("bind held={held:?}"));
         *self.service.lock().unwrap() = Some(service);
         *self.handle.lock().unwrap() = Some(handle);
         Ok(())
@@ -223,16 +201,12 @@ impl GatewayHostComposition for HoldProbeHost {
         let handle = self.handle.lock().unwrap().clone();
         let record = self.record.clone();
         tokio::spawn(async move {
-            let (held, members) = match (service, handle) {
-                (Some(service), Some(handle)) => (
-                    run_starts_held(&service).await,
-                    members_held(&handle, &service).await,
-                ),
-                _ => (Vec::new(), String::new()),
+            let members = match (service, handle) {
+                (Some(service), Some(handle)) => members_held(&handle, &service).await,
+                _ => String::new(),
             };
-            // The driver waits for the `ready held=` line, so it is last.
+            // The driver waits for this line.
             append(&record, &format!("ready members={members}"));
-            append(&record, &format!("ready held={held:?}"));
         });
         Ok(())
     }
@@ -306,6 +280,9 @@ struct Launch {
     composition: Composition,
     /// Lazy identity materialization instead of the eager default.
     lazy: bool,
+    /// `runtime_options.member_restore`, when the boot sets it: how many of
+    /// the seated members the mob's start materializes.
+    member_restore: Option<&'static str>,
     /// A request sent once the init settled ready (its roster callbacks are
     /// recorded apart from the init's).
     after_ready: Option<&'static str>,
@@ -319,6 +296,7 @@ impl Default for Launch {
             failed_roster_calls: 0,
             composition: Composition::Authoritative,
             lazy: false,
+            member_restore: None,
             after_ready: None,
         }
     }
@@ -455,6 +433,9 @@ fn boot(test: &str, dir: &Path, state: Option<&Path>, ending: Ending, launch: &L
     if launch.lazy {
         runtime_options["identity_bootstrap_mode"] = json!({ "mode": "lazy_materialize" });
     }
+    if let Some(restore) = launch.member_restore {
+        runtime_options["member_restore"] = json!(restore);
+    }
     let mut params = json!({
         "init_protocol": "accepted_then_settled",
         "init_id": "restored-customizer-tools",
@@ -534,7 +515,7 @@ fn boot(test: &str, dir: &Path, state: Option<&Path>, ending: Ending, launch: &L
     while outcome == "ready"
         && !std::fs::read_to_string(&record)
             .unwrap_or_default()
-            .contains("ready held=")
+            .contains("ready members=")
         && Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(20));
@@ -586,15 +567,17 @@ fn boot(test: &str, dir: &Path, state: Option<&Path>, ending: Ending, launch: &L
         later_rosters,
     }
 }
-
-/// A persistent gateway killed while its mob ran left the mob's log Running,
-/// so the next boot's mob build revives the member inside meerkat's own
-/// resume, before the identity bootstrap publishes its customizer tools.
-/// Meerkat holds the revived member's run starts when the gateway binds the
-/// runtime; the identity bootstrap publishes the tools (one SDK customizer
-/// build) and releases the hold before Ready.
+/// R111: a persistent gateway killed while its mob ran left the mob's log
+/// Running, so the next boot's mob build resumes it, and a restart that
+/// restores every seated member (`member_restore = "eager"`) builds the
+/// member then, before the identity runtime is composed. The member build
+/// preparer holds that build without calling the SDK: the member holds its
+/// run starts when the gateway binds the runtime. The roster pass publishes
+/// its tools (one SDK customizer build) and releases the hold before Ready.
+/// The first boot seats the member without building it: its one SDK build
+/// is the seat's draft.
 #[test]
-fn a_member_restored_at_a_persistent_gateway_bootstrap_holds_its_runs_until_its_tools_publish() {
+fn a_member_restored_while_a_persistent_gateway_builds_its_mob_is_held_until_its_tools_publish() {
     serve_if_host_process();
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state");
@@ -607,14 +590,14 @@ fn a_member_restored_at_a_persistent_gateway_bootstrap_holds_its_runs_until_its_
         &Launch::default(),
     );
     assert_eq!(first.outcome, "ready", "the first boot settles ready");
-    assert!(
-        first.customizer_builds >= 1,
-        "the first boot builds the roster member through the SDK customizer"
+    assert_eq!(
+        first.customizer_builds, 1,
+        "the first boot's seat builds the member's draft through the SDK customizer"
     );
     assert_eq!(
-        first.line("ready held="),
-        "ready held=[Some(false)]",
-        "the first boot's member runs unheld"
+        first.line("ready members="),
+        format!("ready members={IDENTITY}=None"),
+        "the first boot seats the member and builds nothing"
     );
 
     let second = boot(
@@ -622,31 +605,80 @@ fn a_member_restored_at_a_persistent_gateway_bootstrap_holds_its_runs_until_its_
         &dir.path().join("boot-2"),
         Some(&state),
         Ending::Close,
-        &Launch::default(),
+        &Launch {
+            member_restore: Some("eager"),
+            ..Launch::default()
+        },
     );
     assert_eq!(second.outcome, "ready", "the restart settles ready");
     assert_eq!(
-        second.line("bind held="),
-        "bind held=[Some(true)]",
-        "the member meerkat revived during the mob build holds its run starts until its \
-         customizer tools publish"
-    );
-    assert!(
-        second.customizer_builds >= 1,
-        "the identity bootstrap publishes the member's tools through the SDK customizer"
+        second.line("bind members="),
+        format!("bind members={IDENTITY}=Some(true)"),
+        "the member the mob build restored holds its run starts until its customizer tools \
+         publish"
     );
     assert_eq!(
-        second.line("ready held="),
-        "ready held=[Some(false)]",
+        second.customizer_builds, 1,
+        "the roster pass publishes the held member's tools through the SDK customizer once; the \
+         preparer held the build without calling it"
+    );
+    assert_eq!(
+        second.line("ready members="),
+        format!("ready members={IDENTITY}=Some(false)"),
         "the publication released the hold before Ready"
     );
 }
 
-/// A process-local gateway keeps its mob in memory, so its bootstrap
-/// restores no member: nothing is held when it binds the runtime, and its
-/// member, built by the identity bootstrap with its tools, runs unheld.
+/// R110, R72: a lazy persistent gateway restarted after a clean stop over a
+/// member that owes no work restores no member: nothing is built while the
+/// mob is built or lifted, and the SDK customizer is called for no member.
+/// The member stays seated and unbuilt, and nothing holds it.
 #[test]
-fn a_process_local_gateway_bootstrap_holds_no_member() {
+fn a_restart_that_restores_no_member_calls_the_sdk_customizer_for_none() {
+    serve_if_host_process();
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let launch = Launch {
+        lazy: true,
+        ..Launch::default()
+    };
+
+    let first = boot(
+        RESTORE_NONE_TEST,
+        &dir.path().join("boot-1"),
+        Some(&state),
+        Ending::Close,
+        &launch,
+    );
+    assert_eq!(first.outcome, "ready", "the first boot settles ready");
+
+    let second = boot(
+        RESTORE_NONE_TEST,
+        &dir.path().join("boot-2"),
+        Some(&state),
+        Ending::Close,
+        &launch,
+    );
+    assert_eq!(second.outcome, "ready", "the restart settles ready");
+    assert_eq!(
+        second.customizer_builds, 0,
+        "the restart builds no member, so it asks the SDK customizer for none"
+    );
+    assert_eq!(
+        second.line("ready members="),
+        format!("ready members={IDENTITY}=None"),
+        "neither the mob build nor its lift restored the member: it stays seated and unbuilt \
+         after Ready"
+    );
+}
+
+/// A process-local gateway keeps its mob in memory, so its bootstrap
+/// restores no member: no member exists when it binds the runtime. The
+/// roster pass seats its member, building only the member's draft through
+/// the SDK customizer: the member is built by its first delivery, and
+/// nothing holds it.
+#[test]
+fn a_process_local_gateway_bootstrap_builds_and_holds_no_member() {
     serve_if_host_process();
     let dir = tempfile::tempdir().unwrap();
     let run = boot(
@@ -658,26 +690,29 @@ fn a_process_local_gateway_bootstrap_holds_no_member() {
     );
     assert_eq!(run.outcome, "ready", "the boot settles ready");
     assert_eq!(
-        run.line("bind held="),
-        "bind held=[]",
+        run.line("bind members="),
+        "bind members=",
         "the bootstrap restored no member"
     );
-    assert!(
-        run.customizer_builds >= 1,
-        "the identity bootstrap builds the member through the SDK customizer"
+    assert_eq!(
+        run.customizer_builds, 1,
+        "the seat builds the member's draft through the SDK customizer"
     );
     assert_eq!(
-        run.line("ready held="),
-        "ready held=[Some(false)]",
-        "the member runs unheld"
+        run.line("ready members="),
+        format!("ready members={IDENTITY}=None"),
+        "the member is seated, unbuilt and unheld"
     );
 }
 
-/// The restart's first roster callback fails and every later one answers.
-/// The holds and the identity bootstrap use one roster, read before the mob
-/// build and failing closed, so a failure before it cannot leave a member the
-/// build revives unheld while the bootstrap still goes ahead with a later
-/// answer.
+/// R111: the restart's first roster callback fails and every later one
+/// answers. The holds come from no roster read: Core asks the member build
+/// preparer before each member it builds, and the preparer holds every
+/// build that comes before the identity runtime is composed. So the member
+/// the restart's mob build restores (`member_restore = "eager"`) is held
+/// although the first roster callback failed, and the roster pass, run with
+/// the roster the boot read, publishes its tools and releases it before
+/// Ready.
 #[test]
 fn a_restart_whose_first_roster_callback_fails_still_holds_its_restored_member() {
     serve_if_host_process();
@@ -700,6 +735,7 @@ fn a_restart_whose_first_roster_callback_fails_still_holds_its_restored_member()
         Ending::Close,
         &Launch {
             failed_roster_calls: 1,
+            member_restore: Some("eager"),
             ..Launch::default()
         },
     );
@@ -707,26 +743,25 @@ fn a_restart_whose_first_roster_callback_fails_still_holds_its_restored_member()
     assert_eq!(
         second.line("bind members="),
         format!("bind members={IDENTITY}=Some(true)"),
-        "the member meerkat revived during the mob build holds its run starts, although the \
-         restart's first roster callback failed"
+        "the member the mob build restored holds its run starts, although the restart's first \
+         roster callback failed"
     );
     assert_eq!(
         second.line("ready members="),
         format!("ready members={IDENTITY}=Some(false)"),
-        "the identity bootstrap published its tools and released the hold before Ready"
+        "the roster pass published its tools and released the hold before Ready"
     );
 }
 
-/// A candidate restart that supplies a definition differing from the stored
-/// one runs the stored definition (`candidate_definition = "stored"`). The
-/// roster is derived from the definition its callback is handed: the holds
-/// come from the roster of the definition the mob runs, the same roster the
-/// identity bootstrap restores, so the member the build revives is held. A
-/// candidate releases no hold: the identity bootstrap still publishes the
-/// member's customizer tools, and the member stays held through Ready, so
-/// it starts no run on the candidate.
+/// R82: a candidate restart that supplies a definition differing from the
+/// stored one runs the stored definition (`candidate_definition =
+/// "stored"`), and its roster is read from that definition. A candidate
+/// composition acts nowhere: its mob build restores no member, even when the
+/// start asks for every one (`member_restore = "eager"`), its roster pass
+/// seats and builds nothing, and no SDK customizer build runs, so no member
+/// is held or published on the candidate.
 #[test]
-fn a_candidate_restart_holds_the_member_the_roster_of_its_stored_definition_names() {
+fn a_candidate_restart_of_the_stored_definition_builds_and_holds_no_member() {
     serve_if_host_process();
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state");
@@ -744,8 +779,9 @@ fn a_candidate_restart_holds_the_member_the_roster_of_its_stored_definition_name
     assert_eq!(first.outcome, "ready", "the first boot settles ready");
     assert_eq!(
         first.line("ready members="),
-        "ready members=worker-member=Some(false)",
-        "the first boot's roster names the member of the stored definition's profile"
+        "ready members=worker-member=None",
+        "the first boot's roster names the member of the stored definition's profile, seated \
+         and unbuilt"
     );
 
     let second = boot(
@@ -757,6 +793,7 @@ fn a_candidate_restart_holds_the_member_the_roster_of_its_stored_definition_name
             mob_config: RENAMED_PROFILE_MOB_CONFIG,
             roster: Roster::FromDefinition,
             composition: Composition::CandidateRunningTheStored,
+            member_restore: Some("eager"),
             ..Launch::default()
         },
     );
@@ -764,28 +801,37 @@ fn a_candidate_restart_holds_the_member_the_roster_of_its_stored_definition_name
         second.outcome, "ready",
         "the candidate restart settles ready"
     );
+    let roster_context = second
+        .init_rosters
+        .last()
+        .unwrap_or_else(|| panic!("the candidate read its roster: {:?}", second.init_rosters));
+    let profiles = &roster_context["mob_definition"]["profiles"];
+    assert!(
+        profiles.get("worker").is_some() && profiles.get("helper").is_none(),
+        "the boot roster is read from the stored definition the candidate runs: {profiles}"
+    );
     assert_eq!(
         second.line("bind members="),
-        "bind members=worker-member=Some(true)",
-        "the member of the stored definition, which the candidate runs, holds its run starts \
-         from the mob build"
+        "bind members=worker-member=None",
+        "the candidate's mob build restores no member"
     );
-    assert!(
-        second.customizer_builds >= 1,
-        "the identity bootstrap publishes the member's tools through the SDK customizer"
+    assert_eq!(
+        second.customizer_builds, 0,
+        "a candidate builds and seats no member, so it asks the SDK customizer for none"
     );
     assert_eq!(
         second.line("ready members="),
-        "ready members=worker-member=Some(true)",
-        "a candidate releases no hold: the member stays held after its tools publish"
+        "ready members=worker-member=None",
+        "nothing is built or held on the candidate"
     );
 }
 
-/// The restart's roster no longer lists a member the first boot ran. The
-/// mob build revives it all the same, and nothing publishes its customizer
-/// tools: it holds its run starts from the build until the identity
-/// bootstrap's roster pass retires it, so it never starts a run without
-/// them.
+/// R111: the restart's roster no longer lists a member the first boot
+/// seated. The restart restores every seated member while the mob is built
+/// (`member_restore = "eager"`), the dropped one as well, before the
+/// identity runtime is composed: both are held. Nothing publishes the
+/// dropped member's customizer tools, so it holds its run starts until the
+/// roster pass retires it, and it never starts a run without them.
 #[test]
 fn a_restored_member_the_roster_no_longer_lists_stays_held_until_it_is_retired() {
     serve_if_host_process();
@@ -817,8 +863,8 @@ fn a_dropped_member_stays_held_until_it_is_retired(test: &str, lazy: bool) {
     assert_eq!(first.outcome, "ready", "the first boot settles ready");
     assert_eq!(
         first.line("ready members="),
-        format!("ready members={DROPPED}=Some(false) {IDENTITY}=Some(false)"),
-        "the first boot runs both members unheld"
+        format!("ready members={DROPPED}=None {IDENTITY}=None"),
+        "the first boot seats both members and builds neither"
     );
 
     let second = boot(
@@ -828,6 +874,7 @@ fn a_dropped_member_stays_held_until_it_is_retired(test: &str, lazy: bool) {
         Ending::Close,
         &Launch {
             lazy,
+            member_restore: Some("eager"),
             ..Launch::default()
         },
     );
@@ -835,13 +882,17 @@ fn a_dropped_member_stays_held_until_it_is_retired(test: &str, lazy: bool) {
     assert_eq!(
         second.line("bind members="),
         format!("bind members={DROPPED}=Some(true) {IDENTITY}=Some(true)"),
-        "both members meerkat revived during the mob build hold their run starts, the one the \
-         roster no longer lists as well"
+        "both members the mob build restored hold their run starts, the one the roster no \
+         longer lists as well"
     );
     assert_eq!(
         second.line(&format!("retired {DROPPED} ")),
         format!("retired {DROPPED} cause=unlisted"),
         "the roster pass retires the member the roster no longer lists"
+    );
+    assert_eq!(
+        second.customizer_builds, 1,
+        "the roster pass publishes the listed member's tools; nothing publishes the dropped one's"
     );
     assert_eq!(
         second.line("ready members="),

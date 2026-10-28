@@ -230,9 +230,11 @@ impl UnifiedRuntime {
             self.fire_error(alert);
             log_reconcile_failures(&report.failures);
         } else if !report.skipped_missing_members.is_empty() {
-            // INFO, not WARN: lazy identity bootstrap leaves an edge pending
-            // until both endpoints are members, so a boot skips such edges by
-            // design and a warning would fire on every boot.
+            // INFO, not WARN: an edge waits until both endpoints are members
+            // of Core's mob (an identity not seated yet, or a placed or
+            // externally bound one its host has not materialized), so a
+            // reconcile skips such edges by design and a warning would fire
+            // each time.
             tracing::info!(
                 skipped = report.skipped_missing_members.len(),
                 "edge reconcile left edges pending until both endpoints are members; \
@@ -758,8 +760,7 @@ pub(crate) async fn reconcile_edges_over_members(
 /// naming the first [`LOGGED_RECONCILE_FAILURES`] failed operations beside
 /// the counts, with `skipped` counting the edges skipped beside the
 /// failures. An edge skipped because an endpoint is not a member yet failed
-/// nothing: lazy identity bootstrap leaves it pending until both endpoints
-/// materialize.
+/// nothing: it stays pending until both endpoints are members.
 fn reconcile_incomplete_alert(report: &UnifiedRuntimeReconcileEdgesReport) -> Option<ErrorEvent> {
     if report.failures.is_empty() {
         return None;

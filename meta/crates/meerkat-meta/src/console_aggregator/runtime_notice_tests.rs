@@ -2518,3 +2518,136 @@ async fn restoration_search_is_session_scoped_and_store_reset_invalidates_its_fr
     );
     Ok(())
 }
+
+const BLOCK_MESSAGE: &str = "0199f3c2-9b1e-7e2a-8c41-6d2f0a1b3c4d";
+
+/// A row of a streamed block compaction can remove.
+fn block_row(key: &str, session: &SessionId, kind: &str, sequence: u64) -> NewConsoleFrame {
+    frame(
+        key,
+        session,
+        kind,
+        json!({
+            "delta": "chunk ",
+            "content": "chunk chunk chunk ",
+            "assistant_message_id": BLOCK_MESSAGE,
+            "source_sequence": sequence,
+        }),
+    )
+}
+
+fn reads_since(store: &ObservedStore, from: usize) -> ConsoleLogResult<Vec<Option<u64>>> {
+    Ok(store
+        .query_afters
+        .lock()
+        .map_err(|_| std::io::Error::other("query cursor log lock poisoned"))?[from..]
+        .to_vec())
+}
+
+fn reads_so_far(store: &ObservedStore) -> ConsoleLogResult<usize> {
+    Ok(store
+        .query_afters
+        .lock()
+        .map_err(|_| std::io::Error::other("query cursor log lock poisoned"))?
+        .len())
+}
+
+/// A streamed delta row goes once its block's complete row is stored, so a
+/// row that stays anchors the cache when there is one, and a refresh after
+/// the compaction reuses the cached scan instead of reading the identity's
+/// rows from the first.
+#[tokio::test]
+async fn the_frontier_anchor_never_lands_on_a_delta_row() -> ConsoleLogResult<()> {
+    let store = Arc::new(ObservedStore::new(Vec::new(), None));
+    let aggregator = MetaConsoleAggregator::new(store.clone());
+    let session = SessionId::new();
+    let block = |key: &str, kind: &str, sequence: u64| block_row(key, &session, kind, sequence);
+    let start = store
+        .append_if_absent(frame("run-start", &session, "run_started", json!({})))
+        .await?
+        .frame;
+    let first = store
+        .append_if_absent(block("delta-0", "text_delta", 1))
+        .await?
+        .frame;
+    store
+        .append_if_absent(block("delta-1", "text_delta", 2))
+        .await?;
+    store
+        .append_if_absent(block("delta-2", "text_delta", 3))
+        .await?;
+    let observed = observe(&aggregator, &session).await?;
+    assert_eq!(
+        observed.frontier_anchor,
+        Some((start.dedupe_key, start.id)),
+        "the newest rows are deltas: the anchor is the newest row that stays"
+    );
+
+    let complete = store
+        .append_if_absent(block("complete", "text_complete", 4))
+        .await?
+        .frame;
+    let complete_anchor = Some((complete.dedupe_key, complete.id));
+    let removed = store
+        .inner
+        .compact_message_deltas(&ConsoleDeltaCompaction::new(
+            RUNTIME,
+            IDENTITY,
+            ConsoleDeltaKind::Text,
+            BLOCK_MESSAGE,
+            first.cursor,
+            complete.cursor,
+        ))
+        .await?;
+    // The first delta row stays and holds the block's place.
+    assert_eq!(removed, 2);
+    let reads_before = reads_so_far(&store)?;
+    let refreshed = observe(&aggregator, &session).await?;
+    let refresh_reads = reads_since(&store, reads_before)?;
+    assert!(
+        !refresh_reads.is_empty() && refresh_reads.iter().all(Option::is_some),
+        "a refresh reads past the cached cursor, never from the first row: {refresh_reads:?}"
+    );
+    assert_eq!(refreshed.frontier_anchor, complete_anchor);
+    Ok(())
+}
+
+/// A prefix of delta rows alone still anchors, on its newest row, so the
+/// next observation reads only the new rows instead of the whole identity.
+#[tokio::test]
+async fn a_prefix_of_delta_rows_alone_anchors_on_its_newest_row() -> ConsoleLogResult<()> {
+    let store = Arc::new(ObservedStore::new(Vec::new(), None));
+    let aggregator = MetaConsoleAggregator::new(store.clone());
+    let session = SessionId::new();
+    let mut newest = None;
+    for sequence in 1..=3 {
+        newest = Some(
+            store
+                .append_if_absent(block_row(
+                    &format!("delta-{sequence}"),
+                    &session,
+                    "text_delta",
+                    sequence,
+                ))
+                .await?
+                .frame,
+        );
+    }
+    let newest = newest.ok_or("seeded a delta row")?;
+    let observed = observe(&aggregator, &session).await?;
+    assert_eq!(
+        observed.frontier_anchor,
+        Some((newest.dedupe_key, newest.id))
+    );
+    store
+        .append_if_absent(frame("run-start", &session, "run_started", json!({})))
+        .await?;
+    let reads_before = reads_so_far(&store)?;
+    observe(&aggregator, &session).await?;
+    let refresh_reads = reads_since(&store, reads_before)?;
+    assert!(
+        !refresh_reads.is_empty() && refresh_reads.iter().all(Option::is_some),
+        "the refresh reads past the cached cursor: {refresh_reads:?}"
+    );
+    Ok(())
+}

@@ -12,7 +12,7 @@ use crate::blob_store::is_valid_blob_id_value;
 use crate::mob_handle_runtime::{
     assert_member_accepts_images_with_config, is_recoverable_lifecycle_cleanup_error,
     member_entry_to_json, model_routing_status_for_member, model_routing_status_for_session,
-    resolved_tools_for_member, resolved_tools_for_session, send_message_on_mob_with_interaction,
+    resolved_tools_for_member, send_message_on_mob_with_interaction,
     topology_restore_failed_peer_ids, topology_restore_warning_json,
 };
 use crate::unified_runtime::UnifiedRuntime;
@@ -36,18 +36,29 @@ pub(super) fn identity_from_runtime_alias(
 
 /// The identity a stale runtime id names, with its registered status
 /// (`None` when the identity runtime does not know it); `None` when the id
-/// is no generated runtime id or is its identity's registered binding.
+/// is no generated runtime id or is its identity's registered binding. A
+/// failed read of the registered status is its typed error (`Err`): the id
+/// is then neither current nor stale as far as anyone can tell.
 async fn stale_runtime_alias_detail(
     identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
     alias: &str,
-) -> Option<(
-    crate::identity_first::AgentIdentity,
-    Option<crate::identity_first::IdentityStatus>,
-)> {
+) -> Option<
+    Result<
+        (
+            crate::identity_first::AgentIdentity,
+            Option<crate::identity_first::IdentityStatus>,
+        ),
+        crate::identity_first::IdentityRuntimeError,
+    >,
+> {
     let identity_runtime = identity_runtime?;
     let alias = crate::member_comms_id::runtime_alias_str(alias);
     let identity = identity_from_runtime_alias(alias.as_ref())?;
-    let status = identity_runtime.status(&identity).await.ok();
+    let status = match identity_runtime.status(&identity).await {
+        Ok(status) => Some(status),
+        Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => None,
+        Err(error) => return Some(Err(error)),
+    };
     let registered = status
         .as_ref()
         .and_then(|status| status.agent_runtime_id.as_ref())
@@ -55,16 +66,23 @@ async fn stale_runtime_alias_detail(
     if registered == Some(alias.as_ref()) {
         return None;
     }
-    Some((identity, status))
+    Some(Ok((identity, status)))
 }
 
+/// The refusal of runtime id `alias` when it is not its identity's
+/// registered binding: typed stale, or, when the binding cannot be read,
+/// the read's typed retryable error. `None` for the current binding and for
+/// an id that is no generated runtime id.
 async fn stale_runtime_alias_error_response(
     identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
     alias: &str,
     response_id: Value,
 ) -> Option<JsonRpcResponse> {
     let alias = crate::member_comms_id::runtime_alias_str(alias).into_owned();
-    let (identity, status) = stale_runtime_alias_detail(identity_runtime, &alias).await?;
+    let (identity, status) = match stale_runtime_alias_detail(identity_runtime, &alias).await? {
+        Ok(stale) => stale,
+        Err(error) => return Some(super::identity_error_response(response_id, &error)),
+    };
     Some(JsonRpcResponse {
         jsonrpc: JSONRPC_VERSION.to_string(),
         id: response_id,
@@ -81,6 +99,9 @@ async fn stale_runtime_alias_error_response(
     })
 }
 
+/// Whether a member listing leaves out the member under runtime id `alias`:
+/// a generated runtime id that is not its identity's registered binding,
+/// or whose binding cannot be read.
 async fn runtime_alias_is_stale(
     identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
     alias: &str,
@@ -229,18 +250,22 @@ pub(super) fn parse_handling_mode(
 /// Precedence contract:
 /// 1. A generated `rt:{identity}:{generation}` alias belongs to identity
 ///    authority and stays generation-fenced even while its roster row exists.
-/// 2. An exact mob-roster match (after public-alias/comms encoding) keeps raw
-///    member-id semantics unless the active `IdentityRuntime` binding proves
-///    that the row is an identity-first embodiment. Identity-owned rows route
-///    through `IdentityRuntime` so delivery preparation is never bypassed.
-/// 3. Otherwise, on identity-first runtimes a bare durable identity (e.g.
-///    `atlas-base-001` when the meerkat 0.7.1 roster holds
-///    `rt:atlas-base-001:0`) resolves through the identity bridge —
-///    the gateway-plane counterpart of the console plane's
-///    `console_send_with_identity_first_fallback` (`http_console.rs`).
+/// 2. A durable identity the `IdentityRuntime` has registered takes the
+///    identity door whatever its residency or its status view: live,
+///    dormant (a respawn window, a runtime that began shutting down, a
+///    member Core holds no materialization of) or broken. Registration
+///    chooses the door, never a live status read, so the identity's
+///    admission guards and delivery preparation (addressability, first-boot
+///    rows, held completions, the registered row, memory and defanging) are
+///    never bypassed through the raw member door. A name in the raw reconcile
+///    baseline does not change that: the baseline only decides members
+///    without a registered identity.
+/// 3. A failed read of a registered identity's Core facts while choosing its
+///    door refuses the send typed (retryable, nothing submitted); it is never
+///    taken as "not an identity".
 /// 4. Anything else (no identity runtime, unparseable identity, unknown
-///    identity) falls through to raw member-id semantics so the original
-///    mob `member not found` error surfaces unchanged.
+///    identity) keeps raw member-id semantics so the original mob
+///    `member not found` error surfaces unchanged.
 enum SendMessageTarget {
     /// Deliver through the mob roster (`send_message_on_mob_with_interaction`).
     MobMember,
@@ -266,25 +291,14 @@ enum SendMessageTarget {
     },
 }
 
-/// Whether `status` reads the identity's own live member: Active, or Broken
-/// while Core holds that live member Broken (the broken view still names its
-/// runtime id). A roster row that is such a member routes through the
-/// identity runtime, so delivery preparation is never bypassed. A broken
-/// identity with no live member (a final wake refusal) and a dormant one do
-/// not.
-fn status_owns_live_member(status: &crate::identity_first::IdentityStatus) -> bool {
-    match status.state {
-        crate::identity_first::IdentityLifecycleState::Active => true,
-        crate::identity_first::IdentityLifecycleState::Broken => status.agent_runtime_id.is_some(),
-        crate::identity_first::IdentityLifecycleState::Dormant => false,
-    }
-}
-
+/// The door of a send to `member_id`; `Err` is the typed refusal of a
+/// registered identity whose Core facts could not be read (see
+/// [`SendMessageTarget`]): nothing reached any door.
 async fn resolve_send_message_target(
     runtime: &UnifiedRuntime,
     identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
     member_id: &str,
-) -> SendMessageTarget {
+) -> Result<SendMessageTarget, crate::identity_first::IdentityRuntimeError> {
     let member_id = crate::member_comms_id::runtime_alias_str(member_id).into_owned();
     let configured_identity_runtime = identity_runtime.or_else(|| runtime.identity_runtime_ref());
     // Generated aliases belong to the identity authority even when the raw
@@ -294,81 +308,50 @@ async fn resolve_send_message_target(
         && let Some(identity) =
             crate::identity_first::IdentityRuntime::identity_for_generated_member_alias(&member_id)
     {
-        let status = identity_rt.status(&identity).await.ok();
-        return SendMessageTarget::Identity {
-            identity_rt: identity_rt.clone(),
-            identity,
-            expected_member_alias: Some(member_id.clone()),
-            runtime_member_id: status
-                .as_ref()
-                .and_then(|status| status.agent_runtime_id.as_ref())
-                .map(|runtime_id| runtime_id.as_str().to_string()),
-            session_id: status.and_then(|status| status.session_id),
-        };
+        return identity_send_target(identity_rt, identity, Some(member_id)).await;
     }
     if crate::member_comms_id::is_reserved_generated_alias(&member_id) {
-        return SendMessageTarget::AuthorityUnavailable { alias: member_id };
+        return Ok(SendMessageTarget::AuthorityUnavailable { alias: member_id });
     }
-    let roster_id = crate::member_comms_id::mob_member_id(&member_id);
-    if let Ok(Some(member)) = runtime.mob_handle().get_member(&roster_id).await {
-        if let Some(identity_rt) = configured_identity_runtime
-            && let Ok(identity) = crate::identity_first::AgentIdentity::parse(&member_id)
-            && crate::member_comms_id::live_member_is_identity(
-                member.agent_identity.as_str(),
-                identity.as_str(),
-            )
-            && let Ok(status) = identity_rt.status(&identity).await
-            && status_owns_live_member(&status)
-        {
-            return SendMessageTarget::Identity {
-                identity_rt: identity_rt.clone(),
-                identity,
-                expected_member_alias: None,
-                runtime_member_id: status
-                    .agent_runtime_id
-                    .map(|runtime_id| runtime_id.as_str().to_string()),
-                session_id: status.session_id,
-            };
-        }
-        return SendMessageTarget::MobMember;
-    }
-    // Precedence pinning: the roster probe above is a point-in-time machine
-    // command. A member declared in the reconcile baseline is a roster
-    // member even when a concurrent retire/reconcile makes the probe read
-    // absent (reconcile retires stale members before the replacement spawn
-    // lands). Falling through to the identity bridge in that window would
-    // silently deliver to a same-named durable identity's conversation;
-    // keep raw member-id semantics instead, so the send either lands on the
-    // (re)spawned member or surfaces the mob's own member-not-found error.
-    if runtime
-        .mob_runtime()
-        .baseline_member_specs()
-        .await
-        .iter()
-        .any(|spec| spec.identity.as_str() == member_id)
+    // The identity's registration, never its status view, chooses its door.
+    if let Some(identity_rt) = configured_identity_runtime
+        && let Ok(identity) = crate::identity_first::AgentIdentity::parse(&member_id)
+        && identity_rt.contains(&identity).await
     {
-        return SendMessageTarget::MobMember;
+        return identity_send_target(identity_rt, identity, None).await;
     }
-    let Some(identity_rt) = configured_identity_runtime else {
-        return SendMessageTarget::MobMember;
-    };
-    let Ok(identity) = crate::identity_first::AgentIdentity::parse(&member_id) else {
-        return SendMessageTarget::MobMember;
-    };
-    match identity_rt.status(&identity).await {
-        Ok(status) => SendMessageTarget::Identity {
-            identity_rt: identity_rt.clone(),
-            identity,
-            expected_member_alias: None,
-            runtime_member_id: status
+    Ok(SendMessageTarget::MobMember)
+}
+
+/// The identity door for `identity`, carrying Core's binding of it as read
+/// now: its live member keys the image pre-flight and its session is the
+/// reported fallback. A read that fails for a registered identity refuses
+/// the send instead of choosing a door without those facts. An identity the
+/// runtime does not know (a generated alias of one, or one a roster compile
+/// dropped since) still takes the identity door, which refuses it as
+/// unknown.
+async fn identity_send_target(
+    identity_rt: &std::sync::Arc<crate::identity_first::IdentityRuntime>,
+    identity: crate::identity_first::AgentIdentity,
+    expected_member_alias: Option<String>,
+) -> Result<SendMessageTarget, crate::identity_first::IdentityRuntimeError> {
+    let (runtime_member_id, session_id) = match identity_rt.status(&identity).await {
+        Ok(status) => (
+            status
                 .agent_runtime_id
                 .map(|runtime_id| runtime_id.as_str().to_string()),
-            session_id: status.session_id,
-        },
-        // Unknown identity: keep raw member-id semantics so the original
-        // mob `member not found` error surfaces.
-        Err(_) => SendMessageTarget::MobMember,
-    }
+            status.session_id,
+        ),
+        Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => (None, None),
+        Err(error) => return Err(error),
+    };
+    Ok(SendMessageTarget::Identity {
+        identity_rt: identity_rt.clone(),
+        identity,
+        expected_member_alias,
+        runtime_member_id,
+        session_id,
+    })
 }
 
 pub(super) async fn handle_send_message(
@@ -421,7 +404,14 @@ pub(super) async fn handle_send_message(
             {
                 return response;
             }
-            let target = resolve_send_message_target(runtime, identity_runtime, &member_id).await;
+            let target =
+                match resolve_send_message_target(runtime, identity_runtime, &member_id).await {
+                    Ok(target) => target,
+                    // A registered identity whose Core facts could not be
+                    // read: refused typed before any door, so nothing is
+                    // submitted and no interaction is reserved.
+                    Err(error) => return super::identity_error_response(response_id, &error),
+                };
             // Pre-flight the image-capability guard against the member that
             // will actually take the delivery: the wire id for roster sends,
             // the live runtime member for identity-bridge sends. A dormant
@@ -486,9 +476,10 @@ pub(super) async fn handle_send_message(
             // incarnation -> durable registration and re-keys every later
             // live event onto the incarnation conversation (the console
             // dispatch-mirroring defect). Generated aliases resolve to Identity
-            // or AuthorityUnavailable before the roster probe. Raw workers keep
-            // the MobMember arm, while active identity-owned roster rows route
-            // through IdentityRuntime (both precedence cases are pinned below).
+            // or AuthorityUnavailable before anything else. Raw workers keep
+            // the MobMember arm, while every registered identity routes
+            // through IdentityRuntime whatever its status view (both
+            // precedence cases are pinned below).
             let (events_identity, events_member_id) = match &target {
                 SendMessageTarget::MobMember => (member_id.clone(), Some(member_id.clone())),
                 SendMessageTarget::AuthorityUnavailable { alias } => (
@@ -891,6 +882,19 @@ pub(super) async fn handle_ensure_member(
                     }
                 }
             };
+            if let Some(session_id) = resume_session_id.as_ref()
+                && let Some(refusal) = runtime
+                    .mob_runtime()
+                    .attach_binding_refusal("meta/ensure_member", session_id)
+                    .await
+            {
+                return JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: None,
+                    error: Some(refusal.json_rpc_error()),
+                };
+            }
             let additional_instructions = match params.get("additional_instructions") {
                 None | Some(Value::Null) => None,
                 Some(Value::Array(arr)) => {
@@ -2274,23 +2278,28 @@ pub(super) async fn handle_identity_resolved_tools(
             {
                 return response;
             }
+            // A registered identity answers from its live session, or, when
+            // Core holds it Dormant, from its tool record: the read never
+            // wakes it (`tools_source` says which).
             if let Some(identity_runtime) = identity_runtime
                 && let Ok(parsed) = crate::identity_first::AgentIdentity::parse(&identity)
                 && let Ok(status) = identity_runtime.status(&parsed).await
                 && let Some(session_id) = status.session_id
             {
-                match resolved_tools_for_session(
-                    runtime.mob_runtime().session_service(),
-                    &identity,
-                    session_id,
-                )
-                .await
+                match identity_runtime
+                    .resolved_tools_answer(
+                        &parsed,
+                        &identity,
+                        session_id,
+                        runtime.mob_runtime().session_service(),
+                    )
+                    .await
                 {
-                    Ok(snapshot) => {
+                    Ok(answer) => {
                         return JsonRpcResponse {
                             jsonrpc: JSONRPC_VERSION.to_string(),
                             id: response_id,
-                            result: Some(serde_json::to_value(&snapshot).unwrap_or(Value::Null)),
+                            result: Some(answer),
                             error: None,
                         };
                     }
@@ -2318,7 +2327,10 @@ pub(super) async fn handle_identity_resolved_tools(
                 Ok(snapshot) => JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: response_id,
-                    result: Some(serde_json::to_value(&snapshot).unwrap_or(Value::Null)),
+                    result: Some(crate::mob_handle_runtime::resolved_tools_answer(
+                        &snapshot,
+                        crate::mob_handle_runtime::ResolvedToolsSource::Live,
+                    )),
                     error: None,
                 },
                 Err(err) => JsonRpcResponse {
@@ -3086,6 +3098,18 @@ pub(super) async fn handle_attach_existing_session(
                     };
                 }
             };
+            if let Some(refusal) = runtime
+                .mob_runtime()
+                .attach_binding_refusal("meta/attach_existing_session", &bridge_session_id)
+                .await
+            {
+                return JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: None,
+                    error: Some(refusal.json_rpc_error()),
+                };
+            }
             let raw_reservation = match crate::member_comms_id::reserve_raw_member_target(
                 identity_runtime,
                 mid,
@@ -3269,7 +3293,10 @@ pub(super) async fn handle_run_flow(
                         }),
                     };
                 }
-                Err(crate::flow_role_targets::RoleTargetsRefusal::StaleAlias(error)) => {
+                Err(
+                    crate::flow_role_targets::RoleTargetsRefusal::StaleAlias(error)
+                    | crate::flow_role_targets::RoleTargetsRefusal::Unreadable(error),
+                ) => {
                     return JsonRpcResponse {
                         jsonrpc: JSONRPC_VERSION.to_string(),
                         id: response_id,
@@ -4799,6 +4826,88 @@ mod member_declaration_wire_tests {
             );
         }
     }
+
+    /// A launch member auth binding as `runtime_options.member_auth_binding`
+    /// declares it.
+    fn launch_binding() -> meerkat_core::AuthBindingRef {
+        meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("native-team").expect("realm id"),
+            binding: meerkat_core::BindingId::parse("b").expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        }
+    }
+
+    /// Core materializes an adopted identity from its sealed declaration
+    /// without the spawn customizers, so a launch with a member auth binding
+    /// refuses adoption, typed, before anything is read or written, whatever
+    /// binding the declaration names.
+    #[test]
+    fn adoption_is_refused_under_a_launch_member_auth_binding() {
+        let refused =
+            super::adoption_refusal(true, Some(&launch_binding()), &serde_json::json!("adopt1"))
+                .expect("a launch with a member auth binding refuses adoption");
+        assert_eq!(refused.id, serde_json::json!("adopt1"));
+        assert!(refused.result.is_none(), "a refusal carries no result");
+        let error = refused.error.expect("the refusal");
+        assert_eq!(error.code, -32602);
+        let data = error.data.expect("the refusal's data");
+        assert_eq!(
+            data["kind"],
+            serde_json::json!("member_auth_binding_uncarried")
+        );
+        assert!(data["reason"].is_string(), "{data}");
+    }
+
+    /// An apply re-materializes the identity from its sealed declaration, so
+    /// a launch with a member auth binding refuses it the same way, and a
+    /// launch without one is not refused for it.
+    #[test]
+    fn a_tool_declaration_apply_is_refused_under_a_launch_member_auth_binding() {
+        let refused = super::member_auth_binding_declaration_refusal(
+            Some(&launch_binding()),
+            super::APPLY_MEMBER_TOOL_DECLARATION,
+            &serde_json::json!("apply1"),
+        )
+        .expect("a launch with a member auth binding refuses the apply");
+        let error = refused.error.expect("the refusal");
+        assert_eq!(error.code, -32602);
+        let data = error.data.expect("the refusal's data");
+        assert_eq!(
+            data["kind"],
+            serde_json::json!("member_auth_binding_uncarried")
+        );
+        assert!(
+            data["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("mob/apply_member_tool_declaration")),
+            "{data}"
+        );
+        assert!(
+            super::member_auth_binding_declaration_refusal(
+                None,
+                super::APPLY_MEMBER_TOOL_DECLARATION,
+                &serde_json::json!("apply1"),
+            )
+            .is_none()
+        );
+    }
+
+    /// Without a member auth binding an authoritative launch adopts as
+    /// before, and a non-authoritative launch keeps its own refusal.
+    #[test]
+    fn adoption_without_a_launch_member_auth_binding_is_not_refused_for_it() {
+        assert!(super::adoption_refusal(true, None, &serde_json::json!("adopt1")).is_none());
+        let candidate =
+            super::adoption_refusal(false, Some(&launch_binding()), &serde_json::json!("adopt1"))
+                .expect("a candidate launch refuses adoption");
+        let error = candidate.error.expect("the refusal");
+        assert!(
+            error.message.contains("non-authoritative"),
+            "{}",
+            error.message
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4806,39 +4915,344 @@ mod member_declaration_wire_tests {
 mod tests {
     use super::*;
 
-    /// A roster row routes `meta/send_message` through the identity runtime
-    /// while it is the identity's live member: Active, or Broken while Core
-    /// holds that live member Broken. A broken identity with no live member
-    /// and a dormant one do not.
-    #[test]
-    fn a_live_member_core_holds_broken_still_routes_through_the_identity_runtime() {
-        use crate::identity_first::IdentityLifecycleState::{Active, Broken, Dormant};
-        let status = |state, runtime_id: Option<&str>| crate::identity_first::IdentityStatus {
-            identity: crate::identity_first::AgentIdentity::parse("personal:alice")
-                .expect("an identity"),
-            state,
-            agent_runtime_id: runtime_id
-                .map(|id| crate::identity_first::AgentRuntimeId::parse(id).expect("a runtime id")),
-            session_id: None,
-            member_id: None,
-            profile: None,
-            runtime_mode: None,
-            addressability: crate::identity_first::AgentAddressability::Addressable,
-            display_name: None,
-            labels: std::collections::BTreeMap::new(),
-            generation: None,
-            intent_managed: false,
-            convergence: None,
-            wake_refusal: None,
-            replaced_session: None,
-            session_repair_required: None,
-            customizer_tools_pending: None,
-        };
-        let live = Some("rt:personal:alice:1");
-        assert!(status_owns_live_member(&status(Active, live)));
-        assert!(status_owns_live_member(&status(Broken, live)));
-        assert!(!status_owns_live_member(&status(Broken, None)));
-        assert!(!status_owns_live_member(&status(Dormant, None)));
+    /// A runtime whose mob roster holds `identity`'s member live, under a
+    /// profile Core admits External work for, beside an identity runtime that
+    /// registered `identity` with `addressability` and reads Core's facts
+    /// from a `CoreReadsBridge` holding the member live at generation 0. The
+    /// raw member door would deliver to that roster member, so only the door
+    /// choice keeps a send on the identity door.
+    async fn registered_identity_beside_its_roster_member(
+        mob_id: &str,
+        identity: &str,
+        addressability: crate::identity_first::AgentAddressability,
+    ) -> Result<
+        (
+            crate::UnifiedRuntime,
+            std::sync::Arc<crate::identity_first::IdentityRuntime>,
+            std::sync::Arc<crate::identity_first::core_test_bridge::CoreReadsBridge>,
+            crate::identity_first::AgentRuntimeId,
+        ),
+        String,
+    > {
+        let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "{mob_id}"
+
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+
+[profiles.worker.tools]
+comms = true
+"#
+        ))
+        .map_err(|err| format!("definition parses: {err:?}"))?;
+        let runtime = crate::UnifiedRuntime::builder()
+            .definition(definition)
+            .default_llm_client(std::sync::Arc::new(
+                meerkat_client::TestClient::for_provider(meerkat_core::Provider::OpenAI),
+            ))
+            .build()
+            .await
+            .map_err(|err| format!("runtime builds: {err:?}"))?;
+        let mut spec = meerkat_mob::SpawnMemberSpec::from_wire(
+            "worker".to_string(),
+            identity.to_string(),
+            None,
+            None,
+            None,
+        )
+        .with_labels(std::collections::BTreeMap::from([(
+            "agent_identity".to_string(),
+            identity.to_string(),
+        )]))
+        // Quiescent: no initial message and turn-driven, so no turn runs
+        // beside the sends under test.
+        .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven);
+        spec.identity = crate::member_comms_id::roster_member_id_for_identity(identity);
+        Box::pin(runtime.mob_handle().spawn_spec(spec))
+            .await
+            .map_err(|err| format!("the identity's roster member spawns: {err:?}"))?;
+        let bridge = std::sync::Arc::new(
+            crate::identity_first::core_test_bridge::CoreReadsBridge::default(),
+        );
+        let identity_rt = std::sync::Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: std::sync::Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .map_err(|err| format!("in-memory continuity store: {err:?}"))?,
+                ),
+                lease_provider: std::sync::Arc::new(
+                    crate::identity_first::LocalLeaseProvider::new(),
+                ),
+                runtime_instance_id: mob_id.to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(bridge.clone()),
+                default_timeout: None,
+            },
+        ));
+        let runtime_id = crate::identity_first::core_test_bridge::register_live(
+            &identity_rt,
+            &bridge.core,
+            crate::identity_first::DurableAgentSpec {
+                identity: crate::identity_first::AgentIdentity::parse(identity)
+                    .map_err(|err| format!("identity parses: {err:?}"))?,
+                profile: meerkat_mob::ProfileName::from("worker"),
+                addressability,
+                display_name: None,
+                labels: std::collections::BTreeMap::new(),
+                context: None,
+                additional_instructions: Vec::new(),
+                initial_message: None,
+                runtime_mode_override: None,
+                backend: None,
+                binding: None,
+                placement: None,
+            },
+            0,
+            meerkat_core::types::SessionId::new(),
+        )
+        .await
+        .map_err(|err| format!("the identity registers live: {err:?}"))?;
+        Ok((runtime, identity_rt, bridge, runtime_id))
+    }
+
+    /// A registered identity whose Core facts cannot be read is refused by
+    /// `meta/send_message` typed and retryable, before any door. Its roster
+    /// member is live and Core admits External work for its profile, so the
+    /// raw member door would have delivered a message the identity's
+    /// `InternalOnly` policy refuses; the failed read must never stand for
+    /// "not an identity".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_message_refuses_typed_when_a_registered_identitys_history_cannot_be_read()
+    -> Result<(), String> {
+        let (runtime, identity_rt, bridge, _runtime_id) =
+            registered_identity_beside_its_roster_member(
+                "send-message-history-unreadable-test",
+                "ops-lead",
+                crate::identity_first::AgentAddressability::InternalOnly,
+            )
+            .await?;
+        // Every read of Core's member history from here on fails.
+        bridge.fail_history_reads(0, u64::MAX);
+
+        let response = handle_send_message(
+            &runtime,
+            Some(&identity_rt),
+            serde_json::json!(1),
+            &serde_json::json!({ "member_id": "ops-lead", "message": "an external note" }),
+        )
+        .await;
+
+        assert!(
+            response.result.is_none(),
+            "nothing may be accepted through any door: {response:?}"
+        );
+        let error = response
+            .error
+            .ok_or("a send whose door cannot be chosen must be refused")?;
+        assert_eq!(
+            error.code,
+            crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE,
+            "the typed, retryable history refusal: {error:?}"
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "kind": "identity_history_unavailable",
+                "identity": "ops-lead",
+                "retryable": true,
+            }))
+        );
+        // Every door runs after the send reserves its console interaction, so
+        // no reservation and no frame for the identity means no door ran.
+        assert!(
+            runtime
+                .console_events()
+                .response_phase_for_identity("ops-lead")
+                .await
+                .is_none(),
+            "a send refused before its door reserves no interaction"
+        );
+        let events = runtime
+            .console_events()
+            .replay_all(None)
+            .await
+            .map_err(|err| format!("console replay: {err:?}"))?;
+        assert!(
+            events.iter().all(|event| event.identity != "ops-lead"),
+            "no frame may be recorded for a send refused before its door"
+        );
+
+        let _ = runtime.mob_handle().stop().await;
+        Ok(())
+    }
+
+    /// The stdio guards on a generated runtime id fail closed on a read
+    /// fault. When the binding the id is compared with cannot be read, a
+    /// member method (`meta/send_message`), a flow run's role targets and the
+    /// identity methods' check of an id their resolver left unresolved refuse
+    /// the id with the identity runtime's typed, retryable refusal, the
+    /// current binding's id included: never as a stale id with no registered
+    /// binding, and never as an unknown one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdio_stale_runtime_id_guards_fail_closed_on_a_read_fault() -> Result<(), String> {
+        let (runtime, identity_rt, bridge, runtime_id) =
+            registered_identity_beside_its_roster_member(
+                "stale-runtime-id-unreadable-test",
+                "ops-lead",
+                crate::identity_first::AgentAddressability::Addressable,
+            )
+            .await?;
+        // Every read of Core's member history from here on fails.
+        bridge.fail_history_reads(0, u64::MAX);
+        let unreadable = Some(serde_json::json!({
+            "kind": "identity_history_unavailable",
+            "identity": "ops-lead",
+            "retryable": true,
+        }));
+        for alias in [runtime_id.as_str(), "rt:ops-lead:1"] {
+            let send = handle_send_message(
+                &runtime,
+                Some(&identity_rt),
+                serde_json::json!(1),
+                &serde_json::json!({ "member_id": alias, "message": "a note" }),
+            )
+            .await;
+            assert!(send.result.is_none(), "{alias}: {send:?}");
+            let flow = handle_run_flow(
+                &runtime,
+                Some(&identity_rt),
+                serde_json::json!(2),
+                &serde_json::json!({
+                    "flow_id": "review",
+                    "role_targets": { "worker": [alias] },
+                }),
+            )
+            .await;
+            assert!(flow.result.is_none(), "{alias}: {flow:?}");
+            let identity = crate::rpc::rpc_stale_generated_alias_error(&identity_rt, alias)
+                .await
+                .map(|refusal| refusal.into_response(serde_json::json!(3)))
+                .ok_or_else(|| {
+                    format!("{alias}: an id whose binding cannot be read is not unknown")
+                })?;
+            for (surface, response) in [("send", send), ("flow", flow), ("identity", identity)] {
+                let error = response
+                    .error
+                    .ok_or_else(|| format!("{alias}: {surface} must refuse the id"))?;
+                assert_eq!(
+                    (error.code, &error.data),
+                    (crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE, &unreadable),
+                    "{alias}: {surface}: {error:?}"
+                );
+            }
+        }
+
+        let _ = runtime.mob_handle().stop().await;
+        Ok(())
+    }
+
+    /// A registered `InternalOnly` identity whose status view reads dormant
+    /// while its member still sits in the mob roster (the view a respawn
+    /// window, a runtime that began shutting down, or a member Core holds no
+    /// binding of gives) takes the identity door, which refuses the external
+    /// sender exactly as it does while the identity reads active. The raw
+    /// member door would have delivered it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_message_to_a_dormant_internal_only_identity_is_refused_as_a_live_one_is()
+    -> Result<(), String> {
+        let (runtime, identity_rt, bridge, runtime_id) =
+            registered_identity_beside_its_roster_member(
+                "send-message-dormant-view-test",
+                "ops-lead",
+                crate::identity_first::AgentAddressability::InternalOnly,
+            )
+            .await?;
+        let identity = crate::identity_first::AgentIdentity::parse("ops-lead")
+            .map_err(|err| format!("identity parses: {err:?}"))?;
+        let params = serde_json::json!({ "member_id": "ops-lead", "message": "an external note" });
+
+        let live_view = identity_rt
+            .status(&identity)
+            .await
+            .map_err(|err| format!("live status: {err}"))?;
+        assert_eq!(
+            live_view.state,
+            crate::identity_first::IdentityLifecycleState::Active
+        );
+        let live =
+            handle_send_message(&runtime, Some(&identity_rt), serde_json::json!(1), &params).await;
+
+        // Core ends the identity's binding; the mob roster still holds the
+        // member, so the raw member door could reach it.
+        bridge.core.retire(&runtime_id);
+        let dormant_view = identity_rt
+            .status(&identity)
+            .await
+            .map_err(|err| format!("dormant status: {err}"))?;
+        assert_eq!(
+            dormant_view.state,
+            crate::identity_first::IdentityLifecycleState::Dormant
+        );
+        assert!(
+            runtime
+                .mob_handle()
+                .get_member(&crate::member_comms_id::roster_member_id_for_identity(
+                    "ops-lead"
+                ))
+                .await
+                .map_err(|err| format!("roster read: {err:?}"))?
+                .is_some(),
+            "the roster still holds the member the raw door would deliver to"
+        );
+        let dormant =
+            handle_send_message(&runtime, Some(&identity_rt), serde_json::json!(2), &params).await;
+
+        let refusal = format!(
+            "send_message failed: {}",
+            crate::identity_first::IdentityRuntimeError::NotAddressable(
+                crate::identity_first::NotAddressable {
+                    identity,
+                    addressability: crate::identity_first::AgentAddressability::InternalOnly,
+                }
+            )
+        );
+        for (view, response) in [("active", &live), ("dormant", &dormant)] {
+            assert!(
+                response.result.is_none(),
+                "the {view} view must not accept the external send: {response:?}"
+            );
+            let error = response
+                .error
+                .as_ref()
+                .ok_or_else(|| format!("the {view} view must refuse the external send"))?;
+            assert_eq!(error.code, -32000, "{view}: {error:?}");
+            assert_eq!(
+                error.message, refusal,
+                "{view}: the identity door's addressability refusal"
+            );
+        }
+        assert_eq!(
+            live.error, dormant.error,
+            "the dormant view is refused exactly as the live one"
+        );
+        let events = runtime
+            .console_events()
+            .replay_all(None)
+            .await
+            .map_err(|err| format!("console replay: {err:?}"))?;
+        assert!(
+            events
+                .iter()
+                .all(|event| !(event.identity == "ops-lead" && event.event_type == "user_input")),
+            "no delivery may be recorded for a refused send"
+        );
+
+        let _ = runtime.mob_handle().stop().await;
+        Ok(())
     }
 
     /// Pin for the send_message reservation contract: a generated
@@ -4849,7 +5263,7 @@ mod tests {
     /// `runtime_to_identity` (the console dispatch-mirroring defect). Both
     /// branches are pinned on the SAME rostered member: without identity
     /// authority the reserved-alias refusal wins, with it the Identity arm
-    /// wins, and the roster probe is reached in neither case.
+    /// wins, and the MobMember arm is taken in neither case.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn generated_alias_never_resolves_to_the_mob_member_arm() -> Result<(), String> {
         let definition = meerkat_mob::MobDefinition::from_toml(
@@ -4894,16 +5308,16 @@ comms = true
         // No identity authority: the reserved-alias refusal, not the roster.
         if !matches!(
             resolve_send_message_target(&runtime, None, "rt:builder:0").await,
-            SendMessageTarget::AuthorityUnavailable { .. }
+            Ok(SendMessageTarget::AuthorityUnavailable { .. })
         ) {
             return Err("a generated alias without identity authority must resolve \
                         AuthorityUnavailable, never MobMember"
                 .to_string());
         }
 
-        // Identity authority present: the identity plane is consulted BEFORE
-        // the roster probe, so the same rostered alias resolves to its
-        // durable identity.
+        // Identity authority present: a generated alias always takes the
+        // identity plane, so the same rostered alias resolves to its durable
+        // identity.
         let identity_rt = std::sync::Arc::new(crate::identity_first::IdentityRuntime::new(
             crate::identity_first::IdentityRuntimeConfig {
                 continuity_store: std::sync::Arc::new(
@@ -4922,18 +5336,24 @@ comms = true
         ));
         let resolved =
             match resolve_send_message_target(&runtime, Some(&identity_rt), "rt:builder:0").await {
-                SendMessageTarget::Identity { identity, .. } => identity,
-                SendMessageTarget::MobMember => {
+                Ok(SendMessageTarget::Identity { identity, .. }) => identity,
+                Ok(SendMessageTarget::MobMember) => {
                     return Err(
                         "a generated alias under identity authority must never reach the \
                             roster plane"
                             .to_string(),
                     );
                 }
-                SendMessageTarget::AuthorityUnavailable { alias } => {
+                Ok(SendMessageTarget::AuthorityUnavailable { alias }) => {
                     return Err(format!(
                         "a generated alias under identity authority must resolve Identity, got \
                      AuthorityUnavailable for {alias}"
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "an unregistered identity's alias must resolve Identity, whose door \
+                         refuses it as unknown, not a refusal before the door: {error}"
                     ));
                 }
             };
@@ -5176,8 +5596,8 @@ comms = true
         // Same entry point, authority present: the identity plane must take
         // the send. The identity is unregistered here, so the refusal comes
         // from the identity runtime - which is itself the evidence that the
-        // roster probe was never reached, because the roster DOES hold this
-        // alias and would have accepted it.
+        // MobMember arm was not taken, because the roster DOES hold this
+        // alias and the raw member door would have accepted it.
         let identity_rt = std::sync::Arc::new(crate::identity_first::IdentityRuntime::new(
             crate::identity_first::IdentityRuntimeConfig {
                 continuity_store: std::sync::Arc::new(
@@ -5384,10 +5804,60 @@ fn refuse_adoption_from_non_authoritative_launch(response_id: Value) -> JsonRpcR
     }
 }
 
+/// Whether this launch refuses `mob/adopt_member_identity_declaration`
+/// before anything is read or written: a launch that does not speak for the
+/// durable composition must not author durable state, and a launch with a
+/// member auth binding cannot carry it onto an adopted identity (see
+/// [`member_auth_binding_declaration_refusal`]).
+fn adoption_refusal(
+    speaks_for_composition: bool,
+    member_auth_binding: Option<&meerkat_core::AuthBindingRef>,
+    response_id: &Value,
+) -> Option<JsonRpcResponse> {
+    if !speaks_for_composition {
+        return Some(refuse_adoption_from_non_authoritative_launch(
+            response_id.clone(),
+        ));
+    }
+    member_auth_binding_declaration_refusal(
+        member_auth_binding,
+        ADOPT_MEMBER_IDENTITY_DECLARATION,
+        response_id,
+    )
+}
+
+/// The refusal of a member declaration mutation (`method`) on a launch with
+/// a member auth binding, before anything is read or written: Meerkat
+/// materializes a declared identity from its sealed declaration without the
+/// gateway's spawn customizers, so it would not build with the launch's
+/// binding (see
+/// [`crate::native_realm::MemberRouteRefusal::declaration_uncarried`]).
+/// `None` without a binding.
+fn member_auth_binding_declaration_refusal(
+    member_auth_binding: Option<&meerkat_core::AuthBindingRef>,
+    method: &str,
+    response_id: &Value,
+) -> Option<JsonRpcResponse> {
+    member_auth_binding.map(|_| {
+        let refusal = crate::native_realm::MemberRouteRefusal::declaration_uncarried(method);
+        JsonRpcResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: response_id.clone(),
+            result: None,
+            error: Some(JsonRpcError {
+                code: refusal.code(),
+                message: refusal.message().to_string(),
+                data: Some(refusal.data().clone()),
+            }),
+        }
+    })
+}
+
 pub(crate) async fn handle_member_declaration_rpc(
     handle: &meerkat_mob::MobHandle,
     identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
     speaks_for_composition: bool,
+    member_auth_binding: Option<&meerkat_core::AuthBindingRef>,
     method: &str,
     response_id: Value,
     params: &Value,
@@ -5403,12 +5873,23 @@ pub(crate) async fn handle_member_declaration_rpc(
             //
             // If adoption behaviour itself needs certifying, the honest shape is
             // a rehearsal store, never the production store through an exemption.
-            if !speaks_for_composition {
-                return Some(refuse_adoption_from_non_authoritative_launch(response_id));
+            if let Some(refusal) =
+                adoption_refusal(speaks_for_composition, member_auth_binding, &response_id)
+            {
+                return Some(refusal);
             }
             Some(handle_adopt_member_identity_declaration(handle, response_id, params).await)
         }
         APPLY_MEMBER_TOOL_DECLARATION => {
+            // An apply re-materializes the identity from its sealed
+            // declaration, off the launch's member auth binding.
+            if let Some(refusal) = member_auth_binding_declaration_refusal(
+                member_auth_binding,
+                APPLY_MEMBER_TOOL_DECLARATION,
+                &response_id,
+            ) {
+                return Some(refusal);
+            }
             Some(handle_apply_member_tool_declaration(handle, response_id, params).await)
         }
         MEMBER_TOOL_DECLARATION => Some(

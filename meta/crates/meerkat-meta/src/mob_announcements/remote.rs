@@ -474,7 +474,7 @@ fn waiting_refusal(identity: &MemberIdentity, cause: &SuspendCause) -> KeyedInje
         ),
         SuspendCause::MemberNotLive => KeyedInjectRefusal::new(
             KeyedInjectRefusalCode::OwnerRetired,
-            format!("{identity} has no live incarnation; nothing was committed"),
+            format!("{identity} is not a member of the mob now; nothing was committed"),
         ),
         // Every other wait is this gateway's own native state: nothing is
         // implied, and the caller reads the status next.

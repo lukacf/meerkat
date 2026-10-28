@@ -32,7 +32,9 @@ use crate::unobserved::{UnobservedFacts, UnobservedReason};
 const KEEPER: &str = "voice-keeper";
 const OTHER: &str = "other-keeper";
 
-/// The members never take a turn; the client only has to exist.
+/// No row here reads a turn: the client only has to exist. The members are
+/// AutonomousHost, so each fresh seat still owes and runs its one kickoff
+/// turn; this client's empty stream gives that turn no answer.
 struct NeverCalledClient;
 
 #[async_trait::async_trait]

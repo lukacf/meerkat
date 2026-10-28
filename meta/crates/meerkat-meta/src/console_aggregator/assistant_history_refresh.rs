@@ -123,6 +123,12 @@ pub(super) enum MemberStatusRead {
     /// No member owns the exact session, or it has no current session: an
     /// observation that the member is not settled for this session.
     NotBound,
+    /// The member that owns the session is not materialized in this process
+    /// (Dormant, or being woken), so it was not asked: a status read would
+    /// load its durable session, and it settles nothing until it runs. Not
+    /// settled, like [`Self::NotBound`]; its wake changes the machine state,
+    /// and the pass after it asks again.
+    NotMaterialized,
     /// The read did not answer (its deadline elapsed or it failed) or carried
     /// no run state: nothing was observed.
     NoAnswer,
@@ -216,6 +222,11 @@ async fn read_member_status(
             };
             owner
         };
+        if handle.member_unmaterialized(&member) {
+            return MemberStatusRead::NotMaterialized;
+        }
+        #[cfg(test)]
+        core_status_reads::record(session_id);
         // The binding only routes the observation. Fresh typed status
         // must still prove that this exact session is idle.
         let Ok(status) = crate::member_status_observation::observe_member_status_until(
@@ -242,6 +253,34 @@ async fn read_member_status(
     })
     .await
     .unwrap_or(MemberStatusRead::NoAnswer)
+}
+
+/// The Core member-status reads the refresh gate made, by session: what a
+/// row counts when it requires that a member's status is not read.
+#[cfg(test)]
+pub(crate) mod core_status_reads {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex, PoisonError};
+
+    static READS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
+
+    pub(super) fn record(session_id: &str) {
+        *READS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(session_id.to_string())
+            .or_default() += 1;
+    }
+
+    /// The reads of `session_id` so far.
+    pub(crate) fn count(session_id: &str) -> usize {
+        READS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(session_id)
+            .copied()
+            .unwrap_or_default()
+    }
 }
 
 async fn observe_with<
@@ -278,7 +317,9 @@ where
                 AssistantHistoryRefreshGate::Pending
             };
         }
-        MemberStatusRead::NotBound => return AssistantHistoryRefreshGate::Pending,
+        MemberStatusRead::NotBound | MemberStatusRead::NotMaterialized => {
+            return AssistantHistoryRefreshGate::Pending;
+        }
         MemberStatusRead::Observed(_, MemberRunState::Unknown) | MemberStatusRead::NoAnswer => {
             return AssistantHistoryRefreshGate::StatusUnknown;
         }

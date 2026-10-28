@@ -217,26 +217,27 @@ impl SessionBridge for PhaseScriptedBridge {
         })
     }
 
-    /// Core's successor respawn (reset, delete): the identity's member at
+    /// Core's rotation (reset, delete): the identity's fresh life seated at
     /// the next generation, on a fresh session, under the next fence.
-    async fn reset_member_to_successor(
+    async fn rotate_member(
         &self,
         identity: &AgentIdentity,
         spec: &DurableAgentSpec,
         _draft: &AgentBuildDraft,
-    ) -> Result<MemberRuntimeBinding, BridgeError> {
+    ) -> Result<meerkat_core::types::SessionId, BridgeError> {
         let generation = self
             .core
             .last_member_binding(identity)?
             .map_or(0, |binding| binding.generation().get() + 1);
         let agent_runtime_id = AgentRuntimeId::parse(&format!("rt:{identity}:{generation}"))
             .map_err(|error| BridgeError::Mob(error.to_string()))?;
+        let session_id = meerkat_core::types::SessionId::new();
         let binding = MemberRuntimeBinding {
             agent_runtime_id,
-            session_id: Some(meerkat_core::types::SessionId::new()),
+            session_id: Some(session_id.clone()),
         };
         self.core.bind(identity, &binding, &spec.profile);
-        Ok(binding)
+        Ok(session_id)
     }
 
     async fn live_member(
@@ -1044,8 +1045,8 @@ async fn a_projection_failure_plus_supersede_leads_with_the_supersede_and_keeps_
 /// An explicit DELETE after admission maps to superseded and never rebinds.
 /// ALSO the lock-freedom proof.
 ///
-/// Delete starts the identity's fresh life: Core respawns its member at the
-/// next generation on a fresh session. The post-relock read sees the new
+/// Delete starts the identity's fresh life: Core rotates its member onto
+/// the next generation on a fresh session. The post-relock read sees the new
 /// incarnation, and that must become supersede detail rather than a
 /// reconcile onto the fresh life.
 ///
@@ -1054,7 +1055,7 @@ async fn a_projection_failure_plus_supersede_leads_with_the_supersede_and_keeps_
 /// `let lifecycle_lock = self.lifecycle_lock_for(identity).await;` - verified by
 /// reading that body, not by a grep hit inside a line range, which is how two
 /// earlier versions of a separate lock test ended up vacuous. After taking the
-/// lock, delete has Core respawn the member, so the status read moves past the
+/// lock, delete has Core rotate the member, so the status read moves past the
 /// admitted generation. The test direct-polls to that exact marker, then
 /// releases the turn and drives both operations to their typed terminals.
 #[tokio::test(flavor = "current_thread")]
@@ -1078,7 +1079,7 @@ async fn an_identity_deleted_after_admission_is_superseded_not_unknown() {
     // Takes lifecycle_lock_for(&alice) - the SAME lock the send holds during
     // admission. Drive it without a clock until Core's member moved past the
     // admitted generation, which proves the delete acquired that lock and
-    // crossed its respawn.
+    // crossed its rotation.
     let mut delete = Box::pin(runtime.delete_identity(&alice));
     let mut delete_terminal = None;
     let mut delete_transition_observed = false;

@@ -7,16 +7,15 @@
 //!
 //! - a restart with only Core's stores (mob and session) resumes every roster
 //!   identity onto its committed session at its Core generation;
-//! - a wake after retire resumes the same session, and the generation the
-//!   identity reports is the one Core minted for the woken member;
-//! - delete starts a fresh life at once and keeps liveness: a live
-//!   identity stays live on a fresh session at a higher Core generation, a
-//!   retired one stays retired with a fresh last binding;
+//! - a retire releases the identity's member: Core keeps it seated on the
+//!   same session at the same generation, and the next delivery wakes it
+//!   there with its transcript;
+//! - delete starts a fresh life at once as one Core rotation: the identity
+//!   is seated on a fresh session at a higher Core generation, and one Core
+//!   holds no member for is seated fresh;
 //! - the boot roster compile retires a durable member the roster no longer
 //!   lists (the durable-identity marker);
 //! - a wake after a mob reset is fresh;
-//! - a wake whose last session Core holds nothing for spawns fresh and says
-//!   so with a typed marker;
 //! - an identity a host adopted (Core holds its identity intent row), or one
 //!   whose intent row Core cannot read, is read-only to every Meta verb and
 //!   to the roster compile;
@@ -65,9 +64,9 @@ use meerkat_meta::identity_first::{
     ContinuityStoreError, CustomizerError, DurabilityPolicy, DurableAgentSpec, FencingToken,
     FirstBootManifest, FirstBootRow, FirstBootRowKind, FirstBootWait, IdentityFirstRuntimeContext,
     IdentityRuntime, IdentityRuntimeConfig, IdentityRuntimeError, LeaseAcquireResult, LeaseError,
-    LeaseGrant, LeaseProvider, LeaseRenewResult, ManagedPeerEdge, ReplacedSession,
-    ReplacedSessionReason, RestoreFlowResult, RestoreOutcome, RosterContext, RosterError,
-    SessionBridge, SessionSnapshot, TopologyContext, TopologyError,
+    LeaseGrant, LeaseProvider, LeaseRenewResult, ManagedPeerEdge, RestoreFlowResult,
+    RestoreOutcome, RosterContext, RosterError, SessionBridge, SessionSnapshot, TopologyContext,
+    TopologyError,
 };
 use meerkat_meta::mob_composition_manifest::persistent_mob_storage;
 use meerkat_meta::mob_handle_runtime::SessionCreatedContext;
@@ -967,7 +966,7 @@ async fn restart_with_only_core_stores_resumes_each_identity_on_its_committed_se
         let (state_name, session, generation) = boot.status_session(identity).await;
         assert_eq!(
             state_name, "active",
-            "{identity} must be live after the second boot's eager compile"
+            "{identity} must be a seated member after the second boot's compile"
         );
         assert_eq!(
             session.as_ref(),
@@ -994,8 +993,10 @@ async fn restart_with_only_core_stores_resumes_each_identity_on_its_committed_se
     boot.stop().await;
 }
 
-/// A wake after retire keeps the transcript, and the
-/// identity reports the generation Core minted for the woken member.
+/// A retire releases the identity's member: Core keeps it seated on the
+/// same session at the same generation, and it stays active. The next
+/// delivery wakes it there, with its transcript, and the identity reports
+/// Core's generation.
 #[tokio::test(flavor = "multi_thread")]
 async fn wake_after_retire_resumes_the_same_session_at_cores_generation() {
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -1011,16 +1012,32 @@ async fn wake_after_retire_resumes_the_same_session_at_cores_generation() {
         .await;
     let (_, before_session, _) = boot.status_session(&alice).await;
     let before_session = before_session.expect("a live identity reports its session");
+    let before_generation = boot
+        .core_member_generation(&alice)
+        .await
+        .expect("Core holds alice's member");
 
     let retired = boot.runtime().retire(&alice).await;
     assert!(retired.is_ok(), "retire of a live identity: {retired:?}");
     assert_eq!(
         boot.core_member_generation(&alice).await,
-        None,
-        "retire must leave Core without a live member for the identity"
+        Some(before_generation),
+        "retire keeps the identity's member seated at the same generation"
     );
-    let (state_name, _, _) = boot.status_session(&alice).await;
-    assert_ne!(state_name, "active", "a retired identity is not live");
+    let alice_core = meerkat_meta::member_comms_id::roster_member_id_for_identity(alice.as_str());
+    assert_eq!(
+        boot.unified
+            .mob_handle()
+            .member_materialization_for_test(&alice_core),
+        Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Dormant),
+        "retire releases the member's materialization"
+    );
+    let (state_name, session, _) = boot.status_session(&alice).await;
+    assert_eq!(
+        state_name, "active",
+        "a retired identity stays a seated member"
+    );
+    assert_eq!(session.as_ref(), Some(&before_session));
 
     boot.send(&alice, "Which token did I give you?").await;
     let (state_name, session, generation) = boot.status_session(&alice).await;
@@ -1032,9 +1049,10 @@ async fn wake_after_retire_resumes_the_same_session_at_cores_generation() {
     );
     assert_eq!(
         generation,
-        boot.core_member_generation(&alice).await,
-        "the woken identity's generation is the one Core minted for the woken member"
+        Some(before_generation),
+        "the woken identity reports Core's generation, which the retire left as it was"
     );
+    assert_eq!(generation, boot.core_member_generation(&alice).await);
     let request = boot.capture.last().expect("a post-wake request");
     assert!(
         request.contains(TOKEN),
@@ -1100,10 +1118,12 @@ async fn delete_of_a_live_identity_starts_a_fresh_life_at_a_higher_generation() 
     boot.stop().await;
 }
 
-/// Delete of a retired identity starts the fresh life without making it
-/// live: it stays retired, and its last binding is the fresh session.
+/// Delete of an identity Core holds no member for (a host retired its
+/// member through Core; Meta's own retire only releases one) seats its
+/// fresh life: Core seats the identity Dormant on a fresh session at a
+/// higher generation, and materializes nothing.
 #[tokio::test(flavor = "multi_thread")]
-async fn delete_of_a_retired_identity_keeps_it_retired_with_a_fresh_last_binding() {
+async fn delete_of_an_identity_core_holds_no_member_for_seats_its_fresh_life() {
     let temp = tempfile::TempDir::new().expect("temp dir");
     let state = temp.path().join("state");
     let mob_id = unique_mob_id("delete-retired");
@@ -1115,26 +1135,40 @@ async fn delete_of_a_retired_identity_keeps_it_retired_with_a_fresh_last_binding
     boot.compile(&roster).await;
     boot.send(&alice, &format!("Remember this token: {TOKEN}"))
         .await;
-    let (_, old_session, _) = boot.status_session(&alice).await;
-    let retired = boot.runtime().retire(&alice).await;
-    assert!(retired.is_ok(), "retire of a live identity: {retired:?}");
-
-    let deleted = boot.runtime().delete_identity(&alice).await;
-    assert!(deleted.is_ok(), "delete of a retired identity: {deleted:?}");
+    let (_, old_session, old_generation) = boot.status_session(&alice).await;
+    let old_generation = old_generation.expect("a live identity reports its generation");
+    boot.retire_core_member(&alice).await;
     assert_eq!(
         boot.core_member_generation(&alice).await,
         None,
-        "delete must never make a retired identity live"
+        "control: Core holds no member for alice"
+    );
+
+    let deleted = boot.runtime().delete_identity(&alice).await;
+    assert!(deleted.is_ok(), "delete of a retired identity: {deleted:?}");
+    let generation = boot
+        .core_member_generation(&alice)
+        .await
+        .expect("the delete seats the identity's fresh life");
+    assert!(
+        generation > old_generation,
+        "the fresh life's Core generation ({generation}) is above the old one \
+         ({old_generation})"
+    );
+    let alice_core = meerkat_meta::member_comms_id::roster_member_id_for_identity(alice.as_str());
+    assert_eq!(
+        boot.unified
+            .mob_handle()
+            .member_materialization_for_test(&alice_core),
+        Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Dormant),
+        "the delete materializes nothing"
     );
     let (state_name, session, _) = boot.status_session(&alice).await;
-    assert_ne!(state_name, "active", "the identity stays retired");
-    assert!(
-        session.is_some(),
-        "the retired identity's last binding is reported"
-    );
+    assert_eq!(state_name, "active", "the fresh life is a seated member");
+    assert!(session.is_some(), "the fresh life is bound to a session");
     assert_ne!(
         session, old_session,
-        "the retired identity's last binding is the fresh life's session"
+        "the identity's binding is the fresh life's session"
     );
 
     boot.send(&alice, "Which token did I give you?").await;
@@ -1173,7 +1207,7 @@ async fn boot_compile_retires_a_durable_member_the_roster_no_longer_lists() {
         boot.compile(&first_roster).await;
         assert!(
             boot.core_member_generation(&bob).await.is_some(),
-            "the first boot spawns bob"
+            "the first boot seats bob"
         );
         boot.stop().await;
     }
@@ -1191,16 +1225,16 @@ async fn boot_compile_retires_a_durable_member_the_roster_no_longer_lists() {
     );
     assert!(
         boot.core_member_generation(&alice).await.is_some(),
-        "a listed identity stays live"
+        "a listed identity stays a member"
     );
     boot.assert_continuity_and_leases_unread();
     boot.stop().await;
 }
 
 /// Every Meta spawn of an identity carries Core's durable-identity
-/// marker, keyed by the identity: the first create, a reset's successor and
-/// a wake that resumes the retired session. A retired identity has no live
-/// member, so Core lists nothing for it.
+/// marker, keyed by the identity: the first seat, a reset's rotation, and
+/// the member a retire released, which Core keeps listing and a delivery
+/// wakes again.
 #[tokio::test(flavor = "multi_thread")]
 async fn every_meta_spawn_of_an_identity_carries_the_durable_identity_marker() {
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -1222,14 +1256,8 @@ async fn every_meta_spawn_of_an_identity_carries_the_durable_identity_marker() {
 
     let retired = boot.runtime().retire(&alice).await;
     assert!(retired.is_ok(), "retire of a live identity: {retired:?}");
-    let alice_core = meerkat_meta::member_comms_id::roster_member_id_for_identity(alice.as_str());
-    assert!(
-        boot.core_history()
-            .await
-            .durable_identity_members()
-            .all(|binding| *binding.identity() != alice_core),
-        "a retired identity has no live member to list"
-    );
+    boot.assert_durable_identity_marker(&alice, "the retire's release")
+        .await;
 
     boot.send(&alice, "Wake up.").await;
     boot.assert_durable_identity_marker(&alice, "the resume wake")
@@ -1282,15 +1310,17 @@ async fn wake_after_a_mob_reset_is_fresh() {
     boot.stop().await;
 }
 
-/// A wake whose last session Core holds
-/// nothing for (Core's `Absent`: no body, no authority, no catalog entry, no
-/// lifecycle row) spawns the identity fresh, and says so: the wake's outcome
-/// and the identity's status name the replaced session with the reason
-/// `absent`. The identity was retired on a session whose stores are then
-/// replaced by another directory's (which holds other sessions, so the
-/// whole-store check stays quiet).
+/// A delivery to an identity whose session Core holds nothing for (Core's
+/// `Absent`: no body, no authority, no catalog entry, no lifecycle row) is
+/// Core's to decide, and Meta mints nothing in its place. Alice is seated
+/// on a session, and her directory's session and runtime stores are then
+/// replaced by another directory's, which holds other sessions (so the
+/// whole-store check stays quiet). The restart keeps her seated on that
+/// session. A delivery to her answers Core's typed refusal, starts no fresh
+/// life and runs nothing; a second delivery answers the same way and
+/// changes nothing either.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_wake_whose_last_session_core_holds_nothing_for_spawns_fresh_with_a_typed_marker() {
+async fn a_delivery_whose_session_core_holds_nothing_for_is_cores_to_decide_and_mints_nothing() {
     let temp = tempfile::TempDir::new().expect("temp dir");
     let state = temp.path().join("state");
     let foreign_state = temp.path().join("foreign-state");
@@ -1302,14 +1332,12 @@ async fn a_wake_whose_last_session_core_holds_nothing_for_spawns_fresh_with_a_ty
     let foreign_roster = vec![spec("personal:bob")];
     const TOKEN: &str = "MARKER-ABSENT-6-XRAY";
 
-    let replaced = {
+    let seated = {
         let boot = Boot::start(&state, &mob_id, &roster).await;
         boot.compile(&roster).await;
         boot.send(&alice, &format!("Remember this token: {TOKEN}"))
             .await;
         let (_, session, _) = boot.status_session(&alice).await;
-        let retired = boot.runtime().retire(&alice).await;
-        assert!(retired.is_ok(), "retire of a live identity: {retired:?}");
         boot.stop().await;
         session.expect("a live identity reports its session")
     };
@@ -1324,49 +1352,77 @@ async fn a_wake_whose_last_session_core_holds_nothing_for_spawns_fresh_with_a_ty
     let boot = Boot::start(&foreign_state, &mob_id, &roster).await;
     let compiled = boot.compile_outcomes(&roster).await;
     match compiled.outcomes.get(&alice) {
-        Some(RestoreOutcome::Created {
-            binding,
-            replaced_session,
-            ..
-        }) => {
+        Some(RestoreOutcome::Created { binding, .. } | RestoreOutcome::Resumed { binding, .. }) => {
             assert_eq!(
-                replaced_session.as_ref(),
-                Some(&replaced),
-                "the wake's outcome names the session it replaced"
-            );
-            assert_ne!(
                 binding.session_id.as_ref(),
-                Some(&replaced),
-                "the fresh life runs on a new session"
+                Some(&seated),
+                "the compile keeps alice seated on her session: nothing is minted"
             );
         }
-        other => panic!("the wake must spawn alice fresh: {other:?}"),
+        Some(RestoreOutcome::Refused(error)) => {
+            panic!("the compile seats alice; only a delivery asks Core for her session: {error}")
+        }
+        _ => {}
     }
-    let status = boot
-        .runtime()
-        .status(&alice)
-        .await
-        .expect("status of the fresh identity");
-    assert_eq!(status.state.wire_str(), "active");
-    assert_ne!(status.session_id.as_ref(), Some(&replaced));
+    let before = boot.core_last_binding(&alice).await;
     assert_eq!(
-        status.replaced_session,
-        Some(ReplacedSession {
-            session_id: replaced.clone(),
-            reason: ReplacedSessionReason::Absent,
-        }),
-        "the status carries the typed marker until the next wake"
+        before.session.as_ref(),
+        Some(&seated),
+        "Core holds alice on her session"
     );
-    assert!(
-        status.wake_refusal.is_none(),
-        "an absent session is replaced, not refused"
-    );
-
-    boot.send(&alice, "Which token did I give you?").await;
-    let request = boot.capture.last().expect("a post-wake request");
-    assert!(
-        !request.contains(TOKEN),
-        "the fresh life cannot replay a transcript Core does not hold"
+    let requests = boot.capture.count();
+    for delivery in ["first", "second"] {
+        let refused = boot
+            .runtime()
+            .send(
+                &alice,
+                &meerkat_core::ContentInput::Text(format!(
+                    "Which token did I give you? ({delivery})"
+                )),
+            )
+            .await;
+        match &refused {
+            // Core refused the wake for want of the session.
+            Err(IdentityRuntimeError::IdentitySessionAbsent { session_id, .. }) => {
+                assert_eq!(session_id, &seated, "{delivery}");
+            }
+            // Core holds the member broken for good: its status reads so.
+            Err(IdentityRuntimeError::AdmissionFailed { .. }) => {
+                let status = boot
+                    .runtime()
+                    .status(&alice)
+                    .await
+                    .expect("status of alice");
+                assert_eq!(
+                    status.state,
+                    meerkat_meta::identity_first::IdentityLifecycleState::Broken,
+                    "{delivery}: a final refusal reads broken"
+                );
+            }
+            other => panic!(
+                "{delivery}: Core's verdict on the absent session is a typed refusal: {other:?}"
+            ),
+        }
+        assert_eq!(
+            boot.core_last_binding(&alice).await,
+            before,
+            "{delivery}: nothing is minted; Core's binding of alice is unchanged"
+        );
+        let status = boot
+            .runtime()
+            .status(&alice)
+            .await
+            .expect("status of alice");
+        assert_eq!(
+            status.session_id.as_ref(),
+            Some(&seated),
+            "{delivery}: alice keeps her session"
+        );
+    }
+    assert_eq!(
+        boot.capture.count(),
+        requests,
+        "nothing ran: no turn started for either delivery"
     );
     boot.assert_continuity_and_leases_unread();
     boot.stop().await;
@@ -1564,7 +1620,7 @@ async fn a_first_boot_resume_row_resumes_the_migrated_session_with_its_transcrip
     let boot = Boot::start(&state, &mob_id, &roster).await;
     boot.compile(&roster).await;
     let (state_name, session, _) = boot.status_session(&alice).await;
-    assert_eq!(state_name, "active", "the first boot woke alice");
+    assert_eq!(state_name, "active", "the first boot seats alice");
     assert_eq!(
         session,
         Some(alice_session.clone()),
@@ -1599,9 +1655,10 @@ async fn a_first_boot_resume_row_resumes_the_migrated_session_with_its_transcrip
 
 /// First boot, `Fresh`: an identity whose 0.9.3 continuity was
 /// deleted starts a fresh life on the first boot, although Core's last
-/// binding still names its retired session. The old session stays in Core,
-/// bound to nothing. Control: an identity with the same history and no row
-/// resumes its retired session.
+/// binding still names its retired session (Core retired the members, as a
+/// host does: Meta's own retire only releases one). The old session stays in
+/// Core, bound to nothing. Control: an identity with the same history and no
+/// row is seated on its retired session again and resumes it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_first_boot_fresh_row_starts_fresh_and_leaves_the_old_session_in_core_unbound() {
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -1622,10 +1679,7 @@ async fn a_first_boot_fresh_row_starts_fresh_and_leaves_the_old_session_in_core_
     let (_, old_session, _) = boot.status_session(&alice).await;
     let old_session = old_session.expect("alice's session");
     for identity in [&alice, &bob] {
-        boot.runtime()
-            .retire(identity)
-            .await
-            .unwrap_or_else(|error| panic!("retire {identity}: {error}"));
+        boot.retire_core_member(identity).await;
     }
     boot.stop().await;
     FirstBootManifest::write_new(
@@ -1677,7 +1731,7 @@ async fn a_first_boot_fresh_row_starts_fresh_and_leaves_the_old_session_in_core_
     let request = boot.capture.last().expect("bob's first-boot request");
     assert!(
         request.contains(TOKEN_B),
-        "control: without a row, the wake resumes the retired session"
+        "control: without a row, bob is seated on his retired session and resumes it"
     );
     assert!(!FirstBootManifest::path(&state).exists());
     boot.assert_continuity_and_leases_unread();
@@ -1926,6 +1980,161 @@ async fn a_boot_that_stops_part_way_through_the_manifest_finishes_on_the_next_bo
         "the rest of the manifest is carried out"
     );
     assert!(!manifest_path.exists(), "the finished manifest is removed");
+    boot.assert_continuity_and_leases_unread();
+    boot.stop().await;
+}
+
+/// First boot, `Resume` rows (what an import of a continuity export or
+/// `storage-migrate-native` leaves): the roster compile carries them out as
+/// one batch and rewrites the manifest once, after its last row. A boot that
+/// stops after the batch carried its rows out but before that rewrite
+/// finishes on the next boot. Each row is read against Core's history
+/// again: the carried-out rows read done and are settled, and none is
+/// carried out twice (each identity keeps the binding the first boot's
+/// resume gave it); the row Core's history contradicts and the row whose
+/// session Core holds no durable copy of are refused again and stay in the
+/// manifest.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_boot_that_stops_before_the_batch_rewrite_settles_its_resume_rows_on_the_next_boot() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("first-boot-resume-batch-stop");
+    let carried = [
+        id("personal:alice"),
+        id("personal:bob"),
+        id("personal:carol"),
+    ];
+    let moved_on = id("personal:dave");
+    let never_migrated = id("personal:erin");
+    let roster = [
+        "personal:alice",
+        "personal:bob",
+        "personal:carol",
+        "personal:dave",
+        "personal:erin",
+    ]
+    .into_iter()
+    .map(spec)
+    .collect::<Vec<_>>();
+
+    // As a 0.9.3 directory holds them: each identity's session, with a turn,
+    // and no binding in Core's mob.
+    let seeded = roster[..4].to_vec();
+    let boot = Boot::start(&state, &mob_id, &seeded).await;
+    boot.compile(&seeded).await;
+    let mut sessions = BTreeMap::new();
+    for identity in carried.iter().chain([&moved_on]) {
+        boot.send(identity, "A turn before the migration.").await;
+        let (_, session, _) = boot.status_session(identity).await;
+        sessions.insert(identity.clone(), session.expect("a session"));
+    }
+    boot.stop().await;
+    remove_mob_store(&state);
+
+    // dave's life moved on while the directory was stopped: Core binds him
+    // to a fresh session, not the one his row names.
+    let dave_roster = vec![spec("personal:dave")];
+    let boot = Boot::start(&state, &mob_id, &dave_roster).await;
+    boot.compile(&dave_roster).await;
+    let (_, dave_now, _) = boot.status_session(&moved_on).await;
+    assert_ne!(
+        dave_now.as_ref(),
+        Some(&sessions[&moved_on]),
+        "without a row, dave starts fresh"
+    );
+    boot.stop().await;
+
+    let rows = carried
+        .iter()
+        .chain([&moved_on])
+        .map(|identity| FirstBootRow::Resume {
+            identity: identity.clone(),
+            session: sessions[identity].clone(),
+        })
+        .chain([FirstBootRow::Resume {
+            identity: never_migrated.clone(),
+            session: SessionId::new(),
+        }])
+        .collect::<Vec<_>>();
+    FirstBootManifest::write_new(&state, rows.clone()).expect("the migration writes the manifest");
+    let manifest_path = FirstBootManifest::path(&state);
+    let original = std::fs::read(&manifest_path).expect("the manifest bytes");
+    let read_rows = || {
+        FirstBootManifest::read(&state)
+            .expect("the manifest reads")
+            .map(FirstBootManifest::into_rows)
+    };
+
+    // The first boot carries the batch out, and its one rewrite keeps
+    // exactly the two refused rows.
+    let boot = Boot::start(&state, &mob_id, &roster).await;
+    let outcomes = boot.compile_outcomes(&roster).await;
+    for identity in &carried {
+        let (state_name, session, _) = boot.status_session(identity).await;
+        assert_eq!(
+            state_name, "active",
+            "the first boot carries {identity} out"
+        );
+        assert_eq!(
+            session.as_ref(),
+            Some(&sessions[identity]),
+            "{identity} resumes its row's session"
+        );
+    }
+    assert_first_boot_row_refused(&moved_on, outcomes.outcomes.get(&moved_on));
+    assert_first_boot_row_refused(&never_migrated, outcomes.outcomes.get(&never_migrated));
+    assert_eq!(
+        read_rows(),
+        Some(rows[3..].to_vec()),
+        "the batch's one rewrite keeps the refused rows"
+    );
+    boot.stop().await;
+
+    // Stopped before that rewrite: the manifest still lists every row.
+    std::fs::write(&manifest_path, &original).expect("restore the five-row manifest");
+
+    let boot = Boot::start(&state, &mob_id, &roster).await;
+    let mut restored = BTreeMap::new();
+    for identity in &carried {
+        restored.insert(identity.clone(), boot.core_last_binding(identity).await);
+    }
+    let outcomes = boot.compile_outcomes(&roster).await;
+    for identity in &carried {
+        assert!(
+            !matches!(
+                outcomes.outcomes.get(identity),
+                Some(RestoreOutcome::Refused(_))
+            ),
+            "{identity}'s row reads done: {:?}",
+            outcomes.outcomes.get(identity)
+        );
+        let binding = boot.core_last_binding(identity).await;
+        assert_eq!(
+            binding, restored[identity],
+            "{identity}'s row is not carried out twice: Core's binding is the one the first \
+             boot's resume made"
+        );
+        assert_eq!(
+            binding.session.as_ref(),
+            Some(&sessions[identity]),
+            "{identity} stays on its row's session"
+        );
+    }
+    assert_first_boot_row_refused(&moved_on, outcomes.outcomes.get(&moved_on));
+    assert_first_boot_row_refused(&never_migrated, outcomes.outcomes.get(&never_migrated));
+    assert_eq!(
+        read_rows(),
+        Some(rows[3..].to_vec()),
+        "the carried-out rows are settled; the refused rows stay"
+    );
+    let pending = boot
+        .runtime()
+        .identity_bootstrap_status()
+        .first_boot_pending
+        .into_iter()
+        .map(|row| row.identity)
+        .collect::<Vec<_>>();
+    assert_eq!(pending, vec![moved_on, never_migrated]);
     boot.assert_continuity_and_leases_unread();
     boot.stop().await;
 }
@@ -2603,7 +2812,7 @@ async fn an_unreadable_first_boot_manifest_refuses_every_identity_and_keeps_the_
     .expect("restore a readable manifest");
     boot.compile(&roster).await;
     let (state_name, session, _) = boot.status_session(&alice).await;
-    assert_eq!(state_name, "active", "the next compile woke alice");
+    assert_eq!(state_name, "active", "the next compile seats alice");
     assert_eq!(session, Some(alice_session), "on the session the row names");
     assert!(
         boot.runtime().identity_bootstrap_status().error.is_none(),
@@ -2862,7 +3071,10 @@ async fn a_retired_raw_member_never_becomes_a_declared_identitys_history() {
     let boot = Boot::start(&state, &mob_id, &roster).await;
     boot.compile(&roster).await;
     let woken = boot.core_last_binding(&alice).await;
-    assert!(woken.live && woken.marked, "alice wakes marked: {woken:?}");
+    assert!(
+        woken.live && woken.marked,
+        "alice is seated marked: {woken:?}"
+    );
     assert_ne!(
         woken.session.as_ref(),
         Some(&raw_session),
@@ -2878,13 +3090,13 @@ async fn a_retired_raw_member_never_becomes_a_declared_identitys_history() {
     boot.stop().await;
 }
 
-/// Delete reads the identity's previous life as the wake does. After Meta
-/// retired alice, the host made and retired a raw member under her member
-/// id, so Core's last binding of the member id is that raw member's. The
-/// delete finds no life of alice's to end: it answers as for an identity
-/// Core never spawned and leaves Core's last binding as the raw member left
-/// it, rather than distilling that member's session and starting a fresh
-/// life over it.
+/// Delete reads the identity's previous life as the wake does. After Core
+/// retired alice's member (as a host does: Meta's own retire only releases
+/// it), the host made and retired a raw member under her member id, so
+/// Core's last binding of the member id is that raw member's. The delete
+/// finds no life of alice's to end: it answers as for an identity Core never
+/// spawned and leaves Core's last binding as the raw member left it, rather
+/// than distilling that member's session and starting a fresh life over it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delete_never_takes_a_retired_raw_members_session_as_the_identitys_life() {
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -2896,8 +3108,7 @@ async fn a_delete_never_takes_a_retired_raw_members_session_as_the_identitys_lif
 
     let boot = Boot::start(&state, &mob_id, &roster).await;
     boot.compile(&roster).await;
-    let retired = boot.runtime().retire(&alice).await;
-    assert!(retired.is_ok(), "retire of a live identity: {retired:?}");
+    boot.retire_core_member(&alice).await;
     let raw_session = boot
         .spawn_core_member(
             &alice,

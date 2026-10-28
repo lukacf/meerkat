@@ -228,6 +228,9 @@ async fn identity_event_session_is_current(
 /// never reaches the subscriber under the identity's name.
 fn session_authoritative_agent_event_stream(
     mut event_stream: EventStream,
+    attached_epoch: Option<
+        Arc<std::sync::OnceLock<Option<meerkat_core::comms::SessionEventEpoch>>>,
+    >,
     mut identity_events: tokio::sync::broadcast::Receiver<
         crate::identity_first::runtime::IdentityEvent,
     >,
@@ -247,6 +250,15 @@ fn session_authoritative_agent_event_stream(
         let mut authority_check = tokio::time::interval(Duration::from_secs(1));
         authority_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            // A stream still waiting for its member to wake skips the
+            // backstop, so a waiting connection folds no journal each second:
+            // nothing reaches its subscriber before the attach, and the
+            // waiting stream itself ends when Core refuses the member. The
+            // lifecycle events still check it, and the backstop starts with
+            // the attach (its first tick is due at once).
+            let attached = attached_epoch
+                .as_ref()
+                .is_none_or(|attached| attached.get().is_some());
             tokio::select! {
                 // Prefer lifecycle invalidation and the due backstop over a
                 // lower-plane event ready in the same scheduler turn.
@@ -267,7 +279,7 @@ fn session_authoritative_agent_event_stream(
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
-                _ = authority_check.tick() => {
+                _ = authority_check.tick(), if attached => {
                     if !identity_event_session_is_current(
                         &identity_runtime,
                         &identity,
@@ -653,14 +665,17 @@ impl UnifiedRuntime {
                                         authority_identity.as_str(),
                                     )
                                     .await;
-                                    let subscription =
-                                        subscribe_agent_events_resuming(&handle, &member_id, cursor)
-                                            .await
-                                            .map_err(|error| error.to_string())?;
+                                    let subscription = subscribe_agent_events_once_materialized(
+                                        &handle, &member_id, cursor,
+                                    )
+                                    .await
+                                    .map_err(|error| error.to_string())?;
                                     Ok(crate::http_sse::AgentEventReplay {
                                         epoch: subscription.epoch,
+                                        attached_epoch: subscription.attached_epoch.clone(),
                                         stream: session_authoritative_agent_event_stream(
                                             subscription.stream,
+                                            subscription.attached_epoch,
                                             identity_events,
                                             authority_runtime,
                                             authority_identity,
@@ -675,12 +690,8 @@ impl UnifiedRuntime {
                             });
                         }
                         let member_id = resolve_agent_event_member_id(&handle, &agent_id).await;
-                        subscribe_agent_events_resuming(&handle, &member_id, cursor)
+                        subscribe_agent_events_once_materialized(&handle, &member_id, cursor)
                             .await
-                            .map(|subscription| crate::http_sse::AgentEventReplay {
-                                epoch: subscription.epoch,
-                                stream: subscription.stream,
-                            })
                             .map_err(Into::into)
                     })
                 }),
@@ -719,6 +730,94 @@ impl UnifiedRuntime {
                     self.console_session_fences().clone(),
                 )
             }))
+    }
+}
+
+/// How long a waiting agent event stream waits after a refused attach before
+/// it asks Core again, at the least: each attempt is a command to the mob
+/// actor, and the machine state changes far more often than a member wakes.
+/// (While Core holds the member unmaterialized the stream asks nothing at
+/// all; the floor bounds the refusals of a member it holds live.) Nothing is
+/// lost meanwhile: the attach replays from the woken actor's earliest
+/// retained event.
+const AGENT_EVENT_ATTACH_RETRY_FLOOR: Duration = Duration::from_millis(500);
+
+/// [`subscribe_agent_events_resuming`] for an SSE connection, which also
+/// opens for a member Core seats with no live session actor in this process
+/// (dormant after a restart, or seated with a session its first wake has not
+/// created yet): Core refuses that subscription `MemberSessionNotLive`, and
+/// the connection opens anyway with a stream that attaches once Core
+/// materializes the member. The read never wakes the member; its next
+/// delivery does. While Core holds the member unmaterialized
+/// (`MobHandle::member_unmaterialized`, read from the published machine
+/// state) the stream asks Core nothing. On the change that ends the wake it
+/// asks, and after a refused attempt it asks again on the next change of the
+/// mob's machine state, no sooner than [`AGENT_EVENT_ATTACH_RETRY_FLOOR`]
+/// after it, from the same cursor, until it attaches. The stream then
+/// delivers from the woken actor's first retained event (or after the
+/// connection's `Last-Event-ID` in that actor's sequence space) and names
+/// that space once attached, before its first event, so its frame ids are
+/// resumable. Any other refusal ends the stream (the member left the mob,
+/// say), and so does the end of the mob. The retries hold a non-owning
+/// observer handle, so a waiting connection never keeps the mob open.
+async fn subscribe_agent_events_once_materialized(
+    handle: &meerkat_mob::MobHandle,
+    member_id: &meerkat_mob::AgentIdentity,
+    cursor: meerkat_core::comms::SessionEventCursor,
+) -> Result<crate::http_sse::AgentEventReplay, meerkat_mob::MobError> {
+    // Watch the machine before the first attempt: a materialization that
+    // lands between the refused attempt and the wait is still seen.
+    let mut changes = handle.machine_state_changes();
+    match subscribe_agent_events_resuming(handle, member_id, cursor).await {
+        Ok(subscription) => Ok(crate::http_sse::AgentEventReplay {
+            epoch: subscription.epoch,
+            attached_epoch: None,
+            stream: subscription.stream,
+        }),
+        Err(meerkat_mob::MobError::MemberSessionNotLive { .. }) => {
+            let attached_epoch = Arc::new(std::sync::OnceLock::new());
+            let named = Arc::clone(&attached_epoch);
+            let handle = handle.observer();
+            let member_id = member_id.clone();
+            let stream = async_stream::stream! {
+                let mut next_attempt =
+                    tokio::time::Instant::now() + AGENT_EVENT_ATTACH_RETRY_FLOOR;
+                while changes.changed().await.is_ok() {
+                    // While Core holds the member unmaterialized it is not
+                    // served yet (a dormant member has no actor, and a waking
+                    // one may be refused until its wake ends): wait for the
+                    // change that ends its wake, asking the mob actor nothing
+                    // meanwhile.
+                    if handle.member_unmaterialized(&member_id) {
+                        continue;
+                    }
+                    // However often the machine changes, at most one attempt
+                    // per floor; the attempt reads every change made before it.
+                    tokio::time::sleep_until(next_attempt).await;
+                    match subscribe_agent_events_resuming(&handle, &member_id, cursor).await {
+                        Ok(subscription) => {
+                            let _ = named.set(subscription.epoch);
+                            let mut attached = subscription.stream;
+                            while let Some(envelope) = attached.next().await {
+                                yield envelope;
+                            }
+                            break;
+                        }
+                        Err(meerkat_mob::MobError::MemberSessionNotLive { .. }) => {
+                            next_attempt =
+                                tokio::time::Instant::now() + AGENT_EVENT_ATTACH_RETRY_FLOOR;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            };
+            Ok(crate::http_sse::AgentEventReplay {
+                epoch: None,
+                attached_epoch: Some(attached_epoch),
+                stream: Box::pin(stream),
+            })
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -1344,6 +1443,7 @@ comms = true
         let lower_plane: EventStream = Box::pin(futures::stream::pending());
         session_authoritative_agent_event_stream(
             lower_plane,
+            None,
             identity_events,
             identity_runtime.clone(),
             identity.clone(),
@@ -1637,5 +1737,242 @@ comms = true
             "(current alias {current}, stale alias, alias of no identity)"
         );
         let _ = runtime.mob_handle().stop().await;
+    }
+
+    /// A member with no live actor in this process (a fresh seat, whose
+    /// session its first wake creates) still has an event stream, and
+    /// opening it wakes nothing: the request answers 200 and the stream
+    /// delivers no frame. A turn wakes the member and the stream attaches:
+    /// though the turn ended before the attach, the stream replays the woken
+    /// actor's events from its first retained one, the run from
+    /// `run_started` on, each frame with a resumable `<epoch>:<seq>` id of
+    /// one sequence space, and a reconnect that names one as its
+    /// `Last-Event-ID` resumes after it. A waiting stream ends once Core
+    /// retires its member.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_waiting_member_event_stream_attaches_on_wake_and_ends_on_retire() {
+        use axum::body::{Body, BodyDataStream};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        /// The next data frame of an SSE body, as its event name and id
+        /// (keep-alive comments skipped); `None` once the body ends.
+        async fn next_frame(
+            body: &mut BodyDataStream,
+            buffered: &mut String,
+        ) -> Option<(String, Option<String>)> {
+            loop {
+                if let Some(end) = buffered.find("\n\n") {
+                    let frame: String = buffered.drain(..end + 2).collect();
+                    let field = |name: &str| {
+                        frame
+                            .lines()
+                            .find_map(|line| line.strip_prefix(name))
+                            .map(|value| value.trim().to_string())
+                    };
+                    if field("data:").is_some() {
+                        return Some((field("event:").unwrap_or_default(), field("id:")));
+                    }
+                    continue;
+                }
+                let chunk = body.next().await?.expect("SSE bytes");
+                buffered.push_str(std::str::from_utf8(&chunk).expect("SSE utf8"));
+            }
+        }
+
+        /// A frame id's place in its member's sequence space.
+        fn place(id: Option<&str>) -> (meerkat_core::comms::SessionEventEpoch, u64) {
+            let (epoch, seq) = id
+                .and_then(|id| id.rsplit_once(':'))
+                .expect("an `<epoch>:<seq>` id");
+            (
+                epoch.parse().expect("the id names an epoch"),
+                seq.parse().expect("the id names a sequence"),
+            )
+        }
+
+        let definition = MobDefinition::from_toml(
+            r#"
+[mob]
+id = "waiting-agent-events"
+
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+comms = true
+"#,
+        )
+        .expect("definition parses");
+        let worker = |identity: &AgentIdentity| DurableAgentSpec {
+            identity: identity.clone(),
+            profile: ProfileName::from("worker"),
+            addressability: AgentAddressability::Addressable,
+            display_name: None,
+            labels: BTreeMap::new(),
+            context: None,
+            additional_instructions: Vec::new(),
+            initial_message: None,
+            runtime_mode_override: Some(MobRuntimeMode::TurnDriven),
+            backend: None,
+            binding: None,
+            placement: None,
+        };
+        let lead = AgentIdentity::parse("lead").expect("identity parses");
+        let idle = AgentIdentity::parse("idle").expect("identity parses");
+        let roster = Arc::new(MutableRosterProvider::new(vec![
+            worker(&lead),
+            worker(&idle),
+        ]));
+        let scratch = tempfile::tempdir().expect("scratch dir");
+        let runtime = UnifiedRuntimeBuilder::default()
+            .definition(definition)
+            .continuity_store(Arc::new(
+                LocalContinuityStore::in_memory().expect("continuity store"),
+            ))
+            .lease_provider(Arc::new(LocalLeaseProvider::new()))
+            .roster_provider(roster)
+            .scratch_dir(scratch.path())
+            .ephemeral_runtime_store(true)
+            .identity_runtime_instance_id("waiting-agent-events")
+            .default_llm_client(Arc::new(TestClient::default()))
+            .build()
+            .await
+            .expect("identity-first runtime builds");
+        let identities = runtime
+            .identity_runtime()
+            .expect("identity runtime installed");
+        let current = async |identity: &AgentIdentity| {
+            let status = identities.status(identity).await.expect("identity status");
+            (
+                status
+                    .agent_runtime_id
+                    .expect("current runtime alias")
+                    .as_str()
+                    .to_string(),
+                status.session_id.expect("the seat names its session"),
+            )
+        };
+        let (lead_alias, lead_session) = current(&lead).await;
+        let (idle_alias, _) = current(&idle).await;
+        let mob = runtime.mob_handle();
+        assert!(
+            mob.session_unborn(&lead_session),
+            "a fresh seat's session is unborn until its first wake"
+        );
+        let decisions = crate::runtime::RuntimeDecisionState::local_console(
+            crate::ConsolePolicy {
+                require_app_auth: false,
+                ..Default::default()
+            },
+            None,
+        );
+        let app = runtime.build_reference_app_router(decisions);
+        let open = async |alias: &str, last_event_id: Option<&str>| {
+            let mut request = Request::builder().uri(format!("/agents/{alias}/events"));
+            if let Some(last_event_id) = last_event_id {
+                request = request.header("last-event-id", last_event_id);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).expect("request"))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{alias}");
+            (response.into_body().into_data_stream(), String::new())
+        };
+
+        let (mut waiting, mut waiting_buffer) = open(&lead_alias, None).await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                next_frame(&mut waiting, &mut waiting_buffer)
+            )
+            .await
+            .is_err(),
+            "the stream delivers nothing before the member wakes"
+        );
+        assert!(
+            mob.session_unborn(&lead_session),
+            "opening the stream does not wake the member"
+        );
+
+        identities
+            .send_awaiting_commit(
+                &lead,
+                &meerkat_core::ContentInput::Text("wake up".to_string()),
+            )
+            .await
+            .expect("a turn wakes the member");
+        // The turn has ended: only a replay from the woken actor's first
+        // retained event still delivers its `run_started`.
+        let first_id = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut previous: Option<(meerkat_core::comms::SessionEventEpoch, u64)> = None;
+            loop {
+                let (event, id) = next_frame(&mut waiting, &mut waiting_buffer)
+                    .await
+                    .expect("the attached stream stays open");
+                let (epoch, seq) = place(id.as_deref());
+                if let Some((previous_epoch, previous_seq)) = previous {
+                    assert_eq!(epoch, previous_epoch, "one sequence space");
+                    assert!(seq > previous_seq, "{previous_seq} then {seq}");
+                }
+                previous = Some((epoch, seq));
+                if event == "run_started" {
+                    return id;
+                }
+            }
+        })
+        .await
+        .expect("the stream attaches once the member wakes and replays its run");
+        let (epoch, first_seq) = place(first_id.as_deref());
+        drop(waiting);
+
+        let (mut resumed, mut resumed_buffer) = open(&lead_alias, first_id.as_deref()).await;
+        let (_, resumed_id) = tokio::time::timeout(
+            Duration::from_secs(10),
+            next_frame(&mut resumed, &mut resumed_buffer),
+        )
+        .await
+        .expect("the reconnect delivers")
+        .expect("the resumed stream stays open");
+        let (resumed_epoch, resumed_seq) = place(resumed_id.as_deref());
+        assert_eq!(
+            resumed_epoch, epoch,
+            "the reconnect resumes in the same space"
+        );
+        assert!(
+            resumed_seq > first_seq,
+            "the reconnect resumes after {first_seq}, not at {resumed_seq}"
+        );
+        drop(resumed);
+
+        let (mut retired, mut retired_buffer) = open(&idle_alias, None).await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(300),
+                next_frame(&mut retired, &mut retired_buffer)
+            )
+            .await
+            .is_err(),
+            "the dormant member's stream waits"
+        );
+        mob.retire(crate::member_comms_id::roster_member_id_for_identity(
+            idle.as_str(),
+        ))
+        .await
+        .expect("Core retires the dormant member");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                next_frame(&mut retired, &mut retired_buffer)
+            )
+            .await
+            .expect("the waiting stream ends once Core retires its member")
+            .is_none(),
+            "a retired member's waiting stream delivers nothing"
+        );
+        let _ = mob.stop().await;
     }
 }

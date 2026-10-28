@@ -9,7 +9,7 @@ use crate::machines::mob_machine as dsl;
 use crate::runtime::dormant_seat::fresh_seat_session_id;
 use crate::runtime::{DormantSeatOutcome, MemberRestorePolicy, MobBootSetBasis};
 
-const LAZY_STEP: Duration = Duration::from_secs(60);
+const LAZY_STEP: Duration = Duration::from_mins(1);
 
 fn worker(index: usize) -> AgentIdentity {
     AgentIdentity::from(format!("lazy-{index:02}"))
@@ -1836,7 +1836,7 @@ async fn ten_thousand_dormant_members_restart_without_materializing_any() {
         MEMBERS
     );
     assert!(
-        elapsed < Duration::from_secs(60),
+        elapsed < Duration::from_mins(1),
         "the restart took {elapsed:?}"
     );
 }
@@ -2198,7 +2198,7 @@ async fn seating_a_thousand_then_ten_thousand_identities_reports_each_phase() {
         largest.seat
     );
     assert!(
-        largest.restart < Duration::from_secs(60),
+        largest.restart < Duration::from_mins(1),
         "the restart over {} seated identities took {:?}",
         largest.members,
         largest.restart
@@ -2231,7 +2231,7 @@ async fn seating_ten_thousand_identities_wired_to_a_live_orchestrator_stays_unde
         run.seat
     );
     assert!(
-        run.restart < Duration::from_secs(60),
+        run.restart < Duration::from_mins(1),
         "the restart over {} seated, wired identities took {:?}",
         run.members,
         run.restart
@@ -2240,7 +2240,7 @@ async fn seating_ten_thousand_identities_wired_to_a_live_orchestrator_stays_unde
         .orchestrator_wake
         .expect("the run woke the orchestrator after the restart");
     assert!(
-        wake < Duration::from_secs(60),
+        wake < Duration::from_mins(1),
         "the orchestrator's wake over {} edges took {wake:?}, over the 60 s bound",
         run.members
     );

@@ -12179,13 +12179,10 @@ impl GatedRequestClient {
     /// Wait until the held request has been made, bounded.
     async fn wait_until_held(&self, context: &str) {
         let mut entered = self.entered.subscribe();
-        tokio::time::timeout(
-            Duration::from_secs(60),
-            entered.wait_for(|entered| *entered),
-        )
-        .await
-        .unwrap_or_else(|_| panic!("[{context}] the gated model request was never made"))
-        .expect("entered signal");
+        tokio::time::timeout(Duration::from_mins(1), entered.wait_for(|entered| *entered))
+            .await
+            .unwrap_or_else(|_| panic!("[{context}] the gated model request was never made"))
+            .expect("entered signal");
     }
 
     fn release(&self) {
@@ -12200,7 +12197,7 @@ impl GatedRequestClient {
     async fn wait_until_answered(&self, context: &str) {
         let mut answered = self.answered.subscribe();
         tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             answered.wait_for(|answered| *answered),
         )
         .await
@@ -12466,11 +12463,11 @@ async fn a_lift_whose_resume_notification_turn_spawns_a_member_reaches_ready() {
     );
     client_2.arm(handle.clone());
 
-    let lifted = tokio::time::timeout(Duration::from_secs(120), handle.resume()).await;
+    let lifted = tokio::time::timeout(Duration::from_mins(2), handle.resume()).await;
     let spawns = match &lifted {
         // The notification turn runs under the mob's lifecycle owner, so it
         // may still be on its way when the lift answers.
-        Ok(Ok(())) => tokio::time::timeout(Duration::from_secs(60), async {
+        Ok(Ok(())) => tokio::time::timeout(Duration::from_mins(1), async {
             loop {
                 let spawns = client_2.spawns();
                 if !spawns.is_empty() {
@@ -12875,7 +12872,7 @@ async fn a_held_member_tail_is_refused_typed_at_the_members_wake() {
         "the start leaves the held tail as the shutdown left it"
     );
 
-    tokio::time::timeout(Duration::from_secs(60), handle.resume())
+    tokio::time::timeout(Duration::from_mins(1), handle.resume())
         .await
         .expect("the lift answers")
         .expect("the lift resumes the mob: the member's refused restore is its own outcome");

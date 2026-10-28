@@ -2295,7 +2295,7 @@ async fn reacquire_recording(host: &TestHost, realm: &SpiRealm) -> Vec<HostCall>
         "the failed renew stopped the writer"
     );
     host.take_calls();
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
         realm.lease_is_live() && realm.fence() > first,
         "the writer acquired again and resumed: {:?}",

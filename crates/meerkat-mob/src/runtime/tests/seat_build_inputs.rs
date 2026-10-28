@@ -10,7 +10,7 @@
 use super::*;
 use crate::runtime::DormantSeatOutcome;
 
-const STEP: Duration = Duration::from_secs(60);
+const STEP: Duration = Duration::from_mins(1);
 
 const CONTEXT_DESK: &str = "north";
 const INSTRUCTION: &str = "Answer in one line.";

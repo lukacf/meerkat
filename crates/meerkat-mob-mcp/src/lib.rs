@@ -11886,7 +11886,7 @@ mod tests {
         async fn wait_for_arrivals(&self, count: u64) {
             let mut arrivals = self.arrivals.subscribe();
             let reached = tokio::time::timeout(
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 arrivals.wait_for(|arrived| *arrived >= count),
             )
             .await;
@@ -16946,7 +16946,7 @@ mod tests {
     /// only.
     async fn wait_until_member_live(handle: &MobHandle, identity: &AgentIdentity) {
         let mut changes = handle.machine_state_changes();
-        let live = tokio::time::timeout(Duration::from_secs(60), async {
+        let live = tokio::time::timeout(Duration::from_mins(1), async {
             loop {
                 if handle.member_materialization_for_test(identity)
                     == Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Live)
@@ -17162,7 +17162,7 @@ mod tests {
             assert_eq!(gate.held(), 1, "one member is materialized at a time");
             gate.release_one();
         }
-        let listed = tokio::time::timeout(Duration::from_secs(60), restore)
+        let listed = tokio::time::timeout(Duration::from_mins(1), restore)
             .await
             .expect("the restore finishes")
             .expect("the restore task")
@@ -20189,7 +20189,7 @@ mod tests {
 
         // The released read may still be returning when the cleanup's bounded
         // retries end; the same caller's retry continues the cleanup then.
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         let report = loop {
             match state.mob_destroy(&mob_id).await {
                 Ok(report) => break report,

@@ -12,7 +12,7 @@ use crate::machines::mob_machine as dsl;
 use crate::runtime::actor::member_wake_turn::probe_member_wake_restores_for_test;
 use crate::runtime::{DormantSeatOutcome, MemberRestorePolicy};
 
-const STEP: Duration = Duration::from_secs(60);
+const STEP: Duration = Duration::from_mins(1);
 
 /// The sample definition with a `member` and a `helper` profile (each a
 /// worker otherwise) that `role_wiring` pairs.

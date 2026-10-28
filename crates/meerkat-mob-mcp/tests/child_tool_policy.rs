@@ -1441,7 +1441,7 @@ async fn members_an_agent_created_come_back_dormant_and_a_peer_message_wakes_one
     let handle = restored_dormant_child(&fixture, &child_id).await;
     let recipient = AgentIdentity::from(RECIPIENT);
     tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.send_peer_message(
             AgentIdentity::from(SENDER),
             recipient.clone(),

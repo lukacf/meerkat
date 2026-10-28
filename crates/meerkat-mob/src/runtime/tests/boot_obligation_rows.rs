@@ -18,7 +18,7 @@ use meerkat_runtime::{
     RuntimeOpsLifecycleRegistry,
 };
 
-const ROW_STEP: Duration = Duration::from_secs(60);
+const ROW_STEP: Duration = Duration::from_mins(1);
 
 fn worker(index: usize) -> AgentIdentity {
     AgentIdentity::from(format!("obligation-{index:02}"))

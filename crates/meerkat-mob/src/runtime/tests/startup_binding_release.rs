@@ -13,7 +13,7 @@ use crate::runtime::MemberRestorePolicy;
 use crate::runtime::ops_adapter;
 use crate::runtime::provisioner::provision_finish_test_hooks::{self, ProvisionFinishFault};
 
-const STEP: Duration = Duration::from_secs(60);
+const STEP: Duration = Duration::from_mins(1);
 
 fn turn_driven(identity: &AgentIdentity) -> SpawnMemberSpec {
     let mut spec = SpawnMemberSpec::new("worker", identity.clone());

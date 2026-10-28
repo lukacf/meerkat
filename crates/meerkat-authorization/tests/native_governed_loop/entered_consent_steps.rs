@@ -52,7 +52,7 @@ use meerkat_runtime::meerkat_machine::{
 /// The consented call's id, as the binding retains it.
 const CONSENTED_CALL: &str = "consented-read";
 /// Host-chosen validity of one consent request.
-const CONSENT_VALIDITY: Duration = Duration::from_secs(4 * 60 * 60);
+const CONSENT_VALIDITY: Duration = Duration::from_hours(4);
 
 /// The records owner, rating every record operation R3: a fresh qualified
 /// human decision is required. It selects no separate action account.
@@ -674,7 +674,7 @@ impl ConsentedWorld {
                 meerkat_core::ToolDeadlineChain::new(vec![
                     meerkat_core::ToolDeadlineContributor::finite(
                         meerkat_core::ToolDeadlineOwner::DirectCaller,
-                        Duration::from_secs(600),
+                        Duration::from_mins(10),
                     ),
                 ])
                 .expect("finite caller deadline"),

@@ -18,7 +18,7 @@ use crate::runtime::builder::restore_pass_probe::{self, RestorePassEvent};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Bound for one step; it only turns a hang into a failure.
-const STEP: Duration = Duration::from_secs(60);
+const STEP: Duration = Duration::from_mins(1);
 
 const MEMBERS: usize = 8;
 

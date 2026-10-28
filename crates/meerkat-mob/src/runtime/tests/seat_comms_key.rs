@@ -10,7 +10,7 @@ use super::*;
 use crate::machines::mob_machine as dsl;
 use crate::runtime::DormantSeatOutcome;
 
-const STEP: Duration = Duration::from_secs(60);
+const STEP: Duration = Duration::from_mins(1);
 
 fn turn_driven(identity: &AgentIdentity) -> SpawnMemberSpec {
     let mut spec = SpawnMemberSpec::new("worker", identity.clone());

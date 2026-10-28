@@ -16,7 +16,7 @@ pub struct MemberWakeRetryBackoff {
 
 impl MemberWakeRetryBackoff {
     pub const DEFAULT_INITIAL: Duration = Duration::from_secs(1);
-    pub const DEFAULT_MAX: Duration = Duration::from_secs(60);
+    pub const DEFAULT_MAX: Duration = Duration::from_mins(1);
 
     /// The delay before retry number `retry` (0 is the first).
     pub fn delay(&self, retry: u32) -> Duration {
@@ -47,7 +47,7 @@ mod tests {
         assert_eq!(backoff.delay(0), Duration::from_secs(1));
         assert_eq!(backoff.delay(1), Duration::from_secs(2));
         assert_eq!(backoff.delay(5), Duration::from_secs(32));
-        assert_eq!(backoff.delay(6), Duration::from_secs(60));
-        assert_eq!(backoff.delay(40), Duration::from_secs(60));
+        assert_eq!(backoff.delay(6), Duration::from_mins(1));
+        assert_eq!(backoff.delay(40), Duration::from_mins(1));
     }
 }

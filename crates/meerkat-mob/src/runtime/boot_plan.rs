@@ -144,14 +144,14 @@ pub enum MobBootSetUnobservedCause {
 
 /// The default bound on one member wake (see
 /// [`super::MobBuilder::with_member_wake_timeout`]).
-pub(crate) const DEFAULT_MEMBER_WAKE_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const DEFAULT_MEMBER_WAKE_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// The default first delay of the owed boot-work retry (see
 /// [`super::MobBuilder::with_member_wake_retry_backoff`]).
 pub(crate) const DEFAULT_OWED_WAKE_RETRY_INITIAL: Duration = Duration::from_secs(1);
 
 /// The default longest delay of the owed boot-work retry.
-pub(crate) const DEFAULT_OWED_WAKE_RETRY_MAX: Duration = Duration::from_secs(60);
+pub(crate) const DEFAULT_OWED_WAKE_RETRY_MAX: Duration = Duration::from_mins(1);
 
 /// The default read concurrency of the `OnDemandVerified` pass: the
 /// builder's default restore concurrency.

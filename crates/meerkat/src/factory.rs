@@ -14789,7 +14789,7 @@ mod tests {
             let opener = {
                 let gate = gate.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(1_000)).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                     std::fs::write(&gate, b"open").expect("open the server gate");
                 })
             };

@@ -80,6 +80,36 @@ const MAX_ATOMIC_SNAPSHOT_EDGES: usize = 1000;
 const MAX_ATOMIC_SNAPSHOT_ATTENTION: usize = 1000;
 const MAX_ATOMIC_READY_ITEMS: usize = 1000;
 
+/// Whether `item` is terminal (`completed`, `cancelled`, `failed`). A terminal
+/// item has no transition back to `open`, so it is never ready again; it still
+/// resolves blockers and child joins for the live items that reference it. An
+/// item whose terminality cannot be classified counts as live, so the atomic
+/// ceilings below never shrink on a malformed row.
+fn is_terminal_item(item: &WorkItem) -> bool {
+    WorkGraphMachine::classify_terminality(item).unwrap_or(false)
+}
+
+/// Items that count against the atomic ready/snapshot ceiling: the live
+/// (non-terminal) working set. Closed history does not consume the ceiling.
+fn live_item_count(items: &[WorkItem]) -> usize {
+    items.iter().filter(|item| !is_terminal_item(item)).count()
+}
+
+/// Edges that count against the atomic snapshot edge ceiling: those touching at
+/// least one live item. An edge between two terminal items can no longer change
+/// any item's readiness.
+fn live_edge_count(items: &[WorkItem], edges: &[WorkEdge]) -> usize {
+    let terminal = items
+        .iter()
+        .filter(|item| is_terminal_item(item))
+        .map(|item| &item.id)
+        .collect::<BTreeSet<_>>();
+    edges
+        .iter()
+        .filter(|edge| !(terminal.contains(&edge.from_id) && terminal.contains(&edge.to_id)))
+        .count()
+}
+
 fn bounded_collection_limit(limit: Option<usize>) -> Result<usize, WorkGraphError> {
     let limit = limit.unwrap_or(DEFAULT_COLLECTION_LIMIT);
     if limit > MAX_COLLECTION_LIMIT {
@@ -1047,9 +1077,9 @@ impl WorkGraphService {
             .store
             .read_namespace_graph(&realm_id, &namespace)
             .await?;
-        if all_items.len() > MAX_ATOMIC_READY_ITEMS {
+        if live_item_count(&all_items) > MAX_ATOMIC_READY_ITEMS {
             return Err(WorkGraphError::InvalidInput(format!(
-                "ready-set evaluation exceeds the atomic {MAX_ATOMIC_READY_ITEMS}-item limit; narrow the scope"
+                "ready-set evaluation exceeds the atomic {MAX_ATOMIC_READY_ITEMS}-live-item limit; narrow the scope"
             )));
         }
         let labels = filter.labels.clone();
@@ -1059,10 +1089,12 @@ impl WorkGraphService {
             .map(|item| (item.id.clone(), item))
             .collect::<BTreeMap<_, _>>();
         let mut ready = Vec::new();
-        for item in all_items
-            .iter()
-            .filter(|item| labels.iter().all(|label| item.labels.contains(label)))
-        {
+        // Terminal items are never ready: only the live set is evaluated, so the
+        // evaluation stays within the ceiling however much history the
+        // namespace holds.
+        for item in all_items.iter().filter(|item| {
+            !is_terminal_item(item) && labels.iter().all(|label| item.labels.contains(label))
+        }) {
             let joined = matches!(
                 child_join_disposition(item, &all_items, &edges)?,
                 ChildJoinDisposition::Satisfied
@@ -1104,12 +1136,12 @@ impl WorkGraphService {
             .store
             .read_namespace_snapshot(&realm_id, &namespace)
             .await?;
-        if read.items.len() > MAX_ATOMIC_READY_ITEMS {
+        if live_item_count(&read.items) > MAX_ATOMIC_READY_ITEMS {
             return Err(WorkGraphError::InvalidInput(format!(
-                "snapshot ready-set evaluation exceeds the atomic {MAX_ATOMIC_READY_ITEMS}-item limit; narrow the scope"
+                "snapshot ready-set evaluation exceeds the atomic {MAX_ATOMIC_READY_ITEMS}-live-item limit; narrow the scope"
             )));
         }
-        if read.edges.len() > MAX_ATOMIC_SNAPSHOT_EDGES {
+        if live_edge_count(&read.items, &read.edges) > MAX_ATOMIC_SNAPSHOT_EDGES {
             return Err(WorkGraphError::InvalidInput(format!(
                 "snapshot exceeds the atomic {MAX_ATOMIC_SNAPSHOT_EDGES}-edge scan limit; narrow the namespace/item scope"
             )));
@@ -2720,6 +2752,139 @@ mod tests {
         ) -> Result<Vec<WorkGraphEvent>, crate::WorkGraphError> {
             self.inner.list_events(filter).await
         }
+    }
+
+    async fn close_completed(service: &WorkGraphService, item: WorkItem) -> WorkItem {
+        service
+            .close(crate::CloseWorkItemRequest {
+                id: item.id,
+                realm_id: None,
+                namespace: None,
+                expected_revision: item.revision,
+                status: crate::WorkStatus::Completed,
+            })
+            .await
+            .expect("close")
+    }
+
+    #[tokio::test]
+    async fn closed_history_does_not_consume_the_atomic_ready_ceiling() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        // More stored items than the ceiling, all but one of them closed.
+        for index in 0..super::MAX_ATOMIC_READY_ITEMS {
+            let item = service
+                .create(create_req(&format!("done {index}")))
+                .await
+                .expect("create");
+            close_completed(&service, item).await;
+        }
+        let live = service.create(create_req("live")).await.expect("live");
+
+        let ready = service.ready(Default::default()).await.expect("ready");
+        assert_eq!(
+            ready.iter().map(|item| item.id.clone()).collect::<Vec<_>>(),
+            vec![live.id.clone()]
+        );
+        let snapshot = service
+            .snapshot(Default::default())
+            .await
+            .expect("snapshot");
+        assert_eq!(snapshot.items.len(), 1);
+        let history = service
+            .snapshot(crate::WorkGraphSnapshotFilter {
+                include_terminal: true,
+                limit: Some(10),
+                ..Default::default()
+            })
+            .await
+            .expect("snapshot with history");
+        assert_eq!(history.items.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn the_live_working_set_still_hits_the_atomic_ready_ceiling() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        for index in 0..=super::MAX_ATOMIC_READY_ITEMS {
+            service
+                .create(create_req(&format!("open {index}")))
+                .await
+                .expect("create");
+        }
+        let error = service
+            .ready(Default::default())
+            .await
+            .expect_err("over the live ceiling");
+        assert!(error.to_string().contains("live-item limit"), "{error}");
+        let error = service
+            .snapshot(Default::default())
+            .await
+            .expect_err("over the live ceiling");
+        assert!(error.to_string().contains("live-item limit"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn edges_between_closed_items_do_not_consume_the_snapshot_edge_ceiling() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        // 50 related items (well under the item ceiling) with one edge more
+        // than the edge ceiling between them.
+        let mut items = Vec::new();
+        for index in 0..50 {
+            items.push(
+                service
+                    .create(create_req(&format!("related {index}")))
+                    .await
+                    .expect("create"),
+            );
+        }
+        let mut linked = 0;
+        'pairs: for from in 0..items.len() {
+            for to in (from + 1)..items.len() {
+                if linked > super::MAX_ATOMIC_SNAPSHOT_EDGES {
+                    break 'pairs;
+                }
+                service
+                    .link(LinkWorkItemsRequest {
+                        realm_id: None,
+                        namespace: None,
+                        kind: WorkEdgeKind::Related,
+                        from_id: items[from].id.clone(),
+                        to_id: items[to].id.clone(),
+                    })
+                    .await
+                    .expect("link");
+                linked += 1;
+            }
+        }
+        // While the chain is live the edge ceiling applies.
+        let error = service
+            .snapshot(Default::default())
+            .await
+            .expect_err("over the live edge ceiling");
+        assert!(error.to_string().contains("edge scan limit"), "{error}");
+        // Closed, the items and their edges are history and the snapshot reads again.
+        for item in items {
+            let current = service.get(None, None, item.id).await.expect("get");
+            close_completed(&service, current).await;
+        }
+        service.create(create_req("live")).await.expect("live");
+        let snapshot = service
+            .snapshot(Default::default())
+            .await
+            .expect("snapshot");
+        assert_eq!(snapshot.items.len(), 1);
+        assert!(snapshot.edges.is_empty());
     }
 
     #[tokio::test]

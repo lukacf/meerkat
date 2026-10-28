@@ -95,6 +95,17 @@ them.
 
 ### Changed
 
+- `meerkat-workgraph`: the atomic `ready`/`snapshot` ceilings count the live
+  working set only. A namespace fails `ready` and `snapshot` when it holds more
+  than 1,000 non-terminal items (it used to be 1,000 stored items, terminal ones
+  included), and `snapshot`'s 1,000-edge ceiling counts only edges that touch a
+  non-terminal item. Terminal items are never ready, so `ready` evaluates only
+  live items; closed items and edges between them are still read, still
+  resolve blockers and child joins, and are still returned with
+  `include_terminal`. Before this, a long-lived namespace became permanently
+  unreadable through `ready` and `snapshot` once its history passed 1,000
+  items, because nothing can delete an item.
+
 - `meerkat-mob`: `MobBuilder::resume` restores a running mob's members
   concurrently, up to the builder's restore concurrency, instead of one at a
   time. A member counts against the bound from the start of its restore until

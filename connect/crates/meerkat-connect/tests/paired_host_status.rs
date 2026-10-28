@@ -280,7 +280,7 @@ async fn fresh_native_sessions_read_prior_requests_without_recovering_submission
     let prepared = json!({"state":"prepared","base_current":false,"change":{
         "change_digest":reference,
         "base":{"activation_id":"214","policy_digest":"sha256:fixture","ledger_digest":"sha256:fixture"},
-        "ledger_patch":{"path":"deployment/extensions.toml","extension_id":"telegram","channel_id":"telegram:primary",
+        "ledger_patch":{"path":"host/extensions.toml","extension_id":"telegram","channel_id":"telegram:primary",
             "before":null,"after":{"id":"telegram:primary","ingress":"polling","approved_groups":[]}},
         "unified_diff":"fixture exact draft diff"}});
     let mut replies = Vec::new();
@@ -575,10 +575,10 @@ async fn unrelated_and_unknown_status_cannot_clear_an_uncertain_submission() {
     // is sufficient for the immutable transport/approval contract being tested.
     let change = json!({"change_digest":own,
         "base":{"activation_id":"214","policy_digest":"sha256:fixture","ledger_digest":format!("sha256:{}", "1".repeat(64))},
-        "ledger_patch":{"path":"deployment/extensions.toml","extension_id":"telegram","channel_id":"telegram:primary",
+        "ledger_patch":{"path":"host/extensions.toml","extension_id":"telegram","channel_id":"telegram:primary",
             "before":{"id":"telegram:primary","ingress":"polling","approved_groups":[]},
             "after":{"id":"telegram:primary","ingress":"polling","approved_groups":["-1001234567890"]}},
-        "unified_diff":"--- a/deployment/extensions.toml\n+++ b/deployment/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = [\"-1001234567890\"]\n"});
+        "unified_diff":"--- a/host/extensions.toml\n+++ b/host/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = [\"-1001234567890\"]\n"});
     let mut replies = Reply::pairing().into_iter().collect::<Vec<_>>();
     replies.extend([
         Reply { method: "POST", path: "/console/extensions/frontend/prepare".into(), status: 200,

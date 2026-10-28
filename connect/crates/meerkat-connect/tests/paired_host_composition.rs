@@ -322,9 +322,9 @@ fn change_receipt(groups: Value) -> Value {
     before["approved_groups"] = groups;
     let mut change = json!({"base":{"activation_id":"210","policy_digest":"sha256:current-fixture",
         "ledger_digest":format!("sha256:{}", "1".repeat(64))},
-        "ledger_patch":{"path":"deployment/extensions.toml","extension_id":"telegram",
+        "ledger_patch":{"path":"host/extensions.toml","extension_id":"telegram",
             "channel_id":"telegram:primary","before":original,"after":before},
-        "unified_diff":format!("--- a/deployment/extensions.toml\n+++ b/deployment/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = {}\n", before["approved_groups"])});
+        "unified_diff":format!("--- a/host/extensions.toml\n+++ b/host/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = {}\n", before["approved_groups"])});
     let digest = format!(
         "paired-host-change-v1:sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&change).unwrap())

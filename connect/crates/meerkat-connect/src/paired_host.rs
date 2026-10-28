@@ -1496,7 +1496,7 @@ impl<'de> Deserialize<'de> for FrontendChange {
             .map_err(|_| serde::de::Error::custom("invalid change JSON"))?;
         let metadata: FrontendChangeMetadata = serde_json::from_str(raw.get())
             .map_err(|_| serde::de::Error::custom("unsupported change shape"))?;
-        if metadata.ledger_patch.path != "deployment/extensions.toml"
+        if !valid_ledger_path(&metadata.ledger_patch.path)
             || !json_object(&metadata.ledger_patch.after)
             || metadata
                 .ledger_patch
@@ -3496,6 +3496,22 @@ fn valid_entry_point_group(group: &str) -> bool {
                 && part
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+        })
+}
+
+/// The host's extension ledger file, by the host's own relative path. The host
+/// derives and re-derives every change, so Connect checks only the shape.
+fn valid_ledger_path(path: &str) -> bool {
+    path.len() <= 128
+        && path.ends_with(".toml")
+        && path.split('/').count() <= 8
+        && path.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
         })
 }
 

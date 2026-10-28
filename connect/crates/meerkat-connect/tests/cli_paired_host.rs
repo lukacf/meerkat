@@ -222,9 +222,9 @@ fn prepared() -> Value {
     after["approved_groups"] = candidate()["participants"]["approved_groups"].clone();
     let mut change = json!({"base":{"activation_id":"210","policy_digest":"sha256:cli-fixture",
         "ledger_digest":format!("sha256:{}", "1".repeat(64))},
-        "ledger_patch":{"path":"deployment/extensions.toml","extension_id":"telegram",
+        "ledger_patch":{"path":"host/extensions.toml","extension_id":"telegram",
             "channel_id":"telegram:primary","before":before,"after":after},
-        "unified_diff":"--- a/deployment/extensions.toml\n+++ b/deployment/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = [\"-1001234567890\"]\n"});
+        "unified_diff":"--- a/host/extensions.toml\n+++ b/host/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = [\"-1001234567890\"]\n"});
     change["change_digest"] = json!(format!(
         "paired-host-change-v1:sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&change).unwrap())

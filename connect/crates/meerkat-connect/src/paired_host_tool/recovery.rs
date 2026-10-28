@@ -602,7 +602,7 @@ mod tests {
 
     fn prepared(index: usize) -> String {
         format!(
-            r#"{{"state":"prepared","base_current":false,"change":{{"change_digest":"{}","base":{{"activation_id":"1","policy_digest":"sha256:fixture","ledger_digest":"sha256:fixture"}},"ledger_patch":{{"path":"deployment/extensions.toml","extension_id":"fixture","channel_id":"fixture:1","before":null,"after":{{"threshold":1e-06}}}},"unified_diff":"fixture"}}}}"#,
+            r#"{{"state":"prepared","base_current":false,"change":{{"change_digest":"{}","base":{{"activation_id":"1","policy_digest":"sha256:fixture","ledger_digest":"sha256:fixture"}},"ledger_patch":{{"path":"host/extensions.toml","extension_id":"fixture","channel_id":"fixture:1","before":null,"after":{{"threshold":1e-06}}}},"unified_diff":"fixture"}}}}"#,
             digest(index).as_str()
         )
     }

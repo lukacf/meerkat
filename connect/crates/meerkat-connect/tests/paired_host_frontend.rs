@@ -2111,7 +2111,7 @@ fn change_raw() -> String {
         "\"approved_groups\":[\"-1001234567890\"]",
     );
     format!(
-        r#"{{"change_digest":"{CHANGE_DIGEST}","base":{{"activation_id":"210","policy_digest":"sha256:current-fixture","ledger_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"ledger_patch":{{"path":"deployment/extensions.toml","extension_id":"telegram","channel_id":"telegram:primary","before":{before},"after":{after}}},"unified_diff":"--- a/deployment/extensions.toml\n+++ b/deployment/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = [\"-1001234567890\"]\n"}}"#
+        r#"{{"change_digest":"{CHANGE_DIGEST}","base":{{"activation_id":"210","policy_digest":"sha256:current-fixture","ledger_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"ledger_patch":{{"path":"host/extensions.toml","extension_id":"telegram","channel_id":"telegram:primary","before":{before},"after":{after}}},"unified_diff":"--- a/host/extensions.toml\n+++ b/host/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = [\"-1001234567890\"]\n"}}"#
     )
 }
 
@@ -3346,7 +3346,7 @@ async fn prepared_change_submission_preserves_exact_owner_bytes_and_only_acknowl
         .unwrap();
     let change = capture_change(&mut client).await;
     assert_eq!(change.change_digest().as_str(), CHANGE_DIGEST);
-    assert_eq!(change.ledger_patch().path, "deployment/extensions.toml");
+    assert_eq!(change.ledger_patch().path, "host/extensions.toml");
     assert_eq!(change.base().activation_id.as_deref(), Some("210"));
     assert_eq!(serde_json::to_string(&change).unwrap(), raw);
     assert!(
@@ -3678,7 +3678,7 @@ async fn malformed_or_crossed_prepare_changes_never_become_submit_capable() {
     let mut crossed = base.clone();
     crossed["base"]["activation_id"] = json!("999");
     let mut path = base.clone();
-    path["ledger_patch"]["path"] = json!("deployment/senders.toml");
+    path["ledger_patch"]["path"] = json!("../host/extensions.toml");
     let mut extension = base.clone();
     extension["ledger_patch"]["extension_id"] = json!("whatsapp");
     let mut channel = base.clone();
@@ -3720,6 +3720,37 @@ async fn malformed_or_crossed_prepare_changes_never_become_submit_capable() {
         assert_safe(&error);
     }
     assert_eq!(fixture.finish().await.len(), count);
+}
+
+#[test]
+fn ledger_patch_names_the_hosts_own_ledger_file_by_shape() {
+    let base: Value = serde_json::from_str(&change_raw()).unwrap();
+    let with_path = |path: &str| {
+        let mut change = base.clone();
+        change["ledger_patch"]["path"] = json!(path);
+        serde_json::from_str::<FrontendChange>(&change.to_string())
+    };
+    for path in [
+        "host/extensions.toml",
+        "extensions.toml",
+        "config/a-b_c/ledger.v2.toml",
+    ] {
+        assert!(with_path(path).is_ok(), "{path}");
+    }
+    for path in [
+        "",
+        "/host/extensions.toml",
+        "../extensions.toml",
+        "host/../extensions.toml",
+        "host/./extensions.toml",
+        "host//extensions.toml",
+        "host/extensions.toml/",
+        "host/extensions.json",
+        "host\\extensions.toml",
+        "host/exten sions.toml",
+    ] {
+        assert!(with_path(path).is_err(), "{path}");
+    }
 }
 
 #[tokio::test]

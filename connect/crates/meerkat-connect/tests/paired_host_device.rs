@@ -323,6 +323,7 @@ async fn terminal_pairing_uses_the_same_origin_store_and_reuses_the_saved_device
             &mut stream,
             200,
             json!({"current":{"activation_id":"fixture","policy_digest":null},
+            "ledger_path":"host/extensions.toml",
             "extensions":[],"routing":"sender_identity"}),
             &[],
         )
@@ -405,7 +406,7 @@ async fn confirmed_cookie_is_saved_once_and_a_fresh_client_reuses_it_only_after_
         assert!(head.contains(&format!("paired_host_device={DEVICE}")));
         assert!(!head.contains(PAIR));
         assert!(body.is_empty());
-        reply(&mut stream, 200, json!({"current":{"activation_id":"210","policy_digest":"sha256:fixture"},"extensions":[],"routing":"sender_identity"}), &[]).await;
+        reply(&mut stream, 200, json!({"current":{"activation_id":"210","policy_digest":"sha256:fixture"},"ledger_path":"host/extensions.toml","extensions":[],"routing":"sender_identity"}), &[]).await;
     };
     let (result, (), ()) = timeout(BOUND, async {
         tokio::join!(

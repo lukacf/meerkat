@@ -904,6 +904,9 @@ fn required_nullable_new_change<'de, D: serde::Deserializer<'de>>(
 #[serde(deny_unknown_fields)]
 pub struct FrontendInventory {
     pub current: FrontendCurrent,
+    /// The host's own extension ledger file. A client that has read it accepts
+    /// only channel changes that patch exactly this file.
+    pub ledger_path: String,
     pub extensions: Vec<FrontendExtension>,
     pub routing: FrontendRouting,
 }
@@ -2374,6 +2377,8 @@ pub struct PairedHostClient {
     cookies: Arc<OriginCookies>,
     presenter_credential: Option<(HeaderName, HeaderValue)>,
     confirmed_device: Option<ConfirmedDevice>,
+    // The ledger file the host declared in its latest inventory read.
+    declared_ledger_path: Option<String>,
     // Correlates immutable preparations with this exact client. This is not
     // authorization: the paired host rechecks the live credentials on every call.
     change_binding: Arc<()>,
@@ -2479,6 +2484,7 @@ impl PairedHostClient {
             cookies,
             presenter_credential,
             confirmed_device: None,
+            declared_ledger_path: None,
             change_binding: Arc::new(()),
         })
     }
@@ -2752,17 +2758,19 @@ impl PairedHostClient {
         let bytes = read_body(response, operation).await?;
         if status == 200 {
             let inventory: FrontendInventory = decode(&bytes, operation)?;
-            if inventory
-                .extensions
-                .iter()
-                .flat_map(|extension| &extension.channels)
-                .any(|channel| !channel.senders.informational)
+            if !valid_ledger_path(&inventory.ledger_path)
+                || inventory
+                    .extensions
+                    .iter()
+                    .flat_map(|extension| &extension.channels)
+                    .any(|channel| !channel.senders.informational)
             {
                 return Err(unconfirmed(
                     operation,
                     UnconfirmedReason::UnexpectedResponse,
                 ));
             }
+            self.declared_ledger_path = Some(inventory.ledger_path.clone());
             return Ok(FrontendInventoryRead::Inventory(inventory));
         }
         let expected = match status {
@@ -2845,6 +2853,10 @@ impl PairedHostClient {
                     || receipt.candidate.compile_depth != FrontendCompileDepth::PolicyBundle
                     || change.base().activation_id != receipt.current.activation_id
                     || change.base().policy_digest != receipt.current.policy_digest
+                    || self
+                        .declared_ledger_path
+                        .as_ref()
+                        .is_some_and(|declared| *declared != patch.path)
                     || patch.extension_id != candidate.extension_id
                     || candidate
                         .channel_id
@@ -3135,7 +3147,14 @@ impl PairedHostClient {
                 .transpose()?;
             if state.as_deref() == Some("prepared") {
                 let observation: FrontendPreparedDraft = decode(&bytes, operation)?;
-                if observation.change.change_digest() != digest {
+                let crossed_ledger = match &observation.change {
+                    FrontendPreparedChange::Channel(change) => self
+                        .declared_ledger_path
+                        .as_ref()
+                        .is_some_and(|declared| *declared != change.ledger_patch().path),
+                    FrontendPreparedChange::NewExtension(_) => false,
+                };
+                if observation.change.change_digest() != digest || crossed_ledger {
                     return Err(unconfirmed(
                         operation,
                         UnconfirmedReason::UnexpectedResponse,

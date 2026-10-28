@@ -275,7 +275,7 @@ async fn host_response(
     response
 }
 fn inventory() -> Value {
-    json!({"current":{"activation_id":"214","policy_digest":"sha256:fixture-policy"},"extensions":[],"routing":"sender_identity"})
+    json!({"current":{"activation_id":"214","policy_digest":"sha256:fixture-policy"},"ledger_path":"host/extensions.toml","extensions":[],"routing":"sender_identity"})
 }
 fn secret_request() -> Value {
     json!({"extension_id":"telegram","binding_name":"telegram_bot_token", "base":{"activation_id":"214","policy_digest":"sha256:fixture-policy","ledger_digest":"sha256:fixture-ledger"}})

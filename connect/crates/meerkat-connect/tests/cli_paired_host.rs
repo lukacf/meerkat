@@ -201,6 +201,7 @@ fn candidate() -> Value {
 
 fn inventory() -> Value {
     json!({"current":{"activation_id":"210","policy_digest":"sha256:cli-fixture"},
+        "ledger_path":"host/extensions.toml",
         "extensions":[{"extension_id":"telegram","enabled":true,"wheel_present":true,
             "channels":[{"channel_id":"telegram:primary","ingress":["polling","webhook"],
                 "secrets":[{"name":"TELEGRAM_BOT_TOKEN","present":false}],

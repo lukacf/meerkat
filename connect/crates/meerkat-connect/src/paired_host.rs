@@ -2258,7 +2258,7 @@ impl FrontendProblem {
             "secret_binding_out_of_scope" => "A secret binding belongs to a different consumer.",
             "policy_compile_failed" => "The candidate policy does not compile.",
             "surfaces_lock_stale" => {
-                "The candidate changes the desired extension surfaces; deployment/surfaces.lock must be regenerated and reviewed first."
+                "The candidate changes the desired extension surfaces; the host's surfaces lock must be regenerated and reviewed first."
             }
             "baseline_policy_compile_failed" => {
                 "The current policy inputs do not compile in isolation, so the candidate cannot be judged at full depth."

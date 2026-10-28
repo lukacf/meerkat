@@ -839,7 +839,7 @@ async fn redirect_is_unconfirmed_and_never_sends_code_or_cookie_to_destination()
 #[tokio::test]
 async fn current_snapshot_problems_and_typed_request_rejection_are_preserved() {
     let problems = json!([
-        {"code":"surfaces_lock_stale","path":"policy","message":"The candidate changes the desired extension surfaces; deployment/surfaces.lock must be regenerated and reviewed first."},
+        {"code":"surfaces_lock_stale","path":"policy","message":"The candidate changes the desired extension surfaces; the host's surfaces lock must be regenerated and reviewed first."},
         {"code":"snapshot_changed","path":"","message":"The current activation, policy or ledger changed during validation."}
     ]);
     let mut changed = receipt();

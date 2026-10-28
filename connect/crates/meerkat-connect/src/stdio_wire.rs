@@ -444,10 +444,10 @@ impl Initialize {
                         paired_host.targets.len() == 1
                             && paired_host.targets[0].origin == self.application.origin
                             && paired_host.credential.as_ref().is_some_and(|credential| {
-                                credential.header == "x-paired-host-presenter-credential"
-                                    && credential.expires_at_ms == self.viewer.expires_at_ms
+                                credential.expires_at_ms == self.viewer.expires_at_ms
                                     && crate::paired_host::PairedHostClient::for_presenter(
                                         &self.application.origin,
+                                        &credential.header,
                                         &credential.value,
                                     )
                                     .is_ok()

@@ -195,7 +195,7 @@ fn tags() -> Value {
 fn inspection() -> Value {
     json!({"repo":REPO,"tag":TAG,"commit":COMMIT,
         "distribution":"example-ext-telegram","version":"0.2.8",
-        "entry_point":{"group":"paired_host.extensions","name":"telegram","object":"example_ext_telegram.extension:TelegramExtension"},
+        "entry_point":{"group":"example_host.extensions","name":"telegram","object":"example_ext_telegram.extension:TelegramExtension"},
         "declared":{},"unverified":["manifest","facades","channel_template","secrets"],
         "already_declared":false,
         "prepare":{"new_extension":{"distribution":"example-ext-telegram","version":"0.2.8",
@@ -224,7 +224,7 @@ fn role_inspection() -> Value {
     body["package_path"] = json!("extension");
     body["distribution"] = json!("example-ext-device");
     body["version"] = json!("0.5.1.dev2026100301");
-    body["entry_point"] = json!({"group":"paired_host.extensions", "name":"device",
+    body["entry_point"] = json!({"group":"example_host.extensions", "name":"device",
         "object":"example_ext_device.extension:DeviceExtension"});
     body["unverified"] = json!([
         "manifest",
@@ -372,7 +372,7 @@ async fn captured_client_reads_exact_pins_and_only_fills_channel_before_existing
     else {
         panic!("inspection")
     };
-    assert_eq!(observed.entry_point.group, "paired_host.extensions");
+    assert_eq!(observed.entry_point.group, "example_host.extensions");
     let request = observed
         .with_channel(FrontendExtensionChannel {
             ingress: FrontendIngress::Polling,
@@ -644,7 +644,7 @@ async fn source_failures_preserve_only_the_exact_static_problem_and_optional_rea
     let metadata = source_error(
         "unprocessable",
         "metadata_invalid",
-        "pyproject.toml:project.entry-points.paired_host.extensions",
+        "pyproject.toml:project.entry-points.example_host.extensions",
         "The source's package metadata is not static, valid extension metadata for this host.",
     );
     let no_tags = source_error(
@@ -698,7 +698,7 @@ async fn source_failures_preserve_only_the_exact_static_problem_and_optional_rea
     };
     assert_eq!(
         failure.problems[0].path,
-        "pyproject.toml:project.entry-points.paired_host.extensions"
+        "pyproject.toml:project.entry-points.example_host.extensions"
     );
     let FrontendSourceRead::Rejected(failure) = client.frontend_source_tags(REPO).await.unwrap()
     else {
@@ -1197,7 +1197,7 @@ async fn role_source_diagnostics_are_fixed_and_bound_to_the_requested_package() 
             422,
             "unprocessable",
             "metadata_invalid",
-            "paired-host-release-v1.json",
+            "example-host-release-v1.json",
             metadata,
             true,
         ),

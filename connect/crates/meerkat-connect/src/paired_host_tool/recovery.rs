@@ -856,7 +856,12 @@ mod tests {
 
         fn frontend(&self) -> PairedHostFrontend {
             PairedHostFrontend::new(
-                PairedHostClient::for_presenter(&self.origin, CREDENTIAL).unwrap(),
+                PairedHostClient::for_presenter(
+                    &self.origin,
+                    "x-paired-host-presenter-credential",
+                    CREDENTIAL,
+                )
+                .unwrap(),
             )
         }
 

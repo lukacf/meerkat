@@ -25,7 +25,7 @@ use crate::paired_host_device::{ConfirmedDevice, DeviceStoreError};
 use reqwest::{
     Client, Response, Url,
     cookie::{CookieStore, Jar},
-    header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, HeaderValue, ORIGIN, SET_COOKIE},
+    header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, HeaderName, HeaderValue, ORIGIN, SET_COOKIE},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::value::RawValue;
@@ -2372,10 +2372,10 @@ pub struct PairedHostClient {
     origin_header: HeaderValue,
     http: Client,
     cookies: Arc<OriginCookies>,
-    presenter_credential: Option<HeaderValue>,
+    presenter_credential: Option<(HeaderName, HeaderValue)>,
     confirmed_device: Option<ConfirmedDevice>,
     // Correlates immutable preparations with this exact client. This is not
-    // authorization: The paired host rechecks the live credentials on every call.
+    // authorization: the paired host rechecks the live credentials on every call.
     change_binding: Arc<()>,
 }
 
@@ -2395,15 +2395,21 @@ impl PairedHostClient {
     }
 
     /// Private host bootstrap only. No cookie store is attached to this client;
-    /// The paired host owns credential expiry, live-device checks and retirement.
-    pub(crate) fn for_presenter(origin: &str, value: &str) -> Result<Self, PairedHostError> {
+    /// the paired host owns credential expiry, live-device checks and retirement.
+    /// The host names the request header that carries its credential.
+    pub(crate) fn for_presenter(
+        origin: &str,
+        header: &str,
+        value: &str,
+    ) -> Result<Self, PairedHostError> {
+        let name = presenter_credential_header(header)?;
         let mut credential = HeaderValue::from_str(value)
             .map_err(|_| PairedHostError::InvalidPresenterCredential)?;
         if value.is_empty() || value.chars().any(char::is_whitespace) {
             return Err(PairedHostError::InvalidPresenterCredential);
         }
         credential.set_sensitive(true);
-        let client = Self::with_credential(origin, Some(credential))?;
+        let client = Self::with_credential(origin, Some((name, credential)))?;
         if client.selected_origin() != origin {
             return Err(PairedHostError::InvalidOrigin);
         }
@@ -2412,7 +2418,7 @@ impl PairedHostClient {
 
     fn with_credential(
         human_selected_origin: &str,
-        presenter_credential: Option<HeaderValue>,
+        presenter_credential: Option<(HeaderName, HeaderValue)>,
     ) -> Result<Self, PairedHostError> {
         let origin =
             Url::parse(human_selected_origin).map_err(|_| PairedHostError::InvalidOrigin)?;
@@ -2482,7 +2488,7 @@ impl PairedHostClient {
         operation: PairedHostOperation,
         request: reqwest::RequestBuilder,
     ) -> Result<reqwest::RequestBuilder, PairedHostError> {
-        let Some(credential) = &self.presenter_credential else {
+        let Some((header, credential)) = &self.presenter_credential else {
             return Ok(request);
         };
         if !matches!(
@@ -2495,7 +2501,7 @@ impl PairedHostClient {
         ) {
             return Err(PairedHostError::PresenterOperationUnavailable);
         }
-        Ok(request.header("x-paired-host-presenter-credential", credential.clone()))
+        Ok(request.header(header.clone(), credential.clone()))
     }
 
     /// The nonsecret, canonical human-selected origin for protected review.
@@ -2632,7 +2638,7 @@ impl PairedHostClient {
             || !lower_hex(&observed.commit, 40)
             || observed.distribution.is_empty()
             || observed.version.is_empty()
-            || observed.entry_point.group != "paired_host.extensions"
+            || !valid_entry_point_group(&observed.entry_point.group)
             || observed.entry_point.name.is_empty()
             || observed.entry_point.object.is_empty()
             || !observed.has_configuration_shape()
@@ -3437,6 +3443,23 @@ impl PairedHostClient {
     }
 }
 
+/// The trusted host chooses the header that carries its presenter credential.
+/// Only a lowercase `x-` extension header is accepted, so the credential can
+/// never replace a standard header such as authorization, cookie or origin.
+fn presenter_credential_header(name: &str) -> Result<HeaderName, PairedHostError> {
+    let valid = (3..=64).contains(&name.len())
+        && name.starts_with("x-")
+        && !name.ends_with('-')
+        && !name.contains("--")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if !valid {
+        return Err(PairedHostError::InvalidPresenterCredential);
+    }
+    HeaderName::from_bytes(name.as_bytes()).map_err(|_| PairedHostError::InvalidPresenterCredential)
+}
+
 fn validate_source_repo(repo: &str) -> Result<(), PairedHostError> {
     let parsed = Url::parse(repo).map_err(|_| PairedHostError::InvalidSourceRepository)?;
     // A deliberately canonical input contract, not an implementation of the
@@ -3462,6 +3485,29 @@ fn validate_source_repo(repo: &str) -> Result<(), PairedHostError> {
         return Err(PairedHostError::InvalidSourceRepository);
     }
     Ok(())
+}
+
+/// The host names its own extension entry-point group; Connect checks only that
+/// it is a bounded dotted name, never that it equals one host's group.
+fn valid_entry_point_group(group: &str) -> bool {
+    group.len() <= 128
+        && group.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+        })
+}
+
+/// The host's build-recipe file at the repository root, by the host's own name.
+fn valid_release_recipe_name(path: &str) -> bool {
+    path.strip_suffix(".json").is_some_and(|stem| {
+        (1..=64).contains(&stem.len())
+            && (stem.as_bytes()[0].is_ascii_lowercase() || stem.as_bytes()[0].is_ascii_digit())
+            && stem.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+            })
+    })
 }
 
 fn valid_source_tag(tag: &str) -> bool {
@@ -3521,18 +3567,20 @@ fn source_rejection(
         }
         (422, Kind::Unprocessable, "metadata_invalid", path) => {
             operation == PairedHostOperation::FrontendSourceInspect
-                && (path == "paired-host-release-v1.json"
+                && (valid_release_recipe_name(path)
                     || [
                         "",
                         ":project",
                         ":project.dynamic",
                         ":project.version",
                         ":project.entry-points",
-                        ":project.entry-points.paired_host.extensions",
                         ":project.name",
                     ]
                     .iter()
-                    .any(|suffix| path == format!("{metadata_path}{suffix}")))
+                    .any(|suffix| path == format!("{metadata_path}{suffix}"))
+                    || path
+                        .strip_prefix(&format!("{metadata_path}:project.entry-points."))
+                        .is_some_and(valid_entry_point_group))
         }
         (502, Kind::BadGateway, "repo_unreachable", "repo") => true,
         (503, Kind::Unavailable, "extension_sources_invalid" | "current_inputs_invalid", "") => {
@@ -4189,7 +4237,12 @@ mod presenter_transport_tests {
     async fn presenter_credential_is_route_limited_and_never_adopts_cookies() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        let mut client = PairedHostClient::for_presenter(&origin, "private-test-only").unwrap();
+        let mut client = PairedHostClient::for_presenter(
+            &origin,
+            "x-paired-host-presenter-credential",
+            "private-test-only",
+        )
+        .unwrap();
         let server = tokio::spawn(async move {
             let mut requests = Vec::new();
             for _ in 0..2 {
@@ -4306,7 +4359,12 @@ mod presenter_transport_tests {
             socket.shutdown().await.unwrap();
             String::from_utf8(request).unwrap()
         });
-        let client = PairedHostClient::for_presenter(&origin, "private-test-only").unwrap();
+        let client = PairedHostClient::for_presenter(
+            &origin,
+            "x-paired-host-presenter-credential",
+            "private-test-only",
+        )
+        .unwrap();
         let error = client
             .post(
                 PairedHostOperation::PrepareCandidate,
@@ -4338,5 +4396,38 @@ mod presenter_transport_tests {
         );
         assert!(!error.to_string().contains("private-test-only"));
         assert!(!error.to_string().contains("private-destination"));
+    }
+
+    #[test]
+    fn presenter_credential_travels_in_the_extension_header_the_host_names() {
+        let origin = "https://paired-host.example";
+        for header in [
+            "x-paired-host-presenter-credential",
+            "x-host-session",
+            "x-a1",
+        ] {
+            let client = PairedHostClient::for_presenter(origin, header, "private-test-only")
+                .expect("a lowercase x- header is the host's choice");
+            let (name, _) = client.presenter_credential.as_ref().unwrap();
+            assert_eq!(name.as_str(), header);
+        }
+        for header in [
+            "authorization",
+            "cookie",
+            "origin",
+            "X-Upper",
+            "x-",
+            "x--double",
+            "x-trailing-",
+            "x-with space",
+            "x-under_score",
+            "",
+        ] {
+            assert_eq!(
+                PairedHostClient::for_presenter(origin, header, "private-test-only").unwrap_err(),
+                PairedHostError::InvalidPresenterCredential,
+                "{header}"
+            );
+        }
     }
 }

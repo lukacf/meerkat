@@ -15,7 +15,19 @@ from meerkat_toolkit.frontend.paired_host_live import (
 )
 
 
-TOKEN = "PairedHostLease " + "t" * 43
+ROUTE = "/live/image"
+SCHEME = "HostLease"
+TOKEN = SCHEME + " " + "t" * 43
+
+
+def live_client(base, authorization_provider, **options):
+    return PairedHostLiveImageClient(
+        base,
+        authorization_provider,
+        route=ROUTE,
+        authorization_scheme=SCHEME,
+        **options,
+    )
 
 
 @asynccontextmanager
@@ -78,13 +90,13 @@ async def test_actual_http_exact_route_current_lease_and_no_ambient_proxy(monkey
         monkeypatch.setenv("ALL_PROXY", sink)
         monkeypatch.setenv("NO_PROXY", "")
         current = TOKEN
-        client = PairedHostLiveImageClient(base, lambda: current)
+        client = live_client(base, lambda: current)
         assert await submit(client) == {"accepted": True}
-        current = "PairedHostLease " + "u" * 43
+        current = SCHEME + " " + "u" * 43
         await submit(client)
         assert not sink_calls
         assert len(calls) == 2
-        assert calls[0][0] == b"POST /api/paired_host/robot/live/send_image HTTP/1.1"
+        assert calls[0][0] == b"POST /live/image HTTP/1.1"
         assert calls[0][1][b"Authorization"] == TOKEN.encode()
         assert calls[1][1][b"Authorization"] == current.encode()
         assert json.loads(calls[0][2]) == {
@@ -110,13 +122,64 @@ async def test_actual_http_exact_route_current_lease_and_no_ambient_proxy(monkey
 )
 def test_base_is_one_explicit_loopback_origin(url):
     with pytest.raises(ValueError):
-        PairedHostLiveImageClient(url, lambda: TOKEN)
+        live_client(url, lambda: TOKEN)
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        "",
+        "live/image",
+        "/",
+        "//live",
+        "/live/",
+        "/./live",
+        "/live/../image",
+        "/live?image",
+        "/live#image",
+        "/live%2fimage",
+        "/live image",
+        "/" + "a" * 65,
+        "/a" * 9,
+        None,
+    ],
+)
+def test_route_is_one_host_named_absolute_path(route):
+    with pytest.raises(ValueError):
+        PairedHostLiveImageClient(
+            "http://127.0.0.1:8080",
+            lambda: TOKEN,
+            route=route,
+            authorization_scheme=SCHEME,
+        )
+
+
+@pytest.mark.parametrize("scheme", ["", "Host Lease", "Lease\n", "1Lease", "a" * 65, None])
+def test_authorization_scheme_is_one_token(scheme):
+    with pytest.raises(ValueError):
+        PairedHostLiveImageClient(
+            "http://127.0.0.1:8080",
+            lambda: TOKEN,
+            route=ROUTE,
+            authorization_scheme=scheme,
+        )
+
+
+@pytest.mark.asyncio
+async def test_lease_with_another_scheme_has_no_http_effect():
+    async with server() as (base, calls, _):
+        client = live_client(base, lambda: "Bearer " + "t" * 43)
+        with pytest.raises(ImageSubmissionError) as failure:
+            await submit(client)
+        assert failure.value.kind is ImageFailure.LEASE_UNAVAILABLE
+        assert failure.value.request_entered is False
+        assert not calls
 
 
 @pytest.mark.asyncio
 async def test_validation_and_missing_lease_have_no_http_effect():
     async with server() as (base, calls, _):
-        client = PairedHostLiveImageClient(base, lambda: None)
+        client = live_client(base, lambda: None)
         with pytest.raises(ImageSubmissionError) as failure:
             await submit(client)
         assert failure.value.kind is ImageFailure.LEASE_UNAVAILABLE
@@ -127,7 +190,7 @@ async def test_validation_and_missing_lease_have_no_http_effect():
             )
         with pytest.raises(ValueError):
             await submit(
-                PairedHostLiveImageClient(base, lambda: TOKEN, max_request_bytes=1)
+                live_client(base, lambda: TOKEN, max_request_bytes=1)
             )
         assert not calls
 
@@ -140,7 +203,7 @@ async def test_redirect_never_discloses_or_replays(status):
             status=status, extra=f"Location: {sink}/stolen\r\n".encode()
         ) as (base, calls, _):
             with pytest.raises(ImageSubmissionError) as failure:
-                await submit(PairedHostLiveImageClient(base, lambda: TOKEN))
+                await submit(live_client(base, lambda: TOKEN))
             assert failure.value.kind is ImageFailure.REDIRECT
             assert failure.value.request_entered is True
             assert len(calls) == 1
@@ -162,7 +225,7 @@ async def test_redirect_never_discloses_or_replays(status):
 async def test_malformed_response_is_unconfirmed_and_redacted(body):
     async with server(body=body) as (base, calls, _):
         with pytest.raises(ImageSubmissionError) as failure:
-            await submit(PairedHostLiveImageClient(base, lambda: TOKEN))
+            await submit(live_client(base, lambda: TOKEN))
         assert failure.value.kind is ImageFailure.INVALID_RESPONSE
         assert failure.value.request_entered is True
         assert failure.value.__context__ is None
@@ -174,7 +237,7 @@ async def test_malformed_response_is_unconfirmed_and_redacted(body):
 async def test_lost_response_is_one_attempt():
     async with server(drop=True) as (base, calls, _):
         with pytest.raises(ImageSubmissionError) as failure:
-            await submit(PairedHostLiveImageClient(base, lambda: TOKEN))
+            await submit(live_client(base, lambda: TOKEN))
         assert failure.value.kind is ImageFailure.TRANSPORT
         assert failure.value.request_entered is True
         assert len(calls) == 1
@@ -185,7 +248,7 @@ async def test_real_deadline_has_no_automatic_retry():
     gate = asyncio.Event()
     async with server(gate=gate, drop=True) as (base, calls, entered):
         request = asyncio.create_task(
-            submit(PairedHostLiveImageClient(base, lambda: TOKEN, timeout_seconds=0.1))
+            submit(live_client(base, lambda: TOKEN, timeout_seconds=0.1))
         )
         await entered.wait()
         with pytest.raises(ImageSubmissionError) as failure:
@@ -199,7 +262,7 @@ async def test_response_byte_bound():
     async with server(body=b'{"large":"' + b"x" * 100 + b'"}') as (base, calls, _):
         with pytest.raises(ImageSubmissionError) as failure:
             await submit(
-                PairedHostLiveImageClient(base, lambda: TOKEN, max_response_bytes=32)
+                live_client(base, lambda: TOKEN, max_response_bytes=32)
             )
         assert failure.value.kind is ImageFailure.RESPONSE_TOO_LARGE
         assert len(calls) == 1
@@ -246,7 +309,7 @@ async def test_repeated_cancel_joins_supported_cooperative_response_close(
 
     monkeypatch.setattr(httpx, "AsyncClient", make_client)
     request = asyncio.create_task(
-        submit(PairedHostLiveImageClient("http://127.0.0.1:8080", lambda: TOKEN))
+        submit(live_client("http://127.0.0.1:8080", lambda: TOKEN))
     )
     await close_entered.wait()
     request.cancel("first caller cancellation")
@@ -285,7 +348,7 @@ async def test_primary_http_failure_survives_cleanup_failure(monkeypatch):
         ),
     )
     with pytest.raises(ImageSubmissionError) as failure:
-        await submit(PairedHostLiveImageClient("http://127.0.0.1:8080", lambda: TOKEN))
+        await submit(live_client("http://127.0.0.1:8080", lambda: TOKEN))
     assert failure.value.kind is ImageFailure.HTTP_STATUS
     assert failure.value.status == 403
     assert failure.value.__context__ is None
@@ -297,7 +360,7 @@ async def test_cancel_before_first_scheduling_has_no_client(monkeypatch):
         httpx, "AsyncClient", lambda **options: pytest.fail("unexpected client")
     )
     task = asyncio.create_task(
-        submit(PairedHostLiveImageClient("http://127.0.0.1:8080", lambda: TOKEN))
+        submit(live_client("http://127.0.0.1:8080", lambda: TOKEN))
     )
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

@@ -162,9 +162,9 @@ The host supplies exact raw bytes/header pairs and an out-of-band signing secret
 
 `SlackReplyTransport` borrows a prepared selected HTTPX client. `send_text(channel_id, text, thread_ts=...)` makes one explicit reply attempt. Its receipt preserves requested/observed destination and `sent`, `known_not_sent` or `unknown`. It never opens a DM, infers a thread or falls back to a channel-level send.
 
-## Example host live image input
+## Paired host live image input
 
-`meerkat_toolkit.frontend.paired_host_live.PairedHostLiveImageClient` submits an image to the example host's existing robot route, using a selected literal loopback origin and a current host lease-header callback. `submit_image` takes an existing idempotency key, MIME type and base64 data.
+`meerkat_toolkit.frontend.paired_host_live.PairedHostLiveImageClient` submits an image to a live route the paired host names, using a selected literal loopback origin, the host's lease authorization scheme and a current lease-header callback. `submit_image` takes an existing idempotency key, MIME type and base64 data.
 
 This specialized client creates its own per-submission HTTPX client. It does not use the borrowed service-client preparation contract. An HTTP response is not a native image-acceptance receipt: the caller must observe the exact image job on its original live channel generation before follow-up text is queued.
 

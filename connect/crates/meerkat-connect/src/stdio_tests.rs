@@ -880,6 +880,7 @@ async fn paired_host_preparation_declares_exact_installed_tools_and_native_ceili
     let binding: Initialize = serde_json::from_value(paired_host_binding(root.path())).unwrap();
     let client = crate::paired_host::PairedHostClient::for_presenter(
         "https://paired-host.example",
+        "x-paired-host-presenter-credential",
         "private-test-only",
     )
     .unwrap();

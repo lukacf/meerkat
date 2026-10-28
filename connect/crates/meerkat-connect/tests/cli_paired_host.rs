@@ -250,7 +250,7 @@ fn tool_result(body: &Value, id: &str) -> Value {
 fn role_inspection() -> Value {
     json!({"repo":ROLE_REPO,"tag":"v0.1.0","commit":"b".repeat(40),
         "package_path":"extension","distribution":"example-ext-device","version":"0.1.0",
-        "entry_point":{"group":"paired_host.extensions","name":"device",
+        "entry_point":{"group":"example_host.extensions","name":"device",
             "object":"example_ext_device.extension:DeviceExtension"},
         "declared":{},"already_declared":false,
         "unverified":["manifest","facades","role_contract","host_bindings","secrets"],

@@ -56,7 +56,7 @@ the client's defaults or own its credential storage.
 | `create_permission` | `file_id`, permission object | Provider permission object |
 | `delete_file` | `file_id` | `None` after an accepted empty deletion response |
 
-These are the concrete operations currently used by the paired host. They do not expose
+These are the concrete operations a host commonly needs. They do not expose
 every Drive REST parameter or implement automatic pagination. Field masks are
 sent exactly; omitting `fields` differs from passing an empty string. Selected
 masks need not return `id`. If get/update does return `id`, it must match the
@@ -98,8 +98,8 @@ Relative upload and output paths are made absolute before the first suspension.
 The returned `output_path` preserves the caller's original spelling. This fixes
 the selected directory across a later process-CWD change; it does not prevent
 other owners from replacing files or symlinks. The host authorizes paths and
-controls concurrent content changes. Existing the paired host upload approval binds a
-path, not immutable file bytes.
+controls concurrent content changes. A host upload approval that names a path
+binds that path, not immutable file bytes.
 
 Uploads use a retained regular-file handle and streamed multipart/related body.
 Local I/O uses joined worker calls and reads at most 64 KiB per chunk. Metadata is
@@ -110,8 +110,8 @@ transport does not promise a content snapshot if another process overwrites the
 same-length file during reading.
 
 The default 2 MiB request/response limits apply to JSON metadata, not streamed
-media. No new 5 MB media cap is introduced. Multipart preserves the existing
-The paired host CLI strategy. Google's [upload guide](https://developers.google.com/workspace/drive/api/guides/manage-uploads)
+media. No new 5 MB media cap is introduced. Multipart preserves the earlier
+CLI upload strategy. Google's [upload guide](https://developers.google.com/workspace/drive/api/guides/manage-uploads)
 recommends resumable uploads for larger or interruption-prone transfers. This
 adapter does not implement resumable sessions and synthetic large-stream tests
 do not prove acceptance of arbitrary live upload sizes. Google also imposes
@@ -137,15 +137,15 @@ request, response-close and worker cleanup before returning. Slow cleanup can
 outlast that timeout. HTTPX's automatic EOF close and pre-return response-hook cleanup are retained too. No rollback or
 automatic reattempt follows uncertainty.
 
-The paired host's owned client factories prepare their clients immediately; injected
-clients must be explicitly prepared by their composing host. Its adapters refuse
-an unprepared borrowed client before broker lookup. The paired host's Drive adapter
-validates its supported command shapes before credential
-access, supplies its existing broker's selected-account token and quota project,
-and routes Drive before the old generic subprocess retry. A typed 401 invalidates
-only that account's cached token for a later explicit call. The paired host still owns
-query modes, manual continuation maps, approvals, display projection, conversion,
-collection, source ingestion and policy. Local account labels are not new native
+A host's owned client factories prepare their clients immediately; injected
+clients must be explicitly prepared by their composing host. Host adapters should
+refuse an unprepared borrowed client before broker lookup. A host's Drive adapter
+validates its supported command shapes before credential access, supplies its
+broker's selected-account token and quota project, and routes Drive before any
+generic subprocess retry. A typed 401 invalidates only that account's cached
+token for a later explicit call. The host still owns query modes, manual
+continuation maps, approvals, display projection, conversion, collection, source
+ingestion and policy. Local account labels are not new native
 verified-account or binding-generation attestations.
 
 ## Provenance and proof limits
@@ -159,7 +159,7 @@ and public Drive REST documentation: [list](https://developers.google.com/worksp
 and [delete](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/delete).
 No Google CLI implementation bytes were ported. The inspected gws executor was a
 behavioral reference for existing multipart/MIME behavior and exposed the JSON
-media-output defect; its license is not a grant for the paired host's private code.
+media-output defect; its license is not a grant for any host's private code.
 The SDK's existing mixed-source package licensing remains unchanged.
 
 Source tests use synthetic HTTP and local files. They do not establish live

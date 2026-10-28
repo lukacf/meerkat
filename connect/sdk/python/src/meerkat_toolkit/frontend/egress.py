@@ -1,4 +1,4 @@
-"""Durable frontend delivery owner extracted from the paired host.
+"""Durable frontend delivery owner extracted from an existing host.
 
 The outbox records provider attempts and receipts. Hosts retain recipient policy,
 provider adapters and authorization; no row grants permission to send.

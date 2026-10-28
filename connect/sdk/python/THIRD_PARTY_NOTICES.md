@@ -40,7 +40,7 @@ Agno's copyright and Apache-2.0 license text are retained verbatim in `LICENSE-A
 
 Other Agno code and its optional provider SDKs are declared package dependencies, not embedded copies. Their installed distributions retain their own notices. The `agno-mcp` extra pins the selected runtime versions; its installed-artifact verification identifies the tested dependency graph.
 
-The nine PairedHost-derived module copies listed in `LICENSE-EXTRACTED` are licensed under MIT OR Apache-2.0. Their source provenance is retained in that notice. This grant applies only to those extracted Toolkit copies; the original paired host repositories and separately distributed dependencies retain their own terms. The package license expression also preserves the existing Apache-2.0, BSD-2-Clause and MIT donor obligations.
+The nine extracted module copies listed in `LICENSE-EXTRACTED` are licensed under MIT OR Apache-2.0. Their source provenance is retained in that notice. This grant applies only to those extracted Toolkit copies; the original projects and separately distributed dependencies retain their own terms. The package license expression also preserves the existing Apache-2.0, BSD-2-Clause and MIT donor obligations.
 
 
 Bright Data inherits `scrape_as_markdown` and `search_engine`. Its selected request helper borrows the shared byte-bounded transport, requires HTTP 200, decodes strict UTF-8 and wraps successful Markdown as `{content: text}` so page prose cannot be mistaken for donor error text. Explicit configured zones replace the donor's ambient override. Screenshots and dataset jobs are excluded.
@@ -334,14 +334,13 @@ core Meerkat and MobKit dependencies are unchanged.
 ## Custom extension artifact verification
 
 `extension_artifacts.py` and `_extension_wheels.py` extract generic wheel,
-installed RECORD and import-ownership checks from the private paired host candidate
-recorded in `EXTENSIONS.md`. These extracted Toolkit copies are licensed under
-MIT OR Apache-2.0 as stated in `LICENSE-EXTRACTED`. Household policy,
-activation and runtime ownership are excluded.
+installed RECORD and import-ownership checks from the author's own host project,
+as recorded in `EXTENSIONS.md`. These extracted Toolkit copies are licensed under
+MIT OR Apache-2.0 as stated in `LICENSE-EXTRACTED`. Host policy, activation and
+runtime ownership are excluded.
 
 The optional `extensions` extra depends on the separately installed `packaging`
-distribution, declared `packaging>=25.0` consistently with the captured paired host
-candidate. The current verification uses packaging 26.3, whose distribution
+distribution, declared `packaging>=25.0`. The current verification uses packaging 26.3, whose distribution
 declares Apache-2.0 OR BSD-2-Clause. No packaging source is copied. Retained wheel
 and installed dependency license material remains the responsibility of the
 host's package distribution.

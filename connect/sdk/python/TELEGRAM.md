@@ -67,11 +67,11 @@ is active. The host still authorizes any change and owns admission, routing,
 recipient policy and lifecycle. These observations do not prove an admitted
 conversation, successful reply or installed frontend readiness.
 
-The existing paired host Telegram adapter's `activate()` is the consumer seam:
-inspect using its selected credential before `set_webhook` or marking polling
-active, and let the existing host decide whether the selected binding may proceed.
-That host integration is separate work; adding these transport methods does not
-change an installed the paired host adapter or activate a frontend.
+A host's Telegram adapter can use them at its activation seam: inspect using its
+selected credential before `set_webhook` or marking polling active, and let the
+host decide whether the selected binding may proceed. That host integration is
+separate work; adding these transport methods does not change an installed host
+adapter or activate a frontend.
 
 ## Delivery observations
 
@@ -140,41 +140,29 @@ The 30-second timeout is a socket-operation timeout, not a total wall-clock
 bound. A slow stream or uncooperative thread can delay cancellation and close.
 There is no claim of hard thread preemption or custody after forced process loss.
 A durable owner must record entry before sending and preserve uncertainty after
-process loss. The existing Toolkit `ProactiveEgress` is that owner in the
-The paired host adoption, with no additional queue or retry machine here.
+process loss. The Toolkit `ProactiveEgress` can be that owner, with no
+additional queue or retry machine here.
 
-## The paired host adoption and provenance
+## Host adoption and provenance
 
-The isolated `example-ext-telegram` adoption retains its frozen API-v1 types,
-inbound identity mapping, channel lifecycle, provider token lookup, typing
-behavior, host limits and authorized media retrieval. Its `provider.py` is a
-compatibility import. Provider interpretation and presentation now live in the
-portable adapter described below. Result projection and eligibility for a
-plain-formatting retry consume the same classifier, so a malformed 400 cannot
-make a second send eligible. Current source delegates that second attempt to
-the durable owner; adopting hosts must forward the new receipt hint described
-below. Existing built the paired host distributions retain their recorded version.
+A host extension that adopts these modules keeps its own channel types, inbound
+identity mapping, channel lifecycle, provider token lookup, typing behavior,
+host limits and authorized media retrieval. Provider interpretation and
+presentation live in the portable adapter described below. Result projection and
+eligibility for a plain-formatting retry consume the same classifier, so a
+malformed 400 cannot make a second send eligible. The second attempt belongs to
+the durable owner; adopting hosts must forward the receipt hint described below.
 
-API-v1 has no queued outcome. It conservatively maps `provider_queued` to
-`unknown`, preserving the fixed scheduled/unusable-receipt explanation. It must
-never map that observation to `sent`, `known_not_sent`, or a new automatic send.
-This is an explicit compatibility limitation, not full queued-state projection.
+A host API without a queued outcome should map `provider_queued` to `unknown`,
+preserving the scheduled/unusable-receipt explanation. It must never map that
+observation to `sent`, `known_not_sent`, or a new automatic send.
 
-The extracted starting file is `src/paired_host_ext_telegram/provider.py` at
-The paired host Telegram commit `f187bf89f49d4a0444fd3a9bffe07a49ab662f51`.
-The captured user-owned project declared its license as `Private` and had no
-root LICENSE/COPYING/NOTICE file. Its source provenance and notices remain
-preserved. The extracted Toolkit copies are licensed under MIT OR Apache-2.0
-as stated in `LICENSE-EXTRACTED`; this grant does not change the original
-The paired host project's license or separately distributed dependencies.
-The optional `python-telegram-bot==22.7` dependency (LGPL-3.0-only) supplies update
-models through Toolkit's `telegram` extra. The extension selects that extra;
-the version is unchanged and no PTB source is copied. The new provider adapter
-is also PairedHost-derived and covered by `LICENSE-EXTRACTED`. Exact files,
-metadata, dependencies and hashes for the original wire extraction are in
-`docs/coordination/20260930-upstream-review/telegram-frontend-transport-extraction`.
-The adapter successor is recorded in
-`docs/coordination/20260930-upstream-review/telegram-frontend-adapter-successor`.
+The modules were extracted by their author from the author's own projects into
+Meerkat Toolkit. The extracted Toolkit copies are licensed under MIT OR
+Apache-2.0 as stated in `LICENSE-EXTRACTED`; this grant does not change the
+original projects or separately distributed dependencies. The optional
+`python-telegram-bot==22.7` dependency (LGPL-3.0-only) supplies update models
+through Toolkit's `telegram` extra; no PTB source is copied.
 
 ## Portable interpretation and presentation
 
@@ -183,7 +171,7 @@ identifier, a normalized envelope and `TelegramMediaRef` values. Thread, reply,
 sender, chat and media references retain the existing donor wire meaning. These
 are provider facts, not trusted principals, authorized media, or admission.
 The host maps them into its own API and connection scope. Toolkit imports no
-The paired host API types.
+host API types.
 
 The conversational profile is human-authored text, photo, document and voice.
 Other content returns `TelegramUnsupportedEvent(update_id, reason, facts)`.
@@ -240,10 +228,10 @@ Default parser and media failures do not retain raw provider exception text,
 cause or context. A composing host may select its already-sanitized declared
 error classes with `fetch_media(..., passthrough_errors=(HostError,))`; only those
 explicitly selected classes propagate unchanged. This is a host contract, not a
-model argument or a rule inferred from exception text. The paired host shim selects
-only its existing `ExtensionCallError`. Invalid UTF-8 media references and
-filenames are refused by the adapter's bounded validation. The paired host shim
-also refuses invalid UTF-8 outbound text and captions before secret access or
+model argument or a rule inferred from exception text. A host shim typically selects
+only its own extension call error. Invalid UTF-8 media references and
+filenames are refused by the adapter's bounded validation. A host shim can also
+refuse invalid UTF-8 outbound text and captions before secret access or
 provider entry. The portable presenter does not impose that host text policy.
 
 `TelegramPresenter.send_text` and `send_photo` accept a borrowed transport and
@@ -269,9 +257,9 @@ Dropping the hint preserves the refusal but does not request a plain candidate.
 UNKNOWN retries are a separate host decision. The shared owner's default
 `EgressDeliveryPolicy()` does not resend uncertainty. A host can select the
 [bounded persisted policy](FRONTEND.md#select-a-bounded-uncertainty-policy), with
-every new provider call separately authorized and reserved; the paired host's accepted
-choice is one UNKNOWN resend within four total attempts for conversational
-Telegram replies only, never consent- or approval-governed effects. The presenter does not
+every new provider call separately authorized and reserved; for example one
+UNKNOWN resend within four total attempts for conversational Telegram replies
+only, never consent- or approval-governed effects. The presenter does not
 implement that retry or treat a queued response as acceptance. Durable Stop,
 uncertainty history, startup quiescence and state compatibility stay with the
 existing owner and its host composition.

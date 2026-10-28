@@ -440,7 +440,7 @@
     "identity": {
       "publisher": "meerkat-toolkit",
       "name": "google-calendar",
-      "version": "discovery-2026-09-30.2"
+      "version": "discovery-2026-10-28.1"
     },
     "display_name": "Google Calendar",
     "description": "Research and adapter recipe for calendar operations.",
@@ -459,7 +459,7 @@
       {
         "id": "api-or-maintained-mcp",
         "kind": "research_skill",
-        "instructions": "Inspect Google's Calendar API setup and a maintained compatible connector. Google Cloud/API and OAuth preparation may be required. Identify the intended account and calendars. Preserve the selected application's write restrictions and operation/version receipts. When PairedHost is the host, a direct MCP alias must not bypass its internal-calendar and write-ledger semantics. Verify access with bounded reads. Setup does not create, modify or delete calendar events merely to establish readiness.",
+        "instructions": "Inspect Google's Calendar API setup and a maintained compatible connector. Google Cloud/API and OAuth preparation may be required. Identify the intended account and calendars. Preserve the selected application's write restrictions and operation/version receipts. When the host keeps its own calendar write rules, a direct MCP alias must not bypass them. Verify access with bounded reads. Setup does not create, modify or delete calendar events merely to establish readiness.",
         "sources": [
           "https://developers.google.com/workspace/calendar/api/quickstart/python"
         ],

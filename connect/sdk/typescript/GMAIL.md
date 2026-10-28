@@ -176,7 +176,7 @@ refusal, body limits, post-entry cancellation/loss, progress deadlines, stalled
 borrowed readers with delayed or rejecting cleanup, and a host Fetch that ignores
 abort. Run it against the exact installed npm tarball as well
 as the source build. These are protocol fixtures, not live Google, human consent,
-native OAuth/C1, catalog activation or the paired host migration evidence. Complete
+native OAuth/C1, catalog activation or host migration evidence. Complete
 M4/M8 and host-migration obligations remain open.
 
 ```sh

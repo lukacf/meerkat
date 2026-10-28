@@ -2,7 +2,7 @@
 
 `meerkat-toolkit-agno` packages the shared Agno adapter as an independent Python distribution. It supports 36 explicit MCP profiles, including PostgreSQL table and column metadata over a selected local Unix socket. The PostgreSQL-era Agno36 predecessor's retained proof covers 220 installed methods in the full consumer, 29 PostgreSQL methods in a fresh portable consumer, 111 exact runtime pins and all 36 CLI descriptions in both; those are historical evidence counts, not a claim that each successor reruns them. PostgreSQL uses a selected SCRAM principal, one active invocation owner and at most one MCP server per profile, real read-only metadata statements, rollback and joined cleanup. Remote TCP/TLS and arbitrary SQL are excluded. Inventory adoption is specific to a verified artifact. The canonical implementation remains under `sdk/python/src/meerkat_toolkit/adapters`; the staging command copies an exact allowlist into the separate `meerkat_toolkit_agno` namespace without rewriting modules. There is one maintained source implementation.
 
-This component excludes unrelated private paired host modules. Its distribution name and namespace do not overlap the combined SDK, so either can be installed without overwriting the other's files. No PyPI publication is claimed.
+This component excludes unrelated frontend and host-integration modules. Its distribution name and namespace do not overlap the combined SDK, so either can be installed without overwriting the other's files. No PyPI publication is claimed.
 
 ## Build a local wheel
 

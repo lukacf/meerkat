@@ -116,7 +116,7 @@
         },
         {
           "kind": "application_binding",
-          "instruction": "Compose the five operations into the existing service export and retain host authorization, bounded paging, cancellation and cleanup. In PairedHost retain internal-calendar raw-write denial, origin stamping, the existing write-version ledger, semantic publisher, deterministic IDs, conditional ETags and final readback. An unknown write outcome requires owner reconciliation, never automatic resend, replacement ID or switching strategy. No crash-safe fencing or exactly-once delivery is supplied."
+          "instruction": "Compose the five operations into the existing service export and retain host authorization, bounded paging, cancellation and cleanup. In a host that has them, retain internal-calendar raw-write denial, origin stamping, the existing write-version ledger, semantic publisher, deterministic IDs, conditional ETags and final readback. An unknown write outcome requires owner reconciliation, never automatic resend, replacement ID or switching strategy. No crash-safe fencing or exactly-once delivery is supplied."
         }
       ],
       "plan": {
@@ -124,7 +124,7 @@
         "blockers": [
           "The host must bind the selected Python SDK source or separately verified artifact, selected account/calendar, operation schemas and lifecycle to the existing service export. The operation library is not an activated tool surface.",
           "The existing host credential owner must supply OAuth registration, account consent, minimal operation scopes and credential refresh/revoke. This recipe adds no credential storage, OAuth flow or authentication fallback.",
-          "The retained source checkpoint and local protocol tests do not establish public package availability, live Google access, current account authorization or complete PairedHost adoption."
+          "The retained source checkpoint and local protocol tests do not establish public package availability, live Google access, current account authorization or complete host adoption."
         ]
       }
     }

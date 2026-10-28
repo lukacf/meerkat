@@ -88,41 +88,36 @@ not add retries, calendar selection or a new credential owner. See the
 [configured service guide](../services/README.md#calendar-writes) for operation
 arguments, scope requirements and notification limitations.
 
-## The paired host adoption
+## Host adoption
 
-The paired host's existing `GwsRunner` dispatches Calendar events list/get/insert/patch/
-delete and conditional patch/delete through these operations. Unsupported
-Calendar commands or output/upload/partial-response options refuse; there is no
-Calendar subprocess fallback. Non-Calendar commands keep their existing backend.
-The existing Google token broker supplies an ephemeral request binding once;
-Calendar operations do not invoke the old authentication-substring retry loop.
-A typed HTTP 401 invalidates only that account's existing broker cache entry, then
-raises the original failure. Refresh can occur on a later explicit call; this
-attempt never refreshes or repeats the provider operation.
+A host's command runner can dispatch Calendar events list/get/insert/patch/delete
+and conditional patch/delete through these operations. Unsupported Calendar
+commands or output/upload/partial-response options should refuse rather than
+fall back to a subprocess. The host's Google token broker supplies an ephemeral
+request binding once; Calendar operations do not use an authentication-substring
+retry loop. A typed HTTP 401 invalidates only that account's broker cache entry,
+then raises the original failure. Refresh can occur on a later explicit call;
+this attempt never refreshes or repeats the provider operation.
 
-The paired host keeps account normalization, internal-calendar raw-write denial,
-source-gap policy, origin stamping, write-version ledger, semantic publication,
-ETag revalidation, deterministic IDs and final readback. Its existing
-`ExpectedActivityPublisher` adds a typed `write_outcome: "unknown"` to mutation
-failure receipts when the actual Calendar runner error carries it through
-FastMCP's explicit cause chain. Read failures and untyped prose do not create that
-field. A later explicit stable-key publication may reconcile a previously
-committed write; the failed invocation itself cannot report publication success.
+The host keeps account normalization, raw-write denial for internal calendars,
+source-gap policy, origin stamping, its write-version ledger, semantic
+publication, ETag revalidation, deterministic IDs and final readback. A host can
+add a typed `write_outcome: "unknown"` to mutation failure receipts when the
+actual Calendar runner error carries it. Read failures and untyped prose do not
+create that field. A later explicit stable-key publication may reconcile a
+previously committed write; the failed invocation itself cannot report
+publication success.
 
-The existing JSONL version ledger remains a best-effort echo-suppression aid,
-not a durable commit journal or crash-safe fencing owner. Its surface/event-ID
-key does not isolate identical event IDs across calendars/accounts. That existing
-limitation, full Calendar API coverage, production OAuth/account readiness,
-artifact installation and complete the paired host migration are separate acceptance
-work. Local loopback and source-composition tests do not establish live Google
-readiness or a deployed system.
+Full Calendar API coverage, production OAuth/account readiness, artifact
+installation and a complete host migration are separate acceptance work. Local
+loopback and source-composition tests do not establish live Google readiness or
+a deployed system.
 
 ## Provenance
 
 This module is original implementation informed by official Google REST contracts
 and existing Toolkit HTTP/cancellation patterns. No Google client-library source
-or the paired host implementation body is included in the module. PairedHost-specific
-binding and policy code stays in the paired host. The SDK artifact's existing mixed-source
-license declaration still applies to the package as a whole; this guide makes no
-new grant for its other private-source modules. Evidence and exact preimages are
-under `docs/coordination/20260930-upstream-review/calendar-transport-adoption`.
+or host implementation body is included in the module. Host-specific binding and
+policy code stays in the host. The SDK artifact's existing mixed-source license
+declaration still applies to the package as a whole; this guide makes no new
+grant for its other private-source modules.

@@ -163,10 +163,10 @@ Retry-After. The business invocation/reconciliation owner retains that decision.
 
 The `connectors.gmail` REST transport is original MIT OR Apache-2.0 Toolkit code
 based on Google's linked public REST contract, reusing this repository's HA
-transport discipline. No Google, Agno or the paired host implementation is copied into
+transport discipline. No Google, Agno or host implementation is copied into
 that transport. The separate `connectors.gmail_message` formatting module is
-PairedHost-derived source licensed under MIT OR Apache-2.0 for the extracted
-Toolkit copy, as recorded below and in `LICENSE-EXTRACTED`. Google documentation states CC BY 4.0
+extracted source licensed under MIT OR Apache-2.0 for the extracted Toolkit
+copy, as recorded below and in `LICENSE-EXTRACTED`. Google documentation states CC BY 4.0
 for prose and Apache-2.0 for samples; hosted Gmail retains its own terms. HTTPX and AnyIO
 are optional dependencies for this profile. Google Cloud project, Gmail API enablement,
 OAuth consent/client registration, scopes and administrator restrictions remain
@@ -178,12 +178,13 @@ claims, representation fidelity, same-endpoint account separation, exact send
 bytes, refusal, response limits, cancellation, timeout, connection loss and
 cleanup after body failure. These are protocol fixtures, not a live Google
 server, authenticated user flow, native OAuth integration, exactly-once
-business delivery, package activation or the paired host migration. M4/M8 and all
+business delivery, package activation or a host migration. M4/M8 and all
 other complete end-state requirements remain open.
 
-The paired host routes its existing Gmail command shapes through these operations
-using its existing broker. Host composition tests are local protocol evidence;
-they do not establish live Google behavior or native approval completeness.
+A host can route its existing Gmail command shapes through these operations
+using its own credential broker. Host composition tests are local protocol
+evidence; they do not establish live Google behavior or native approval
+completeness.
 
 ## Pure message formatting
 
@@ -210,8 +211,8 @@ Attachments are only descriptors, even if provider bytes are present.
 
 The supported charset names are ASCII/us-ascii, UTF8/utf-8,
 Latin1/latin-1/iso-8859-1 and cp1252/windows-1252. An explicit Content-Type charset
-wins. The public default is ASCII; the paired host explicitly uses UTF-8 to retain its
-previous undeclared-charset profile. Undecodable or unsupported text refuses
+wins. The public default is ASCII; a host can pass UTF-8 explicitly to retain an
+earlier undeclared-charset profile. Undecodable or unsupported text refuses
 without replacement. Gmail `body.data` is canonical base64url (correct padding
 optional), decoded once; Content-Transfer-Encoding is not applied again. A
 supplied decoded `size` must match available bytes; empty data alongside an
@@ -244,18 +245,17 @@ Malformed content raises content-free `GmailMessageFormatError` with one of
 `invalid_message`, `unsupported_content`, `limit_exceeded`, `invalid_reply`, or
 `invalid_composition`, without raw exception cause/context. Returned records and
 MIME remain private content; host logging and traceback-local inspection remain
-host responsibilities. Intentional stricter behavior replaces the old the paired host
+host responsibilities. Intentional stricter behavior replaces an earlier
 empty/replacement fallback for malformed base64, text and payload structure.
 
-The paired host now uses these helpers directly for full-message projection and
-send/draft/reply composition. Its HTML cleanup, including the existing household
-sender workaround, remains local. Ordinary valid output remains compatible;
-attachment rows additionally expose part identity and incomplete text bodies
-carry explicit diagnostics. Raw results, reply outcome handling, account/client
-selection, approvals, parent-fetch/send ordering and all stores remain unchanged.
+A host can use these helpers directly for full-message projection and
+send/draft/reply composition. Its own HTML cleanup remains local. Attachment
+rows expose part identity and incomplete text bodies carry explicit diagnostics.
+Raw results, reply outcome handling, account/client selection, approvals,
+parent-fetch/send ordering and all stores remain with the host.
 
-The module derives from the paired host's private `google_mcp.py` helpers. Its donor hash
-and exact provenance are in `LICENSE-EXTRACTED`. The extracted Toolkit copy is
-licensed under MIT OR Apache-2.0; the original paired host project is unchanged.
+The module was extracted by its author from the author's own host helpers. The
+extracted Toolkit copy is licensed under MIT OR Apache-2.0 as stated in
+`LICENSE-EXTRACTED`; the original project is unchanged.
 Tests are synthetic source/host composition
 checks, not live-provider or full end-state acceptance.

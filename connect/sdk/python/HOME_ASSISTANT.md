@@ -111,11 +111,11 @@ It covers nested result fidelity, both service profiles, separate account
 selection, redirect refusal, local refusal, provider errors, bounded bodies,
 malformed data, timeout, cancellation and connection loss. Its handlers are
 fixtures, not a Home Assistant installation. Live account support, interactive
-authorization, device effects, packaging/release validation, the paired host migration,
+authorization, device effects, packaging/release validation, host migration,
 TypeScript operations and the rest of Toolkit M4/M8 remain separate work.
 
 The implementation is original Toolkit code based on the public protocol, not
-a copy of the paired host's environment/global-client wrappers. Home Assistant core
+a copy of any host's environment/global-client wrappers. Home Assistant core
 `6cd7e61bad577dd450e26dca2680fd80770543b1` is the pinned source oracle and is
 [Apache-2.0 licensed](https://github.com/home-assistant/core/blob/6cd7e61bad577dd450e26dca2680fd80770543b1/LICENSE.md).
 HTTPX is an optional runtime dependency. The repository's Toolkit license
@@ -134,7 +134,7 @@ A non-image login page is not a camera still. Full-body requests exclude inherit
 range, conditional and method-override headers, as well as default query values.
 
 The JSON limit does not cap media. `max_media_bytes=None` is the camera default,
-matching the previous the paired host buffered-still behavior without a new size cap.
+matching earlier buffered-still behavior without a new size cap.
 A host may supply a positive media byte limit. Images are buffered in memory, so
 hosts should select an appropriate limit for their deployment. Neither JSON nor
 media limits silently truncate a successful result. Timeout and cancellation join

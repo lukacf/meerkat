@@ -25,7 +25,7 @@
           "Authored by Meerkat Toolkit, not Google. Documentation hashes identify observed public bytes, not a hosted implementation or live conformance.",
           "This is the first retained Drive library entry. Existing package versions are unchanged. Select the exact package version, package digest, library digest and strategy; no heuristic selection, automatic upgrade or fallback.",
           "No Google CLI implementation or quickstart code was copied. The inspected gws executor was a behavioral reference for existing multipart and MIME behavior, not the selected transport or a credential owner.",
-          "The catalog license does not grant rights over other private SDK modules or PairedHost code. Select an authorized source or artifact with its actual license files.",
+          "The catalog license does not grant rights over other private SDK modules or host code. Select an authorized source or artifact with its actual license files.",
           "No MCP endpoint, agent frontend, public package availability, authenticated account, native authority or live support is declared by this recipe."
         ],
         "local_patches": []
@@ -47,9 +47,9 @@
           ],
           "known_requirements": [],
           "unresolved_details": [
-            "The library selection API cannot activate this guidance-only recipe. Existing host owners must bind the selected SDK artifact, current operation schemas, policy, grants and lifetime to the service export; the PairedHost adapter is bounded composition evidence, not generic activation or authority.",
+            "The library selection API cannot activate this guidance-only recipe. Existing host owners must bind the selected SDK artifact, current operation schemas, policy, grants and lifetime to the service export; a host adapter is bounded composition evidence, not generic activation or authority.",
             "The existing credential owner must establish the selected account, project, OAuth client/consent, operation scopes and resource permissions. A local account label or file ID is not verified credential binding; no credential store, OAuth fallback, refresh policy or scope expansion is supplied.",
-            "The accepted private artifacts establish the bounded local composition recorded in SUPPORT.md. They do not establish public package availability, live Google conformance, native admission, deployment or complete PairedHost adoption; verify a different artifact before use."
+            "The accepted private artifacts establish the bounded local composition recorded in SUPPORT.md. They do not establish public package availability, live Google conformance, native admission, deployment or complete host adoption; verify a different artifact before use."
           ]
         }
       ],
@@ -63,7 +63,7 @@
       "assessments": [
         {
           "status": "experimental",
-          "scope": "Retained official documentation and original SDK source inspection, with accepted bounded private-artifact and PairedHost composition evidence linked in SUPPORT.md. No live Google readiness, native admission, public release or deployment support is claimed.",
+          "scope": "Retained official documentation and original SDK source inspection, with accepted bounded private-artifact and host composition evidence linked in SUPPORT.md. No live Google readiness, native admission, public release or deployment support is claimed.",
           "source_revision": "sha256:ed65f7996431e772abe324ce45a2ae13377207443965fce2c8650efae55e7998",
           "assessed_at_unix_ms": 1790887993587,
           "evidence": [

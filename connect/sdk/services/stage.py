@@ -40,9 +40,6 @@ def stage(destination: Path) -> dict[str, object]:
         replacements = [("meerkat_toolkit.", "meerkat_toolkit_services.")]
         if name == "SERVICES-HOST-CLIENT.md":
             replacements.append(("src/meerkat_toolkit/httpx_client.py", "httpx_client.py"))
-        if name == "GOOGLE-OAUTH.md":
-            replacements.append(("../../docs/coordination/20261004T003359.800515-claude-gcp-lead-45cc8b.txt",
-                                 "https://github.com/lukacf/meerkat/issues/1631#issuecomment-5975028207"))
         if name == "SLACK-OAUTH.md":
             replacements.append(("It uses the existing `slack` extra's\nHTTPX and AnyIO dependencies.",
                                  "It uses this distribution's existing HTTPX and AnyIO dependencies."))

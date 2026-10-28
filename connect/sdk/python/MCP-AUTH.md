@@ -32,10 +32,9 @@ Browser localhost must refer to the same host.
 Current Toolkit source also accepts a host-owned registered-HTTPS callback
 inbox using the existing SDK start/complete signatures. This does not make
 HTTPS login available on released loopback-only native builds. The native
-owner has accepted [#1808](https://github.com/lukacf/meerkat/issues/1808), recorded
-in the [exact contract receipt](../../docs/coordination/20261006-paired-host-presenter/20261006T082420.307696-claude-gcp-lead-28b77d.json),
-for per-target callback admission and client registration. That receipt records
-contract acceptance, without qualifying a released-native HTTPS consumer.
+owner has accepted [#1808](https://github.com/lukacf/meerkat/issues/1808)
+for per-target callback admission and client registration. That acceptance
+records the contract, without qualifying a released-native HTTPS consumer.
 This source adds no native configuration or
 capability override, future attempt-status method, persisted recovery, HTTPS
 server or protected presenter. Native support and actual host admission are

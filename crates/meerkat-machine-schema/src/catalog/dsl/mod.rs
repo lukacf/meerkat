@@ -793,6 +793,7 @@ pub fn approval_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "RunEnded",
                 ],
             ),
+            NamedTypeBinding::string_enum("EnteredEffectPhase", &["Open", "Closing"]),
         ],
         Vec::new(),
     )
@@ -1910,6 +1911,11 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum("InputLane", &["Queue", "Steer"]),
             NamedTypeBinding::string_enum("RunStartHoldReason", &["MobStop", "ToolsNotPublished"]),
+            NamedTypeBinding::string_enum("SessionResidencyOwner", &["Session", "Composition"]),
+            NamedTypeBinding::string_enum(
+                "EmptyResumeRetirementVerdict",
+                &["Retire", "KeepServing"],
+            ),
             NamedTypeBinding::string_enum(
                 "InputPhase",
                 &[
@@ -3374,6 +3380,11 @@ runtime_internal_inputs!(
         // The operator's held-tail repair, driven by recovery's
         // resolve-held-tail primitive on its own fresh authority.
         AuthorizeOperatorDurableTailRepair,
+        // The runtime loop's empty-resume verdict (a composition-owned
+        // registration keeps serving), and the composition's boot re-claim
+        // of a recovered registration it placed.
+        ResolveEmptyResumeRetirement,
+        ClaimCompositionResidency,
     ]
 );
 
@@ -3795,6 +3806,9 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     TypePathStructField::named("peer_id", "PeerId"),
                     TypePathStructField::named("address", "PeerAddress"),
                     TypePathStructField::named("signing_key", "PeerSigningKey"),
+                    // Derived from the parsed address; the boot plan
+                    // wakes a network (Tcp or Uds) member.
+                    TypePathStructField::named("transport", "PeerTransportKind"),
                 ],
             ),
             NamedTypeBinding::type_path_struct(
@@ -4043,6 +4057,119 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "MemberRevivalVerdictKind",
                 &["ReviveAuthorized", "BrokenRecorded"],
             ),
+            // Member residency (Dormant / Waking / Live).
+            NamedTypeBinding::string_enum(
+                "MemberMaterializationPhase",
+                &["Dormant", "Waking", "Live"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberWakeCause",
+                &[
+                    "Boot",
+                    "HostDelivery",
+                    "PeerDelivery",
+                    "Operator",
+                    "PlacedPeerWired",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberWakeVerdictKind",
+                &["Authorized", "Joined", "AlreadyLive", "Refused"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberWakeRefusalKind",
+                &[
+                    "Broken",
+                    "Retiring",
+                    "NotAMember",
+                    "HostOwned",
+                    "MobNotRunning",
+                    "LifecycleOriginFenced",
+                    "NonAuthoritativeComposition",
+                    "HostPreparationPending",
+                    "ResumeGateUnavailable",
+                    "SuppressedLifecycleNotice",
+                    "SenderWaking",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberWakeRetryableKind",
+                &[
+                    "ResumeGateUnavailable",
+                    "HostingClaimHeld",
+                    "WakeTimedOut",
+                    "BuildPreparationRefused",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberWakeAbandonKind",
+                &[
+                    "NotCurrent",
+                    "ReloadRefused",
+                    "Unsettled",
+                    "ReadinessFailed",
+                    "TopologyFailed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberWakeAbandonCause",
+                &["MobStopping", "MobCompleting", "MobDestroying"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberWakeFeedbackVerdict",
+                &["Applied", "StaleAttempt"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberMaterializationLossCause",
+                &[
+                    "RegistrationReleased",
+                    "ExecutorRetired",
+                    "ActorDiscarded",
+                    "DurabilityReload",
+                    "ReconfigureRollback",
+                    "ObservedMissing",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberMaterializationReleaseOutcome",
+                &["Released", "Stale"],
+            ),
+            NamedTypeBinding::string_enum(
+                "CompositionAuthorityKind",
+                &["Authoritative", "NonAuthoritative"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberRecoveryObligationKind",
+                &["None", "RuntimeWork", "PendingDelivery", "Unobserved"],
+            ),
+            NamedTypeBinding::string_enum(
+                "BootMaterializationKind",
+                &["Wake", "StayDormant", "VerifyThenDormant"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberRestorePolicyKind",
+                &["OnDemand", "OnDemandVerified", "Eager"],
+            ),
+            NamedTypeBinding::string_enum("PeerInputClass", &["Content", "Lifecycle"]),
+            NamedTypeBinding::string_enum("PeerNoticeDisposition", &["Deliver", "Suppressed"]),
+            NamedTypeBinding::string_enum("PeerTransportKind", &["Inproc", "Tcp", "Uds"]),
+            NamedTypeBinding::string_enum(
+                "MemberBootObligationCause",
+                &["Obligation", "EndpointPending", "PlacedPeerWired"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberReleaseVerdict",
+                &[
+                    "Release",
+                    "NothingMaterialized",
+                    "WakeInFlight",
+                    "HostOwned",
+                    "NotAMember",
+                    "NotYetReleasable",
+                    "PinnedByPlacedPeer",
+                ],
+            ),
+            NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("ResumeAttemptId"),
             NamedTypeBinding::u64("MobDefinitionEpoch"),
             NamedTypeBinding::type_path_struct(
@@ -4667,6 +4794,18 @@ runtime_internal_inputs!(
         // classifier in the same command as the step it guards, so it is
         // never a standalone surface command.
         RetireAtScope,
+        // Member residency: the builder seeds and plans, the actor wakes,
+        // seats, rotates and classifies notices. None is a surface command.
+        SeedMemberResidency,
+        WakeMember,
+        PlanBootMaterialization,
+        SealBootMaterializationPlan,
+        ClassifyPeerNotice,
+        CommitDormantSeat,
+        ResolveMemberHostPreparation,
+        BeginMemberRotation,
+        CommitMemberRotation,
+        ClassifyMemberRelease,
     ]
 );
 

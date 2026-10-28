@@ -14,6 +14,21 @@ impl MobActor {
             tracing::error!("post-topology work lost its matching continuation");
             return;
         };
+        // The topology reconciliation settled: MobMachine's topology fence
+        // comes down here, before the post-commit work, not after it. The
+        // resume's own post-commit steps mutate no graph. A member run can
+        // wait on graph work the fence defers (a spawn, wire or retire tool
+        // call), so a fence held across post-commit work that waits on such
+        // a run let the resume and the run wait on each other forever.
+        if let Err(error) = self.apply_explicit_resume_input(
+            |attempt| mob_dsl::MobMachineInput::SettleExplicitResumeTopology { attempt },
+            "settle_explicit_resume_topology",
+        ) {
+            // A committed lift leaves its mob settled whatever it answers.
+            let _ = self.settle_committed_explicit_resume();
+            let _ = pending.reply_tx.send(Err(error));
+            return;
+        }
         pending.phase = ResumeLifecyclePhase::PostCommitMembers {
             step: ResumePostCommitStep::OperationBindings,
             post_commit_error: post_commit_error.or(topology_result.err()),
@@ -56,6 +71,21 @@ impl MobActor {
                 {
                     continue;
                 }
+                // A member that is not materialized has no session actor of
+                // its own here: the provision of its wake (the shared cold
+                // recipe) binds its owner context, so its session is neither
+                // read nor registered here. A Dormant member waits for its
+                // first delivery; a Waking one's wake is in flight, and by
+                // now every open wake belongs to someone other than the lift
+                // (the lift's own planned wakes settled before this pass), so
+                // binding it here would race that wake's own binding.
+                // MobMachine's residency decides it.
+                if crate::runtime::boot_plan::domain_member_is_unmaterialized(
+                    self.dsl_authority.state(),
+                    &entry.agent_identity,
+                ) {
+                    continue;
+                }
                 // Nothing acts on a member whose custody restore stays
                 // deferred.
                 if self.deferred_member_custody.contains(&entry.agent_identity) {
@@ -65,10 +95,20 @@ impl MobActor {
                     Ok(Some(plan)) => {
                         let identity = plan.entry.agent_identity.clone();
                         let io = io.clone();
+                        #[cfg(test)]
+                        let hold = super::take_explicit_resume_member_binding_hold_for_test(
+                            &self.definition.id,
+                            &identity,
+                        );
                         self.spawn_resume_post_commit_member(
                             ResumePostCommitStep::OperationBindings,
                             identity,
                             boxed_arm_future(|| async move {
+                                #[cfg(test)]
+                                if let Some((entered, release)) = hold {
+                                    let _ = entered.send(());
+                                    let _ = release.await;
+                                }
                                 Self::realize_restored_member_operation_binding(
                                     io,
                                     plan,
@@ -86,8 +126,31 @@ impl MobActor {
                 }
             }
         }
+        self.observe_owed_resume_post_commit_member(
+            crate::runtime::state::LifecycleProgressStage::ResumeOperationBindings,
+        );
         if self.resume_post_commit_member_tasks.is_empty() {
             self.begin_resume_orchestrator_notifications().await;
+        }
+    }
+
+    /// Name, in the resume's progress observation, a member whose post-commit
+    /// work at `stage` is still owed, and how many members are owed in all. A
+    /// stall then names a member the resume waits on, not the last member
+    /// whose work finished, and reports the whole debt.
+    fn observe_owed_resume_post_commit_member(
+        &self,
+        stage: crate::runtime::state::LifecycleProgressStage,
+    ) {
+        if let (Some(pending), Some(owed)) = (
+            self.pending_resume_lifecycle.as_ref(),
+            self.resume_post_commit_member_tasks.first(),
+        ) {
+            pending.progress.awaiting_owed_members(
+                owed,
+                self.resume_post_commit_member_tasks.len(),
+                stage,
+            );
         }
     }
 
@@ -197,19 +260,18 @@ impl MobActor {
         if let Err(error) = result {
             self.retain_resume_post_commit_error(error);
         }
+        let stage = match step {
+            ResumePostCommitStep::OperationBindings => {
+                crate::runtime::state::LifecycleProgressStage::ResumeOperationBindings
+            }
+            ResumePostCommitStep::OrchestratorNotification => {
+                crate::runtime::state::LifecycleProgressStage::OrchestratorResumeNotification
+            }
+        };
         if let Some(pending) = self.pending_resume_lifecycle.as_ref() {
-            pending.progress.member_progress(
-                &identity,
-                match step {
-                    ResumePostCommitStep::OperationBindings => {
-                        crate::runtime::state::LifecycleProgressStage::ResumeOperationBindings
-                    }
-                    ResumePostCommitStep::OrchestratorNotification => {
-                        crate::runtime::state::LifecycleProgressStage::OrchestratorResumeNotification
-                    }
-                },
-            );
+            pending.progress.member_progress(&identity, stage);
         }
+        self.observe_owed_resume_post_commit_member(stage);
         if self.resume_post_commit_member_tasks.is_empty() {
             match step {
                 ResumePostCommitStep::OperationBindings => {
@@ -278,7 +340,10 @@ impl MobActor {
                     ))),
                 };
                 match plan {
-                    Ok(Some(plan)) => {
+                    // A queued injection (a local AutonomousHost orchestrator)
+                    // completes without waiting on the orchestrator's turn: it
+                    // stays this resume's own post-commit work.
+                    Ok(Some(plan)) if plan.realizes_without_a_turn() => {
                         let service = Arc::clone(&self.session_service);
                         let provisioner = Arc::clone(&self.provisioner);
                         self.spawn_resume_post_commit_member(
@@ -291,14 +356,47 @@ impl MobActor {
                             }),
                         );
                     }
+                    Ok(Some(plan)) => self.hand_off_orchestrator_resume_notification_turn(plan),
                     Ok(None) => {}
                     Err(error) => self.retain_resume_post_commit_error(error),
                 }
             }
         }
+        self.observe_owed_resume_post_commit_member(
+            crate::runtime::state::LifecycleProgressStage::OrchestratorResumeNotification,
+        );
         if self.resume_post_commit_member_tasks.is_empty() {
             self.finish_resume_post_commit_members();
         }
+    }
+
+    /// Hand a resume notification that runs the orchestrator's turn to the
+    /// actor's lifecycle owner, as the cold resume does
+    /// (`builder::realize_orchestrator_resume_notification_turn`). The
+    /// explicit resume never waits on that turn: the turn's model and tool
+    /// work can wait on this very resume (a mob tool that spawns, wires or
+    /// retires), and a long turn would hold the lift short of ready. A failed
+    /// notification is recorded as a mob event naming the orchestrator and its
+    /// session and surfaces like every other orchestrator lifecycle delivery;
+    /// it does not fail the resume. Nothing in the resume's completion reads
+    /// that turn: MobMachine bound the coordinator (`ResumeOrchestrator`)
+    /// before any notification is planned.
+    fn hand_off_orchestrator_resume_notification_turn(
+        &mut self,
+        plan: crate::runtime::builder::OrchestratorResumeNotification,
+    ) {
+        let emitter = crate::runtime::events::MobEventEmitter::new(
+            Arc::clone(&self.events),
+            self.definition.id.clone(),
+        );
+        self.lifecycle_tasks.spawn(
+            crate::runtime::builder::realize_orchestrator_resume_notification_turn(
+                plan,
+                Arc::clone(&self.session_service),
+                Arc::clone(&self.provisioner),
+                emitter,
+            ),
+        );
     }
 
     fn finish_resume_post_commit_members(&mut self) {
@@ -336,15 +434,10 @@ impl MobActor {
         } else {
             post_commit_error.map_or(Ok(()), Err)
         };
-        let settled = self.apply_explicit_resume_input(
-            |attempt| mob_dsl::MobMachineInput::SettleExplicitResumeTopology { attempt },
-            "settle_explicit_resume_post_commit",
-        );
-        let result = settled.and_then(|()| self.finish_explicit_resume_attempt(result));
-        if result.is_ok() {
-            // A resume re-drives every retirement this actor owns as stuck.
-            self.enqueue_stuck_retirement_redrives();
-        }
+        // The topology settled when its reconciliation did
+        // (`begin_resume_post_topology_members`). The attempt's end seals the
+        // plan and queues the stuck-retirement re-drives, whatever the answer.
+        let result = self.finish_explicit_resume_attempt(result);
         let _ = pending.reply_tx.send(result);
     }
 }

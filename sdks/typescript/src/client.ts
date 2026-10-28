@@ -435,6 +435,7 @@ import type {
   ForkCacheLoweredRequestProvenance,
   ForkCacheProvider,
   ForkCacheTtl,
+  ForkCacheTtlUnknown,
   ForkPoint,
   HelpOptions,
   InstructionActivationIdentity,
@@ -8020,19 +8021,31 @@ export class MeerkatClient {
         data.lowered_request_provenance,
         context,
       ),
-      ttl: MeerkatClient.requireClosedStringField(
-        data,
-        "ttl",
-        [
-          "five_minutes",
-          "one_hour",
-          "thirty_minutes",
-          "twenty_four_hours",
-          "provider_default",
-        ],
-        context,
-      ) as ForkCacheTtl,
+      ttl: MeerkatClient.parseForkCacheTtl(data, context),
     };
+  }
+
+  /**
+   * Parse the cache lifetime recorded on authored breakpoint evidence. The
+   * field is advisory and its vocabulary grows with provider cache
+   * lifetimes: a lifetime this SDK does not know reads as
+   * `{ unknown: <value> }`, so a newer server never fails the read. A
+   * missing, empty or non-string `ttl` is malformed and fails closed.
+   */
+  private static parseForkCacheTtl(
+    data: Record<string, unknown>,
+    context: string,
+  ): ForkCacheTtl | ForkCacheTtlUnknown {
+    const ttls: readonly ForkCacheTtl[] = [
+      "five_minutes",
+      "one_hour",
+      "thirty_minutes",
+      "twenty_four_hours",
+      "provider_default",
+      "twelve_hours",
+    ];
+    const ttl = MeerkatClient.requireStringField(data, "ttl", context);
+    return ttls.includes(ttl as ForkCacheTtl) ? (ttl as ForkCacheTtl) : { unknown: ttl };
   }
 
   private static parseForkPoint(raw: unknown, context: string): ForkPoint {

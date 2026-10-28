@@ -7,7 +7,7 @@ use meerkat_machine_kernels::test_oracle::{
     GeneratedMachineKernel, KernelInput, KernelSignal, KernelState, KernelValue,
 };
 use meerkat_machine_schema::identity::{
-    FieldId, InputVariantId, NamedTypeId, PhaseId, SignalVariantId,
+    EnumTypeId, EnumVariantId, FieldId, InputVariantId, NamedTypeId, PhaseId, SignalVariantId,
 };
 
 fn field(slug: &str) -> FieldId {
@@ -37,6 +37,16 @@ fn named_u64(type_name: &str, value: u64) -> KernelValue {
     KernelValue::Named {
         type_name: NamedTypeId::parse(type_name).expect("type id"),
         value: Box::new(KernelValue::U64(value)),
+    }
+}
+
+/// The residency owner a standalone session's binding names: the session
+/// owns its registration. Only a composition's routed placement (a mob
+/// member's binding) names `Composition`.
+fn standalone_residency_owner() -> KernelValue {
+    KernelValue::NamedVariant {
+        enum_name: EnumTypeId::parse("SessionResidencyOwner").expect("enum type id"),
+        variant: EnumVariantId::parse("Session").expect("enum variant id"),
     }
 }
 
@@ -84,6 +94,7 @@ fn prepared_meerkat_state() -> KernelState {
                     ),
                     (field("fence_token"), named_u64("FenceToken", 3)),
                     (field("generation"), named_u64("Generation", 1)),
+                    (field("residency_owner"), standalone_residency_owner()),
                     (field("runtime_epoch_id"), KernelValue::None),
                     (field("session_id"), named_string("SessionId", "session-1")),
                 ]),

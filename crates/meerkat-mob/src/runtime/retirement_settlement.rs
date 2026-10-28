@@ -139,6 +139,10 @@ pub(crate) struct MemberLifecycleObservations {
     last_shutdown_report: std::sync::Mutex<Option<MobShutdownReport>>,
     fail_stop_cause: std::sync::Mutex<Option<Arc<MobError>>>,
     actor_task: crate::tokio::sync::watch::Sender<ActorTaskEnd>,
+    /// The members whose materialization changed in each published
+    /// MobMachine state, for the subscriptions that attach at a member's
+    /// wake.
+    materialization: super::member_event_attach::MemberMaterializationFeed,
     /// Test probe: set once a Shutdown parks on its off-actor teardown.
     #[cfg(test)]
     pub(crate) shutdown_teardown_parked: crate::tokio::sync::watch::Sender<bool>,
@@ -256,6 +260,13 @@ impl MemberLifecycleObservations {
     /// wrapper records the end.
     pub(crate) fn actor_task_end(&self) -> ActorTaskEnd {
         *self.actor_task.borrow()
+    }
+
+    /// The actor's feed of member materialization changes.
+    pub(crate) fn materialization_feed(
+        &self,
+    ) -> &super::member_event_attach::MemberMaterializationFeed {
+        &self.materialization
     }
 
     pub(crate) fn subscribe(&self, identity: &AgentIdentity) -> Option<RetirementSettlementWatch> {

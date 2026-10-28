@@ -21,6 +21,13 @@
 //! (`open_stock_realm_persistence_for_host`) admits the host's authenticated
 //! callers instead, through `StockGovernance::bind_caller_prompt`, each only
 //! while the host's exact-target decision allows it.
+//!
+//! A run's retained work resumes on the stock composition: a host producer
+//! bundle retains the work of the run that dispatched it (as fork_off does),
+//! and a trusted host's delivery owner, on an inbox of its own, admits the
+//! approved notice of consent parked at that run's close (the stock realm's
+//! consent continuation) or a host job's completion as a resume of exactly
+//! that run, through the composition's own retained-resume check.
 #![cfg(all(
     feature = "session-store",
     feature = "local-authorization",
@@ -49,27 +56,42 @@ use meerkat::governed_realm::{
     open_stock_realm_persistence_as, open_stock_realm_persistence_for_host,
 };
 use meerkat::surface::{
-    PersistentRuntimeExecutor, build_runtime_backed_service_with_default_reconfigure_host,
+    PersistentRuntimeExecutor, SessionServiceDeliveryHost,
+    build_runtime_backed_service_with_default_reconfigure_host,
 };
-use meerkat::{AgentFactory, DiskStorageProvider, FactoryAgentBuilder, PersistentSessionService};
+use meerkat::{
+    AgentFactory, ConsentNoticeProjector, ContinuationDelivery, ContinuationHandling,
+    ContinuationHostBindings, ContinuationKey, ContinuationOwner, ContinuationOwnerService,
+    ContinuationProducer, ContinuationResultRef, ContinuationStatus, DetachedJobService,
+    DiskStorageProvider, FactoryAgentBuilder, MemoryDetachedJobStore, PersistentSessionService,
+    RetainedJobFacts, RetainedJobLookup, RetainedJobRecord, RetainedJobSource,
+    RuntimeDeliveryOwner, RuntimeDeliveryOwnerHandle, RuntimeDeliveryPass, SessionAddressResolver,
+};
 use meerkat_authorization::publication::LocalAuthorizationPublication;
 use meerkat_authorization_contracts::audit::{
     AuditObservation, AuditTarget, StoredAuthorizationAuditObservation,
 };
+use meerkat_core::approval::ApprovalConsentWithdrawalReason;
+use meerkat_core::approval::consent::{ConsentNoticeKind, consent_delivery_job_id};
+use meerkat_core::approval::consent_test_support::ParkedRoutedConsent;
 use meerkat_core::authorization::{
     ModelAuthorizationFacts, ModelAuthorizationUse, OperationObservedOutcome, OperationRefusalKind,
 };
 use meerkat_core::connection::{AuthCredentialIdentity, RealmId};
 use meerkat_core::mcp_config::McpServerConfig;
+use meerkat_core::retained_work::RetainedWorkIdentity;
 use meerkat_core::service::{
     CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions,
     SessionService,
 };
+use meerkat_core::session_hosting::HostingDomainRef;
 use meerkat_core::tool_catalog::{TOOL_CATALOG_LOAD_NAME, TOOL_CATALOG_SEARCH_NAME};
 use meerkat_core::{
-    Config, ControllerModelClient, ControllerModelSelection, Message, OperationAuthorizationError,
-    OperationRefused, PrincipalKind, PrincipalRef, Provider, Session, SessionId,
-    SessionLlmIdentity, StopReason, ToolResult, TrustDomainId,
+    ApprovalConsentCustody, ApprovalConsentDeliveryState, ApprovalConsentScope,
+    ApprovalConsentTransition, ApprovalId, ApprovalService, Config, ControllerModelClient,
+    ControllerModelSelection, Message, OperationAuthorizationError, OperationRefused,
+    PrincipalKind, PrincipalRef, Provider, Session, SessionId, SessionLlmIdentity, StopReason,
+    ToolResult, TrustDomainId,
 };
 use meerkat_llm_core::{
     LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmStream, PreparedLlmRequest,
@@ -1899,10 +1921,7 @@ async fn an_outcome_binds_only_as_the_hosts_external_event() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stock_governed_realm_never_admits_a_host_original() {
     use meerkat::{
-        ContinuationDelivery, ContinuationHandling, ContinuationKey, ContinuationOwner,
-        ContinuationOwnerService, ContinuationProducer, ContinuationResultRef, ContinuationStatus,
         HostOriginalFacts, HostOriginalLookup, HostOriginalReadiness, HostOriginalRecord,
-        RetainedJobLookup, RetainedJobSource,
     };
 
     /// Holds the observation exactly, for the submit-time consistency check.
@@ -2083,5 +2102,1181 @@ async fn a_stock_governed_realm_never_admits_a_host_original() {
     assert!(model.requests().is_empty(), "nothing ran");
     drop(continuations);
     drop(handle);
+    realm.close(vec![session]).await;
+}
+
+// ---------------------------------------------------------------------------
+// Retained resume
+// ---------------------------------------------------------------------------
+
+/// The stable name a trusted host registers its producer tool bundle under.
+const PRODUCER: &str = "producer";
+const DISPATCH_JOB: &str = "dispatch_job";
+const DISPATCHED: &str = "job dispatched";
+/// The host namespace of the producer's committed jobs.
+const JOBS: &str = "app.jobs";
+/// The answer of a resumed run.
+const RESUMED: &str = "resumed after the job";
+/// The answer of a later prompt in the same session.
+const LATER: &str = "a later answer";
+
+/// A host's producer tool bundle: its one operation dispatches a job that
+/// outlives the call and retains the work of the run that dispatched it, as
+/// fork_off retains it, from the call's dispatch context.
+#[derive(Default)]
+struct Producer {
+    retained: Mutex<Vec<RetainedWorkIdentity>>,
+}
+
+impl Producer {
+    /// The work the latest dispatching run retained.
+    fn retained(&self) -> RetainedWorkIdentity {
+        self.retained
+            .lock()
+            .expect("retained")
+            .last()
+            .cloned()
+            .expect("a governed run dispatched a job and retained its work")
+    }
+}
+
+#[async_trait]
+impl meerkat_core::AgentToolDispatcher for Producer {
+    fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+        [Arc::new(meerkat_core::ToolDef::new(
+            DISPATCH_JOB,
+            "dispatch a job of the producer",
+            json!({"type": "object", "properties": {}, "additionalProperties": false}),
+        ))]
+        .into()
+    }
+
+    /// Without its dispatch context a call names no run to retain.
+    async fn dispatch(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        Ok(meerkat_core::ToolDispatchOutcome::sync_result(
+            ToolResult::new(call.id.to_string(), "no run to retain".to_string(), true),
+        ))
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        let Some(work) = context.retained_work() else {
+            return self.dispatch(call).await;
+        };
+        self.retained.lock().expect("retained").push(work.clone());
+        Ok(meerkat_core::ToolDispatchOutcome::sync_result(
+            ToolResult::new(call.id.to_string(), DISPATCHED.to_string(), false),
+        ))
+    }
+}
+
+/// The producer, registered by the trusted host under its stable name.
+fn registered_producer(producer: &Arc<Producer>) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    Arc::new(meerkat_core::RegisteredToolBundleDispatcher::new(
+        PRODUCER,
+        Arc::clone(producer) as Arc<dyn meerkat_core::AgentToolDispatcher>,
+    ))
+}
+
+/// [`provision`], with the operator's grant of the producer's dispatch to
+/// the default agent.
+async fn provision_producer(root: &Path, log: &Path, controller_account: &str) {
+    provision(root, log, controller_account).await;
+    let principals = StockPrincipals::for_local_operator(&realm()).expect("local operator");
+    grant_stock_agent(
+        root,
+        REALM,
+        &principals,
+        &StockGrantRequest {
+            agent: DEFAULT_STOCK_AGENT.to_string(),
+            target: StockGrantTarget::ToolBundleOperation {
+                bundle: PRODUCER.to_string(),
+                operation: DISPATCH_JOB.to_string(),
+            },
+            expires_in_ms: None,
+        },
+    )
+    .await
+    .expect("the operator grants the producer's dispatch");
+}
+
+/// The script of a session whose first prompt dispatches a job and
+/// finishes, followed by `then`.
+fn dispatching_script(then: &[&'static str]) -> Vec<Step> {
+    let mut script = vec![
+        Step::Call {
+            id: "dispatch",
+            name: DISPATCH_JOB,
+            args: json!({}),
+        },
+        Step::Finish(FINAL),
+    ];
+    script.extend(then.iter().copied().map(Step::Finish));
+    script
+}
+
+/// The operator's prompt through `bind_prompt` and the ordinary accept, run
+/// to its completion while its original is still the ledger's candidate:
+/// the returned pending original is neither admitted nor withdrawn yet.
+async fn prompt_with_pending_original(
+    realm: &StockRealm,
+    session: &StockSession,
+    text: &str,
+) -> meerkat::governed_realm::stock::originals::PendingOriginal {
+    let (input, pending) = realm
+        .stock
+        .bind_prompt(
+            &realm.machine,
+            &session.session_id,
+            Input::Prompt(PromptInput::new(text, None)),
+            session.controller.clone(),
+        )
+        .await
+        .expect("the operator's prompt is bound");
+    let (_, completion) = realm
+        .machine
+        .accept_input_with_completion(&session.session_id, input)
+        .await
+        .expect("native admission");
+    let outcome = tokio::time::timeout(WAIT, completion.expect("completion waiter").wait())
+        .await
+        .expect("the governed run settles")
+        .expect("the live waiter releases the result to the current destination");
+    assert!(
+        matches!(outcome, CompletionOutcome::Completed(_)),
+        "{outcome:?}"
+    );
+    pending
+}
+
+/// Wait within WAIT for `input`'s terminal completion in `session`.
+async fn terminal_of(
+    realm: &StockRealm,
+    session: &StockSession,
+    input: &meerkat_core::InputId,
+    what: &str,
+) -> CompletionOutcome {
+    let mut last = None;
+    let waited = tokio::time::timeout(WAIT, async {
+        loop {
+            match realm
+                .machine
+                .input_terminal_completion(&session.session_id, input)
+                .await
+            {
+                Ok(Some(outcome)) => return outcome,
+                other => {
+                    last = Some(format!("{other:?}"));
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        }
+    })
+    .await;
+    waited.unwrap_or_else(|_| panic!("{what}: no terminal within {WAIT:?}; last read {last:?}"))
+}
+
+/// A host's committed record of its producer's jobs: each job's owner
+/// session, the work its dispatching run retained and its result, in the
+/// host's own namespace.
+#[derive(Default)]
+struct HostJobs {
+    jobs: Mutex<HashMap<String, RetainedJobFacts>>,
+}
+
+impl HostJobs {
+    /// Commit job `job`, owed to `session`, for the retained `work`.
+    fn commit(&self, job: &str, session: &SessionId, work: &RetainedWorkIdentity) {
+        self.jobs.lock().expect("jobs").insert(
+            job.to_string(),
+            RetainedJobFacts {
+                owner_session_id: session.clone(),
+                retained_work: Some(work.clone()),
+                result_digest: job_digest(job),
+            },
+        );
+    }
+}
+
+#[async_trait]
+impl RetainedJobSource for HostJobs {
+    async fn retained_job(
+        &self,
+        producer: &ContinuationProducer,
+        job_id: &str,
+    ) -> RetainedJobLookup {
+        if *producer != jobs_producer() {
+            return RetainedJobLookup::Absent;
+        }
+        let facts = self.jobs.lock().expect("jobs").get(job_id).cloned();
+        match facts {
+            Some(facts) => RetainedJobLookup::Found(facts),
+            None => RetainedJobLookup::Absent,
+        }
+    }
+}
+
+fn jobs_producer() -> ContinuationProducer {
+    ContinuationProducer::Host {
+        namespace: JOBS.to_string(),
+    }
+}
+
+fn job_digest(job: &str) -> String {
+    format!("sha256:{job}")
+}
+
+fn session_owner(session: &SessionId) -> ContinuationOwner {
+    ContinuationOwner::Session {
+        session_id: session.clone(),
+    }
+}
+
+/// Commit the completion of the host's job `job`, read from its committed
+/// record, as a continuation owed to `session`.
+async fn submit_job(
+    continuations: &ContinuationOwnerService,
+    jobs: &HostJobs,
+    session: &SessionId,
+    job: &str,
+) -> ContinuationKey {
+    let record = RetainedJobRecord::from_owner(jobs, jobs_producer(), job)
+        .await
+        .expect("the host's job record reads")
+        .expect("the host committed the job");
+    let key = ContinuationKey::new(format!("jobs:{job}")).expect("key");
+    continuations
+        .submit_retained_completion(
+            &session_owner(session),
+            ContinuationDelivery {
+                key: key.clone(),
+                result: ContinuationResultRef {
+                    producer: jobs_producer(),
+                    producer_id: job.to_string(),
+                    result_digest: job_digest(job),
+                    summary: None,
+                },
+                body: "the job finished".into(),
+                handling: ContinuationHandling::Queue,
+            },
+            &record,
+            1,
+        )
+        .await
+        .expect("the job's completion is committed");
+    key
+}
+
+/// The hosting domain the host's consent notice scopes name, under `root`.
+fn hosting_domain(root: &Path) -> HostingDomainRef {
+    let lock_dir = root.join("hosting");
+    meerkat_core::session_hosting::HostingPaths {
+        hosting_lock_dir: lock_dir.clone(),
+        cold_delivery_lock: lock_dir.join("cold-delivery.lock"),
+        database: None,
+    }
+    .domain_ref()
+}
+
+/// The continuation key of `approval_id`'s `transition` notice.
+fn consent_key(approval_id: &ApprovalId, transition: ApprovalConsentTransition) -> ContinuationKey {
+    ContinuationKey::new(format!(
+        "consent:{}",
+        consent_delivery_job_id(approval_id, transition)
+    ))
+    .expect("key")
+}
+
+/// Where `approval_id`'s `transition` notice stands, as its owner holds it.
+fn notice_state(
+    approvals: &ApprovalService,
+    approval_id: &ApprovalId,
+    transition: ApprovalConsentTransition,
+) -> Option<ApprovalConsentDeliveryState> {
+    approvals
+        .get(approval_id)
+        .expect("approval row")
+        .consent
+        .and_then(|consent| {
+            consent
+                .delivery(transition)
+                .map(|delivery| delivery.state.clone())
+        })
+}
+
+fn consent_custody(
+    approvals: &ApprovalService,
+    approval_id: &ApprovalId,
+) -> Option<ApprovalConsentCustody> {
+    approvals
+        .get(approval_id)
+        .expect("approval row")
+        .consent
+        .and_then(|consent| consent.custody)
+}
+
+fn withdrawal_reason(
+    approvals: &ApprovalService,
+    approval_id: &ApprovalId,
+) -> Option<ApprovalConsentWithdrawalReason> {
+    approvals
+        .get(approval_id)
+        .expect("approval row")
+        .consent
+        .and_then(|consent| consent.withdrawal)
+        .map(|withdrawal| withdrawal.reason)
+}
+
+/// Whether a continuation is settled: admitted (and acknowledged) or
+/// refused for good.
+fn settled(status: &ContinuationStatus) -> bool {
+    matches!(
+        status,
+        ContinuationStatus::Applied { .. } | ContinuationStatus::Refused { .. }
+    )
+}
+
+/// A trusted host's delivery composition over a stock realm: the
+/// continuation key ledger on an inbox of its own, its continuation bindings
+/// (the job source it binds, and the wake its custody changes announce) and,
+/// when it projects consent notices, the notice projector of one approval
+/// owner, with the delivery owner armed over them.
+struct HostDelivery {
+    continuations: ContinuationOwnerService,
+    bindings: Arc<ContinuationHostBindings>,
+    passes: tokio::sync::watch::Receiver<RuntimeDeliveryPass>,
+    _owner: RuntimeDeliveryOwnerHandle,
+}
+
+impl HostDelivery {
+    /// Arm the host's delivery owner over `realm`; with `consent`, it also
+    /// projects the notices that approval owner owes to its domain's
+    /// sessions.
+    fn arm(realm: &StockRealm, consent: Option<(Arc<ApprovalService>, HostingDomainRef)>) -> Self {
+        let inbox = meerkat_runtime::RuntimeDeliveryInbox::new(Arc::new(
+            meerkat_runtime::InMemoryRuntimeStore::new(),
+        ));
+        let continuations = ContinuationOwnerService::new(
+            inbox.clone(),
+            Arc::new(SessionAddressResolver),
+            Arc::clone(&realm.machine),
+        );
+        let bindings = Arc::new(ContinuationHostBindings::default());
+        let mut host = SessionServiceDeliveryHost::new(
+            &realm.service,
+            &realm.machine,
+            DetachedJobService::new(Arc::new(MemoryDetachedJobStore::new())),
+            None,
+        )
+        .with_continuation_bindings(Arc::clone(&bindings));
+        if let Some((approvals, domain)) = consent {
+            host = host.with_consent_notices(Arc::new(ConsentNoticeProjector::new(
+                approvals,
+                domain,
+                inbox.clone(),
+                &realm.machine,
+            )));
+        }
+        let owner = RuntimeDeliveryOwner::new(Arc::new(MemoryDetachedJobStore::new()), inbox)
+            .with_attachment_commits(realm.machine.subscribe_attachment_commits())
+            .with_run_settlements(realm.machine.subscribe_run_settlements())
+            .with_source_changes(bindings.subscribe_source_changes())
+            .arm(Arc::new(host))
+            .expect("arm the host's delivery owner");
+        let passes = owner.subscribe_passes();
+        Self {
+            continuations,
+            bindings,
+            passes,
+            _owner: owner,
+        }
+    }
+
+    /// Wait within WAIT until the continuation `key` owed to `session` reads
+    /// as `until` does; past it, fail with its last status and the owner's
+    /// last pass.
+    async fn status_until(
+        &mut self,
+        session: &SessionId,
+        key: &ContinuationKey,
+        what: &str,
+        until: impl Fn(&ContinuationStatus) -> bool,
+    ) -> ContinuationStatus {
+        let owner = session_owner(session);
+        let continuations = &self.continuations;
+        let passes = &mut self.passes;
+        let waited = tokio::time::timeout(WAIT, async {
+            loop {
+                let status = continuations
+                    .continuation_status(&owner, key)
+                    .await
+                    .expect("continuation status");
+                if until(&status) {
+                    return status;
+                }
+                passes.changed().await.expect("owner pass channel");
+            }
+        })
+        .await;
+        if let Ok(status) = waited {
+            return status;
+        }
+        let last = self.continuations.continuation_status(&owner, key).await;
+        panic!(
+            "{what}: not within {WAIT:?}; last status {last:?}; last pass {:?}",
+            self.passes.borrow().clone()
+        )
+    }
+
+    /// Wait within WAIT for a pass of the owner that `matches`; past it, fail
+    /// with the last pass.
+    async fn pass_until(
+        &mut self,
+        what: &str,
+        matches: impl FnMut(&RuntimeDeliveryPass) -> bool,
+    ) -> RuntimeDeliveryPass {
+        let waited = tokio::time::timeout(WAIT, self.passes.wait_for(matches))
+            .await
+            .map(|pass| pass.expect("owner pass channel").clone());
+        waited.unwrap_or_else(|_| {
+            panic!(
+                "{what}: no such pass within {WAIT:?}; last pass {:?}",
+                self.passes.borrow().clone()
+            )
+        })
+    }
+
+    /// Wait within WAIT until `approval_id`'s `transition` notice is no
+    /// longer owed by `approvals`, reading it again after each pass; past it,
+    /// fail with its state and the last pass.
+    async fn receipt_until(
+        &mut self,
+        approvals: &ApprovalService,
+        approval_id: &ApprovalId,
+        transition: ApprovalConsentTransition,
+        what: &str,
+    ) -> ApprovalConsentDeliveryState {
+        let passes = &mut self.passes;
+        let waited = tokio::time::timeout(WAIT, async {
+            loop {
+                match notice_state(approvals, approval_id, transition) {
+                    Some(ApprovalConsentDeliveryState::Owed) | None => {}
+                    Some(state) => return state,
+                }
+                passes.changed().await.expect("owner pass channel");
+            }
+        })
+        .await;
+        waited.unwrap_or_else(|_| {
+            panic!(
+                "{what}: not within {WAIT:?}; the notice is {:?}; last pass {:?}",
+                notice_state(approvals, approval_id, transition),
+                self.passes.borrow().clone()
+            )
+        })
+    }
+}
+
+/// The stock realm's consent continuation. Consent of a run of the
+/// operator's, approved and parked at that run's close, owes its approved
+/// notice to the session. On the stock composition the notice is admitted
+/// once, as a resume of exactly that run's retained work, through the
+/// composition's own owners: the run's original still held in the ledger,
+/// the stock requester rule, the grants and the session's pinned
+/// controller. Its receipt names that input, the resumed run runs, and the
+/// parked consent moves into a run staged with that input and is spent
+/// there once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stock_consent_notice_resumes_its_parked_run_once() {
+    let _turn = CONTROLLER_CREDENTIAL.lock().await;
+    let root = tempfile::tempdir().expect("state root");
+    let log = root.path().join("records.log");
+    provision_producer(root.path(), &log, "controller-consent-resume").await;
+    let producer = Arc::new(Producer::default());
+    let model = ScriptedModel::new("controller-consent-resume", dispatching_script(&[RESUMED]));
+    let realm = open_as(root.path(), DEFAULT_STOCK_AGENT, model.clone()).await;
+    let session = realm
+        .session_with(Vec::new(), Some(registered_producer(&producer)))
+        .await;
+    let (original, text) = realm
+        .prompt(&session, "Dispatch the job")
+        .await
+        .expect("the operator's prompt is bound");
+    assert_eq!(text, FINAL);
+    let dispatched = model.feedback(1, "dispatch");
+    assert!(!dispatched.is_error, "{}", dispatched.text_content());
+    let work = producer.retained();
+    assert_eq!(
+        work.contributors()
+            .iter()
+            .map(|contributor| contributor.input_id.clone())
+            .collect::<Vec<_>>(),
+        vec![original],
+        "the run's retained work names exactly its original"
+    );
+
+    let approvals = Arc::new(ApprovalService::new());
+    let domain = hosting_domain(root.path());
+    let consent = ParkedRoutedConsent::park(
+        &approvals,
+        ApprovalConsentScope {
+            domain: domain.clone(),
+            session_id: session.session_id.clone(),
+        },
+        work,
+    )
+    .await
+    .expect("consent of the run's work, approved and parked at its close");
+    let approval_id = consent.approval_id().clone();
+    let approved = ApprovalConsentTransition::Approved;
+
+    let mut delivery = HostDelivery::arm(&realm, Some((Arc::clone(&approvals), domain)));
+    let status = delivery
+        .status_until(
+            &session.session_id,
+            &consent_key(&approval_id, approved),
+            "the approved notice is admitted on the stock composition",
+            |status| {
+                settled(status)
+                    || matches!(
+                        status,
+                        ContinuationStatus::Pending {
+                            admitted: Some(_),
+                            ..
+                        }
+                    )
+            },
+        )
+        .await;
+    let notice_input = match status {
+        ContinuationStatus::Applied {
+            session: admitted,
+            input,
+            ..
+        }
+        | ContinuationStatus::Pending {
+            admitted: Some((admitted, input)),
+            ..
+        } => {
+            assert_eq!(admitted, session.session_id);
+            input
+        }
+        other => panic!("the approved notice was not admitted: {other:?}"),
+    };
+    assert_eq!(
+        delivery
+            .receipt_until(&approvals, &approval_id, approved, "the notice's receipt")
+            .await,
+        ApprovalConsentDeliveryState::Admitted {
+            session_id: session.session_id.clone(),
+            input_id: notice_input.to_string(),
+        },
+        "the receipt names the admitted notice input"
+    );
+    let resumed = terminal_of(&realm, &session, &notice_input, "the resumed run").await;
+    assert!(
+        matches!(&resumed, CompletionOutcome::Completed(result) if result.text == RESUMED),
+        "{resumed:?}"
+    );
+
+    let run = consent.open_resumed_run(std::slice::from_ref(&notice_input));
+    assert_eq!(
+        consent_custody(&approvals, &approval_id),
+        Some(ApprovalConsentCustody::Transferred {
+            input_id: notice_input.to_string(),
+        }),
+        "the consent moved into the run staged with its receipt's input"
+    );
+    assert_eq!(consent.spend_in(&run), Ok(()), "spent in the resumed run");
+    assert_eq!(
+        consent
+            .notices()
+            .iter()
+            .filter(|kind| **kind == ConsentNoticeKind::Used)
+            .count(),
+        1,
+        "used once"
+    );
+    assert_eq!(
+        model.requests().len(),
+        3,
+        "the original's two model requests and the resumed run's one"
+    );
+    drop(delivery);
+    realm.close(vec![session]).await;
+}
+
+/// A resume whose original the stock ledger does not hold, as after a
+/// restart (the ledger is process memory and a new process's holds
+/// nothing), is refused for good. Consent parked for that run owes an
+/// approved notice the stock composition settles as refused
+/// (`AuthorityDenied`): its receipt is `Failed`, the parked consent is
+/// withdrawn, and nothing runs. Without a retained-resume owner the notice
+/// stayed owed forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_consent_notice_for_work_the_ledger_does_not_hold_fails_visibly() {
+    let _turn = CONTROLLER_CREDENTIAL.lock().await;
+    let root = tempfile::tempdir().expect("state root");
+    let log = root.path().join("records.log");
+    provision_producer(root.path(), &log, "controller-unheld-resume").await;
+    let producer = Arc::new(Producer::default());
+    let model = ScriptedModel::new("controller-unheld-resume", dispatching_script(&[]));
+    let realm = open_as(root.path(), DEFAULT_STOCK_AGENT, model.clone()).await;
+    let session = realm
+        .session_with(Vec::new(), Some(registered_producer(&producer)))
+        .await;
+    // The run completes while its original is still the ledger's candidate;
+    // the candidate is then withdrawn, so the ledger no longer holds the
+    // original, as a new process's ledger holds nothing.
+    let pending = prompt_with_pending_original(&realm, &session, "Dispatch the job").await;
+    drop(pending);
+    let work = producer.retained();
+
+    let approvals = Arc::new(ApprovalService::new());
+    let domain = hosting_domain(root.path());
+    let consent = ParkedRoutedConsent::park(
+        &approvals,
+        ApprovalConsentScope {
+            domain: domain.clone(),
+            session_id: session.session_id.clone(),
+        },
+        work,
+    )
+    .await
+    .expect("consent of the run's work, approved and parked at its close");
+    let approval_id = consent.approval_id().clone();
+    let approved = ApprovalConsentTransition::Approved;
+
+    let mut delivery = HostDelivery::arm(&realm, Some((Arc::clone(&approvals), domain)));
+    let status = delivery
+        .status_until(
+            &session.session_id,
+            &consent_key(&approval_id, approved),
+            "the approved notice settles",
+            settled,
+        )
+        .await;
+    assert!(
+        matches!(
+            status,
+            ContinuationStatus::Refused {
+                reason: meerkat_runtime::RuntimeDeliveryRefusalReason::AuthorityDenied,
+                ..
+            }
+        ),
+        "{status:?}"
+    );
+    match delivery
+        .receipt_until(&approvals, &approval_id, approved, "the notice's receipt")
+        .await
+    {
+        ApprovalConsentDeliveryState::Failed { reason } => {
+            assert!(reason.contains("AuthorityDenied"), "{reason}");
+        }
+        other => panic!("the approved notice was not receipted as failed: {other:?}"),
+    }
+    assert_eq!(
+        withdrawal_reason(&approvals, &approval_id),
+        Some(ApprovalConsentWithdrawalReason::RunEnded),
+        "the undeliverable notice withdrew the parked consent"
+    );
+    assert_eq!(
+        model.requests().len(),
+        2,
+        "nothing ran for the refused resume"
+    );
+    drop(delivery);
+    realm.close(vec![session]).await;
+}
+
+/// A host-authenticated caller's work resumes only while the host still
+/// admits that caller. The completion of a job the caller's run dispatched
+/// is admitted as a resume of that run while the host's exact-target
+/// decision allows the caller; once the host withdraws the caller, a
+/// completion of the same run is refused for good (`AuthorityDenied`)
+/// before anything runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_withdrawn_callers_resume_is_refused() {
+    let _turn = CONTROLLER_CREDENTIAL.lock().await;
+    let root = tempfile::tempdir().expect("state root");
+    let log = root.path().join("records.log");
+    provision_producer(root.path(), &log, "controller-caller-resume").await;
+    let producer = Arc::new(Producer::default());
+    let model = ScriptedModel::new("controller-caller-resume", dispatching_script(&[RESUMED]));
+    let access = HostAccess::answering(Ok(()));
+    let realm = open_for_host(
+        root.path(),
+        model.clone(),
+        host_ingress(),
+        Arc::clone(&access) as Arc<dyn StockCallerAccess>,
+    )
+    .await;
+    let session = realm
+        .session_with(Vec::new(), Some(registered_producer(&producer)))
+        .await;
+    let caller = host_caller();
+    let (_, text) = realm
+        .caller_prompt(&session, "Dispatch the job", &caller)
+        .await
+        .expect("the allowed caller's input binds");
+    assert_eq!(text, FINAL);
+    let work = producer.retained();
+    let jobs = Arc::new(HostJobs::default());
+    jobs.commit("job-1", &session.session_id, &work);
+    jobs.commit("job-2", &session.session_id, &work);
+
+    let mut delivery = HostDelivery::arm(&realm, None);
+    let _binding = delivery
+        .bindings
+        .bind(
+            Arc::new(SessionAddressResolver),
+            Arc::clone(&jobs) as Arc<dyn RetainedJobSource>,
+        )
+        .expect("bind the host's job source");
+    let first = submit_job(&delivery.continuations, &jobs, &session.session_id, "job-1").await;
+    let resumed_input = match delivery
+        .status_until(
+            &session.session_id,
+            &first,
+            "the resume while the host admits the caller",
+            settled,
+        )
+        .await
+    {
+        ContinuationStatus::Applied { input, .. } => input,
+        other => panic!("the resume was not admitted: {other:?}"),
+    };
+    let resumed = terminal_of(&realm, &session, &resumed_input, "the resumed run").await;
+    assert!(
+        matches!(&resumed, CompletionOutcome::Completed(result) if result.text == RESUMED),
+        "{resumed:?}"
+    );
+
+    access.answer(Err(denied()));
+    let second = submit_job(&delivery.continuations, &jobs, &session.session_id, "job-2").await;
+    let refused = delivery
+        .status_until(
+            &session.session_id,
+            &second,
+            "the resume once the host withdrew the caller",
+            settled,
+        )
+        .await;
+    assert!(
+        matches!(
+            refused,
+            ContinuationStatus::Refused {
+                reason: meerkat_runtime::RuntimeDeliveryRefusalReason::AuthorityDenied,
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        model.requests().len(),
+        3,
+        "nothing ran for the refused resume"
+    );
+    drop(delivery);
+    realm.close(vec![session]).await;
+}
+
+/// A resume of a run whose original is still the stock ledger's candidate
+/// (its admission not settled yet) is not ready, never refused: the row
+/// stays pending and its drain names the cause. Once the ledger promotes the
+/// candidate and the host announces that custody change, the same
+/// completion is admitted as a resume of the run, and the resumed run runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resume_waits_while_its_original_is_a_pending_candidate() {
+    let _turn = CONTROLLER_CREDENTIAL.lock().await;
+    let root = tempfile::tempdir().expect("state root");
+    let log = root.path().join("records.log");
+    provision_producer(root.path(), &log, "controller-pending-resume").await;
+    let producer = Arc::new(Producer::default());
+    let model = ScriptedModel::new("controller-pending-resume", dispatching_script(&[RESUMED]));
+    let realm = open_as(root.path(), DEFAULT_STOCK_AGENT, model.clone()).await;
+    let session = realm
+        .session_with(Vec::new(), Some(registered_producer(&producer)))
+        .await;
+    let pending = prompt_with_pending_original(&realm, &session, "Dispatch the job").await;
+    let work = producer.retained();
+    let jobs = Arc::new(HostJobs::default());
+    jobs.commit("job-1", &session.session_id, &work);
+
+    let mut delivery = HostDelivery::arm(&realm, None);
+    let _binding = delivery
+        .bindings
+        .bind(
+            Arc::new(SessionAddressResolver),
+            Arc::clone(&jobs) as Arc<dyn RetainedJobSource>,
+        )
+        .expect("bind the host's job source");
+    let key = submit_job(&delivery.continuations, &jobs, &session.session_id, "job-1").await;
+    let held = delivery
+        .pass_until(
+            "a drain holds the resume back while its original's admission is pending",
+            |pass| {
+                pass.refused > 0
+                    || pass
+                        .failures
+                        .iter()
+                        .any(|failure| failure.contains("OriginalAdmissionPending"))
+            },
+        )
+        .await;
+    assert_eq!(held.refused, 0, "not ready, never refused: {held:?}");
+    let status = delivery
+        .continuations
+        .continuation_status(&session_owner(&session.session_id), &key)
+        .await
+        .expect("continuation status");
+    assert!(
+        matches!(status, ContinuationStatus::Pending { admitted: None, .. }),
+        "{status:?}"
+    );
+    assert_eq!(model.requests().len(), 2, "nothing resumed while pending");
+
+    pending.admit().expect("the ledger promotes the candidate");
+    delivery.bindings.source_custody_changed();
+    let resumed_input = match delivery
+        .status_until(
+            &session.session_id,
+            &key,
+            "the resume once the original is admitted",
+            settled,
+        )
+        .await
+    {
+        ContinuationStatus::Applied { input, .. } => input,
+        other => panic!("the resume was not admitted: {other:?}"),
+    };
+    let resumed = terminal_of(&realm, &session, &resumed_input, "the resumed run").await;
+    assert!(
+        matches!(&resumed, CompletionOutcome::Completed(result) if result.text == RESUMED),
+        "{resumed:?}"
+    );
+    drop(delivery);
+    realm.close(vec![session]).await;
+}
+
+/// On stock, an approval resumes its parked run only while no later
+/// governed prompt has moved that session's destination: every binding of
+/// a stock session advances its destination's generation, and a resume
+/// names the destination its run was admitted under. After a later prompt
+/// the approved notice can never be admitted: it is settled as refused
+/// (`NoAdmissibleWorkBinding`), its receipt is `Failed`, the parked consent
+/// is withdrawn, and the model gets no request for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_consent_notice_after_a_later_prompt_fails_visibly() {
+    let _turn = CONTROLLER_CREDENTIAL.lock().await;
+    let root = tempfile::tempdir().expect("state root");
+    let log = root.path().join("records.log");
+    provision_producer(root.path(), &log, "controller-moved-resume").await;
+    let producer = Arc::new(Producer::default());
+    let model = ScriptedModel::new("controller-moved-resume", dispatching_script(&[LATER]));
+    let realm = open_as(root.path(), DEFAULT_STOCK_AGENT, model.clone()).await;
+    let session = realm
+        .session_with(Vec::new(), Some(registered_producer(&producer)))
+        .await;
+    let (_, text) = realm
+        .prompt(&session, "Dispatch the job")
+        .await
+        .expect("the operator's prompt is bound");
+    assert_eq!(text, FINAL);
+    let work = producer.retained();
+
+    let approvals = Arc::new(ApprovalService::new());
+    let domain = hosting_domain(root.path());
+    let consent = ParkedRoutedConsent::park(
+        &approvals,
+        ApprovalConsentScope {
+            domain: domain.clone(),
+            session_id: session.session_id.clone(),
+        },
+        work,
+    )
+    .await
+    .expect("consent of the run's work, approved and parked at its close");
+    let approval_id = consent.approval_id().clone();
+    let approved = ApprovalConsentTransition::Approved;
+
+    // A later governed prompt in the same session moves its destination.
+    let (_, later) = realm
+        .prompt(&session, "Anything else?")
+        .await
+        .expect("the later prompt is bound");
+    assert_eq!(later, LATER);
+
+    let mut delivery = HostDelivery::arm(&realm, Some((Arc::clone(&approvals), domain)));
+    let status = delivery
+        .status_until(
+            &session.session_id,
+            &consent_key(&approval_id, approved),
+            "the approved notice settles after a later prompt",
+            settled,
+        )
+        .await;
+    assert!(
+        matches!(
+            status,
+            ContinuationStatus::Refused {
+                reason: meerkat_runtime::RuntimeDeliveryRefusalReason::NoAdmissibleWorkBinding,
+                ..
+            }
+        ),
+        "{status:?}"
+    );
+    match delivery
+        .receipt_until(&approvals, &approval_id, approved, "the notice's receipt")
+        .await
+    {
+        ApprovalConsentDeliveryState::Failed { reason } => {
+            assert!(reason.contains("NoAdmissibleWorkBinding"), "{reason}");
+        }
+        other => panic!("the approved notice was not receipted as failed: {other:?}"),
+    }
+    assert_eq!(
+        withdrawal_reason(&approvals, &approval_id),
+        Some(ApprovalConsentWithdrawalReason::RunEnded),
+        "the undeliverable notice withdrew the parked consent"
+    );
+    assert_eq!(
+        model.requests().len(),
+        3,
+        "the model got no request for the notice"
+    );
+    drop(delivery);
+    realm.close(vec![session]).await;
+}
+
+/// A controller client of another selection, for a later prompt that is
+/// bound and never submitted: it reports its selection and answers no
+/// request.
+struct OtherController(ControllerModelSelection);
+
+#[async_trait]
+impl meerkat_core::AgentLlmClient for OtherController {
+    fn controller_model_selection(&self) -> Option<ControllerModelSelection> {
+        Some(self.0.clone())
+    }
+    async fn stream_response(
+        &self,
+        _: &[Message],
+        _: &[Arc<meerkat_core::ToolDef>],
+        _: u32,
+        _: Option<f32>,
+        _: Option<&meerkat_core::ProviderParamsOverride>,
+    ) -> Result<meerkat_core::LlmStreamResult, meerkat_core::AgentError> {
+        Err(meerkat_core::AgentError::ConfigError(
+            "the other controller is never asked".into(),
+        ))
+    }
+    fn provider(&self) -> Provider {
+        self.0.provider()
+    }
+    fn model(&self) -> &str {
+        self.0.model()
+    }
+}
+
+/// Row (v) with the later prompt bound under another controller selection
+/// (the host switched the session's model or credential). The session's
+/// pin then holds that selection's client and none for the earlier run's,
+/// so the resume's owners would answer it not ready on every round. The
+/// runtime refuses a resume whose destination its session has since moved
+/// before it asks any owner, so the notice still settles: refused
+/// (`NoAdmissibleWorkBinding`), its receipt `Failed`, the parked consent
+/// withdrawn, and no model request for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_consent_notice_after_a_later_prompt_with_another_controller_fails_visibly() {
+    let _turn = CONTROLLER_CREDENTIAL.lock().await;
+    let root = tempfile::tempdir().expect("state root");
+    let log = root.path().join("records.log");
+    provision_producer(root.path(), &log, "controller-switched-resume").await;
+    let producer = Arc::new(Producer::default());
+    let model = ScriptedModel::new("controller-switched-resume", dispatching_script(&[]));
+    let realm = open_as(root.path(), DEFAULT_STOCK_AGENT, model.clone()).await;
+    let session = realm
+        .session_with(Vec::new(), Some(registered_producer(&producer)))
+        .await;
+    let (_, text) = realm
+        .prompt(&session, "Dispatch the job")
+        .await
+        .expect("the operator's prompt is bound");
+    assert_eq!(text, FINAL);
+    let work = producer.retained();
+
+    let approvals = Arc::new(ApprovalService::new());
+    let domain = hosting_domain(root.path());
+    let consent = ParkedRoutedConsent::park(
+        &approvals,
+        ApprovalConsentScope {
+            domain: domain.clone(),
+            session_id: session.session_id.clone(),
+        },
+        work,
+    )
+    .await
+    .expect("consent of the run's work, approved and parked at its close");
+    let approval_id = consent.approval_id().clone();
+    let approved = ApprovalConsentTransition::Approved;
+
+    // A later prompt of the same session is bound with a client of another
+    // selection: the binding moves the session's destination and pins that
+    // client. It is never submitted.
+    let switched = selection("controller-switched-elsewhere");
+    let (_later, unsubmitted) = realm
+        .stock
+        .bind_prompt(
+            &realm.machine,
+            &session.session_id,
+            Input::Prompt(PromptInput::new("Anything else?", None)),
+            ControllerModelClient::new(switched.clone(), Arc::new(OtherController(switched))),
+        )
+        .await
+        .expect("the later prompt binds under another controller selection");
+    drop(unsubmitted);
+
+    let mut delivery = HostDelivery::arm(&realm, Some((Arc::clone(&approvals), domain)));
+    let status = delivery
+        .status_until(
+            &session.session_id,
+            &consent_key(&approval_id, approved),
+            "the approved notice settles after a later prompt under another controller",
+            settled,
+        )
+        .await;
+    assert!(
+        matches!(
+            status,
+            ContinuationStatus::Refused {
+                reason: meerkat_runtime::RuntimeDeliveryRefusalReason::NoAdmissibleWorkBinding,
+                ..
+            }
+        ),
+        "{status:?}"
+    );
+    match delivery
+        .receipt_until(&approvals, &approval_id, approved, "the notice's receipt")
+        .await
+    {
+        ApprovalConsentDeliveryState::Failed { reason } => {
+            assert!(reason.contains("NoAdmissibleWorkBinding"), "{reason}");
+        }
+        other => panic!("the approved notice was not receipted as failed: {other:?}"),
+    }
+    assert_eq!(
+        withdrawal_reason(&approvals, &approval_id),
+        Some(ApprovalConsentWithdrawalReason::RunEnded),
+        "the undeliverable notice withdrew the parked consent"
+    );
+    assert_eq!(
+        model.requests().len(),
+        2,
+        "the model got no request for the notice"
+    );
+    drop(delivery);
+    realm.close(vec![session]).await;
+}
+
+/// A host-authenticated caller's work resumes only while the caller's login
+/// is current. The completion of a job the caller's run dispatched is
+/// admitted as a resume of that run while the login is current; once the
+/// login's deadline has passed, a completion of the same run is refused for
+/// good (`AuthorityDenied`) before anything runs, though the host still
+/// answers that it admits the caller.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_callers_resume_after_its_login_expired_is_refused() {
+    let _turn = CONTROLLER_CREDENTIAL.lock().await;
+    let root = tempfile::tempdir().expect("state root");
+    let log = root.path().join("records.log");
+    provision_producer(root.path(), &log, "controller-expired-login-resume").await;
+    let producer = Arc::new(Producer::default());
+    let model = ScriptedModel::new(
+        "controller-expired-login-resume",
+        dispatching_script(&[RESUMED]),
+    );
+    let access = HostAccess::answering(Ok(()));
+    let realm = open_for_host(
+        root.path(),
+        model.clone(),
+        host_ingress(),
+        Arc::clone(&access) as Arc<dyn StockCallerAccess>,
+    )
+    .await;
+    let session = realm
+        .session_with(Vec::new(), Some(registered_producer(&producer)))
+        .await;
+    let caller = host_caller();
+    let (_, text) = realm
+        .caller_prompt(&session, "Dispatch the job", &caller)
+        .await
+        .expect("the allowed caller's input binds");
+    assert_eq!(text, FINAL);
+    let work = producer.retained();
+    let jobs = Arc::new(HostJobs::default());
+    jobs.commit("job-1", &session.session_id, &work);
+    jobs.commit("job-2", &session.session_id, &work);
+
+    let mut delivery = HostDelivery::arm(&realm, None);
+    let _binding = delivery
+        .bindings
+        .bind(
+            Arc::new(SessionAddressResolver),
+            Arc::clone(&jobs) as Arc<dyn RetainedJobSource>,
+        )
+        .expect("bind the host's job source");
+    let first = submit_job(&delivery.continuations, &jobs, &session.session_id, "job-1").await;
+    let resumed_input = match delivery
+        .status_until(
+            &session.session_id,
+            &first,
+            "the resume while the caller's login is current",
+            settled,
+        )
+        .await
+    {
+        ContinuationStatus::Applied { input, .. } => input,
+        other => panic!("the resume was not admitted: {other:?}"),
+    };
+    let resumed = terminal_of(&realm, &session, &resumed_input, "the resumed run").await;
+    assert!(
+        matches!(&resumed, CompletionOutcome::Completed(result) if result.text == RESUMED),
+        "{resumed:?}"
+    );
+
+    // The login's deadline has passed; the host's answer is unchanged.
+    access.login(StockLoginLifetime::ExpiresAt { unix_ms: 1 });
+    let second = submit_job(&delivery.continuations, &jobs, &session.session_id, "job-2").await;
+    let refused = delivery
+        .status_until(
+            &session.session_id,
+            &second,
+            "the resume once the caller's login expired",
+            settled,
+        )
+        .await;
+    assert!(
+        matches!(
+            refused,
+            ContinuationStatus::Refused {
+                reason: meerkat_runtime::RuntimeDeliveryRefusalReason::AuthorityDenied,
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        model.requests().len(),
+        3,
+        "nothing ran for the refused resume"
+    );
+    drop(delivery);
     realm.close(vec![session]).await;
 }

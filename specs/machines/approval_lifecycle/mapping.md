@@ -8,7 +8,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ApprovalLifecycleMachine`
 
 ### Code Anchors
-- `approval_lifecycle_authority` (machine `ApprovalLifecycleMachine`): `crates/meerkat-core/src/generated/approval_lifecycle.rs` — generated ApprovalLifecycleMachine owner for CreateRejectedEmptyAllowedDecisions, CreateRejectedAlreadyExists, CreatePending, CreateConsentRejectedEmptyAllowedDecisions, CreateConsentRejectedAlreadyExists, CreateConsentPending, RestoreRejectedDuplicate, RestoreRejectedEmptyAllowedDecisions, RestorePending, RestoreExpired, RestoreCancelled, RestoreApproved, RestoreDenied, RestoreRejectedInvalidRecord, ReconcileRejectedMissing, ReconcileRejectedLinked, ReconcileRejectedInvalidRecord, ReconcileAppliedPending, ReconcileAppliedExpired, ReconcileAppliedCancelled, ReconcileAppliedApproved, ReconcileAppliedDenied, ObserveExpiryRejectedMissing, ObserveExpiryExpiresPending, ObserveExpiryPendingNoop, ObserveExpiryApprovedNoop, ObserveExpiryDeniedNoop, ObserveExpiryExpiredNoop, ObserveExpiryCancelledNoop, DecideRejectedMissing, DecideRejectedExpired, DecideRejectedAlreadyDecided, DecideRejectedAuthenticationRequired, DecideRejectedApproveNotAllowed, DecideRejectedDenyNotAllowed, DecideApprove, DecideDeny, DecideConsentRejectedMissing, DecideConsentRejectedMismatch, DecideConsentRejectedExpired, DecideConsentRejectedAlreadyDecided, DecideConsentRejectedAuthenticationRequired, DecideConsentRejectedNotAllowed, DecideConsentApprove, DecideConsentDeny, ConsumeConsentRejectedMissing, ConsumeConsentRejectedAlreadyConsumed, ConsumeConsentRejectedMismatch, ConsumeConsentRejectedNotSatisfied, ConsumeConsentForEntry, WithdrawConsentRejectedMissing, WithdrawConsentRejectedMismatch, WithdrawConsentPending, WithdrawConsentSettled, SettleUnlinkedRejectedMissing, SettleUnlinkedRejectedNotConsent, SettleUnlinkedRejectedLinked, SettleUnlinkedRejectedConsumed, SettleUnlinkedRejectedExpired, SettleUnlinkedRejectedSettled, SettleUnlinkedPending, SettleUnlinkedApproved, BeginReviewRejectedDuplicate, BeginReviewPending, RecordReviewVerdictRejectedMissing, RecordReviewVerdictRejectedConsentLinked, RecordReviewVerdictRejectedRetired, RecordReviewVerdictRejectedSettled, RecordReviewVerdictAllowed, RecordReviewVerdictDenied, RecordReviewVerdictEscalated, RecordReviewUnavailableRejectedMissing, RecordReviewUnavailableRejectedConsentLinked, RecordReviewUnavailableRejectedRetired, RecordReviewUnavailableRejectedSettled, RecordReviewUnavailable, RetireReviewRejectedMissing, RetireReviewRejectedConsentLinked, RetireReviewRejectedRetired, RetireReviewRejectedSettled, RetireReview, ConsumeReviewRejectedMissing, ConsumeReviewRejectedConsentLinked, ConsumeReviewRejectedRetired, ConsumeReviewRejectedUsed, ConsumeReviewRejectedNotSatisfied, ConsumeReviewForEntry, ReleaseReviewRejectedMissing, ReleaseReviewRejectedConsentLinked, ReleaseReviewRejectedPending, ReleaseReviewAllowed, ReleaseReviewDenied, ReleaseReviewEscalated, ReleaseReviewUnavailable, ReleaseReviewRetired, ReleaseReviewUsed, ApprovalStatusResolved, ApprovalLifecycleRejected, ReviewStatusResolved, and ReviewLifecycleRejected
+- `approval_lifecycle_authority` (machine `ApprovalLifecycleMachine`): `crates/meerkat-core/src/generated/approval_lifecycle.rs` — generated ApprovalLifecycleMachine owner for CreateRejectedEmptyAllowedDecisions, CreateRejectedAlreadyExists, CreatePending, CreateConsentRejectedEmptyAllowedDecisions, CreateConsentRejectedAlreadyExists, CreateConsentPending, RestoreRejectedDuplicate, RestoreRejectedEmptyAllowedDecisions, RestorePending, RestoreExpired, RestoreCancelled, RestoreApproved, RestoreDenied, RestoreRejectedInvalidRecord, ReconcileRejectedMissing, ReconcileRejectedLinked, ReconcileRejectedInvalidRecord, ReconcileAppliedPending, ReconcileAppliedExpired, ReconcileAppliedCancelled, ReconcileAppliedApproved, ReconcileAppliedDenied, ObserveExpiryRejectedMissing, ObserveExpiryExpiresPending, ObserveExpiryPendingNoop, ObserveExpiryApprovedNoop, ObserveExpiryDeniedNoop, ObserveExpiryExpiredNoop, ObserveExpiryCancelledNoop, DecideRejectedMissing, DecideRejectedExpired, DecideRejectedAlreadyDecided, DecideRejectedAuthenticationRequired, DecideRejectedApproveNotAllowed, DecideRejectedDenyNotAllowed, DecideApprove, DecideDeny, DecideConsentRejectedMissing, DecideConsentRejectedMismatch, DecideConsentRejectedExpired, DecideConsentRejectedAlreadyDecided, DecideConsentRejectedAuthenticationRequired, DecideConsentRejectedNotAllowed, DecideConsentApprove, DecideConsentDeny, ConsumeConsentRejectedMissing, ConsumeConsentRejectedAlreadyConsumed, ConsumeConsentRejectedMismatch, ConsumeConsentRejectedNotSatisfied, ConsumeConsentForEntry, WithdrawConsentRejectedMissing, WithdrawConsentRejectedMismatch, WithdrawConsentPending, WithdrawConsentSettled, SettleUnlinkedRejectedMissing, SettleUnlinkedRejectedNotConsent, SettleUnlinkedRejectedLinked, SettleUnlinkedRejectedConsumed, SettleUnlinkedRejectedExpired, SettleUnlinkedRejectedSettled, SettleUnlinkedPending, SettleUnlinkedApproved, BeginReviewRejectedDuplicate, BeginReviewPending, RecordReviewVerdictRejectedMissing, RecordReviewVerdictRejectedConsentLinked, RecordReviewVerdictRejectedRetired, RecordReviewVerdictRejectedSettled, RecordReviewVerdictAllowed, RecordReviewVerdictDenied, RecordReviewVerdictEscalated, RecordReviewUnavailableRejectedMissing, RecordReviewUnavailableRejectedConsentLinked, RecordReviewUnavailableRejectedRetired, RecordReviewUnavailableRejectedSettled, RecordReviewUnavailable, RetireReviewRejectedMissing, RetireReviewRejectedConsentLinked, RetireReviewRejectedRetired, RetireReviewRejectedSettled, RetireReview, ConsumeReviewRejectedMissing, ConsumeReviewRejectedConsentLinked, ConsumeReviewRejectedRetired, ConsumeReviewRejectedUsed, ConsumeReviewRejectedNotSatisfied, ConsumeReviewForEntry, ReleaseReviewRejectedMissing, ReleaseReviewRejectedConsentLinked, ReleaseReviewRejectedPending, ReleaseReviewAllowed, ReleaseReviewDenied, ReleaseReviewEscalated, ReleaseReviewUnavailable, ReleaseReviewRetired, ReleaseReviewUsed, AdmitEnteredStepRejectedMissing, AdmitEnteredStepRejectedConsentLinked, AdmitEnteredStepRejectedRetired, AdmitEnteredStepRejectedNotEntered, AdmitEnteredStep, AdmitEnteredStepRejectedClosing, ReleaseReviewUsedClosing, ReleaseReviewRejectedClosing, FinishEnteredStepRejectedMissing, FinishEnteredStepRejectedNotInFlight, FinishEnteredStepOpen, FinishEnteredStepClosing, FinishEnteredStepReleases, ApprovalStatusResolved, ApprovalLifecycleRejected, ReviewStatusResolved, and ReviewLifecycleRejected
 
 ### Scenarios
 - `approval_request_pending` — CreateRejectedEmptyAllowedDecisions, CreateRejectedAlreadyExists, CreatePending, CreateConsentRejectedEmptyAllowedDecisions, CreateConsentRejectedAlreadyExists, CreateConsentPending keep request creation, and a consent approval created atomically with its linked human attempt, under ApprovalStatusResolved or ApprovalLifecycleRejected
@@ -19,6 +19,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `approval_restore_consistency` — RestoreRejectedDuplicate, RestoreRejectedEmptyAllowedDecisions, RestorePending, RestoreExpired, RestoreCancelled, RestoreApproved, RestoreDenied, RestoreRejectedInvalidRecord validate persisted status, decision audit, allowed-decision compatibility and consent history (authenticated and consumed) before rehydrating approval lifecycle truth, never as a live link
 - `approval_reconcile_from_store` — ReconcileRejectedMissing, ReconcileRejectedLinked, ReconcileRejectedInvalidRecord, ReconcileAppliedPending, ReconcileAppliedExpired, ReconcileAppliedCancelled, ReconcileAppliedApproved, ReconcileAppliedDenied replace one existing unlinked row's state from its stored row after restore validation, never undoing a spend and never creating a link
 - `approval_review_attempt_retirement` — BeginReviewRejectedDuplicate, BeginReviewPending, RecordReviewVerdictRejectedMissing, RecordReviewVerdictRejectedConsentLinked, RecordReviewVerdictRejectedRetired, RecordReviewVerdictRejectedSettled, RecordReviewVerdictAllowed, RecordReviewVerdictDenied, RecordReviewVerdictEscalated, RecordReviewUnavailableRejectedMissing, RecordReviewUnavailableRejectedConsentLinked, RecordReviewUnavailableRejectedRetired, RecordReviewUnavailableRejectedSettled, RecordReviewUnavailable, RetireReviewRejectedMissing, RetireReviewRejectedConsentLinked, RetireReviewRejectedRetired, RetireReviewRejectedSettled, RetireReview, ConsumeReviewRejectedMissing, ConsumeReviewRejectedConsentLinked, ConsumeReviewRejectedRetired, ConsumeReviewRejectedUsed, ConsumeReviewRejectedNotSatisfied, ConsumeReviewForEntry, ReleaseReviewRejectedMissing, ReleaseReviewRejectedConsentLinked, ReleaseReviewRejectedPending, ReleaseReviewAllowed, ReleaseReviewDenied, ReleaseReviewEscalated, ReleaseReviewUnavailable, ReleaseReviewRetired, ReleaseReviewUsed keep one process-local retained review attempt under generated status: a retired attempt rejects late verdicts and entry, an allow is consumed at most once, release disposes only settled attempts, and a linked human attempt is refused by every generic review input
+- `approval_entered_effect_steps` — AdmitEnteredStepRejectedMissing, AdmitEnteredStepRejectedConsentLinked, AdmitEnteredStepRejectedRetired, AdmitEnteredStepRejectedNotEntered, AdmitEnteredStep, AdmitEnteredStepRejectedClosing, ReleaseReviewUsedClosing, ReleaseReviewRejectedClosing, FinishEnteredStepRejectedMissing, FinishEnteredStepRejectedNotInFlight, FinishEnteredStepOpen, FinishEnteredStepClosing, FinishEnteredStepReleases keep the entered state of a spent attempt's effect: a later step begins only against the attempt its entry spent once while that effect is open, and ends with its finish; neither spends; the admitting dispatch's end releases the attempt with no step in flight and otherwise closes the effect, which admits no new step and is released by its last step's finish; an unknown or released, consent-linked, retired or never spent attempt admits none
 
 ### Transitions
 - `CreateRejectedEmptyAllowedDecisions`
@@ -309,6 +310,45 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ReleaseReviewUsed`
   - anchors: `approval_lifecycle_authority`
   - scenarios: `approval_review_attempt_retirement`
+- `AdmitEnteredStepRejectedMissing`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_entered_effect_steps`
+- `AdmitEnteredStepRejectedConsentLinked`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_entered_effect_steps`
+- `AdmitEnteredStepRejectedRetired`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_entered_effect_steps`
+- `AdmitEnteredStepRejectedNotEntered`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_entered_effect_steps`
+- `AdmitEnteredStep`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_entered_effect_steps`
+- `AdmitEnteredStepRejectedClosing`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_entered_effect_steps`
+- `ReleaseReviewUsedClosing`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_entered_effect_steps`
+- `ReleaseReviewRejectedClosing`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_entered_effect_steps`
+- `FinishEnteredStepRejectedMissing`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_entered_effect_steps`
+- `FinishEnteredStepRejectedNotInFlight`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_entered_effect_steps`
+- `FinishEnteredStepOpen`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_entered_effect_steps`
+- `FinishEnteredStepClosing`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_entered_effect_steps`
+- `FinishEnteredStepReleases`
+  - anchors: `approval_lifecycle_authority`
+  - scenarios: `approval_entered_effect_steps`
 
 ### Effects
 - `ApprovalStatusResolved`
@@ -319,10 +359,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `approval_request_pending`, `approval_consent_link_and_spend`, `approval_consent_unlinked_settlement`, `approval_restore_consistency`, `approval_reconcile_from_store`
 - `ReviewStatusResolved`
   - anchors: `approval_lifecycle_authority`
-  - scenarios: `approval_consent_link_and_spend`, `approval_review_attempt_retirement`
+  - scenarios: `approval_consent_link_and_spend`, `approval_review_attempt_retirement`, `approval_entered_effect_steps`
 - `ReviewLifecycleRejected`
   - anchors: `approval_lifecycle_authority`
-  - scenarios: `approval_review_attempt_retirement`
+  - scenarios: `approval_review_attempt_retirement`, `approval_entered_effect_steps`
 
 ### Invariants
 - `approval_maps_cover_exactly_the_registered_ids`
@@ -344,6 +384,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `consumed_consent_is_approved_authenticated_and_unlinked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `entered_state_covers_exactly_the_used_attempts`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `closing_entered_effect_has_a_step_in_flight`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

@@ -84,7 +84,11 @@ impl MobCommand {
             // acquisition; both halves already require SendCommand.
             | Self::SpawnAttachedForkedParticipant { .. }
             // Releasing a host's run-start hold lets the member start runs.
-            | Self::ReleaseMemberRunStarts { .. } => Some(ControlScope::SendCommand),
+            | Self::ReleaseMemberRunStarts { .. }
+            // A dormant seat creates members (and spawns the fresh ones that
+            // owe a kickoff): the authority class of a spawn.
+            | Self::PlanDormantSeats { .. }
+            | Self::CommitDormantSeats { .. } => Some(ControlScope::SendCommand),
 
             #[cfg(feature = "openai-live")]
             Self::StartLiveBridgeOperation { .. }
@@ -131,6 +135,9 @@ impl MobCommand {
             // quiesces the live shell like retirement without touching
             // continuity, so it carries the same destructive-class scope.
             | Self::ReloadMemberRegistration { .. }
+            // Release discards the member's live materialization in place
+            // (it stays seated), the same destructive class as a reload.
+            | Self::ReleaseMember { .. }
             | Self::Stop { .. }
             // Closing admission is a mob-lifecycle mutation like Stop.
             | Self::CloseIfIdle { .. }
@@ -139,6 +146,9 @@ impl MobCommand {
             | Self::Complete { .. }
             | Self::Destroy { .. }
             | Self::Reset { .. }
+            // A rotation retires the member's current life to seat its next.
+            | Self::PlanMemberRotation { .. }
+            | Self::StartMemberRotation { .. }
             | Self::AdoptMemberIdentityDeclaration { .. }
             | Self::ApplyMemberToolDeclaration { .. }
             | Self::ResolveIdentityConvergenceBlock { .. } => Some(ControlScope::Retire),
@@ -199,6 +209,15 @@ impl MobCommand {
             | Self::PendingSpawnAnchorSettled { .. }
             | Self::PolicySpawnSettled { .. }
             | Self::ReviveMemberLiveMaterialization { .. }
+            // A member wake is an actor self-send (host dispatch), a send of
+            // the mob's own wake route (a peer send that met a dormant
+            // member), or its own timer; the delivery it serves was admitted
+            // where it entered.
+            | Self::WakeMember { .. }
+            | Self::MemberWakeTimedOut { .. }
+            | Self::RetryOwedMemberWake { .. }
+            // An owed edge repair is the actor's own timer.
+            | Self::RepairOwedEdge { .. }
             | Self::StartupMemberRecovered { .. }
             | Self::ResumeLifecycleReadinessResolved { .. }
             | Self::ResumeLifecyclePreparationResolved { .. }
@@ -208,8 +227,11 @@ impl MobCommand {
             | Self::ResumeLifecycleMemberObserved { .. }
             | Self::ResumeLifecycleMemberReady { .. }
             | Self::ResumeLifecycleMemberSettled { .. }
+            | Self::ResumeLifecycleMemberReadinessResolved { .. }
             | Self::ResumeLifecycleMemberCleanupHeld { .. }
             | Self::ResumeLifecycleMemberUnproven { .. }
+            | Self::ResumeLifecycleBootMemberSettled { .. }
+            | Self::ResumeLifecycleBootMembersPrepared { .. }
             | Self::ResumeLifecycleRollbackStep { .. }
             | Self::ResumeLifecycleRollbackFinalized { .. }
             | Self::ResumePostCommitMemberCompleted { .. }
@@ -285,6 +307,7 @@ impl MobCommand {
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
             | Self::QueueRoutedEffectForTest { .. }
+            | Self::WakeMemberFromEffectForTest { .. }
             | Self::SpawnLiveMutationAwaitingActorForTest { .. }
             | Self::HonourCompletionForTest { .. }
             | Self::SpawnLiveMutationSendingCompletionForTest { .. }
@@ -344,6 +367,8 @@ impl MobCommand {
                     | Self::ResumeLifecycle { .. }
                     | Self::Reset { .. }
                     | Self::ReloadMemberRegistration { .. }
+                    | Self::PlanMemberRotation { .. }
+                    | Self::StartMemberRotation { .. }
             ),
             Some(
                 ControlScope::List
@@ -383,6 +408,17 @@ impl MobCommand {
             Self::ReviveMemberLiveMaterialization { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
+            Self::WakeMember { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(
+                    super::actor::member_wake::MemberWakeFailure::from_actor_refusal(&error),
+                ));
+            }
+            Self::ReleaseMember { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::MemberWakeTimedOut { .. }
+            | Self::RetryOwedMemberWake { .. }
+            | Self::RepairOwedEdge { .. } => {}
             Self::ReloadMemberRegistration { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
@@ -433,6 +469,18 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::ReleaseMemberRunStarts { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::PlanDormantSeats { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::PlanMemberRotation { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::StartMemberRotation { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::CommitDormantSeats { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             // Settling closes the waiter set; the actor's in-flight map prunes
@@ -646,6 +694,10 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             #[cfg(test)]
+            Self::WakeMemberFromEffectForTest { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
             Self::SpawnLiveMutationAwaitingActorForTest { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
@@ -690,8 +742,11 @@ impl MobCommand {
             | Self::ResumeLifecycleMemberObserved { .. }
             | Self::ResumeLifecycleMemberReady { .. }
             | Self::ResumeLifecycleMemberSettled { .. }
+            | Self::ResumeLifecycleMemberReadinessResolved { .. }
             | Self::ResumeLifecycleMemberCleanupHeld { .. }
             | Self::ResumeLifecycleMemberUnproven { .. }
+            | Self::ResumeLifecycleBootMemberSettled { .. }
+            | Self::ResumeLifecycleBootMembersPrepared { .. }
             | Self::ResumeLifecycleRollbackStep { .. }
             | Self::ResumeLifecycleRollbackFinalized { .. }
             | Self::ResumePostCommitMemberCompleted { .. }

@@ -8,28 +8,31 @@
 //! bind it - live, and refused by every placement-guarded consumer transition.
 //!
 //! These tests exercise the DSL authority directly (no actor, no session
-//! service) and pin three facts at the machine level:
+//! service) and pin these facts at the machine level:
 //!   * a LOCAL revival re-emits `RequestRuntimeBinding` carrying the exact
-//!     membership tuple the machine already owns,
+//!     membership tuple the machine already owns, in its Bound step; the
+//!     Ready step then closes the wake attempt Live,
 //!   * a PLACED revival does not (its member host owns the binding - the same
 //!     reason `CommitSpawnMembershipRemote` emits none; that arm is pinned in
 //!     `multi_host_machine.rs` where the host ladder lives),
-//!   * a revival that cannot name the exact tuple is REFUSED rather than
-//!     resolving the obligation and leaving the member unbindable.
+//!   * every resolution names its wake attempt: feedback for any other
+//!     attempt is a typed `StaleAttempt` no-op, and an open attempt never
+//!     outlives the session binding it would name.
 //!
-//! The refusal is load-bearing rather than defensive: DSL map accessors yield
-//! the field default for an absent key, so an unguarded emit would route an
-//! empty session id or a zero fence token into the consumer - a silently wrong
-//! binding instead of a loud one.
+//! The tuple guards are load-bearing rather than defensive: DSL map accessors
+//! yield the field default for an absent key, so an unguarded emit would route
+//! an empty session id or a zero fence token into the consumer - a silently
+//! wrong binding instead of a loud one.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use meerkat_mob::machines::mob_machine::{
     AgentIdentity, AgentRuntimeId, FenceToken, Generation,
-    MemberLiveMaterializationObservationKind, MemberRevivalVerdictKind, MobMachineAuthority,
-    MobMachineEffect, MobMachineInput, MobMachineMutator, MobMachineSignal, MobMachineState,
-    MobMachineTransition, MobMemberState, MobPhase, PlacedCompletionLifecycleIntentKind,
-    ResumeMemberBinding, SessionId, SpawnPolicyRuntimeMode,
+    MemberLiveMaterializationObservationKind, MemberMaterializationPhase, MemberPeerEndpoint,
+    MemberRevivalVerdictKind, MemberWakeFeedbackVerdict, MobMachineAuthority, MobMachineEffect,
+    MobMachineInput, MobMachineMutator, MobMachineSignal, MobMachineState, MobMachineTransition,
+    MobMemberState, MobPhase, PeerAddress, PeerId, PeerName, PeerSigningKey,
+    PlacedCompletionLifecycleIntentKind, ResumeMemberBinding, SessionId, SpawnPolicyRuntimeMode,
 };
 
 const MEMBER: &str = "worker-1";
@@ -138,7 +141,32 @@ fn apply_local_spawn_ladder(authority: &mut MobMachineAuthority, identity_name: 
     .expect("local CommitSpawnActivation must settle the spawn-exec phase");
 }
 
-fn authorize_revival(authority: &mut MobMachineAuthority, identity_name: &str) {
+/// The member's comms endpoint, registered after its spawn as the actor does.
+/// A local wake closes Live only with a registered endpoint.
+fn register_member_endpoint(authority: &mut MobMachineAuthority, identity_name: &str) {
+    MobMachineMutator::apply(
+        authority,
+        MobMachineInput::RegisterMemberPeer {
+            agent_identity: identity(identity_name),
+            agent_runtime_id: runtime_id(identity_name, GENERATION),
+            generation: Generation(GENERATION),
+            fence_token: FenceToken(FENCE),
+            peer_endpoint: MemberPeerEndpoint::new(
+                PeerName(identity_name.to_string()),
+                PeerId(format!("peer-{identity_name}")),
+                PeerAddress(format!("inproc://{identity_name}")),
+                PeerSigningKey([9; 32]),
+            ),
+        },
+    )
+    .expect("the spawned member registers its endpoint");
+}
+
+/// The drift arm: the machine believed the member Live and a probe observed
+/// its materialization gone with a durable snapshot present. It opens exactly
+/// one wake attempt (Live -> Waking) and returns the attempt id the shell
+/// fences every resolution with.
+fn authorize_revival(authority: &mut MobMachineAuthority, identity_name: &str) -> u64 {
     let transition = authority
         .apply_signal(MobMachineSignal::ClassifyMemberLiveMaterialization {
             agent_identity: identity(identity_name),
@@ -146,23 +174,46 @@ fn authorize_revival(authority: &mut MobMachineAuthority, identity_name: &str) {
             reason: "live materialization missing at dispatch".to_string(),
         })
         .expect("a durable snapshot must authorize exactly one revival attempt");
-    assert!(
-        transition.effects().iter().any(|effect| matches!(
-            effect,
+    let attempt = transition
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
             MobMachineEffect::MemberLiveMaterializationClassified {
                 verdict: MemberRevivalVerdictKind::ReviveAuthorized,
+                attempt,
                 ..
-            }
-        )),
-        "revival authorization is the machine-owned verdict this fixture depends on",
-    );
-    assert!(
+            } => *attempt,
+            _ => None,
+        })
+        .expect("revival authorization is the machine-owned verdict this fixture depends on");
+    assert_eq!(
         authority
             .state()
-            .member_revival_pending
-            .contains(&identity(identity_name)),
-        "authorization must record the revival obligation",
+            .member_wake_attempts
+            .get(&identity(identity_name)),
+        Some(&attempt),
+        "authorization must open the wake attempt it reports",
     );
+    assert_eq!(
+        authority
+            .state()
+            .member_materialization
+            .get(&identity(identity_name)),
+        Some(&MemberMaterializationPhase::Waking),
+        "an authorized revival is a Waking member",
+    );
+    attempt
+}
+
+fn feedback_verdicts(transition: &MobMachineTransition) -> Vec<MemberWakeFeedbackVerdict> {
+    transition
+        .effects()
+        .iter()
+        .filter_map(|effect| match effect {
+            MobMachineEffect::MemberWakeFeedbackResolved { verdict, .. } => Some(*verdict),
+            _ => None,
+        })
+        .collect()
 }
 
 fn binding_requests(
@@ -184,6 +235,7 @@ fn binding_requests(
                 fence_token,
                 generation,
                 session_id,
+                ..
             } => Some((
                 agent_identity.clone(),
                 agent_runtime_id.clone(),
@@ -201,16 +253,20 @@ fn local_member_revival_reemits_the_exact_runtime_binding_request() {
     let mut authority = MobMachineAuthority::new();
     authorize_spawn_profile(&mut authority, MEMBER);
     apply_local_spawn_ladder(&mut authority, MEMBER);
-    authorize_revival(&mut authority, MEMBER);
+    register_member_endpoint(&mut authority, MEMBER);
+    let attempt = authorize_revival(&mut authority, MEMBER);
 
-    let resolved = authority
-        .apply_signal(MobMachineSignal::ResolveMemberRevivalSucceeded {
+    // Step 1 (Bound): the provision registered the runtime; the machine asks
+    // the consumer to bind the member's placement tuple before its drain
+    // admits any work. The attempt stays open.
+    let bound = authority
+        .apply_signal(MobMachineSignal::ResolveMemberRevivalBound {
             agent_identity: identity(MEMBER),
+            attempt,
         })
-        .expect("a rebindable local revival must resolve");
-
+        .expect("the Bound step of a rebindable local wake applies");
     assert_eq!(
-        binding_requests(&resolved),
+        binding_requests(&bound),
         vec![(
             identity(MEMBER),
             runtime_id(MEMBER, GENERATION),
@@ -222,12 +278,45 @@ fn local_member_revival_reemits_the_exact_runtime_binding_request() {
          tuple the machine already owns; a revived member with no placement is \
          refused by every placement-guarded consumer transition",
     );
+    assert_eq!(
+        feedback_verdicts(&bound),
+        vec![MemberWakeFeedbackVerdict::Applied]
+    );
+    assert_eq!(
+        authority
+            .state()
+            .member_wake_attempts
+            .get(&identity(MEMBER)),
+        Some(&attempt),
+        "the attempt stays open until readiness and topology settled",
+    );
+
+    // Step 2 (Ready): the attempt closes Live; the binding request belongs to
+    // the Bound step only.
+    let ready = authority
+        .apply_signal(MobMachineSignal::ResolveMemberRevivalSucceeded {
+            agent_identity: identity(MEMBER),
+            attempt,
+        })
+        .expect("a bound local wake resolves Live");
+    assert!(binding_requests(&ready).is_empty());
+    assert_eq!(
+        feedback_verdicts(&ready),
+        vec![MemberWakeFeedbackVerdict::Applied]
+    );
+    assert_eq!(
+        authority
+            .state()
+            .member_materialization
+            .get(&identity(MEMBER)),
+        Some(&MemberMaterializationPhase::Live),
+    );
     assert!(
         !authority
             .state()
-            .member_revival_pending
-            .contains(&identity(MEMBER)),
-        "a resolved revival clears the machine-owned obligation",
+            .member_wake_attempts
+            .contains_key(&identity(MEMBER)),
+        "a resolved revival closes the machine-owned attempt",
     );
     assert!(
         !authority
@@ -239,15 +328,16 @@ fn local_member_revival_reemits_the_exact_runtime_binding_request() {
 }
 
 #[test]
-fn revival_resolution_refuses_when_the_session_binding_is_gone() {
+fn an_open_wake_never_outlives_its_session_binding() {
     let mut authority = MobMachineAuthority::new();
     authorize_spawn_profile(&mut authority, MEMBER);
     apply_local_spawn_ladder(&mut authority, MEMBER);
     authorize_revival(&mut authority, MEMBER);
 
-    // The membership facts the emit reads can be mutated between authorization
-    // and resolution (a concurrent retirement/rebind releases the binding).
-    // Recovering that exact shape is the only way to reach the refusal.
+    // A retirement or rebind that releases the binding closes the attempt in
+    // the same transition, so the Bound step never has to name a missing
+    // tuple: a Waking member without a session binding is not a reachable,
+    // recoverable shape.
     let mut unbindable = authority.state().clone();
     assert!(
         unbindable
@@ -256,58 +346,68 @@ fn revival_resolution_refuses_when_the_session_binding_is_gone() {
             .is_some(),
         "the fixture must actually remove the session binding it is testing for",
     );
-    let mut authority = MobMachineAuthority::recover_from_state(unbindable)
-        .expect("a member without a session binding is a recoverable shape");
-
-    authority
-        .apply_signal(MobMachineSignal::ResolveMemberRevivalSucceeded {
-            agent_identity: identity(MEMBER),
-        })
-        .expect_err(
-            "a revival that cannot name the exact binding tuple must refuse: resolving \
-             it would clear the obligation and leave the member permanently unbindable, \
-             and emitting it would route a default-valued session id",
-        );
     assert!(
-        authority
-            .state()
-            .member_revival_pending
-            .contains(&identity(MEMBER)),
-        "a refused resolution must leave the obligation outstanding, so a later \
-         classification can re-authorize the attempt",
+        MobMachineAuthority::recover_from_state(unbindable).is_err(),
+        "a residency phase exists only for a session-bound member \
+         (materialization_domain_is_session_bound_membership)",
     );
 }
 
 #[test]
-fn revival_resolution_refuses_without_an_authorized_obligation() {
+fn feedback_without_an_open_attempt_is_a_typed_stale_no_op() {
     let mut authority = MobMachineAuthority::new();
     authorize_spawn_profile(&mut authority, MEMBER);
     apply_local_spawn_ladder(&mut authority, MEMBER);
+    let before = authority.state().clone();
 
-    authority
-        .apply_signal(MobMachineSignal::ResolveMemberRevivalSucceeded {
+    for signal in [
+        MobMachineSignal::ResolveMemberRevivalBound {
             agent_identity: identity(MEMBER),
-        })
-        .expect_err(
-            "resolution is only admissible against a machine-authorized revival \
-             obligation; an unsolicited resolution must never mint a binding request",
+            attempt: 1,
+        },
+        MobMachineSignal::ResolveMemberRevivalSucceeded {
+            agent_identity: identity(MEMBER),
+            attempt: 1,
+        },
+    ] {
+        let stale = authority
+            .apply_signal(signal)
+            .expect("late or unsolicited wake feedback is a total machine verdict");
+        assert!(
+            binding_requests(&stale).is_empty(),
+            "feedback for an attempt the machine never opened must never mint a binding request",
         );
+        assert_eq!(
+            feedback_verdicts(&stale),
+            vec![MemberWakeFeedbackVerdict::StaleAttempt]
+        );
+        assert_eq!(
+            authority.state(),
+            &before,
+            "a stale verdict changes nothing"
+        );
+    }
 }
 
-fn recreation_completed() -> MobMachineSignal {
+fn recreation_completed(attempt: u64) -> MobMachineSignal {
     MobMachineSignal::ResolveRecreatedMemberSessionSucceeded {
         agent_identity: identity(MEMBER),
         agent_runtime_id: runtime_id(MEMBER, GENERATION),
         fence_token: FenceToken(FENCE),
         generation: Generation(GENERATION),
         bridge_session_id: session_id("recreated-session"),
+        attempt,
     }
 }
 
-fn recreated_member_authority() -> MobMachineAuthority {
+/// A wake whose nonpersistent session was recreated: the drift arm opened the
+/// attempt, then the fresh session's binding was recovered (the recovery arm
+/// preserves the residency phase).
+fn recreated_member_authority() -> (MobMachineAuthority, u64) {
     let mut authority = MobMachineAuthority::new();
     authorize_spawn_profile(&mut authority, MEMBER);
     apply_local_spawn_ladder(&mut authority, MEMBER);
+    let attempt = authorize_revival(&mut authority, MEMBER);
     authority
         .apply_signal(MobMachineSignal::RecoverMemberSessionBinding {
             agent_identity: identity(MEMBER),
@@ -316,44 +416,64 @@ fn recreated_member_authority() -> MobMachineAuthority {
             replacing: Some(session_id(BRIDGE_SESSION)),
         })
         .expect("fresh recreation recovers the new session binding first");
-    authority
+    assert_eq!(
+        authority
+            .state()
+            .member_materialization
+            .get(&identity(MEMBER)),
+        Some(&MemberMaterializationPhase::Waking),
+        "recovering the recreated session's binding never overwrites the phase",
+    );
+    (authority, attempt)
+}
+
+fn recreated_binding_request() -> Vec<(
+    AgentIdentity,
+    AgentRuntimeId,
+    FenceToken,
+    Option<Generation>,
+    SessionId,
+)> {
+    vec![(
+        identity(MEMBER),
+        runtime_id(MEMBER, GENERATION),
+        FenceToken(FENCE),
+        Some(Generation(GENERATION)),
+        session_id("recreated-session"),
+    )]
 }
 
 #[test]
 fn recreated_member_completion_emits_only_its_exact_current_binding() {
-    let mut authority = recreated_member_authority();
-    let before = authority.state().clone();
-    for _ in 0..2 {
-        let transition = authority
-            .apply_signal(recreation_completed())
-            .expect("an exact successful recreation is idempotent");
-        assert_eq!(transition.effects().len(), 1);
+    let (mut authority, attempt) = recreated_member_authority();
+    let first = authority
+        .apply_signal(recreation_completed(attempt))
+        .expect("an exact recreation is the wake's Bound step");
+    let bound = authority.state().clone();
+    assert!(bound.member_wake_bound.contains(&identity(MEMBER)));
+    assert_eq!(
+        bound.member_wake_attempts.get(&identity(MEMBER)),
+        Some(&attempt),
+        "the attempt stays open until ResolveMemberRevivalSucceeded closes it Live",
+    );
+    let again = authority
+        .apply_signal(recreation_completed(attempt))
+        .expect("an exact successful recreation is idempotent");
+    for transition in [&first, &again] {
+        assert_eq!(binding_requests(transition), recreated_binding_request());
         assert_eq!(
-            binding_requests(&transition),
-            vec![(
-                identity(MEMBER),
-                runtime_id(MEMBER, GENERATION),
-                FenceToken(FENCE),
-                Some(Generation(GENERATION)),
-                session_id("recreated-session"),
-            )],
+            feedback_verdicts(transition),
+            vec![MemberWakeFeedbackVerdict::Applied]
         );
-        assert_eq!(authority.state(), &before);
     }
+    assert_eq!(authority.state(), &bound);
 }
 
 #[test]
 fn recreated_member_completion_refuses_stale_receipt_fields_without_effects() {
-    let before = recreated_member_authority().state().clone();
+    let (baseline, attempt) = recreated_member_authority();
+    let before = baseline.state().clone();
     for (label, member, runtime, fence, generation, session) in [
-        (
-            "identity",
-            "other-member",
-            MEMBER,
-            FENCE,
-            GENERATION,
-            "recreated-session",
-        ),
         (
             "runtime",
             MEMBER,
@@ -389,6 +509,7 @@ fn recreated_member_completion_refuses_stale_receipt_fields_without_effects() {
                 fence_token: FenceToken(fence),
                 generation: Generation(generation),
                 bridge_session_id: session_id(session),
+                attempt,
             })
             .unwrap_err();
         assert_eq!(
@@ -397,18 +518,42 @@ fn recreated_member_completion_refuses_stale_receipt_fields_without_effects() {
             "stale {label} changed authority"
         );
     }
+
+    // Another identity has no open attempt: its feedback is the typed Stale
+    // verdict, never a binding request.
+    let mut authority =
+        MobMachineAuthority::recover_from_state(before.clone()).expect("recover exact baseline");
+    let stale = authority
+        .apply_signal(MobMachineSignal::ResolveRecreatedMemberSessionSucceeded {
+            agent_identity: identity("other-member"),
+            agent_runtime_id: runtime_id(MEMBER, GENERATION),
+            fence_token: FenceToken(FENCE),
+            generation: Generation(GENERATION),
+            bridge_session_id: session_id("recreated-session"),
+            attempt,
+        })
+        .expect("feedback for an identity with no open attempt is a total verdict");
+    assert!(binding_requests(&stale).is_empty());
+    assert_eq!(
+        feedback_verdicts(&stale),
+        vec![MemberWakeFeedbackVerdict::StaleAttempt]
+    );
+    assert_eq!(
+        authority.state(),
+        &before,
+        "stale identity changed authority"
+    );
 }
 
 #[test]
 fn recreated_member_completion_refuses_obsolete_authority_without_effects() {
-    let baseline = recreated_member_authority().state().clone();
+    let (baseline, attempt) = recreated_member_authority();
+    let baseline = baseline.state().clone();
     type AuthorityMutation = fn(&mut MobMachineState);
-    let cases: &[(&str, AuthorityMutation)] = &[
-        ("stopped", |state| {
-            state.lifecycle_phase = MobPhase::Stopped;
-            // A Stopped mob holds member run starts (machine invariant).
-            state.member_run_starts_held = true;
-        }),
+
+    // The attempt is still open, but the incarnation it names is no longer
+    // the exact current, live, unquiesced one: refused, nothing changes.
+    let refused: &[(&str, AuthorityMutation)] = &[
         ("quiescing", |state| {
             state.placed_completion_lifecycle_quiescing = true;
             state.placed_completion_lifecycle_intent =
@@ -418,11 +563,6 @@ fn recreated_member_completion_refuses_obsolete_authority_without_effects() {
             state
                 .live_runtime_ids
                 .remove(&runtime_id(MEMBER, GENERATION));
-        }),
-        ("retiring", |state| {
-            state
-                .member_state_markers
-                .insert(runtime_id(MEMBER, GENERATION), MobMemberState::Retiring);
         }),
         ("retirement pending", |state| {
             state.runtime_retire_pending_sessions.insert(
@@ -435,9 +575,6 @@ fn recreated_member_completion_refuses_obsolete_authority_without_effects() {
                 .member_session_bindings
                 .insert(identity(MEMBER), session_id("successor"));
         }),
-        ("session absent", |state| {
-            state.member_session_bindings.remove(&identity(MEMBER));
-        }),
         ("runtime fence absent", |state| {
             state
                 .runtime_fence_tokens
@@ -448,39 +585,103 @@ fn recreated_member_completion_refuses_obsolete_authority_without_effects() {
                 .runtime_fence_tokens
                 .insert(runtime_id(MEMBER, GENERATION), FenceToken(FENCE + 1));
         }),
-        ("broken", |state| {
-            state
-                .member_restore_failures
-                .insert(identity(MEMBER), "restore failed".into());
-        }),
-        ("revival pending", |state| {
-            state.member_revival_pending.insert(identity(MEMBER));
-        }),
-        ("explicit resume pending", |state| {
-            state.explicit_resume_member_work.insert(
-                identity(MEMBER),
-                ResumeMemberBinding {
-                    agent_runtime_id: runtime_id(MEMBER, GENERATION),
-                    fence_token: FenceToken(FENCE),
-                    session_id: session_id("recreated-session"),
-                    definition_epoch: 0,
-                },
-            );
-        }),
     ];
-    for &(label, mutate) in cases {
+    for &(label, mutate) in refused {
         let mut before = baseline.clone();
         mutate(&mut before);
         let mut authority = MobMachineAuthority::recover_from_state(before.clone())
             .unwrap_or_else(|error| panic!("{label} fixture must recover: {error}"));
-        authority.apply_signal(recreation_completed()).unwrap_err();
+        authority
+            .apply_signal(recreation_completed(attempt))
+            .unwrap_err();
         assert_eq!(authority.state(), &before, "{label} changed authority");
     }
+
+    // The competing transition already closed the attempt (a Stop moves the
+    // member to Dormant, a retirement start or a Broken verdict removes its
+    // phase, a newer attempt supersedes it): the late completion is the typed
+    // Stale verdict, with no binding request and no state change.
+    let closed: &[(&str, AuthorityMutation)] = &[
+        ("stopped", |state| {
+            state.lifecycle_phase = MobPhase::Stopped;
+            // A Stopped mob holds member run starts (machine invariant).
+            state.member_run_starts_held = true;
+            state
+                .member_materialization
+                .insert(identity(MEMBER), MemberMaterializationPhase::Dormant);
+            state.member_wake_attempts.remove(&identity(MEMBER));
+            state.member_wake_bound.remove(&identity(MEMBER));
+        }),
+        ("retiring", |state| {
+            state
+                .member_state_markers
+                .insert(runtime_id(MEMBER, GENERATION), MobMemberState::Retiring);
+            state.member_materialization.remove(&identity(MEMBER));
+            state.member_wake_attempts.remove(&identity(MEMBER));
+            state.member_wake_bound.remove(&identity(MEMBER));
+        }),
+        ("broken", |state| {
+            state
+                .member_restore_failures
+                .insert(identity(MEMBER), "restore failed".into());
+            state.member_materialization.remove(&identity(MEMBER));
+            state.member_wake_attempts.remove(&identity(MEMBER));
+            state.member_wake_bound.remove(&identity(MEMBER));
+        }),
+        ("superseded", |state| {
+            state.member_wake_attempt_sequence += 1;
+            let newer = state.member_wake_attempt_sequence;
+            state.member_wake_attempts.insert(identity(MEMBER), newer);
+        }),
+    ];
+    for &(label, mutate) in closed {
+        let mut before = baseline.clone();
+        mutate(&mut before);
+        let mut authority = MobMachineAuthority::recover_from_state(before.clone())
+            .unwrap_or_else(|error| panic!("{label} fixture must recover: {error}"));
+        let stale = authority
+            .apply_signal(recreation_completed(attempt))
+            .unwrap_or_else(|error| panic!("{label}: late feedback is a total verdict: {error}"));
+        assert!(
+            binding_requests(&stale).is_empty(),
+            "{label} minted a binding"
+        );
+        assert_eq!(
+            feedback_verdicts(&stale),
+            vec![MemberWakeFeedbackVerdict::StaleAttempt],
+            "{label}"
+        );
+        assert_eq!(authority.state(), &before, "{label} changed authority");
+    }
+
+    // A Waking member without a session binding is not a recoverable shape.
+    let mut unbound = baseline.clone();
+    unbound.member_session_bindings.remove(&identity(MEMBER));
+    assert!(MobMachineAuthority::recover_from_state(unbound).is_err());
+
+    // An explicit resume reserves the member through this same attempt (it
+    // joined or opened it), so the recreation completes its Bound step.
+    let mut resuming = baseline;
+    resuming.explicit_resume_member_work.insert(
+        identity(MEMBER),
+        ResumeMemberBinding {
+            agent_runtime_id: runtime_id(MEMBER, GENERATION),
+            fence_token: FenceToken(FENCE),
+            session_id: session_id("recreated-session"),
+            definition_epoch: 0,
+        },
+    );
+    let mut authority = MobMachineAuthority::recover_from_state(resuming)
+        .expect("an explicit resume over an open attempt is a recoverable shape");
+    let applied = authority
+        .apply_signal(recreation_completed(attempt))
+        .expect("the explicit resume's own attempt completes its Bound step");
+    assert_eq!(binding_requests(&applied), recreated_binding_request());
 }
 
 #[test]
 fn recreated_member_recovery_refuses_lifecycle_intent_without_quiescence() {
-    let mut state = recreated_member_authority().state().clone();
+    let mut state = recreated_member_authority().0.state().clone();
     assert!(!state.placed_completion_lifecycle_quiescing);
     state.placed_completion_lifecycle_intent = Some(PlacedCompletionLifecycleIntentKind::Stop);
     assert!(

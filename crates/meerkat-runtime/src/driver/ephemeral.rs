@@ -1333,6 +1333,7 @@ impl EphemeralRuntimeDriver {
                     generation: active_runtime_generation,
                     runtime_epoch_id: active_runtime_epoch_id,
                     session_id,
+                    residency_owner: crate::meerkat_machine::dsl::SessionResidencyOwner::Session,
                 },
             )
             .map_err(|err| {
@@ -1505,18 +1506,39 @@ impl EphemeralRuntimeDriver {
 
     /// A governed input is admitted only for the scoped destination this
     /// session document currently serves, when one is bound.
+    ///
+    /// A resume of retained work names its original's destination. When the
+    /// document has since bound a later generation of that same destination,
+    /// the resume can never be admitted here (a document's generations only
+    /// advance): it is refused for good, so the delivery carrying it settles
+    /// instead of retrying forever. Every other mismatch stays retryable. The
+    /// runtime reads the same rule before it asks any owner
+    /// (`scoped_destination_superseded`); this is its check under custody.
     fn check_scoped_context(&self, input: &Input) -> Result<(), RuntimeDriverError> {
-        let (current, ever_bound) = self.with_dsl_state(|state| {
-            (
-                state.scoped_context_binding.clone(),
-                state.scoped_context_generation > 0 || state.scoped_context_required,
-            )
-        });
+        let (current, current_scope, current_generation, ever_bound) =
+            self.with_dsl_state(|state| {
+                (
+                    state.scoped_context_binding.clone(),
+                    state.scoped_context_scope.clone(),
+                    state.scoped_context_generation,
+                    state.scoped_context_generation > 0 || state.scoped_context_required,
+                )
+            });
         match (
             current,
             crate::input_authority::input_context_target(input)?,
         ) {
             (Some(current), Some(target)) if current != target => {
+                if crate::input_authority::retained_resume_destination_superseded(
+                    input,
+                    current_scope.as_deref(),
+                    current_generation,
+                )? {
+                    return Err(RuntimeDriverError::RetainedResumeRefused {
+                        reason:
+                            crate::retained_work::RetainedResumeRefusal::NoAdmissibleWorkBinding,
+                    });
+                }
                 Err(crate::input_authority::unavailable())
             }
             // A retired destination (or a required, not yet bound one) is
@@ -1526,6 +1548,31 @@ impl EphemeralRuntimeDriver {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Whether this session document has superseded the destination
+    /// `target`: it is bound, under `target`'s stable scope, at a generation
+    /// strictly newer than `target`'s
+    /// (`input_authority::destination_superseded`). Work naming `target` can
+    /// never be admitted here again. A retained resume reads it before any
+    /// owner is asked, so an owner that is not ready for that work (no
+    /// client for its controller any more) cannot keep it owed; admission
+    /// applies the same rule again (`check_scoped_context`).
+    pub(crate) fn scoped_destination_superseded(
+        &self,
+        target: &meerkat_authorization_contracts::work_association::NativeWorkTarget,
+    ) -> Result<bool, RuntimeDriverError> {
+        let (bound, scope, generation) = self.with_dsl_state(|state| {
+            (
+                state.scoped_context_binding.is_some(),
+                state.scoped_context_scope.clone(),
+                state.scoped_context_generation,
+            )
+        });
+        if !bound {
+            return Ok(false);
+        }
+        crate::input_authority::destination_superseded(target, scope.as_deref(), generation)
     }
 
     fn requires_scoped_destination(&self) -> bool {

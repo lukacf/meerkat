@@ -61,7 +61,7 @@ AuditPrefixLength == 6
 AuditPrefix ==
     \/ model_step_count = 0 /\ Initialize
     \/ model_step_count = 1 /\ RegisterSessionIdle(AuditSession, None, {})
-    \/ model_step_count = 2 /\ PrepareBindingsIdle(AuditRuntime, 1, Some(1), None, AuditSession)
+    \/ model_step_count = 2 /\ PrepareBindingsIdle(AuditRuntime, 1, Some(1), None, AuditSession, "Session")
     \/ model_step_count = 3 /\ ResolveLiveOpenAdmissionAcceptedAttached(AuditSession, AuditFirst, AuditIdentity, None)
     \/ model_step_count = 4 /\ ResolveLiveExecutionModeAdmissionAttached(AuditSession, AuditFirst, "profile_1", "FunctionBridge", TRUE, FALSE)
     \/ model_step_count = 5 /\ StageExperimentalLiveExecutionAttached(AuditSession, AuditFirst, AuditRuntime, 1, 1, 0, AuditPending(AuditFirst))

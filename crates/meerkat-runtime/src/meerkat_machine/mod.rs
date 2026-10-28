@@ -1216,6 +1216,10 @@ pub use scoped_retained_resume::{
     RetainedControllerOwner, RetainedInvocationOwner, ScopedRetainedResume,
 };
 mod agent_mandate;
+mod boot_obligations;
+pub use boot_obligations::{
+    RuntimeBootObligations, RuntimeRecoveryWork, RuntimeRecoveryWorkUnobserved,
+};
 pub mod composition;
 mod dispatch_control;
 mod dispatch_drain;
@@ -1324,6 +1328,35 @@ impl StagedSessionDslInput {
             .as_slice()
             .iter()
             .any(|effect| composition::lift_routed_signal(effect).is_some())
+    }
+
+    /// [`Self::has_routed_signal_effect`] without the registration release,
+    /// which the final unregister holds back and dispatches only once
+    /// its durable finalization committed.
+    fn has_routed_signal_effect_besides_registration_release(&self) -> bool {
+        self.effects.as_slice().iter().any(|effect| {
+            !matches!(
+                effect,
+                dsl::MeerkatMachineEffect::RuntimeRegistrationReleased { .. }
+            ) && composition::lift_routed_signal(effect).is_some()
+        })
+    }
+
+    /// The released registration's routed signal: every final
+    /// unregister publishes the exact runtime id, fence and epoch it released
+    /// to the owning mob.
+    fn registration_release_signals(&self) -> Vec<composition::MeerkatSeamSignal> {
+        self.effects
+            .as_slice()
+            .iter()
+            .filter(|effect| {
+                matches!(
+                    effect,
+                    dsl::MeerkatMachineEffect::RuntimeRegistrationReleased { .. }
+                )
+            })
+            .filter_map(composition::lift_routed_signal)
+            .collect()
     }
 }
 
@@ -2859,12 +2892,6 @@ pub enum EnsureRuntimeExecutorAttachment {
 static MACHINE_CLEANUP_RUNTIME: OnceLock<StdMutex<Option<crate::tokio::runtime::Runtime>>> =
     OnceLock::new();
 
-// Machine cleanup can restore and reduce the same generated DSL state as the
-// host runtime, so its worker runs on the same documented budget as every
-// host binary's workers (see `crate::host_stack`).
-#[cfg(not(target_arch = "wasm32"))]
-const MACHINE_CLEANUP_THREAD_STACK_SIZE: usize = crate::host_stack::HOST_WORKER_STACK_BUDGET;
-
 /// A durability-degradation caller must observe its canonical repair-blocked
 /// result even when a public custom interrupt handle never completes. The
 /// exact process-owned callback continues after this acknowledgement budget.
@@ -3226,12 +3253,21 @@ impl MachineCleanupTaskSpawner {
             });
         }
 
+        // Machine cleanup restores and reduces the same generated DSL state
+        // as the host runtime and runs session and mob work for the whole
+        // process, so its threads follow the host stack budget and its knobs
+        // (see `crate::host_stack`).
+        let stack_bytes = crate::host_stack::process_runtime_stack_bytes().map_err(|error| {
+            RuntimeDriverError::Internal(format!(
+                "failed to start machine cleanup runtime: {error}"
+            ))
+        })?;
         let candidate = crate::tokio::runtime::Builder::new_multi_thread()
             // Cleanup and ingress share this dispatcher. One owner's
             // synchronous poll must not monopolize every session's lane.
             .worker_threads(2)
             .thread_name("meerkat-machine-cleanup")
-            .thread_stack_size(MACHINE_CLEANUP_THREAD_STACK_SIZE)
+            .thread_stack_size(stack_bytes)
             .enable_all()
             .build()
             .map_err(|error| {
@@ -3787,6 +3823,42 @@ impl PreparedRuntimeExecutorAttachmentRetirement {
                 guard,
                 self.cleanup_spawner.clone(),
                 UnregisterDisposition::STOP,
+            );
+        self.armed = false;
+        Ok(completion)
+    }
+
+    /// [`Self::commit`], beginning the retirement's unregister with
+    /// `queued_inputs`, its disposition for the inputs queued on the
+    /// registration ([`UnregisterQueuedInputs`]). [`Self::commit`] ends them
+    /// as stopped; a requeue keeps the eligible ones durably queued for the
+    /// registration that replaces this one, as a graceful process shutdown
+    /// does. A retirement whose unregister already began keeps the
+    /// disposition it began with.
+    ///
+    /// # Errors
+    /// `QueuedInputsRefused` for a disposition [`UnregisterQueuedInputs::check`]
+    /// refuses: nothing is started, and the lease stays armed, so dropping it
+    /// retires the attachment as [`Self::commit`] does.
+    pub fn commit_with_queued_inputs(
+        mut self,
+        queued_inputs: UnregisterQueuedInputs,
+    ) -> Result<RuntimeExecutorAttachmentRetirementCompletion, RuntimeDriverError> {
+        let queued_inputs = queued_inputs
+            .recorded()
+            .map_err(RuntimeDriverError::QueuedInputsRefused)?;
+        let guard = self.mutation_guard.take().ok_or_else(|| {
+            RuntimeDriverError::Internal(
+                "prepared exact attachment retirement lost its mutation fence".to_string(),
+            )
+        })?;
+        let completion = self
+            .machine
+            .spawn_executor_attachment_retirement_with_guard(
+                self.witness.clone(),
+                guard,
+                self.cleanup_spawner.clone(),
+                queued_inputs,
             );
         self.armed = false;
         Ok(completion)
@@ -12008,6 +12080,19 @@ impl MeerkatMachine {
         self.lock_session_registration_transaction(session_id).await
     }
 
+    /// Hold `session_id`'s session mutation gate until the guard drops, as a
+    /// run's finalization holds it, so a test can stand work that takes the
+    /// gate behind it. `None` when the session is not registered.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn hold_session_mutation_gate_for_test(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<crate::tokio::sync::OwnedMutexGuard<()>> {
+        let gate = self.session_mutation_gate(session_id).await?;
+        Some(gate.lock_settled(SettledGateWait::TestFixture).await)
+    }
+
     #[cfg(test)]
     pub(crate) fn probe_next_session_registration_transaction_contention_for_test(
         &self,
@@ -13876,6 +13961,20 @@ impl MeerkatMachine {
             .composition_signal_dispatcher = Some(dispatcher);
     }
 
+    /// The exact registration's installed signal endpoint, for tests that
+    /// route a signal to its consumer the way the runtime does.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn session_composition_signal_dispatcher_for_test(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<composition::MeerkatCompositionSignalDispatcher> {
+        self.sessions
+            .read()
+            .await
+            .get(session_id)
+            .and_then(|entry| entry.composition_signal_dispatcher.clone())
+    }
+
     /// Apply a routed-input variant delivered by the `meerkat_mob_seam`
     /// composition dispatcher against the session's shared DSL authority.
     ///
@@ -13933,7 +14032,7 @@ impl MeerkatMachine {
         }
         // Actor materialization takes the generated authority before its
         // process claim even outside M. Keep the same order here.
-        let authority = entry
+        let mut authority = entry
             .dsl_authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -13997,11 +14096,108 @@ impl MeerkatMachine {
                     .into(),
             });
         }
+        // The composition takes its custody back through the machine: a
+        // recovered registration starts session-owned (residency is not
+        // persisted), and the composition's claim of the exact recovered
+        // binding marks it Composition-owned again, so an empty resume keeps
+        // the recovered member serving.
+        dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            dsl::MeerkatMachineInput::ClaimCompositionResidency {
+                session_id: dsl::SessionId::from_domain(session_id),
+                agent_runtime_id: runtime_id,
+                fence_token: fence,
+                generation,
+            },
+        )
+        .map_err(|error| RuntimeDriverError::StaleAuthority {
+            reason: format!(
+                "composition recovery could not claim the recovered registration's residency: {}",
+                dsl_authority::map_error(error, "ClaimCompositionResidency")
+            ),
+        })?;
         drop(authority);
         drop(claim);
         entry.composition_signal_dispatcher = Some(dispatcher);
         entry.composition_materialization_claim_id = None;
         Ok(true)
+    }
+
+    /// The operation registry of `session_id`'s registration when that
+    /// registration already serves exactly one member binding, read without
+    /// waiting on anything a run holds.
+    ///
+    /// `Some` only while the full binding restore (local session bindings,
+    /// then [`Self::recover_composition_signal_dispatcher`]) would leave the
+    /// registration as it is: an executor attached and live under an Active
+    /// registration that is durability ready; no unregister, stop cleanup or
+    /// predecessor settlement; no actor materialization claim in flight;
+    /// runtime bindings already issued; MeerkatMachine's active runtime
+    /// binding exactly `runtime_id`, `fence` and `generation`; and, when the
+    /// caller delivers composition signals, `dispatcher` already its open
+    /// composition endpoint. The attachment that adopted the registration
+    /// stamped its use, so a pending unregister of an earlier use cannot take
+    /// it over either.
+    ///
+    /// Read under the session map's read lock and the entry's synchronous
+    /// locks alone: it never takes the session mutation gate, the driver or
+    /// the registration transaction, so a run in flight (whose finalization
+    /// holds the gate) never holds it up. `None` otherwise; the caller then
+    /// takes the full restore.
+    pub async fn serving_member_binding_ops_registry(
+        &self,
+        session_id: &SessionId,
+        runtime_id: &dsl::AgentRuntimeId,
+        fence: dsl::FenceToken,
+        generation: Option<dsl::Generation>,
+        dispatcher: Option<&composition::MeerkatCompositionSignalDispatcher>,
+    ) -> Option<Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions.get(session_id)?;
+        if entry.require_durability_ready().is_err()
+            || entry
+                .registration_blocked_by_unregister(session_id)
+                .is_some()
+            || !entry.generated_executor_registration_active()
+            || !entry.attachment_is_live()
+            || entry.canonical_runtime_bindings.is_none()
+        {
+            return None;
+        }
+        {
+            let authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = authority.state();
+            if state.active_runtime_id.as_ref() != Some(runtime_id)
+                || state.active_fence_token != Some(fence)
+                || state.active_runtime_generation != generation
+            {
+                return None;
+            }
+        }
+        {
+            let claim = entry
+                .materialization_claim_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !matches!(
+                claim.phase,
+                crate::RuntimeActorMaterializationClaimPhase::Vacant
+                    | crate::RuntimeActorMaterializationClaimPhase::RetainedActor
+            ) {
+                return None;
+            }
+        }
+        if let Some(dispatcher) = dispatcher {
+            let current = entry.composition_signal_dispatcher.as_ref()?;
+            if !Arc::ptr_eq(current, dispatcher) || dispatcher.transport_is_closed() != Some(false)
+            {
+                return None;
+            }
+        }
+        Some(Arc::clone(&entry.ops_lifecycle))
     }
 
     pub(crate) async fn apply_routed_meerkat_input_with_signal_dispatcher(

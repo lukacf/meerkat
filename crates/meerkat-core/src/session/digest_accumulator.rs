@@ -323,7 +323,11 @@ impl TranscriptDigestAccumulator {
     /// by that prefix changed. Dropping the scope without calling this — an
     /// early `?` return — leaves the accumulator invalidated, which is the
     /// fail-safe direction.
-    fn finish_in_place_scan(&mut self, lowest_mutated_index: Option<usize>) {
+    ///
+    /// Returns whether a mutation dropped a lineage that was only the lazy
+    /// WholeBlob mark (no installed prefix); the caller re-marks it at the
+    /// post-scan length.
+    fn finish_in_place_scan(&mut self, lowest_mutated_index: Option<usize>) -> bool {
         let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
         let Some(parked) = state.parked.take() else {
             if lowest_mutated_index.is_some() {
@@ -335,9 +339,13 @@ impl TranscriptDigestAccumulator {
                 state.lazy_exact_row_current_count = None;
                 state.epoch = state.epoch.saturating_add(1);
             }
-            return;
+            return false;
         };
         if let Some(lowest_mutated_index) = lowest_mutated_index {
+            let lazy_whole_blob_lineage = parked.lazy_exact_row_current_count.is_some()
+                && parked.exact_row_anchor.is_none()
+                && parked.exact_row_committed.is_none()
+                && parked.exact_row_current.is_none();
             state.exact_row_anchor = parked.exact_row_anchor.filter(|anchor| {
                 u64::try_from(lowest_mutated_index).is_ok_and(|index| index >= anchor.row_count())
             });
@@ -346,7 +354,7 @@ impl TranscriptDigestAccumulator {
                     .is_ok_and(|index| index >= committed.row_count())
             });
             state.epoch = state.epoch.saturating_add(1);
-            return;
+            return lazy_whole_blob_lineage;
         }
         state.stream_a = parked.stream_a;
         state.boundaries = parked.boundaries;
@@ -354,6 +362,7 @@ impl TranscriptDigestAccumulator {
         state.exact_row_committed = parked.exact_row_committed;
         state.exact_row_current = parked.exact_row_current;
         state.lazy_exact_row_current_count = parked.lazy_exact_row_current_count;
+        false
     }
 
     /// Re-derive the live-current lineage after a known-index mutation kept an
@@ -756,11 +765,18 @@ impl TranscriptMessages {
 
     /// Resolve a parked in-place scan with the lowest mutated message index
     /// (`None` = the scan changed nothing, so the witness stays valid).
+    ///
+    /// A mutation keeps a lineage that was only the lazy WholeBlob mark: a
+    /// WholeBlob document is re-serialized whole, scanned rows included, so
+    /// the mark is set again at the post-scan length.
     pub(crate) fn finish_in_place_scan(&mut self, lowest_mutated_index: Option<usize>) {
-        self.accumulator.finish_in_place_scan(lowest_mutated_index);
+        let lazy_whole_blob_lineage = self.accumulator.finish_in_place_scan(lowest_mutated_index);
         if lowest_mutated_index.is_some() {
             self.accumulator
                 .rebuild_exact_row_current_from_retained_prefix(&self.messages);
+        }
+        if lazy_whole_blob_lineage {
+            self.mark_lazy_whole_blob_row_lineage();
         }
     }
 

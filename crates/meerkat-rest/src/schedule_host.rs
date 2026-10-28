@@ -59,6 +59,33 @@ impl RestScheduleContext {
     ) -> Result<(), ScheduleDomainError> {
         self.ensure_session_target_exists(session_id).await?;
 
+        // A scheduled delivery to a dormant mob member's session wakes the
+        // member through its owner, as a host delivery does, instead of
+        // registering this host's own executor for a session the mob owns.
+        if !self
+            .runtime
+            .runtime_adapter
+            .contains_session(session_id)
+            .await
+            && let Some(Err(error)) =
+                meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+                    .wake(session_id)
+                    .await
+        {
+            // A retryable refusal (`SessionError::Busy`) admitted nothing: the
+            // occurrence stays reclaimable and is redriven with the same
+            // identity. A final one fails the delivery.
+            let detail =
+                format!("the member owning session {session_id} could not be woken: {error}");
+            return Err(
+                if matches!(error, meerkat_core::service::SessionError::Busy { .. }) {
+                    ScheduleDomainError::DeliveryRepairDeferred { detail }
+                } else {
+                    ScheduleDomainError::Internal(detail)
+                },
+            );
+        }
+
         let executor = Box::new(RestSessionRuntimeExecutor::new(
             self.runtime.clone(),
             session_id.clone(),

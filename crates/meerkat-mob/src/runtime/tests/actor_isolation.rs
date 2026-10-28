@@ -34,6 +34,8 @@ mod crash_restart_lease_reclaim;
 mod degraded_retirement;
 #[path = "degraded_shutdown.rs"]
 mod degraded_shutdown;
+#[path = "lift_post_commit_rows.rs"]
+mod lift_post_commit_rows;
 #[path = "reload_lane.rs"]
 mod reload_lane;
 #[path = "run_start_staging.rs"]
@@ -359,6 +361,14 @@ impl FaultInjectingRuntimeStore {
 impl RuntimeStore for FaultInjectingRuntimeStore {
     fn session_authority_ops(&self) -> &dyn meerkat_runtime::store::RuntimeSessionAuthorityOps {
         self.inner.session_authority_ops()
+    }
+
+    // A mob boot over this store plans its members from the wrapped store's
+    // obligation scan, as over the store itself.
+    async fn list_runtimes_with_recovery_work(
+        &self,
+    ) -> Result<Vec<LogicalRuntimeId>, meerkat_runtime::store::RuntimeStoreError> {
+        self.inner.list_runtimes_with_recovery_work().await
     }
 
     fn session_persistence_profile(
@@ -1433,9 +1443,20 @@ async fn resume_readiness_fanout_keeps_the_loop_responsive() {
     const READINESS_LATENCY: Duration = Duration::from_millis(500);
     let mob = create_isolation_mob(17).await;
     mob.handle.stop().await.expect("stop mob");
+    // The Stop closes the live members' peer ingress at the loop boundary
+    // after its reply: one comms read per member, on the loop. One actor
+    // round trip lets that boundary finish first, so none of the slow reads
+    // armed below is spent on it.
+    assert_eq!(
+        mob.handle.status().await.expect("phase after the stop"),
+        MobState::Stopped
+    );
     // Exactly the 17 pre-commit readiness reads are slow. The post-commit
-    // topology reconciliation still runs inline (a #1102 follow-on), so it
-    // must not inherit the latency or the progress watchdog trips on it.
+    // work still runs inline: the topology reconciliation (a #1102
+    // follow-on) and the reopening of the members' peer ingress the
+    // durable Resume emits (one comms read per member). Both come after the
+    // readiness fan-out, so they must not inherit the latency or the
+    // progress watchdog trips on it.
     mob.service.set_comms_runtime_delay_for_next_calls(
         17,
         u64::try_from(READINESS_LATENCY.as_millis()).expect("latency fits"),
@@ -1496,12 +1517,15 @@ async fn reconstructed_stopped_resume_preparation_keeps_query_phase_responsive()
     }
     handle.stop().await.expect("stop original mob");
     crash_stop_and_release_routes(handle).await;
+    // The row holds the members' attachment preparation at the lift, so the
+    // lift must restore every member.
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,
         runtime_metadata,
     ))
     .with_session_service(service.clone())
     .notify_orchestrator_on_resume(false)
+    .with_member_restore_policy(crate::runtime::MemberRestorePolicy::Eager)
     .resume()
     .await
     .expect("reconstruct stopped mob");
@@ -1525,6 +1549,10 @@ async fn reconstructed_stopped_resume_preparation_keeps_query_phase_responsive()
     .await
     .expect("exact attachment preparation entered the held boundary");
 
+    // The earlier handle left every member's live session actor, so the
+    // explicit resume's seam retires each Dormant member's retained
+    // attachment before the durable Resume (`RetireRetained`): the held
+    // boundary is that takeover's, and the mob is still Stopped.
     let query = tokio::time::timeout(Duration::from_millis(250), resumed.status()).await;
     let replied_early = resume.is_finished();
     drop(held_gate);
@@ -1565,9 +1593,12 @@ async fn reconstructed_isolation_mob_with_definition(
     );
     mob.handle.stop().await.expect("stop original");
     crash_stop_and_release_routes(mob.handle).await;
+    // Every user holds or observes member construction at the lift, so the
+    // lift must restore every member.
     mob.handle = MobBuilder::for_resume(storage)
         .with_session_service(mob.service.clone())
         .notify_orchestrator_on_resume(false)
+        .with_member_restore_policy(crate::runtime::MemberRestorePolicy::Eager)
         .resume()
         .await
         .expect("reconstruct stopped actor");
@@ -1598,10 +1629,13 @@ async fn reconstructed_resume_preserves_the_exact_host_compaction_curator() {
     mob.handle.stop().await.expect("stop original");
     crash_stop_and_release_routes(mob.handle).await;
     let curator: Arc<dyn meerkat_core::CompactionCurator> = Arc::new(TestCompactionCurator);
+    // The row counts the member construction the lift performs, so the lift
+    // must restore the member.
     mob.handle = MobBuilder::for_resume(storage)
         .with_session_service(mob.service.clone())
         .with_spawn_member_customizer(Arc::new(CuratorCustomizer(Arc::clone(&curator))))
         .notify_orchestrator_on_resume(false)
+        .with_member_restore_policy(crate::runtime::MemberRestorePolicy::Eager)
         .resume()
         .await
         .expect("reconstruct stopped actor");
@@ -1630,11 +1664,25 @@ impl Drop for ReleaseConstructionGate {
     }
 }
 
+/// A reconstructed stopped mob of two mutually wired workers, whose explicit
+/// resume is held in its own topology phase.
+///
+/// The lift commits the durable Resume first (the mob is Running) and
+/// rebuilds the members its plan materializes through the explicit-resume
+/// work path (`boot_lift`): each member is Waking under the plan's attempt,
+/// reserved, provisioned off the actor and settled Live by its own
+/// readiness. No wake topology step runs for them: the resume restores their
+/// wiring in its post-commit topology phase once every member's work
+/// settled. Member 0's construction is held until member 1 is Live (its
+/// runtime is then the one the resume wires), member 1's runtime parks the
+/// mob's member-trust installs, and the construction is released: the
+/// resume's topology worker parks in its install on member 1's runtime.
 async fn held_reconstructed_resume_topology() -> (
     IsolationMob,
     tokio::task::JoinHandle<Result<(), MobError>>,
     ReleaseConstructionGate,
 ) {
+    use crate::machines::mob_machine as mob_dsl;
     let mut definition = turn_driven_definition();
     definition.wiring.role_wiring = vec![RoleWiringRule {
         a: ProfileName::from("worker"),
@@ -1659,16 +1707,24 @@ async fn held_reconstructed_resume_topology() -> (
         },
     )
     .await;
-    wait_until(
-        "other runtime available before topology",
-        Duration::from_secs(5),
-        || {
-            let service = Arc::clone(&mob.service);
-            let id = mob.session(1).clone();
-            async move { service.sessions.read().await.contains_key(&id) }
-        },
-    )
-    .await;
+    // Member 1's rebuild settles first: Live, its resume work settled. A
+    // runtime of member 1 left from before the restart is not the one the
+    // resume wires.
+    {
+        let member = mob_dsl::AgentIdentity::from_domain(mob.member(1));
+        let mut state = mob.handle.machine_state_watch_rx.clone();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            state.wait_for(|state| {
+                state.member_materialization.get(&member)
+                    == Some(&mob_dsl::MemberMaterializationPhase::Live)
+                    && !state.explicit_resume_member_work.contains_key(&member)
+            }),
+        )
+        .await
+        .expect("member 1's rebuild settles Live while member 0's construction is held")
+        .expect("the mob actor publishes its machine state");
+    }
     let runtime = mob
         .service
         .sessions
@@ -1676,7 +1732,7 @@ async fn held_reconstructed_resume_topology() -> (
         .await
         .get(mob.session(1))
         .cloned()
-        .expect("runtime");
+        .expect("member 1's live runtime");
     let gate = Arc::new(TestRuntimeControlBarrier::new());
     let release_topology = ReleaseConstructionGate(Arc::clone(&gate));
     // Park ONLY the resume topology worker's trust installs. The reconstructed
@@ -2368,6 +2424,14 @@ async fn full_member_lane_rejects_before_any_machine_transition() {
 async fn resume_survives_a_member_retired_during_the_readiness_fanout() {
     let mob = create_isolation_mob(17).await;
     mob.handle.stop().await.expect("stop mob");
+    // The Stop closes the live members' peer ingress at the loop boundary
+    // after its reply, one comms read per member on the loop. One actor
+    // round trip lets that boundary finish, so the slow reads armed below
+    // are the readiness fan-out's.
+    assert_eq!(
+        mob.handle.status().await.expect("phase after the stop"),
+        MobState::Stopped
+    );
     mob.service.set_comms_runtime_delay_for_next_calls(17, 500);
 
     let resume = {
@@ -2683,10 +2747,14 @@ async fn bounded_submit_timeout_does_not_cancel_inflight_admission_but_skips_par
     );
 }
 
-/// A member revival deferred by the mob's explicit resume
-/// (`LifecycleOperationPending { "explicit_resume member .." }`) settles on
-/// that operation's own typed completion: the member's explicit-resume work
-/// leaving the actor-published machine state. Nothing is timed.
+/// A member revival requested while the mob's explicit resume still owns
+/// that member's materialization waits for it and settles with it, on that
+/// operation's own typed completion: the member's explicit-resume work
+/// leaving the actor-published machine state. The lift commits the durable
+/// Resume first and realizes the member's plan attempt itself, through the
+/// explicit-resume work path (`boot_lift`); `ensure_member_live` joins that
+/// attempt in flight instead of answering. Nothing is timed but the window
+/// that proves the revival waits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revival_deferred_by_explicit_resume_settles_on_its_typed_completion() {
     use crate::machines::mob_machine as mob_dsl;
@@ -2703,22 +2771,33 @@ async fn a_revival_deferred_by_explicit_resume_settles_on_its_typed_completion()
     let member = mob.member(0).clone();
     let dsl_member = mob_dsl::AgentIdentity::from_domain(&member);
     let mut state = mob.handle.machine_state_watch_rx.clone();
-    state
-        .wait_for(|state| state.explicit_resume_member_work.contains_key(&dsl_member))
-        .await
-        .expect("the resume stages member zero's explicit-resume work");
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        state.wait_for(|state| state.explicit_resume_member_work.contains_key(&dsl_member)),
+    )
+    .await
+    .expect("the resume stages member zero's explicit-resume work in time")
+    .expect("the resume stages member zero's explicit-resume work");
 
-    // The held construction keeps the work pending: revival is deferred.
-    assert!(matches!(
-        mob.handle.ensure_member_live(&member).await,
-        Err(MobError::LifecycleOperationPending { intent })
-            if intent == format!("explicit_resume member {member}")
-    ));
+    // The held construction keeps the member's plan attempt, and with it the
+    // resume's work of the member, pending: the revival joins that attempt.
+    let mut revival = tokio::spawn({
+        let handle = mob.handle.clone();
+        let member = member.clone();
+        async move { handle.ensure_member_live(&member).await }
+    });
     let settled = tokio::spawn({
         let handle = mob.handle.clone();
         let member = member.clone();
         async move { handle.explicit_resume_member_work_settled(&member).await }
     });
+    // Must elapse: the revival waits for the held attempt instead of
+    // answering. A slow host only makes the wait longer.
+    let revived_early = tokio::time::timeout(Duration::from_millis(250), &mut revival).await;
+    assert!(
+        revived_early.is_err(),
+        "the revival waits for the attempt the resume owns: {revived_early:?}"
+    );
     assert!(
         mob.handle
             .machine_state_watch_rx
@@ -2730,7 +2809,10 @@ async fn a_revival_deferred_by_explicit_resume_settles_on_its_typed_completion()
 
     drop(release_construction);
     assert!(
-        settled.await.expect("settled waiter joins"),
+        tokio::time::timeout(Duration::from_secs(10), settled)
+            .await
+            .expect("the explicit-resume work settles once the construction is released")
+            .expect("settled waiter joins"),
         "the waiter completes when the explicit-resume work ends"
     );
     assert!(
@@ -2740,8 +2822,14 @@ async fn a_revival_deferred_by_explicit_resume_settles_on_its_typed_completion()
             .explicit_resume_member_work
             .contains_key(&dsl_member)
     );
-    resume
+    tokio::time::timeout(Duration::from_secs(10), revival)
         .await
+        .expect("the revival settles with the attempt it joined")
+        .expect("revival task joins")
+        .expect("the joined attempt made the member live");
+    tokio::time::timeout(Duration::from_secs(10), resume)
+        .await
+        .expect("resume settles once the construction is released")
         .expect("resume task joins")
         .expect("resume completes once the construction is released");
     // Level-triggered: a waiter that arrives after the operation ended

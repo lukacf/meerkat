@@ -243,6 +243,56 @@ impl std::fmt::Display for ApprovalLifecycleStatus {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum EnteredEffectPhase {
+    #[default]
+    #[serde(rename = "Open")]
+    Open,
+    #[serde(rename = "Closing")]
+    Closing,
+}
+impl EnteredEffectPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "Open",
+            Self::Closing => "Closing",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for EnteredEffectPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Open" => Ok(Self::Open),
+            "Closing" => Ok(Self::Closing),
+            other => Err(format!("invalid EnteredEffectPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for EnteredEffectPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for EnteredEffectPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum ReviewAttemptStatus {
     #[default]
     #[serde(rename = "Pending")]
@@ -442,6 +492,8 @@ pub struct State {
     pub review_ids: std::collections::BTreeSet<String>,
     pub review_statuses: std::collections::BTreeMap<String, ReviewAttemptStatus>,
     pub review_retirements: std::collections::BTreeMap<String, ReviewRetirementReason>,
+    pub review_entered_phase: std::collections::BTreeMap<String, EnteredEffectPhase>,
+    pub review_entered_steps: std::collections::BTreeMap<String, u64>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -549,6 +601,14 @@ pub mod inputs {
     pub struct ReleaseReview {
         pub review_id: String,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitEnteredStep {
+        pub review_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FinishEnteredStep {
+        pub review_id: String,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -569,6 +629,8 @@ pub enum Input {
     RetireReview(inputs::RetireReview),
     ConsumeReviewForEntry(inputs::ConsumeReviewForEntry),
     ReleaseReview(inputs::ReleaseReview),
+    AdmitEnteredStep(inputs::AdmitEnteredStep),
+    FinishEnteredStep(inputs::FinishEnteredStep),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -589,6 +651,8 @@ impl Input {
             Self::RetireReview(_) => InputKind::RetireReview,
             Self::ConsumeReviewForEntry(_) => InputKind::ConsumeReviewForEntry,
             Self::ReleaseReview(_) => InputKind::ReleaseReview,
+            Self::AdmitEnteredStep(_) => InputKind::AdmitEnteredStep,
+            Self::FinishEnteredStep(_) => InputKind::FinishEnteredStep,
         }
     }
 }
@@ -610,6 +674,8 @@ pub enum InputKind {
     RetireReview,
     ConsumeReviewForEntry,
     ReleaseReview,
+    AdmitEnteredStep,
+    FinishEnteredStep,
 }
 
 pub mod effects {
@@ -751,6 +817,19 @@ pub enum TransitionId {
     ReleaseReviewUnavailable,
     ReleaseReviewRetired,
     ReleaseReviewUsed,
+    AdmitEnteredStepRejectedMissing,
+    AdmitEnteredStepRejectedConsentLinked,
+    AdmitEnteredStepRejectedRetired,
+    AdmitEnteredStepRejectedNotEntered,
+    AdmitEnteredStep,
+    AdmitEnteredStepRejectedClosing,
+    ReleaseReviewUsedClosing,
+    ReleaseReviewRejectedClosing,
+    FinishEnteredStepRejectedMissing,
+    FinishEnteredStepRejectedNotInFlight,
+    FinishEnteredStepOpen,
+    FinishEnteredStepClosing,
+    FinishEnteredStepReleases,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -836,5 +915,7 @@ pub fn initial_state() -> State {
         review_ids: Default::default(),
         review_statuses: Default::default(),
         review_retirements: Default::default(),
+        review_entered_phase: Default::default(),
+        review_entered_steps: Default::default(),
     }
 }

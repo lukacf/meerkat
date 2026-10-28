@@ -907,14 +907,16 @@ fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
         .collect();
     assert_eq!(
         parts,
-        ["audits-a", "audits-b", "audits-c", "audits-d"],
+        [
+            "audits-a", "audits-b", "audits-c", "audits-d", "audits-e", "audits-f", "audits-g"
+        ],
         "every audit shard runs"
     );
     assert_eq!(
         job.get("timeout-minutes")
             .and_then(serde_json::Value::as_u64),
         Some(20),
-        "a TLC shard times out at 20 minutes, well over its expected 5-8"
+        "a TLC shard times out at 20 minutes, well over its expected 6-10"
     );
     let job_text = job_step_text(job);
     for required in [

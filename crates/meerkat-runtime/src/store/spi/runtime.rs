@@ -37,19 +37,23 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
+use futures::{StreamExt as _, TryStreamExt as _};
 use meerkat_core::host_store::ScopeKind;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 use tokio::sync::RwLock;
 
 use super::SpiError;
 use super::realm::{
-    ArmedScopes, ScopeDelta, ScopeFamily, ScopeGuard, ScopeId, ScopeState, SpiRealm,
+    ArmedScopes, ScopeCell, ScopeDelta, ScopeFamily, ScopeGuard, ScopeId, ScopeState, SpiRealm,
 };
 use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
 use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
 use crate::ops_lifecycle::PersistedOpsSnapshot;
 use crate::store::memory::journal::{self, TouchScope, Touches};
-use crate::store::memory::journal_image::{self, BOOT_FACTS_KEY, BootFactsV1, ScopeExport};
+use crate::store::memory::journal_image::{BOOT_FACTS_KEY, ScopeExport};
+use crate::store::recovery_obligation::{
+    BootFactsV1, boot_facts_predate_ops_fold, runtime_holds_recovery_work, runtime_is_archived,
+};
 use crate::store::{
     AuthOAuthFlowSnapshotUpdate, CommittedWholeBlobProvisionalTail, CommittedWholeBlobSnapshot,
     ContinuationAdmission, ContinuationAdmissionOutcome, ContinuationAdmissionTransition,
@@ -107,6 +111,15 @@ pub(crate) const MOB_HOST_REVOCATION_FAMILY: ScopeFamily = ScopeFamily {
 
 /// The single entry of a record scope.
 const RECORD_ENTRY: &str = "v";
+
+/// How many runtimes [`SpiRuntimeStore::open`] reads from the host at once:
+/// the head entries each runtime keeps as chunks, and the body of each
+/// runtime recovery must act on. It is 16, the default restore concurrency
+/// of a mob resume (meerkat-mob's `MobBuilder::with_resume_restore_concurrency`):
+/// the open runs before any mob is built, so it has a bound of its own. One
+/// runtime's reads stay in order: its rows 16 per `read_rows` call, then its
+/// chunks one after another.
+pub(crate) const BOOT_LOAD_CONCURRENCY: usize = 16;
 
 fn runtime_id_scope(runtime_id: &LogicalRuntimeId) -> ScopeId {
     ScopeId::new(RUNTIME_FAMILY, runtime_id.0.clone())
@@ -176,29 +189,54 @@ fn memory_error(error: RuntimeStoreError) -> SpiError {
     SpiError::Corrupt(error.to_string())
 }
 
-/// Whether a runtime's body loads at boot: recovery must act on it.
-/// An archived runtime never loads at boot.
-fn needs_body_at_boot(pinned: &BTreeMap<String, Arc<Vec<u8>>>) -> Result<bool, SpiError> {
-    if let Some(catalog) = pinned.get("cat") {
-        let entry: RuntimeSessionCatalogEntry = serde_json::from_slice(catalog)
-            .map_err(|error| SpiError::Corrupt(format!("catalog entry: {error}")))?;
-        if entry
-            .lifecycle_terminal()
-            .is_some_and(meerkat_core::SessionLifecycleTerminal::is_archived)
-        {
-            return Ok(false);
-        }
+/// Whether a runtime's pinned boot facts were written before the ops
+/// lifecycle's work was folded into them, for a runtime that is not
+/// archived ([`runtime_is_archived`] over its `cat` and `lc` entries): they
+/// may leave out an undelivered background completion or a running
+/// detached job wait, so the obligation scan lists the runtime as holding
+/// work (fail closed) until its next commit pins the folded form. A head
+/// without boot facts holds no rows at all, so it owes nothing.
+pub(super) fn head_predates_ops_fold(
+    pinned: &BTreeMap<String, Arc<Vec<u8>>>,
+) -> Result<bool, SpiError> {
+    let Some(facts) = pinned.get(BOOT_FACTS_KEY) else {
+        return Ok(false);
+    };
+    if !boot_facts_predate_ops_fold(facts) {
+        return Ok(false);
+    }
+    let catalog = pinned
+        .get("cat")
+        .map(|bytes| serde_json::from_slice::<RuntimeSessionCatalogEntry>(bytes))
+        .transpose()
+        .map_err(|error| SpiError::Corrupt(format!("catalog entry: {error}")))?;
+    let lifecycle = pinned.get("lc").map(|bytes| bytes.as_slice());
+    Ok(!runtime_is_archived(catalog.as_ref(), lifecycle))
+}
+
+/// Whether a runtime's body loads at boot: recovery must act on it, by the
+/// predicate the obligation scan asks
+/// (`runtime_has_recovery_obligation`) over its pinned entries. An archived
+/// runtime ([`runtime_is_archived`]: its `cat` entry carries the Archived
+/// terminal, or its `lc` entry names a Retired or Destroyed runtime) never
+/// loads at boot, and its boot facts are not read.
+pub(super) fn needs_body_at_boot(
+    pinned: &BTreeMap<String, Arc<Vec<u8>>>,
+) -> Result<bool, SpiError> {
+    let catalog = pinned
+        .get("cat")
+        .map(|bytes| serde_json::from_slice::<RuntimeSessionCatalogEntry>(bytes))
+        .transpose()
+        .map_err(|error| SpiError::Corrupt(format!("catalog entry: {error}")))?;
+    let lifecycle = pinned.get("lc").map(|bytes| bytes.as_slice());
+    if runtime_is_archived(catalog.as_ref(), lifecycle) {
+        return Ok(false);
     }
     let facts = match pinned.get(BOOT_FACTS_KEY) {
         Some(bytes) => BootFactsV1::decode(bytes).map_err(memory_error)?,
         None => BootFactsV1::default(),
     };
-    let lifecycle = pinned.get("lc").map(|bytes| bytes.as_slice());
-    Ok(facts.nonterminal
-        || facts.pending_owners
-        || facts.tail
-        || journal_image::lifecycle_has_current_run(lifecycle)
-        || (facts.inputs && lifecycle.is_none()))
+    Ok(runtime_holds_recovery_work(&facts, lifecycle))
 }
 
 /// The changes one scope's export makes: every whole group's entries, the
@@ -250,6 +288,12 @@ pub struct SpiRuntimeStore {
     /// The mob host records; a change lands here only after its batch did,
     /// on the task that committed it.
     mob_host: Arc<StdMutex<MobHostRecords>>,
+    /// Runtimes whose head, as the open found it, pins boot facts written
+    /// before the ops lifecycle's work was folded into them
+    /// ([`head_predates_ops_fold`]) and whose body is not loaded. The
+    /// obligation scan lists them as holding work until their body loads or
+    /// their next commit pins the folded form.
+    unfolded_heads: Arc<StdMutex<HashSet<String>>>,
 }
 
 impl std::fmt::Debug for SpiRuntimeStore {
@@ -274,10 +318,58 @@ fn find<'a>(guards: &'a mut [ScopeGuard], id: &ScopeId) -> Result<&'a mut ScopeS
         .ok_or_else(|| SpiError::Misuse(format!("{id} is not locked")))
 }
 
+/// What the open read of one runtime, nothing of it installed yet: its
+/// locked scope, its pinned entries, and its body when recovery must act on
+/// it.
+struct RuntimeAtBoot {
+    /// The runtime's place in the claim (key order), the order the open
+    /// installs the runtimes in.
+    index: usize,
+    state: ScopeGuard,
+    pinned: BTreeMap<String, Arc<Vec<u8>>>,
+    /// The body, loaded when recovery must act on the runtime.
+    body: Option<BTreeMap<String, Arc<Vec<u8>>>>,
+    /// Without a body: whether the head predates the ops fold
+    /// ([`head_predates_ops_fold`]).
+    unfolded: bool,
+}
+
+/// Read one runtime for the open: lock its scope, read its pinned entries
+/// (a chunked one from the host), and load its body when recovery must act
+/// on it. Nothing goes to memory and the scope is not marked loaded, so a
+/// read that fails or is dropped leaves the scope as the listing left it.
+/// The scope stays locked across the host reads, as every call's does; no
+/// read here waits for another lock while it holds it.
+async fn read_runtime_at_boot(
+    realm: &SpiRealm,
+    index: usize,
+    cell: Arc<ScopeCell>,
+) -> Result<RuntimeAtBoot, SpiError> {
+    let mut state = cell.lock_owned().await;
+    let pinned = realm.pinned_values(&state).await?;
+    let (body, unfolded) = if needs_body_at_boot(&pinned)? {
+        (Some(realm.load_body(&mut state).await?), false)
+    } else {
+        (None, head_predates_ops_fold(&pinned)?)
+    };
+    Ok(RuntimeAtBoot {
+        index,
+        state,
+        pinned,
+        body,
+        unfolded,
+    })
+}
+
 impl SpiRuntimeStore {
     /// Open the runtime store over a realm: claim its families, import every
     /// realm record and every runtime's pinned entries, and load the bodies
     /// recovery must act on. Every other body loads on first use.
+    ///
+    /// The runtimes are read from the host up to 16 at once (their head
+    /// entries kept as chunks, and the bodies recovery must act on); one
+    /// runtime's reads stay in order. Nothing is installed until every read
+    /// succeeded, so a failed read fails the open with no runtime installed.
     ///
     /// # Errors
     /// Host failures and data that does not decode.
@@ -317,21 +409,44 @@ impl SpiRuntimeStore {
                 }
             }
         }
-        for cell in realm.claim(RUNTIME_FAMILY)? {
-            let mut state = cell.lock().await;
+        let mut unfolded_heads = HashSet::new();
+        // The runtimes are read up to BOOT_LOAD_CONCURRENCY at once, each
+        // holding only its own scope's lock. Nothing is installed until every
+        // read succeeded: the first failure fails the open, with no runtime
+        // in memory and no scope marked loaded. The runtimes are then
+        // installed one by one in key order, as a serial open installed them.
+        let reader: &SpiRealm = &realm;
+        let reads = realm
+            .claim(RUNTIME_FAMILY)?
+            .into_iter()
+            .enumerate()
+            .map(move |(index, cell)| read_runtime_at_boot(reader, index, cell));
+        let mut runtimes: Vec<RuntimeAtBoot> = futures::stream::iter(reads)
+            .buffer_unordered(BOOT_LOAD_CONCURRENCY)
+            .try_collect()
+            .await?;
+        runtimes.sort_unstable_by_key(|runtime| runtime.index);
+        for RuntimeAtBoot {
+            mut state,
+            pinned,
+            body,
+            unfolded,
+            ..
+        } in runtimes
+        {
             let scope = TouchScope::Runtime(state.id().key.clone());
-            let pinned = realm.pinned_values(&state).await?;
             memory
                 .journal_import(&scope, &pinned)
                 .await
                 .map_err(memory_error)?;
-            if needs_body_at_boot(&pinned)? {
-                let body = realm.load_body(&mut state).await?;
+            if let Some(body) = body {
                 memory
                     .journal_import(&scope, &body)
                     .await
                     .map_err(memory_error)?;
                 state.mark_loaded();
+            } else if unfolded {
+                unfolded_heads.insert(state.id().key.clone());
             }
         }
         Ok(Self {
@@ -339,6 +454,7 @@ impl SpiRuntimeStore {
             memory,
             gate: Arc::new(RwLock::new(())),
             mob_host: Arc::new(StdMutex::new(records)),
+            unfolded_heads: Arc::new(StdMutex::new(unfolded_heads)),
         })
     }
 
@@ -410,6 +526,17 @@ impl SpiRuntimeStore {
             .commit_detached(deltas)
             .await
             .map_err(SpiError::into_write)?;
+        // Each committed runtime's head now pins its boot facts in the
+        // folded form: the scan reads them from memory again.
+        {
+            let mut unfolded = self
+                .unfolded_heads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for runtime_id in &runtimes {
+                unfolded.remove(runtime_id);
+            }
+        }
         // An archived runtime with nothing left for recovery leaves
         // memory once its archive is durable.
         for runtime_id in runtimes {
@@ -463,6 +590,15 @@ impl SpiRuntimeStore {
             return Err(memory_error(error));
         }
         state.mark_loaded();
+        // Memory now holds the runtime's full facts, its ops lifecycle
+        // snapshot among them: the scan reads them there instead of failing
+        // closed on its head.
+        if let TouchScope::Runtime(runtime_id) = &scope {
+            self.unfolded_heads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(runtime_id);
+        }
         Ok(())
     }
 
@@ -1072,6 +1208,48 @@ impl RuntimeStore for SpiRuntimeStore {
             <InMemoryRuntimeStore as RuntimeStore>::list_runtime_delivery_authorities(&self.memory),
         )
         .await
+    }
+
+    /// Answered from memory, with no host read, as a cross-scope read (no
+    /// commit in flight, refused while a scope is poisoned).
+    ///
+    /// The answer is complete. The open imported every runtime's pinned
+    /// entries, its catalog entry and its lifecycle among them, and loaded
+    /// the body of every runtime the same predicate named. Every later
+    /// change to a runtime is a call that loads its body before memory
+    /// changes. So memory holds the full facts of every runtime that had
+    /// recovery work at the open or changed since. A runtime whose body is
+    /// still on the host had no work at the open and has not changed since,
+    /// and from its pinned entries alone the predicate again answers that
+    /// it has none. The pinned facts carry the work an ops lifecycle
+    /// snapshot owes from the runtime's first commit that computed it. A
+    /// head committed before then may leave such work out, so its runtime
+    /// is listed as holding work (fail closed) until that commit: the open
+    /// recorded every such head it did not load.
+    async fn list_runtimes_with_recovery_work(
+        &self,
+    ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
+        let mut listed = self
+            .cross_scope_read(
+                <InMemoryRuntimeStore as RuntimeStore>::list_runtimes_with_recovery_work(
+                    &self.memory,
+                ),
+            )
+            .await?;
+        let unfolded = self
+            .unfolded_heads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let present: HashSet<String> = listed.iter().map(|runtime| runtime.0.clone()).collect();
+        let mut extra: Vec<LogicalRuntimeId> = unfolded
+            .into_iter()
+            .filter(|runtime| !present.contains(runtime))
+            .map(LogicalRuntimeId)
+            .collect();
+        extra.sort_by(|a, b| a.0.cmp(&b.0));
+        listed.extend(extra);
+        Ok(listed)
     }
 
     async fn list_runtime_delivery_records(

@@ -84,7 +84,12 @@ build cannot read; do not drive the identity).
 
 The reads are store reads: they never wait behind the mob actor, need
 `ControlScope::List` (`MobError::ScopeDenied` otherwise), and a failed read is
-an error, never an empty history. A storage composition without the built-in
+an error, never an empty history. A handle and its clones keep the fold
+between reads, so a read reads only the journal events appended since the
+previous one (with the identity intent rows, in one store transaction) instead
+of reading or decoding the whole journal: it costs those events plus the size
+of the history it answers (its members and sessions). A journal that a destroy
+cleared is read whole again. A storage composition without the built-in
 identity and member store refuses them with
 `MobStoreError::IdentityMemberAtomicPersistenceUnavailable`. Pruning never
 removes the events the history reads. Destroying the mob clears its journal,
@@ -96,6 +101,44 @@ read-only and never creates or migrates it. A missing file is
 `MemberBindingHistoryReadError::StoreMissing`, and a file that is not a mob
 store this build reads is `ForeignSchema`; a store that holds no mob answers
 an empty history.
+
+A binding can name a session no store holds yet. A seat, or a rotation's next
+life, builds nothing: the member's first wake creates its session under the id
+the seat named, so until then the session is unborn, not lost. The history's
+`session_unborn(session_id)` answers it, read from the journal rows the mob's
+own restart restores the fact from, and `MobHandle::session_unborn(session_id)`
+answers it on a running mob. A host that checks a stopped store for bindings
+whose sessions are missing leaves unborn sessions out. A member retired before
+its first wake leaves its session unborn. `MobHandle::member_history` of a
+member whose session is unborn answers an empty page and does not wake it.
+Core's reads by session id (RPC `session/history`, REST
+`GET /sessions/{id}/history`) answer not found for an unborn session, since no
+store holds it; a host that serves its own reads of member sessions by id
+checks `session_unborn` first. `session_bindings_since_reset()` lists the
+latest binding of each session named since the latest mob reset, so a host can
+tell whether an identity had a created session before its last binding: a
+member reset seats the next life on a new, unborn session, while the session
+of the life before it stays in that list.
+
+A seated member that is not materialized in this process (dormant, or waking
+while its wake runs) is not served yet: a dormant member has no session
+actor, and a waking one may or may not have one before its wake ends. A
+subscription to its agent events opens anyway, without waking it and with no
+command to the mob while it waits: `MobHandle::subscribe_agent_events`,
+`subscribe_agent_events_from`, `subscribe_agent_events_observation` and
+`subscribe_all_agent_events` attach the member's stream at its wake, from the
+woken actor's earliest retained event, so the run its next delivery starts is
+read from its first event (the subscription's `attached_epoch` is set at the
+attach, to the sequence space the woken actor's stream names). The mob event
+router (`subscribe_mob_events`) carries such a member from its wake, and a
+member released and woken again from its new actor. A member the machine holds
+live whose session actor is gone is refused `MobError::MemberSessionNotLive`.
+`MobHandle::member_unmaterialized(identity)` reads the residency fact from the
+published machine state, with no command and without waking the member, and
+stays true until the wake ends. The answer can be stale by the time the host
+acts on it, and the read is never a write path: only the machine's own
+transitions move a member's residency, and a host that needs a member live
+wakes it with a delivery or `ensure_member_live`.
 
 ### One-shot durable role migration
 

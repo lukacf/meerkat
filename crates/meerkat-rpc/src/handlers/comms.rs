@@ -61,6 +61,17 @@ pub(crate) fn normalize_send_error(
         meerkat_core::comms::SendError::DurableAdmissionRejected { envelope_id } => {
             CommsSendErrorData::peer_input_rejected(peer_name.unwrap_or("<unknown>"), *envelope_id)
         }
+        // A seated member that was not woken: typed, not delivered, never
+        // "not found".
+        meerkat_core::comms::SendError::PeerWakeRefused {
+            peer,
+            envelope_id,
+            refusal,
+        } => CommsSendErrorData::peer_wake_refused(
+            peer_name.unwrap_or(peer.as_str()),
+            *envelope_id,
+            refusal,
+        ),
         // Not a failed send: the envelope may already be delivered, and a
         // caller told "failed" retries, which can duplicate the delivery.
         meerkat_core::comms::SendError::AmbiguousDelivery {
@@ -362,6 +373,29 @@ mod tests {
         assert_eq!(json["code"], "peer_input_rejected");
         assert_eq!(json["peer"], "peer-a");
         assert_eq!(json["envelope_id"], envelope_id.to_string());
+    }
+
+    // A seated member whose wake was refused reaches the host as its own
+    // typed `peer_wake_refused`, carrying the closed refusal, never as
+    // `peer_not_found_or_not_trusted` or `send_failed`.
+    #[test]
+    fn normalize_send_error_types_a_refused_member_wake() {
+        let envelope_id = uuid::Uuid::new_v4();
+        let data = normalize_send_error(
+            Some("peer-a"),
+            &meerkat_core::comms::SendError::PeerWakeRefused {
+                peer: "peer-a".to_string(),
+                envelope_id,
+                refusal: meerkat_core::comms::PeerWakeRefusal::MobNotRunning,
+            },
+        );
+
+        let json = serde_json::to_value(data).unwrap();
+        assert_eq!(json["code"], "peer_wake_refused");
+        assert_eq!(json["peer"], "peer-a");
+        assert_eq!(json["envelope_id"], envelope_id.to_string());
+        assert_eq!(json["refusal"]["kind"], "mob_not_running");
+        assert_eq!(json["retryable"], true);
     }
 
     // A peer response addressed to a peer that did not send the request is

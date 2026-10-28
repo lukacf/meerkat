@@ -426,15 +426,17 @@ fn unregister_caller_wait_deadline() -> meerkat_core::time_compat::Instant {
     meerkat_core::time_compat::Instant::now() + UNREGISTER_CALLER_WAIT_GRACE
 }
 
-/// Outcome of the runtime loop's no-pending teardown prefix.
+/// Outcome of the runtime loop's empty-resume teardown prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuntimeLoopTeardownUnregisterAdmission {
+    /// MeerkatMachine's empty-resume verdict was `Retire`:
     /// `BeginUnregisterSession` was staged and its progress persisted; the
     /// loop must hand off its exact executor to the unregister saga.
     Began,
-    /// Admitted input was found queued under the mutation gate; nothing was
-    /// staged and the registration must keep serving.
-    QueuedWorkPresent,
+    /// MeerkatMachine's empty-resume verdict was `KeepServing` (admitted
+    /// input is queued, or the composition owns the registration's
+    /// residency): nothing was staged and the registration keeps serving.
+    KeepServing,
 }
 
 /// The work a gated `BeginUnregisterSession` prefix yields to. It is checked
@@ -445,9 +447,10 @@ pub(crate) enum RuntimeLoopTeardownUnregisterAdmission {
 enum BeginUnregisterYield {
     /// Teardown is required: stage regardless of retained work.
     Nothing,
-    /// The runtime loop's no-pending teardown: yield to admitted input
-    /// queued in any lane.
-    QueuedInput,
+    /// The runtime loop's empty-resume teardown: stage only on
+    /// MeerkatMachine's `Retire` verdict (`ResolveEmptyResumeRetirement`,
+    /// asked with whether admitted input is queued in any lane).
+    EmptyResumeVerdict,
 }
 
 /// What a quiescent close hands its owned unregister worker: the mutation
@@ -477,8 +480,9 @@ enum GatedBeginUnregister {
     /// `BeginUnregisterSession` committed (or the drain window was already
     /// open) and its progress was persisted.
     Began,
-    /// The work the prefix yields to is present; nothing was staged.
-    WorkPresent,
+    /// The empty-resume verdict kept the registration serving; nothing was
+    /// staged.
+    KeepServing,
 }
 
 /// Maximum time an explicit stop caller waits for the independently-owned
@@ -10997,16 +11001,21 @@ impl MeerkatMachine {
             .map(|_| ())
     }
 
-    /// Runtime-loop no-pending teardown prefix that yields to admitted input.
+    /// Runtime-loop empty-resume teardown prefix: a resume batch ended with
+    /// no pending boundary, and MeerkatMachine decides whether the
+    /// registration retires (`ResolveEmptyResumeRetirement`).
     ///
-    /// Under the session mutation gate, admitted-but-unstaged input in any
-    /// lane means the registration still has work to serve, so nothing is
-    /// staged and [`RuntimeLoopTeardownUnregisterAdmission::QueuedWorkPresent`]
-    /// is returned. The gate is what closes the race between the loop's
-    /// queue observation and this prefix: ingress admission takes the same
-    /// gate, so input cannot be admitted between the check and
-    /// `BeginUnregisterSession`.
-    pub(crate) async fn begin_unregister_from_runtime_loop_teardown_unless_queued(
+    /// Under the session mutation gate the shell observes whether admitted
+    /// input is queued in any lane and asks the verdict. `Retire` (nothing
+    /// queued, a session-owned registration) stages `BeginUnregisterSession`
+    /// as before. `KeepServing` (input queued, or a composition-owned
+    /// registration: a mob member stays loaded until its mob releases it)
+    /// stages nothing and returns
+    /// [`RuntimeLoopTeardownUnregisterAdmission::KeepServing`]. The gate is
+    /// what closes the race between the observation and this prefix:
+    /// ingress admission takes the same gate, so input cannot be admitted
+    /// between the verdict and `BeginUnregisterSession`.
+    pub(crate) async fn begin_unregister_from_runtime_loop_empty_resume(
         &self,
         session_id: &SessionId,
         driver: &SharedDriver,
@@ -11019,13 +11028,13 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
         driver: &SharedDriver,
-        yield_to_queued_input: bool,
+        empty_resume: bool,
     ) -> Result<RuntimeLoopTeardownUnregisterAdmission, RuntimeDriverError> {
         let gate_guard = self
             .lock_current_runtime_loop_driver_authority(session_id, driver)
             .await?;
-        let yield_to = if yield_to_queued_input {
-            BeginUnregisterYield::QueuedInput
+        let yield_to = if empty_resume {
+            BeginUnregisterYield::EmptyResumeVerdict
         } else {
             BeginUnregisterYield::Nothing
         };
@@ -11041,8 +11050,8 @@ impl MeerkatMachine {
             .await?
         {
             GatedBeginUnregister::Began => Ok(RuntimeLoopTeardownUnregisterAdmission::Began),
-            GatedBeginUnregister::WorkPresent => {
-                Ok(RuntimeLoopTeardownUnregisterAdmission::QueuedWorkPresent)
+            GatedBeginUnregister::KeepServing => {
+                Ok(RuntimeLoopTeardownUnregisterAdmission::KeepServing)
             }
         }
     }
@@ -11064,12 +11073,17 @@ impl MeerkatMachine {
         transition_context: &str,
         persist_context: &'static str,
     ) -> Result<GatedBeginUnregister, RuntimeDriverError> {
-        let work_present = match yield_to {
-            BeginUnregisterYield::Nothing => false,
-            BeginUnregisterYield::QueuedInput => driver.lock().await.has_queued_input_in_any_lane(),
-        };
-        if work_present {
-            return Ok(GatedBeginUnregister::WorkPresent);
+        if yield_to == BeginUnregisterYield::EmptyResumeVerdict {
+            let queued_input_present = driver.lock().await.has_queued_input_in_any_lane();
+            match self
+                .resolve_empty_resume_retirement(session_id, queued_input_present)
+                .await?
+            {
+                crate::meerkat_machine::dsl::EmptyResumeRetirementVerdict::KeepServing => {
+                    return Ok(GatedBeginUnregister::KeepServing);
+                }
+                crate::meerkat_machine::dsl::EmptyResumeRetirementVerdict::Retire => {}
+            }
         }
         match self
             .stage_begin_unregister_session_authority(session_id, UnregisterDisposition::STOP)
@@ -11095,6 +11109,46 @@ impl MeerkatMachine {
         }
         Self::persist_unregister_progress(driver, persist_context).await?;
         Ok(GatedBeginUnregister::Began)
+    }
+
+    /// MeerkatMachine's verdict for an empty resume
+    /// (`ResolveEmptyResumeRetirement`): `Retire` when nothing is queued and
+    /// the registration is session-owned, `KeepServing` when input is queued
+    /// or the composition owns the registration's residency. A pure verdict:
+    /// it changes no machine state. The caller holds the session mutation
+    /// gate, so the queued-input observation it passes stays true until it
+    /// acts on the verdict.
+    async fn resolve_empty_resume_retirement(
+        &self,
+        session_id: &SessionId,
+        queued_input_present: bool,
+    ) -> Result<crate::meerkat_machine::dsl::EmptyResumeRetirementVerdict, RuntimeDriverError> {
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ResolveEmptyResumeRetirement {
+                    queued_input_present,
+                },
+                "ResolveEmptyResumeRetirement",
+            )
+            .await
+            .map_err(RuntimeDriverError::Internal)?;
+        effects
+            .as_slice()
+            .iter()
+            .find_map(|effect| {
+                match effect {
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::EmptyResumeRetirementResolved {
+                    verdict,
+                } => Some(*verdict),
+                _ => None,
+            }
+            })
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "the empty-resume verdict of session {session_id} emitted no authority verdict"
+                ))
+            })
     }
 
     /// Whether the exact current registration's entry has an installed
@@ -12304,12 +12358,20 @@ ControlFlow::Break(()) => return Ok(()),
         })
         .await?;
         let expected_terminal_snapshot = staged.committed_snapshot.clone();
-        if staged.has_routed_signal_effect() {
-            // Final unregister currently has no cross-machine seam signal.
-            // Its dispatch-failure recovery may therefore restore the local
-            // Draining retry anchor. If the generated contract ever adds a
-            // routed effect, fail before dispatch and restore the staged local
-            // state; that future contract needs a non-rollback delivery saga.
+        // The final unregister publishes the released registration to the
+        // owning mob (`RuntimeRegistrationReleased`). That is a post-commit
+        // fact, never rolled back: it is held here, the staged commit below
+        // dispatches nothing, and it is sent only after the exact entry was
+        // removed, so a finalization that fails and restores Draining has told
+        // the mob nothing.
+        let registration_release_signals = staged.registration_release_signals();
+        if staged.has_routed_signal_effect_besides_registration_release() {
+            // Besides the release, the final unregister has no cross-machine
+            // seam signal. Its dispatch-failure recovery may therefore restore
+            // the local Draining retry anchor. If the generated contract ever
+            // adds another routed effect, fail before dispatch and restore the
+            // staged local state; that future contract needs a non-rollback
+            // delivery saga, as the release has.
             let previous_snapshot = staged.previous_snapshot.clone();
             crate::stack_relief::box_in_own_frame(|| {
                 self.restore_session_dsl_state(session_id, previous_snapshot)
@@ -12333,9 +12395,10 @@ ControlFlow::Break(()) => return Ok(()),
         .await
         {
             crate::stack_relief::box_in_own_frame(
-                || // Safe only because `has_routed_signal_effect` was rejected above
-            // before dispatch. No cross-machine observer can have seen this
-            // final transition while local authority is restored.
+                || // Safe only because every routed effect but the held release
+            // was rejected above before dispatch, and the release is sent only
+            // after the entry's removal. No cross-machine observer can have
+            // seen this final transition while local authority is restored.
             self.restore_session_dsl_state(session_id, unregister_rollback_snapshot.clone()),
             )
             .await;
@@ -12359,7 +12422,7 @@ ControlFlow::Break(()) => return Ok(()),
                 ))),
             };
         }
-        let expected_pending_finalization = {
+        let (expected_pending_finalization, registration_release_dispatcher) = {
             let sessions = crate::stack_relief::box_in_own_frame(|| self.sessions.read()).await;
             let entry = sessions.get(session_id).ok_or_else(|| {
                 RuntimeDriverError::Internal(format!(
@@ -12378,7 +12441,10 @@ ControlFlow::Break(()) => return Ok(()),
             {
                 return Ok(());
             }
-            entry.pending_unregister_finalization.clone()
+            (
+                entry.pending_unregister_finalization.clone(),
+                entry.composition_signal_dispatcher.clone(),
+            )
         };
         if self.store.is_some() && expected_pending_finalization.is_none() {
             return Err(RuntimeDriverError::Internal(format!(
@@ -12512,6 +12578,25 @@ ControlFlow::Break(()) => return Ok(()),
             )
         })
         .await?;
+        // The registration is gone; tell the owning mob, once. A failed
+        // send is not rolled back: the mob's member stays Live with nothing
+        // materialized until its next delivery observes the loss (the
+        // machine's counted drift arm), and a stale release is a no-op there.
+        if let Some(dispatcher) = registration_release_dispatcher.as_ref() {
+            for signal in registration_release_signals {
+                if let Err(error) = crate::stack_relief::box_in_own_frame(|| {
+                    composition::dispatch_routed_signal(dispatcher, signal)
+                })
+                .await
+                {
+                    tracing::warn!(
+                        %session_id,
+                        %error,
+                        "the released registration did not reach its mob"
+                    );
+                }
+            }
+        }
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized complete");
 Ok::<(), RuntimeDriverError>(())
 })

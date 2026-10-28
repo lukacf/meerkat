@@ -46,8 +46,13 @@ use meerkat_workgraph::{WorkAdmission, WorkGraphAdmissionFence, WorkGraphError, 
 pub enum HelperAdmissionRefusal {
     /// Not permitted now: another admission than the one the fence was bound
     /// to, the setup operation's current decision refused it or requires a
-    /// review this entry cannot carry, or a relevant original is cancelled,
-    /// no longer retained or does not allow the operation.
+    /// review this entry cannot carry (for an entered step, more review than
+    /// the dispatch entered), the admitting dispatch of an entered step
+    /// ended, or a relevant original is cancelled, no longer retained or
+    /// does not allow the operation. A refusal by a dispatch's review is
+    /// final for that dispatch only: a new call is reviewed anew. For an
+    /// entered step it speaks only for this admission: earlier steps keep
+    /// their effects.
     Denied,
     /// The owners cannot say now (contention, a refusal to rebuild after an
     /// owner change, clock or custody unavailable). The store operation did
@@ -145,6 +150,13 @@ enum FenceCheck {
         operation: meerkat_core::GovernedDispatchOperation,
         further: FurtherOriginals,
     },
+    /// A further step of a governed tool dispatch's entered operation,
+    /// checked by that dispatch's own retained work owners within the review
+    /// it entered; it spends nothing and runs no review.
+    Entered {
+        operation: meerkat_core::EnteredDispatchOperation,
+        further: FurtherOriginals,
+    },
 }
 
 impl GovernedHelperAdmissionFence {
@@ -234,6 +246,41 @@ impl GovernedHelperAdmissionFence {
         ))
     }
 
+    /// The fence for one admission of helper work as a further step of a
+    /// governed tool dispatch's entered operation
+    /// ([`meerkat_core::EnteredDispatchOperation`]): for a reviewed (R2 or
+    /// R3) call that spent its review at its first effect, or any call that
+    /// entered through the witness. At commit the step is checked by that
+    /// dispatch's own work owners as [`Self::from_dispatch`] describes, with
+    /// every original of the work and every one of `complete_contributors`
+    /// conjoined, under those owners' exclusion held through the commit,
+    /// except that the current decision may require the review the dispatch
+    /// entered, and no more. Nothing is spent, no review runs and no consent
+    /// is requested under the graph lock; the review owner admits the step
+    /// only while the admitting dispatch is live. One fence serves one
+    /// attempt, and the witness serves every step of the call.
+    pub fn from_entered(
+        entered: &meerkat_core::EnteredDispatchOperation,
+        originals: Arc<dyn AuthenticatedOriginalSource>,
+        complete_contributors: Arc<[RetainedOriginal]>,
+        realm_id: impl Into<String>,
+        namespace: WorkNamespace,
+        admission: WorkAdmission,
+    ) -> Arc<Self> {
+        Self::with_check(
+            FenceCheck::Entered {
+                operation: entered.clone(),
+                further: FurtherOriginals {
+                    originals: complete_contributors,
+                    source: Arc::new(SourceOriginalBasis::new(originals)),
+                },
+            },
+            realm_id.into(),
+            namespace,
+            admission,
+        )
+    }
+
     fn with_check(
         check: FenceCheck,
         realm_id: String,
@@ -253,6 +300,29 @@ impl GovernedHelperAdmissionFence {
     /// The typed reason this fence's one attempt refused, if it did.
     pub fn refusal(&self) -> Option<HelperAdmissionRefusal> {
         self.refusal.get().copied()
+    }
+
+    /// Run the store `operation` at most once inside `run` (a governed
+    /// dispatch's own check, held through it) and return its result
+    /// unchanged; a refusal met before it ran is typed by `refusal`.
+    fn commit_within(
+        &self,
+        run: impl FnOnce(&mut dyn FnMut()) -> Result<(), meerkat_core::ToolError>,
+        operation: Box<dyn FnOnce() -> Result<(), WorkGraphError> + '_>,
+        refusal: fn(&meerkat_core::ToolError) -> HelperAdmissionRefusal,
+    ) -> Result<(), WorkGraphError> {
+        let mut pending = Some(operation);
+        let mut result = None;
+        let checked = run(&mut || {
+            if let Some(operation) = pending.take() {
+                result = Some(operation());
+            }
+        });
+        match (checked, result) {
+            (_, Some(result)) => result,
+            (Err(error), None) => Err(self.refuse(refusal(&error))),
+            (Ok(()), None) => Err(self.refuse(HelperAdmissionRefusal::Unavailable)),
+        }
     }
 
     fn refuse(&self, refusal: HelperAdmissionRefusal) -> WorkGraphError {
@@ -328,7 +398,28 @@ fn refusal_of(error: OperationAuthorizationError) -> HelperAdmissionRefusal {
     }
 }
 
+/// A dispatch-path refusal: a denial, as on the prepared path, for a refused
+/// operation and for a review settlement final for the dispatch (a review
+/// this entry cannot carry: an R2 or R3 decision refuses here, since no
+/// review runs under the graph lock); otherwise unavailable.
 fn tool_refusal_of(error: &meerkat_core::ToolError) -> HelperAdmissionRefusal {
+    match error {
+        meerkat_core::ToolError::AuthorizationRefused { refusal, .. }
+            if super::effect_leaf_denies(*refusal) =>
+        {
+            HelperAdmissionRefusal::Denied
+        }
+        error if super::review_settlement_denies(error) => HelperAdmissionRefusal::Denied,
+        _ => HelperAdmissionRefusal::Unavailable,
+    }
+}
+
+/// An entered step's refusal: a denial for a refused step (an ended
+/// dispatch, a source cancelled, revoked or no longer retained, a decision
+/// needing more review than was entered, an expired window, malformed
+/// facts); otherwise unavailable (contention, a rebuild request, owners that
+/// cannot answer now). It speaks only for this step.
+fn entered_refusal_of(error: &meerkat_core::ToolError) -> HelperAdmissionRefusal {
     match error {
         meerkat_core::ToolError::AuthorizationRefused { refusal, .. }
             if super::effect_leaf_denies(*refusal) =>
@@ -394,20 +485,19 @@ impl WorkGraphAdmissionFence for GovernedHelperAdmissionFence {
             FenceCheck::Dispatch {
                 operation: governed,
                 further,
-            } => {
-                let mut pending = Some(operation);
-                let mut result = None;
-                let checked = governed.run_if_current_within(further, &mut || {
-                    if let Some(operation) = pending.take() {
-                        result = Some(operation());
-                    }
-                });
-                match (checked, result) {
-                    (_, Some(result)) => result,
-                    (Err(error), None) => Err(self.refuse(tool_refusal_of(&error))),
-                    (Ok(()), None) => Err(self.refuse(HelperAdmissionRefusal::Unavailable)),
-                }
-            }
+            } => self.commit_within(
+                |commit| governed.run_if_current_within(further, commit),
+                operation,
+                tool_refusal_of,
+            ),
+            FenceCheck::Entered {
+                operation: entered,
+                further,
+            } => self.commit_within(
+                |commit| entered.run_if_current_within(further, commit),
+                operation,
+                entered_refusal_of,
+            ),
         }
     }
 }

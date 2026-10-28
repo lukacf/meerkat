@@ -625,6 +625,60 @@ impl std::fmt::Display for AutonomousShutdownMemberActionKind {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum BootMaterializationKind {
+    #[default]
+    #[serde(rename = "Wake")]
+    Wake,
+    #[serde(rename = "StayDormant")]
+    StayDormant,
+    #[serde(rename = "VerifyThenDormant")]
+    VerifyThenDormant,
+}
+impl BootMaterializationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Wake => "Wake",
+            Self::StayDormant => "StayDormant",
+            Self::VerifyThenDormant => "VerifyThenDormant",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for BootMaterializationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Wake" => Ok(Self::Wake),
+            "StayDormant" => Ok(Self::StayDormant),
+            "VerifyThenDormant" => Ok(Self::VerifyThenDormant),
+            other => Err(format!("invalid BootMaterializationKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for BootMaterializationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for BootMaterializationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -759,6 +813,56 @@ impl std::convert::TryFrom<String> for CollectionPolicyKind {
     }
 }
 impl std::fmt::Display for CollectionPolicyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum CompositionAuthorityKind {
+    #[default]
+    #[serde(rename = "Authoritative")]
+    Authoritative,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+}
+impl CompositionAuthorityKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Authoritative => "Authoritative",
+            Self::NonAuthoritative => "NonAuthoritative",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for CompositionAuthorityKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Authoritative" => Ok(Self::Authoritative),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            other => Err(format!("invalid CompositionAuthorityKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for CompositionAuthorityKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for CompositionAuthorityKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -3039,6 +3143,60 @@ impl std::fmt::Display for MemberAdmissionVerdictKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum MemberBootObligationCause {
+    #[default]
+    #[serde(rename = "Obligation")]
+    Obligation,
+    #[serde(rename = "EndpointPending")]
+    EndpointPending,
+    #[serde(rename = "PlacedPeerWired")]
+    PlacedPeerWired,
+}
+impl MemberBootObligationCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Obligation => "Obligation",
+            Self::EndpointPending => "EndpointPending",
+            Self::PlacedPeerWired => "PlacedPeerWired",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberBootObligationCause {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Obligation" => Ok(Self::Obligation),
+            "EndpointPending" => Ok(Self::EndpointPending),
+            "PlacedPeerWired" => Ok(Self::PlacedPeerWired),
+            other => Err(format!("invalid MemberBootObligationCause value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberBootObligationCause {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberBootObligationCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MemberHealthClass {
     #[default]
     #[serde(rename = "Healthy")]
@@ -3219,6 +3377,182 @@ impl std::fmt::Display for MemberLiveMaterializationObservationKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum MemberMaterializationLossCause {
+    #[default]
+    #[serde(rename = "RegistrationReleased")]
+    RegistrationReleased,
+    #[serde(rename = "ExecutorRetired")]
+    ExecutorRetired,
+    #[serde(rename = "ActorDiscarded")]
+    ActorDiscarded,
+    #[serde(rename = "DurabilityReload")]
+    DurabilityReload,
+    #[serde(rename = "ReconfigureRollback")]
+    ReconfigureRollback,
+    #[serde(rename = "ObservedMissing")]
+    ObservedMissing,
+}
+impl MemberMaterializationLossCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RegistrationReleased => "RegistrationReleased",
+            Self::ExecutorRetired => "ExecutorRetired",
+            Self::ActorDiscarded => "ActorDiscarded",
+            Self::DurabilityReload => "DurabilityReload",
+            Self::ReconfigureRollback => "ReconfigureRollback",
+            Self::ObservedMissing => "ObservedMissing",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberMaterializationLossCause {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RegistrationReleased" => Ok(Self::RegistrationReleased),
+            "ExecutorRetired" => Ok(Self::ExecutorRetired),
+            "ActorDiscarded" => Ok(Self::ActorDiscarded),
+            "DurabilityReload" => Ok(Self::DurabilityReload),
+            "ReconfigureRollback" => Ok(Self::ReconfigureRollback),
+            "ObservedMissing" => Ok(Self::ObservedMissing),
+            other => Err(format!(
+                "invalid MemberMaterializationLossCause value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberMaterializationLossCause {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberMaterializationLossCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberMaterializationPhase {
+    #[default]
+    #[serde(rename = "Dormant")]
+    Dormant,
+    #[serde(rename = "Waking")]
+    Waking,
+    #[serde(rename = "Live")]
+    Live,
+}
+impl MemberMaterializationPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Dormant => "Dormant",
+            Self::Waking => "Waking",
+            Self::Live => "Live",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberMaterializationPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Dormant" => Ok(Self::Dormant),
+            "Waking" => Ok(Self::Waking),
+            "Live" => Ok(Self::Live),
+            other => Err(format!(
+                "invalid MemberMaterializationPhase value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberMaterializationPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberMaterializationPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberMaterializationReleaseOutcome {
+    #[default]
+    #[serde(rename = "Released")]
+    Released,
+    #[serde(rename = "Stale")]
+    Stale,
+}
+impl MemberMaterializationReleaseOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Released => "Released",
+            Self::Stale => "Stale",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberMaterializationReleaseOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Released" => Ok(Self::Released),
+            "Stale" => Ok(Self::Stale),
+            other => Err(format!(
+                "invalid MemberMaterializationReleaseOutcome value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberMaterializationReleaseOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberMaterializationReleaseOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MemberOperatorRejectKind {
     #[default]
     #[serde(rename = "UnknownIdentity")]
@@ -3334,6 +3668,190 @@ impl std::convert::TryFrom<String> for MemberProgressEventKind {
     }
 }
 impl std::fmt::Display for MemberProgressEventKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberRecoveryObligationKind {
+    #[default]
+    #[serde(rename = "None")]
+    None,
+    #[serde(rename = "RuntimeWork")]
+    RuntimeWork,
+    #[serde(rename = "PendingDelivery")]
+    PendingDelivery,
+    #[serde(rename = "Unobserved")]
+    Unobserved,
+}
+impl MemberRecoveryObligationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::RuntimeWork => "RuntimeWork",
+            Self::PendingDelivery => "PendingDelivery",
+            Self::Unobserved => "Unobserved",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberRecoveryObligationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "None" => Ok(Self::None),
+            "RuntimeWork" => Ok(Self::RuntimeWork),
+            "PendingDelivery" => Ok(Self::PendingDelivery),
+            "Unobserved" => Ok(Self::Unobserved),
+            other => Err(format!(
+                "invalid MemberRecoveryObligationKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberRecoveryObligationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberRecoveryObligationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberReleaseVerdict {
+    #[default]
+    #[serde(rename = "Release")]
+    Release,
+    #[serde(rename = "NothingMaterialized")]
+    NothingMaterialized,
+    #[serde(rename = "WakeInFlight")]
+    WakeInFlight,
+    #[serde(rename = "HostOwned")]
+    HostOwned,
+    #[serde(rename = "NotAMember")]
+    NotAMember,
+    #[serde(rename = "NotYetReleasable")]
+    NotYetReleasable,
+    #[serde(rename = "PinnedByPlacedPeer")]
+    PinnedByPlacedPeer,
+}
+impl MemberReleaseVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Release => "Release",
+            Self::NothingMaterialized => "NothingMaterialized",
+            Self::WakeInFlight => "WakeInFlight",
+            Self::HostOwned => "HostOwned",
+            Self::NotAMember => "NotAMember",
+            Self::NotYetReleasable => "NotYetReleasable",
+            Self::PinnedByPlacedPeer => "PinnedByPlacedPeer",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberReleaseVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Release" => Ok(Self::Release),
+            "NothingMaterialized" => Ok(Self::NothingMaterialized),
+            "WakeInFlight" => Ok(Self::WakeInFlight),
+            "HostOwned" => Ok(Self::HostOwned),
+            "NotAMember" => Ok(Self::NotAMember),
+            "NotYetReleasable" => Ok(Self::NotYetReleasable),
+            "PinnedByPlacedPeer" => Ok(Self::PinnedByPlacedPeer),
+            other => Err(format!("invalid MemberReleaseVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberReleaseVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberReleaseVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberRestorePolicyKind {
+    #[default]
+    #[serde(rename = "OnDemand")]
+    OnDemand,
+    #[serde(rename = "OnDemandVerified")]
+    OnDemandVerified,
+    #[serde(rename = "Eager")]
+    Eager,
+}
+impl MemberRestorePolicyKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OnDemand => "OnDemand",
+            Self::OnDemandVerified => "OnDemandVerified",
+            Self::Eager => "Eager",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberRestorePolicyKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "OnDemand" => Ok(Self::OnDemand),
+            "OnDemandVerified" => Ok(Self::OnDemandVerified),
+            "Eager" => Ok(Self::Eager),
+            other => Err(format!("invalid MemberRestorePolicyKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberRestorePolicyKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberRestorePolicyKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -3492,6 +4010,436 @@ impl std::convert::TryFrom<String> for MemberWaitClassificationKind {
     }
 }
 impl std::fmt::Display for MemberWaitClassificationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberWakeAbandonCause {
+    #[default]
+    #[serde(rename = "MobStopping")]
+    MobStopping,
+    #[serde(rename = "MobCompleting")]
+    MobCompleting,
+    #[serde(rename = "MobDestroying")]
+    MobDestroying,
+}
+impl MemberWakeAbandonCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MobStopping => "MobStopping",
+            Self::MobCompleting => "MobCompleting",
+            Self::MobDestroying => "MobDestroying",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberWakeAbandonCause {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MobStopping" => Ok(Self::MobStopping),
+            "MobCompleting" => Ok(Self::MobCompleting),
+            "MobDestroying" => Ok(Self::MobDestroying),
+            other => Err(format!("invalid MemberWakeAbandonCause value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberWakeAbandonCause {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberWakeAbandonCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberWakeAbandonKind {
+    #[default]
+    #[serde(rename = "NotCurrent")]
+    NotCurrent,
+    #[serde(rename = "ReloadRefused")]
+    ReloadRefused,
+    #[serde(rename = "Unsettled")]
+    Unsettled,
+    #[serde(rename = "ReadinessFailed")]
+    ReadinessFailed,
+    #[serde(rename = "TopologyFailed")]
+    TopologyFailed,
+}
+impl MemberWakeAbandonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotCurrent => "NotCurrent",
+            Self::ReloadRefused => "ReloadRefused",
+            Self::Unsettled => "Unsettled",
+            Self::ReadinessFailed => "ReadinessFailed",
+            Self::TopologyFailed => "TopologyFailed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberWakeAbandonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotCurrent" => Ok(Self::NotCurrent),
+            "ReloadRefused" => Ok(Self::ReloadRefused),
+            "Unsettled" => Ok(Self::Unsettled),
+            "ReadinessFailed" => Ok(Self::ReadinessFailed),
+            "TopologyFailed" => Ok(Self::TopologyFailed),
+            other => Err(format!("invalid MemberWakeAbandonKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberWakeAbandonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberWakeAbandonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberWakeCause {
+    #[default]
+    #[serde(rename = "Boot")]
+    Boot,
+    #[serde(rename = "HostDelivery")]
+    HostDelivery,
+    #[serde(rename = "PeerDelivery")]
+    PeerDelivery,
+    #[serde(rename = "Operator")]
+    Operator,
+    #[serde(rename = "PlacedPeerWired")]
+    PlacedPeerWired,
+}
+impl MemberWakeCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Boot => "Boot",
+            Self::HostDelivery => "HostDelivery",
+            Self::PeerDelivery => "PeerDelivery",
+            Self::Operator => "Operator",
+            Self::PlacedPeerWired => "PlacedPeerWired",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberWakeCause {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Boot" => Ok(Self::Boot),
+            "HostDelivery" => Ok(Self::HostDelivery),
+            "PeerDelivery" => Ok(Self::PeerDelivery),
+            "Operator" => Ok(Self::Operator),
+            "PlacedPeerWired" => Ok(Self::PlacedPeerWired),
+            other => Err(format!("invalid MemberWakeCause value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberWakeCause {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberWakeCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberWakeFeedbackVerdict {
+    #[default]
+    #[serde(rename = "Applied")]
+    Applied,
+    #[serde(rename = "StaleAttempt")]
+    StaleAttempt,
+}
+impl MemberWakeFeedbackVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Applied => "Applied",
+            Self::StaleAttempt => "StaleAttempt",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberWakeFeedbackVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Applied" => Ok(Self::Applied),
+            "StaleAttempt" => Ok(Self::StaleAttempt),
+            other => Err(format!("invalid MemberWakeFeedbackVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberWakeFeedbackVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberWakeFeedbackVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberWakeRefusalKind {
+    #[default]
+    #[serde(rename = "Broken")]
+    Broken,
+    #[serde(rename = "Retiring")]
+    Retiring,
+    #[serde(rename = "NotAMember")]
+    NotAMember,
+    #[serde(rename = "HostOwned")]
+    HostOwned,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+    #[serde(rename = "LifecycleOriginFenced")]
+    LifecycleOriginFenced,
+    #[serde(rename = "NonAuthoritativeComposition")]
+    NonAuthoritativeComposition,
+    #[serde(rename = "HostPreparationPending")]
+    HostPreparationPending,
+    #[serde(rename = "ResumeGateUnavailable")]
+    ResumeGateUnavailable,
+    #[serde(rename = "SuppressedLifecycleNotice")]
+    SuppressedLifecycleNotice,
+    #[serde(rename = "SenderWaking")]
+    SenderWaking,
+}
+impl MemberWakeRefusalKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Broken => "Broken",
+            Self::Retiring => "Retiring",
+            Self::NotAMember => "NotAMember",
+            Self::HostOwned => "HostOwned",
+            Self::MobNotRunning => "MobNotRunning",
+            Self::LifecycleOriginFenced => "LifecycleOriginFenced",
+            Self::NonAuthoritativeComposition => "NonAuthoritativeComposition",
+            Self::HostPreparationPending => "HostPreparationPending",
+            Self::ResumeGateUnavailable => "ResumeGateUnavailable",
+            Self::SuppressedLifecycleNotice => "SuppressedLifecycleNotice",
+            Self::SenderWaking => "SenderWaking",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberWakeRefusalKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Broken" => Ok(Self::Broken),
+            "Retiring" => Ok(Self::Retiring),
+            "NotAMember" => Ok(Self::NotAMember),
+            "HostOwned" => Ok(Self::HostOwned),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            "LifecycleOriginFenced" => Ok(Self::LifecycleOriginFenced),
+            "NonAuthoritativeComposition" => Ok(Self::NonAuthoritativeComposition),
+            "HostPreparationPending" => Ok(Self::HostPreparationPending),
+            "ResumeGateUnavailable" => Ok(Self::ResumeGateUnavailable),
+            "SuppressedLifecycleNotice" => Ok(Self::SuppressedLifecycleNotice),
+            "SenderWaking" => Ok(Self::SenderWaking),
+            other => Err(format!("invalid MemberWakeRefusalKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberWakeRefusalKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberWakeRefusalKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberWakeRetryableKind {
+    #[default]
+    #[serde(rename = "ResumeGateUnavailable")]
+    ResumeGateUnavailable,
+    #[serde(rename = "HostingClaimHeld")]
+    HostingClaimHeld,
+    #[serde(rename = "WakeTimedOut")]
+    WakeTimedOut,
+    #[serde(rename = "BuildPreparationRefused")]
+    BuildPreparationRefused,
+}
+impl MemberWakeRetryableKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ResumeGateUnavailable => "ResumeGateUnavailable",
+            Self::HostingClaimHeld => "HostingClaimHeld",
+            Self::WakeTimedOut => "WakeTimedOut",
+            Self::BuildPreparationRefused => "BuildPreparationRefused",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberWakeRetryableKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ResumeGateUnavailable" => Ok(Self::ResumeGateUnavailable),
+            "HostingClaimHeld" => Ok(Self::HostingClaimHeld),
+            "WakeTimedOut" => Ok(Self::WakeTimedOut),
+            "BuildPreparationRefused" => Ok(Self::BuildPreparationRefused),
+            other => Err(format!("invalid MemberWakeRetryableKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberWakeRetryableKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberWakeRetryableKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberWakeVerdictKind {
+    #[default]
+    #[serde(rename = "Authorized")]
+    Authorized,
+    #[serde(rename = "Joined")]
+    Joined,
+    #[serde(rename = "AlreadyLive")]
+    AlreadyLive,
+    #[serde(rename = "Refused")]
+    Refused,
+}
+impl MemberWakeVerdictKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Authorized => "Authorized",
+            Self::Joined => "Joined",
+            Self::AlreadyLive => "AlreadyLive",
+            Self::Refused => "Refused",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberWakeVerdictKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Authorized" => Ok(Self::Authorized),
+            "Joined" => Ok(Self::Joined),
+            "AlreadyLive" => Ok(Self::AlreadyLive),
+            "Refused" => Ok(Self::Refused),
+            other => Err(format!("invalid MemberWakeVerdictKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberWakeVerdictKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberWakeVerdictKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -5294,6 +6242,106 @@ impl std::fmt::Display for NodeRunStatus {
 pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
 pub type PeerAddress = meerkat_machine_schema::catalog::dsl::mob_machine::PeerAddress;
 pub type PeerId = meerkat_machine_schema::catalog::dsl::mob_machine::PeerId;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerInputClass {
+    #[default]
+    #[serde(rename = "Content")]
+    Content,
+    #[serde(rename = "Lifecycle")]
+    Lifecycle,
+}
+impl PeerInputClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Content => "Content",
+            Self::Lifecycle => "Lifecycle",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerInputClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Content" => Ok(Self::Content),
+            "Lifecycle" => Ok(Self::Lifecycle),
+            other => Err(format!("invalid PeerInputClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerInputClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerInputClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerNoticeDisposition {
+    #[default]
+    #[serde(rename = "Deliver")]
+    Deliver,
+    #[serde(rename = "Suppressed")]
+    Suppressed,
+}
+impl PeerNoticeDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Deliver => "Deliver",
+            Self::Suppressed => "Suppressed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerNoticeDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Deliver" => Ok(Self::Deliver),
+            "Suppressed" => Ok(Self::Suppressed),
+            other => Err(format!("invalid PeerNoticeDisposition value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerNoticeDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerNoticeDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type PeerSigningKey = meerkat_machine_schema::catalog::dsl::mob_machine::PeerSigningKey;
 pub type PlacedCarrierCleanupObligation =
     meerkat_machine_schema::catalog::dsl::mob_machine::PlacedCarrierCleanupObligation;
@@ -5844,6 +6892,34 @@ impl From<&str> for RunId {
     }
 }
 impl std::fmt::Display for RunId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct RuntimeEpochId(pub String);
+impl From<String> for RuntimeEpochId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for RuntimeEpochId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for RuntimeEpochId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
@@ -6743,7 +7819,8 @@ pub struct State {
     pub runtime_retire_pending_sessions: std::collections::BTreeMap<AgentRuntimeId, SessionId>,
     pub remote_runtime_retired_ids: std::collections::BTreeSet<AgentRuntimeId>,
     pub remote_supervisor_revoked_ids: std::collections::BTreeSet<AgentRuntimeId>,
-    pub member_revival_pending: std::collections::BTreeSet<AgentIdentity>,
+    pub member_materialization:
+        std::collections::BTreeMap<AgentIdentity, MemberMaterializationPhase>,
     pub explicit_resume_attempt: Option<ResumeAttemptId>,
     pub explicit_resume_cancel_requested: bool,
     pub explicit_resume_preparation_pending: bool,
@@ -6957,6 +8034,26 @@ pub struct State {
     pub operator_grant_expiries: std::collections::BTreeMap<PrincipalId, Option<u64>>,
     pub spawn_profile_authority_resolved_spec_digests:
         std::collections::BTreeMap<AgentIdentity, String>,
+    pub member_wake_attempts: std::collections::BTreeMap<AgentIdentity, u64>,
+    pub member_wake_attempt_sequence: u64,
+    pub member_wake_bound: std::collections::BTreeSet<AgentIdentity>,
+    pub member_materialization_epoch:
+        std::collections::BTreeMap<AgentIdentity, Option<RuntimeEpochId>>,
+    pub member_materialization_drift_count: u64,
+    pub member_boot_obligation_owed:
+        std::collections::BTreeMap<AgentIdentity, MemberBootObligationCause>,
+    pub member_restore_policy: MemberRestorePolicyKind,
+    pub composition_authority: CompositionAuthorityKind,
+    pub member_host_preparation_pending: std::collections::BTreeSet<AgentIdentity>,
+    pub boot_plan_sealed: bool,
+    pub member_rotation_session_ids: std::collections::BTreeMap<AgentIdentity, SessionId>,
+    pub member_rotation_peer_endpoints:
+        std::collections::BTreeMap<AgentIdentity, MemberPeerEndpoint>,
+    pub runtime_retire_archive_only: std::collections::BTreeSet<AgentRuntimeId>,
+    pub owed_edge_repairs: std::collections::BTreeSet<WiringEdge>,
+    pub owed_external_edge_repairs: std::collections::BTreeSet<ExternalPeerEdge>,
+    pub member_seat_session_unborn: std::collections::BTreeSet<AgentIdentity>,
+    pub unborn_seat_sessions: std::collections::BTreeSet<SessionId>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -7790,6 +8887,7 @@ pub mod inputs {
         pub session_id: SessionId,
         pub refusal_code: String,
         pub reason: String,
+        pub attempt: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRuntimeIngressRefusal {
@@ -8335,6 +9433,84 @@ pub mod inputs {
         pub fence_token: FenceToken,
         pub session_id: SessionId,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SeedMemberResidency {
+        pub policy: MemberRestorePolicyKind,
+        pub composition_authority: CompositionAuthorityKind,
+        pub host_pending: std::collections::BTreeSet<AgentIdentity>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct WakeMember {
+        pub agent_identity: AgentIdentity,
+        pub cause: MemberWakeCause,
+        pub observed_missing: bool,
+        pub input_class: PeerInputClass,
+        pub sender_waking: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PlanBootMaterialization {
+        pub agent_identity: AgentIdentity,
+        pub obligation: MemberRecoveryObligationKind,
+        pub host_required: bool,
+        pub orchestrator_notified: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SealBootMaterializationPlan {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyPeerNotice {
+        pub recipient: AgentIdentity,
+        pub sender: AgentIdentity,
+        pub notice_class: PeerInputClass,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CommitDormantSeat {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub external_addressable: bool,
+        pub runtime_mode: SpawnPolicyRuntimeMode,
+        pub bridge_session_id: SessionId,
+        pub member_peer_endpoint: Option<MemberPeerEndpoint>,
+        pub session_archived: bool,
+        pub kickoff_owed: bool,
+        pub session_unborn: bool,
+        pub fresh_launch: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberHostPreparation {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginMemberRotation {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub session_id: SessionId,
+        pub peer_endpoint: Option<MemberPeerEndpoint>,
+        pub session_archived: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CommitMemberRotation {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub session_id: Option<SessionId>,
+        pub disposal: MemberSessionDisposal,
+        pub next_agent_runtime_id: AgentRuntimeId,
+        pub next_fence_token: FenceToken,
+        pub next_generation: Generation,
+        pub runtime_mode: SpawnPolicyRuntimeMode,
+        pub external_addressable: bool,
+        pub kickoff_owed: bool,
+        pub kickoff_objective_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyMemberRelease {
+        pub agent_identity: AgentIdentity,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -8565,6 +9741,16 @@ pub enum Input {
     SettleExplicitResumeCleanup(inputs::SettleExplicitResumeCleanup),
     FinishExplicitResume(inputs::FinishExplicitResume),
     RetireAtScope(inputs::RetireAtScope),
+    SeedMemberResidency(inputs::SeedMemberResidency),
+    WakeMember(inputs::WakeMember),
+    PlanBootMaterialization(inputs::PlanBootMaterialization),
+    SealBootMaterializationPlan(inputs::SealBootMaterializationPlan),
+    ClassifyPeerNotice(inputs::ClassifyPeerNotice),
+    CommitDormantSeat(inputs::CommitDormantSeat),
+    ResolveMemberHostPreparation(inputs::ResolveMemberHostPreparation),
+    BeginMemberRotation(inputs::BeginMemberRotation),
+    CommitMemberRotation(inputs::CommitMemberRotation),
+    ClassifyMemberRelease(inputs::ClassifyMemberRelease),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -8871,6 +10057,16 @@ impl Input {
             Self::SettleExplicitResumeCleanup(_) => InputKind::SettleExplicitResumeCleanup,
             Self::FinishExplicitResume(_) => InputKind::FinishExplicitResume,
             Self::RetireAtScope(_) => InputKind::RetireAtScope,
+            Self::SeedMemberResidency(_) => InputKind::SeedMemberResidency,
+            Self::WakeMember(_) => InputKind::WakeMember,
+            Self::PlanBootMaterialization(_) => InputKind::PlanBootMaterialization,
+            Self::SealBootMaterializationPlan(_) => InputKind::SealBootMaterializationPlan,
+            Self::ClassifyPeerNotice(_) => InputKind::ClassifyPeerNotice,
+            Self::CommitDormantSeat(_) => InputKind::CommitDormantSeat,
+            Self::ResolveMemberHostPreparation(_) => InputKind::ResolveMemberHostPreparation,
+            Self::BeginMemberRotation(_) => InputKind::BeginMemberRotation,
+            Self::CommitMemberRotation(_) => InputKind::CommitMemberRotation,
+            Self::ClassifyMemberRelease(_) => InputKind::ClassifyMemberRelease,
         }
     }
 }
@@ -9094,6 +10290,16 @@ pub enum InputKind {
     SettleExplicitResumeCleanup,
     FinishExplicitResume,
     RetireAtScope,
+    SeedMemberResidency,
+    WakeMember,
+    PlanBootMaterialization,
+    SealBootMaterializationPlan,
+    ClassifyPeerNotice,
+    CommitDormantSeat,
+    ResolveMemberHostPreparation,
+    BeginMemberRotation,
+    CommitMemberRotation,
+    ClassifyMemberRelease,
 }
 
 pub mod signals {
@@ -9103,6 +10309,7 @@ pub mod signals {
     pub struct ObserveRuntimeReady {
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
+        pub runtime_epoch_id: Option<RuntimeEpochId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RetireMember {
@@ -9438,6 +10645,7 @@ pub mod signals {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveMemberRevivalSucceeded {
         pub agent_identity: AgentIdentity,
+        pub attempt: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRecreatedMemberSessionSucceeded {
@@ -9446,11 +10654,13 @@ pub mod signals {
         pub fence_token: FenceToken,
         pub generation: Generation,
         pub bridge_session_id: SessionId,
+        pub attempt: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveMemberRevivalFailed {
         pub agent_identity: AgentIdentity,
         pub reason: String,
+        pub attempt: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitDestroyCleanup {}
@@ -9515,12 +10725,59 @@ pub mod signals {
         pub agent_identity: AgentIdentity,
         pub refusal_code: String,
         pub reason: String,
+        pub attempt: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverMemberRestoreHostRefused {
         pub agent_identity: AgentIdentity,
         pub refusal_code: String,
         pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberRevivalBound {
+        pub agent_identity: AgentIdentity,
+        pub attempt: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberRevivalRetryable {
+        pub agent_identity: AgentIdentity,
+        pub attempt: u64,
+        pub kind: MemberWakeRetryableKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AbandonMemberWake {
+        pub agent_identity: AgentIdentity,
+        pub attempt: u64,
+        pub kind: MemberWakeAbandonKind,
+        pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseMemberMaterialization {
+        pub agent_runtime_id: Option<AgentRuntimeId>,
+        pub fence_token: Option<FenceToken>,
+        pub runtime_epoch_id: Option<RuntimeEpochId>,
+        pub cause: MemberMaterializationLossCause,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveWiringEdgeRealization {
+        pub edge: WiringEdge,
+        pub realized: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveExternalEdgeRealization {
+        pub edge: ExternalPeerEdge,
+        pub realized: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberRevivalSessionCreated {
+        pub agent_identity: AgentIdentity,
+        pub attempt: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverMemberSeatSession {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub unborn: bool,
     }
 }
 
@@ -9606,6 +10863,14 @@ pub enum Signal {
     SealIdentityGenerationHighwater(signals::SealIdentityGenerationHighwater),
     ResolveMemberRevivalHostRefused(signals::ResolveMemberRevivalHostRefused),
     RecoverMemberRestoreHostRefused(signals::RecoverMemberRestoreHostRefused),
+    ResolveMemberRevivalBound(signals::ResolveMemberRevivalBound),
+    ResolveMemberRevivalRetryable(signals::ResolveMemberRevivalRetryable),
+    AbandonMemberWake(signals::AbandonMemberWake),
+    ReleaseMemberMaterialization(signals::ReleaseMemberMaterialization),
+    ResolveWiringEdgeRealization(signals::ResolveWiringEdgeRealization),
+    ResolveExternalEdgeRealization(signals::ResolveExternalEdgeRealization),
+    ResolveMemberRevivalSessionCreated(signals::ResolveMemberRevivalSessionCreated),
+    RecoverMemberSeatSession(signals::RecoverMemberSeatSession),
 }
 impl Signal {
     pub fn kind(&self) -> SignalKind {
@@ -9720,6 +10985,16 @@ impl Signal {
             Self::SealIdentityGenerationHighwater(_) => SignalKind::SealIdentityGenerationHighwater,
             Self::ResolveMemberRevivalHostRefused(_) => SignalKind::ResolveMemberRevivalHostRefused,
             Self::RecoverMemberRestoreHostRefused(_) => SignalKind::RecoverMemberRestoreHostRefused,
+            Self::ResolveMemberRevivalBound(_) => SignalKind::ResolveMemberRevivalBound,
+            Self::ResolveMemberRevivalRetryable(_) => SignalKind::ResolveMemberRevivalRetryable,
+            Self::AbandonMemberWake(_) => SignalKind::AbandonMemberWake,
+            Self::ReleaseMemberMaterialization(_) => SignalKind::ReleaseMemberMaterialization,
+            Self::ResolveWiringEdgeRealization(_) => SignalKind::ResolveWiringEdgeRealization,
+            Self::ResolveExternalEdgeRealization(_) => SignalKind::ResolveExternalEdgeRealization,
+            Self::ResolveMemberRevivalSessionCreated(_) => {
+                SignalKind::ResolveMemberRevivalSessionCreated
+            }
+            Self::RecoverMemberSeatSession(_) => SignalKind::RecoverMemberSeatSession,
         }
     }
 }
@@ -9803,6 +11078,14 @@ pub enum SignalKind {
     SealIdentityGenerationHighwater,
     ResolveMemberRevivalHostRefused,
     RecoverMemberRestoreHostRefused,
+    ResolveMemberRevivalBound,
+    ResolveMemberRevivalRetryable,
+    AbandonMemberWake,
+    ReleaseMemberMaterialization,
+    ResolveWiringEdgeRealization,
+    ResolveExternalEdgeRealization,
+    ResolveMemberRevivalSessionCreated,
+    RecoverMemberSeatSession,
 }
 
 pub mod effects {
@@ -9824,6 +11107,7 @@ pub mod effects {
         pub fence_token: FenceToken,
         pub generation: Option<Generation>,
         pub session_id: SessionId,
+        pub attempt: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnProfileAuthorized {
@@ -10115,6 +11399,7 @@ pub mod effects {
         pub observation: MemberLiveMaterializationObservationKind,
         pub verdict: MemberRevivalVerdictKind,
         pub reason: String,
+        pub attempt: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnManyFailureClassified {
@@ -10663,6 +11948,96 @@ pub mod effects {
         pub actual_fence_token: Option<FenceToken>,
         pub current_session_id: Option<SessionId>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MaterializeMember {
+        pub agent_identity: AgentIdentity,
+        pub cause: MemberWakeCause,
+        pub attempt: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct VerifyMember {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BootMaterializationPlanned {
+        pub agent_identity: AgentIdentity,
+        pub verdict: BootMaterializationKind,
+        pub attempt: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberWakeClassified {
+        pub agent_identity: AgentIdentity,
+        pub cause: MemberWakeCause,
+        pub verdict: MemberWakeVerdictKind,
+        pub refusal: Option<MemberWakeRefusalKind>,
+        pub attempt: Option<u64>,
+        pub session_id: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberWakeFeedbackResolved {
+        pub agent_identity: AgentIdentity,
+        pub attempt: u64,
+        pub verdict: MemberWakeFeedbackVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberWakesAbandoned {
+        pub cause: MemberWakeAbandonCause,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RotationSessionsAbandoned {
+        pub rotations: std::collections::BTreeMap<AgentIdentity, SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CloseMemberPeerIngress {
+        pub reason: MemberWakeRefusalKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReopenMemberPeerIngress {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PublishWakeRoute {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RetractWakeRoute {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RebuildWakeRoutes {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PeerNoticeClassified {
+        pub recipient: AgentIdentity,
+        pub sender: AgentIdentity,
+        pub notice_class: PeerInputClass,
+        pub disposition: PeerNoticeDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberMaterializationReleased {
+        pub agent_runtime_id: Option<AgentRuntimeId>,
+        pub cause: MemberMaterializationLossCause,
+        pub outcome: MemberMaterializationReleaseOutcome,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberReleaseClassified {
+        pub agent_identity: AgentIdentity,
+        pub verdict: MemberReleaseVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeBindingRefusalStale {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub session_id: SessionId,
+        pub attempt: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OwedMemberWakesRecorded {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OwedEdgeRepairsRecorded {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PersistMemberSeatSessionBorn {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub session_id: SessionId,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -10820,6 +12195,25 @@ pub enum Effect {
     ExplicitResumeMemberOutcomeClassified(effects::ExplicitResumeMemberOutcomeClassified),
     ExplicitResumeFinished(effects::ExplicitResumeFinished),
     RetireAtScopeResolved(effects::RetireAtScopeResolved),
+    MaterializeMember(effects::MaterializeMember),
+    VerifyMember(effects::VerifyMember),
+    BootMaterializationPlanned(effects::BootMaterializationPlanned),
+    MemberWakeClassified(effects::MemberWakeClassified),
+    MemberWakeFeedbackResolved(effects::MemberWakeFeedbackResolved),
+    MemberWakesAbandoned(effects::MemberWakesAbandoned),
+    RotationSessionsAbandoned(effects::RotationSessionsAbandoned),
+    CloseMemberPeerIngress(effects::CloseMemberPeerIngress),
+    ReopenMemberPeerIngress(effects::ReopenMemberPeerIngress),
+    PublishWakeRoute(effects::PublishWakeRoute),
+    RetractWakeRoute(effects::RetractWakeRoute),
+    RebuildWakeRoutes(effects::RebuildWakeRoutes),
+    PeerNoticeClassified(effects::PeerNoticeClassified),
+    MemberMaterializationReleased(effects::MemberMaterializationReleased),
+    MemberReleaseClassified(effects::MemberReleaseClassified),
+    RuntimeBindingRefusalStale(effects::RuntimeBindingRefusalStale),
+    OwedMemberWakesRecorded(effects::OwedMemberWakesRecorded),
+    OwedEdgeRepairsRecorded(effects::OwedEdgeRepairsRecorded),
+    PersistMemberSeatSessionBorn(effects::PersistMemberSeatSessionBorn),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -10972,6 +12366,25 @@ pub enum EffectKind {
     ExplicitResumeMemberOutcomeClassified,
     ExplicitResumeFinished,
     RetireAtScopeResolved,
+    MaterializeMember,
+    VerifyMember,
+    BootMaterializationPlanned,
+    MemberWakeClassified,
+    MemberWakeFeedbackResolved,
+    MemberWakesAbandoned,
+    RotationSessionsAbandoned,
+    CloseMemberPeerIngress,
+    ReopenMemberPeerIngress,
+    PublishWakeRoute,
+    RetractWakeRoute,
+    RebuildWakeRoutes,
+    PeerNoticeClassified,
+    MemberMaterializationReleased,
+    MemberReleaseClassified,
+    RuntimeBindingRefusalStale,
+    OwedMemberWakesRecorded,
+    OwedEdgeRepairsRecorded,
+    PersistMemberSeatSessionBorn,
 }
 
 pub mod command_capabilities {
@@ -12556,6 +13969,133 @@ pub enum TransitionId {
     ObserveRuntimeDestroyedCompleted,
     AdmitDestroyMemberRetireRuntimeEndedRunning,
     AdmitDestroyMemberRetireRuntimeEndedStopped,
+    SeedMemberResidencyRunning,
+    SeedMemberResidencyStopped,
+    SeedMemberResidencyCompleted,
+    WakeMemberAuthorizedRunning,
+    WakeMemberJoinedRunning,
+    WakeMemberAlreadyLiveRunning,
+    WakeMemberRefusedRunning,
+    WakeMemberRefusedStopped,
+    WakeMemberRefusedCompleted,
+    WakeMemberRefusedDestroyed,
+    PlanBootMaterializationWake,
+    PlanBootMaterializationVerify,
+    PlanBootMaterializationStayDormant,
+    SealBootMaterializationPlan,
+    ClassifyPeerNoticeRunning,
+    ClassifyPeerNoticeStopped,
+    ClassifyPeerNoticeCompleted,
+    ClassifyPeerNoticeDestroyed,
+    CommitDormantSeatRunning,
+    ResolveMemberHostPreparationRunning,
+    ResolveMemberHostPreparationStopped,
+    ResolveMemberHostPreparationCompleted,
+    BeginMemberRotationRunning,
+    CommitMemberRotationLiveRunning,
+    CommitMemberRotationLiveStopped,
+    CommitMemberRotationRetiredRunning,
+    CommitMemberRotationRetiredStopped,
+    ResolveMemberRevivalBoundRunning,
+    ResolveMemberRevivalRetryableRunning,
+    AbandonMemberWakeDormantRunning,
+    AbandonMemberWakeBrokenRunning,
+    ResolveMemberRevivalBoundStaleRunning,
+    ResolveMemberRevivalBoundStaleStopped,
+    ResolveMemberRevivalBoundStaleCompleted,
+    ResolveMemberRevivalBoundStaleDestroyed,
+    ResolveMemberRevivalSucceededStaleRunning,
+    ResolveMemberRevivalSucceededStaleStopped,
+    ResolveMemberRevivalSucceededStaleCompleted,
+    ResolveMemberRevivalSucceededStaleDestroyed,
+    ResolveMemberRevivalFailedStaleRunning,
+    ResolveMemberRevivalFailedStaleStopped,
+    ResolveMemberRevivalFailedStaleCompleted,
+    ResolveMemberRevivalFailedStaleDestroyed,
+    ResolveMemberRevivalHostRefusedStaleRunning,
+    ResolveMemberRevivalHostRefusedStaleStopped,
+    ResolveMemberRevivalHostRefusedStaleCompleted,
+    ResolveMemberRevivalHostRefusedStaleDestroyed,
+    ResolveMemberRevivalRetryableStaleRunning,
+    ResolveMemberRevivalRetryableStaleStopped,
+    ResolveMemberRevivalRetryableStaleCompleted,
+    ResolveMemberRevivalRetryableStaleDestroyed,
+    AbandonMemberWakeStaleRunning,
+    AbandonMemberWakeStaleStopped,
+    AbandonMemberWakeStaleCompleted,
+    AbandonMemberWakeStaleDestroyed,
+    ResolveRecreatedMemberSessionSucceededStaleRunning,
+    ResolveRecreatedMemberSessionSucceededStaleStopped,
+    ResolveRecreatedMemberSessionSucceededStaleCompleted,
+    ResolveRecreatedMemberSessionSucceededStaleDestroyed,
+    ReleaseMemberMaterializationReleasedRunning,
+    ReleaseMemberMaterializationReleasedStopped,
+    ReleaseMemberMaterializationReleasedCompleted,
+    ReleaseMemberMaterializationStaleRunning,
+    ReleaseMemberMaterializationStaleStopped,
+    ReleaseMemberMaterializationStaleCompleted,
+    ReleaseMemberMaterializationStaleDestroyed,
+    ClassifyMemberLiveMaterializationTerminalDormant,
+    AuthorizeExplicitResumeMemberLiveRunning,
+    AuthorizeExplicitResumeMemberJoinRunning,
+    ClassifyMemberReleaseRunning,
+    ClassifyMemberReleaseStopped,
+    ClassifyMemberReleaseCompleted,
+    ClassifyMemberReleaseDestroyed,
+    CommitMemberRotationLiveKickoffRunning,
+    CommitMemberRotationLiveKickoffStopped,
+    CommitMemberRotationRetiredKickoffRunning,
+    CommitMemberRotationRetiredKickoffStopped,
+    ResolveRuntimeBindingRefusalStaleRunning,
+    ResolveRuntimeBindingRefusalStaleStopped,
+    ResolveRuntimeBindingRefusalStaleCompleted,
+    ResolveRuntimeBindingRefusalStaleDestroyed,
+    WireMembersPlacedPeerWakeFirstEnd,
+    WireMembersPlacedPeerWakeSecondEnd,
+    WireMembersWithTrustPlacedPeerWakeFirstEnd,
+    WireMembersWithTrustPlacedPeerWakeSecondEnd,
+    ResolveWiringEdgeRealizationRealizedRunning,
+    ResolveWiringEdgeRealizationRealizedStopped,
+    ResolveWiringEdgeRealizationRealizedCompleted,
+    ResolveWiringEdgeRealizationRealizedDestroyed,
+    ResolveWiringEdgeRealizationOwedRunning,
+    ResolveWiringEdgeRealizationOwedStopped,
+    ResolveWiringEdgeRealizationOwedCompleted,
+    ResolveWiringEdgeRealizationOwedDestroyed,
+    ResolveWiringEdgeRealizationStaleRunning,
+    ResolveWiringEdgeRealizationStaleStopped,
+    ResolveWiringEdgeRealizationStaleCompleted,
+    ResolveWiringEdgeRealizationStaleDestroyed,
+    ResolveExternalEdgeRealizationRealizedRunning,
+    ResolveExternalEdgeRealizationRealizedStopped,
+    ResolveExternalEdgeRealizationRealizedCompleted,
+    ResolveExternalEdgeRealizationRealizedDestroyed,
+    ResolveExternalEdgeRealizationOwedRunning,
+    ResolveExternalEdgeRealizationOwedStopped,
+    ResolveExternalEdgeRealizationOwedCompleted,
+    ResolveExternalEdgeRealizationOwedDestroyed,
+    ResolveExternalEdgeRealizationStaleRunning,
+    ResolveExternalEdgeRealizationStaleStopped,
+    ResolveExternalEdgeRealizationStaleCompleted,
+    ResolveExternalEdgeRealizationStaleDestroyed,
+    RetireMemberArchiveOnly,
+    AdmitDestroyMemberRetireArchiveOnlyRunning,
+    AdmitDestroyMemberRetireArchiveOnlyStopped,
+    WireExternalPeerDormantRunning,
+    WireExternalPeerAlreadyWiredDormant,
+    UnwireExternalPeerDormantRunning,
+    RetireRunningReleasingArchiveOnly,
+    RetireRunningPreservingBindingArchiveOnly,
+    RetireStoppedReleasingArchiveOnly,
+    RetireStoppedPreservingBindingArchiveOnly,
+    ResolveMemberRevivalSessionCreatedRunning,
+    ResolveMemberRevivalSessionCreatedStaleRunning,
+    ResolveMemberRevivalSessionCreatedStaleStopped,
+    ResolveMemberRevivalSessionCreatedStaleCompleted,
+    ResolveMemberRevivalSessionCreatedStaleDestroyed,
+    RecoverMemberSeatSessionUnbornRunning,
+    RecoverMemberSeatSessionBornRunning,
+    AuthorizeSpawnProfileSeatedRunning,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -12734,7 +14274,7 @@ pub fn initial_state() -> State {
         runtime_retire_pending_sessions: Default::default(),
         remote_runtime_retired_ids: Default::default(),
         remote_supervisor_revoked_ids: Default::default(),
-        member_revival_pending: Default::default(),
+        member_materialization: Default::default(),
         explicit_resume_attempt: None,
         explicit_resume_cancel_requested: false,
         explicit_resume_preparation_pending: false,
@@ -12912,5 +14452,22 @@ pub fn initial_state() -> State {
         operator_grant_scopes: Default::default(),
         operator_grant_expiries: Default::default(),
         spawn_profile_authority_resolved_spec_digests: Default::default(),
+        member_wake_attempts: Default::default(),
+        member_wake_attempt_sequence: 0,
+        member_wake_bound: Default::default(),
+        member_materialization_epoch: Default::default(),
+        member_materialization_drift_count: 0,
+        member_boot_obligation_owed: Default::default(),
+        member_restore_policy: MemberRestorePolicyKind::OnDemand,
+        composition_authority: CompositionAuthorityKind::Authoritative,
+        member_host_preparation_pending: Default::default(),
+        boot_plan_sealed: false,
+        member_rotation_session_ids: Default::default(),
+        member_rotation_peer_endpoints: Default::default(),
+        runtime_retire_archive_only: Default::default(),
+        owed_edge_repairs: Default::default(),
+        owed_external_edge_repairs: Default::default(),
+        member_seat_session_unborn: Default::default(),
+        unborn_seat_sessions: Default::default(),
     }
 }

@@ -1,13 +1,18 @@
 //! A mob member whose runtime executor stopped while its registration stayed
-//! is rebuilt by the next turn on that same registration (the
-//! MissingLiveMaterialization redrive). The member declares a real MCP
-//! server, so the rebuilt construction composes a successor router for the
-//! registration its predecessor served.
+//! is served again by its next turn. The turn observes the live
+//! materialization missing and wakes the member through MobMachine's drift
+//! arm, and the wake replaces the stopped registration through the explicit
+//! replacement seam: that registration is released, its observation slot
+//! retired with it, and the member is rebuilt on a new registration of the
+//! same session. The member declares a real MCP server, so the rebuilt
+//! construction composes a successor router for the session its predecessor
+//! served.
 //!
 //! The predecessor router's shutdown must have completed before the
-//! successor's construction starts, the successor must serve the server, the
-//! registration's tool surface must stay Operating and the member must stay
-//! Active.
+//! successor's construction starts, the successor must serve the server and
+//! be installed on the member's current registration, that registration's
+//! tool surface must stay Operating and the member must stay Active with its
+//! runtime identity.
 //!
 //! Evidence limits: "shutdown completed" is the router's observable
 //! retirement and cache state (taken out, and its tool cache cleared once the
@@ -287,7 +292,7 @@ async fn missing_live_redrive_retires_the_predecessor_router_before_the_successo
         adapter.contains_session(&session_id).await,
         "a completed stop keeps the registration"
     );
-    let bindings = adapter
+    let stopped = adapter
         .prepare_local_session_bindings(session_id.clone())
         .await
         .expect("delivery-time preparation readmits the stopped runtime");
@@ -327,7 +332,7 @@ async fn missing_live_redrive_retires_the_predecessor_router_before_the_successo
     .expect("the composition route binds the stale tuple");
     let constructions_before_turn = entries.lock().unwrap().len();
 
-    // The next turn redrives the missing live materialization on the same
+    // The next turn wakes the member, which replaces the stopped
     // registration.
     tokio::time::timeout(
         Duration::from_mins(1),
@@ -356,25 +361,44 @@ async fn missing_live_redrive_retires_the_predecessor_router_before_the_successo
     );
 
     // (a) The recovered member's server is callable through its own router
-    // and through the registration's installed observer.
+    // and through the observer installed on the member's current
+    // registration. The wake replaced the stopped registration: its slot was
+    // retired with it, and the current registration holds a slot of its own.
     wait_callable(&successor, "recovered member").await;
-    let installed = bindings
+    let current = adapter
+        .prepare_local_session_bindings(session_id.clone())
+        .await
+        .expect("the member's current registration");
+    let stopped_slot = stopped
         .mcp_observation_slot()
-        .and_then(|slot| slot.current())
+        .expect("the stopped registration had an observation slot");
+    let current_slot = current
+        .mcp_observation_slot()
+        .expect("the current registration has an observation slot");
+    assert!(
+        stopped_slot.current().is_none(),
+        "the stopped registration's slot answers nothing once the wake replaced it"
+    );
+    assert!(
+        !current_slot.same_slot(stopped_slot),
+        "the wake rebuilt the member on a new registration"
+    );
+    let installed = current_slot
+        .current()
         .and_then(|(_, observer)| observer)
-        .expect("the successor is installed on the registration");
+        .expect("the successor is installed on the member's current registration");
     assert!(
         matches!(
             installed.observe_operation(SERVER, OPERATION).await,
             Observation::Callable { .. }
         ),
-        "the registration observes the recovered server as callable"
+        "the current registration observes the recovered server as callable"
     );
 
-    // (c) The registration's surface stays Operating, with the server Active
-    // under the recovered router.
+    // (c) The current registration's surface stays Operating, with the
+    // server Active under the recovered router.
     assert_eq!(
-        bindings
+        current
             .external_tool_surface()
             .surface_snapshot(SERVER)
             .and_then(|entry| entry.base_state),
@@ -382,7 +406,7 @@ async fn missing_live_redrive_retires_the_predecessor_router_before_the_successo
         "the recovered router keeps the server Active on the registration"
     );
     assert_eq!(
-        bindings
+        current
             .external_tool_surface()
             .diagnostic_snapshot()
             .surface_phase,

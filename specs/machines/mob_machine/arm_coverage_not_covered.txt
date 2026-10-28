@@ -1,0 +1,208 @@
+# MobMachine arms that no hand-written audit drives, each with the reason.
+#
+# Read by arm_coverage_gate.sh, which fails on any arm of the generated
+# model's Next relation that is neither in an audit runner's covered_actions
+# array (checked to fire by that audit's TLC coverage) nor matched here.
+#
+# Format: one entry per line, `<ArmName> <reason>` or `<Prefix>* <reason>`
+# for an arm family. Arm names are the expanded names of model.tla (a
+# per_phase transition expands to one arm per phase, suffixed with the
+# phase). `#` starts a comment. An entry that names no uncovered arm, an exact
+# entry that names a covered arm, a duplicate and an entry without a reason
+# fail the gate. `arm_coverage_gate.sh --list-uncovered` prints the arms that
+# still need an entry or an audit.
+AuthorizeFlow* flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+AuthorizeLoop* flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+ClassifyFlow* flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+ClassifyStep* flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+ClassifyTurn* flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+CompleteFlow* flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+CancelFlow* flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+RunFlow* flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+StartFlow* flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+CreateFrame* flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+CreateLoop* flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+CreateRun* flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+RecordLoop* flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+ResolveFlow* flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+EscalateTo* supervisor escalation of flow failures; flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+EvaluateTopology* flow delegation topology edge rules; flow engine state (runs, steps, frames, loops), outside the member lifecycle; no hand-written audit drives it
+StartRunRunning driven by member_lifecycle_audit through its AuditStartRun wrapper (one run at a time), whose coverage line TLC names after the wrapper
+FinishRun* mob-level run counting outside Running and its zero-count variants; member_lifecycle_audit drives FinishRunRunning
+InitializeAdaptive* adaptive runs, outside the member lifecycle; only the adaptive_mob_bundle layer_terminal_feedback witness exercises part of them
+RecordAdaptive* adaptive runs, outside the member lifecycle; only the adaptive_mob_bundle layer_terminal_feedback witness exercises part of them
+ResolveAdaptive* adaptive runs, outside the member lifecycle; only the adaptive_mob_bundle layer_terminal_feedback witness exercises part of them
+RequestAdaptive* adaptive runs, outside the member lifecycle; only the adaptive_mob_bundle layer_terminal_feedback witness exercises part of them
+IngestAdaptive* adaptive runs, outside the member lifecycle; only the adaptive_mob_bundle layer_terminal_feedback witness exercises part of them
+RecordCoordination* coordination board work intents and resource claims; no audit drives them
+UpdateCoordination* coordination board work intents and resource claims; no audit drives them
+ObserveCoordination* coordination board resource claim overlap; no audit drives it
+InitializeOrchestrator* orchestrator bookkeeping beside the member lifecycle; no audit drives it
+StopOrchestrator* orchestrator bookkeeping beside the member lifecycle; no audit drives it
+ResumeOrchestrator* orchestrator bookkeeping beside the member lifecycle; no audit drives it
+DestroyOrchestrator* orchestrator bookkeeping beside the member lifecycle; no audit drives it
+BindCoordinator* coordinator binding; no audit drives it
+UnbindCoordinator* coordinator binding; no audit drives it
+BindObjective* objective owner bindings; no audit drives them
+ConcludeObjective* objective conclusions; no audit drives them
+RecoverObjective* objective owner and conclusion replay; no audit drives it
+BindOwner* owner bridge session binding; no audit drives it
+RecoverOwner* owner bridge session replay; no audit drives it
+BeginHost* member-host bind ladder; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+CommitHost* member-host bind ladder; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+HostRebound* member-host bind ladder; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RefreshHost* member-host capabilities; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RevokeHost* member-host revocation; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RecoverHost* member-host binding replay; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RecoverConfirmed* member-host revocation replay; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RecoverOrdinary* member-host bind request replay; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RecoverReplacement* member-host replacement bind replay; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+AuthorizePlaced* placed carrier cleanup; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+ResolvePlaced* placed spawn, kickoff and completion custody; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RecordPlaced* placed completion obligations; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+StartPlaced* placed kickoffs; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+ClosePlaced* placed completion outcomes; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+DisposePlaced* placed kickoff obligations; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+AcknowledgePlaced* placed kickoff and completion outcomes; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RejectPlaced* placed kickoffs; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RequestPlaced* placed completion cancellation; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RecoverPlaced* placed carrier cleanup and completion sequence replay; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RecoverPending* pending placed spawn and completion replay; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RecoverResolved* resolved placed completion replay; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RecoverFinalized* finalized placed kickoff replay; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RecoverCommitted* committed placed spawn replay; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+PromoteCommitted* placed spawn carrier binding; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+BeginPlaced* placed-completion lifecycle quiesce replay and its Stopped and Completed variants; the audits drive the fresh Running quiesce arms (BeginPlacedCompletionLifecycleQuiesceFresh, BeginPlacedCompletionLifecycleQuiesceFreshStop)
+EndPlaced* placed-completion lifecycle quiesce endings, which only the placed custody and RetireAll paths reach; no audit drives them
+AbortRemote* remote (placed) member turn custody; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+AcknowledgeRemote* remote (placed) member turn custody; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+CommitRemote* remote (placed) member turn custody; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+DisposeRemote* remote (placed) member turn custody; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+ResolveRemote* remote (placed) member turn custody; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RecordRemote* remote (placed) member runtime and supervisor observations; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RecoverRemote* remote (placed) member observation replay; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+ClassifyRemote* remote (placed) member runtime observations; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+ObserveRemote* remote (placed) member archive; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RetireRemote* remote (placed) member retirement; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RetireMemberRemote* remote (placed) member retirement; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+ObserveMemberRetirementArchivedPlaced* placed member archives; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+RecoverRosterMemberRetirementStartedPlaced placed retirement-start replay; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+ResolveMemberRevivalSucceededRunningPlaced a placed member's wake closes Live through its member host; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+ObserveMemberRetirementArchivedStaleRuntime needs a Retiring runtime its identity no longer maps to; every audited unmapping arm clears that marker in the same step (member_lifecycle_audit AuditRetiringRuntimeMapped)
+ObserveMemberRetirementArchivedStaleRuntimeStopped needs a Retiring runtime its identity no longer maps to; every audited unmapping arm clears that marker in the same step (member_lifecycle_audit AuditRetiringRuntimeMapped)
+BeginSpawn* spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+AbortSpawn* spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+CommitSpawn* spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+CompleteSpawn* spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+CancelPending* spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+StageSpawn* spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+ComputeRespawn* respawn generation probe over the spawn ladder; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+RespawnRunning respawn over the spawn ladder; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+ClassifySpawn* spawn-many failure classification; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+ResolveSpawn* spawn member admission; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+ClassifyRetire* retire disposition of a pending spawn; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+EnsureMember* ensure-member over the spawn ladder; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+ProbeMember* spawn admission duplicate probe; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+RecordMember* spawn materialization failure record; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+Kickoff* member kickoff lifecycle; the seat owes no kickoff and no audit drives the kickoff arms
+RecoverMemberKickoff* member kickoff replay; no audit drives it
+AdmitSupervisor* supervisor rotation; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+CommitSupervisor* supervisor rotation; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+RecordSupervisor* supervisor rotation; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+ProvisionSupervisor* supervisor authority; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+RecoverSupervisor* supervisor authority replay; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+RestoreSupervisor* supervisor authority rollback; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+ClearSupervisor* supervisor authority destroy; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+ClassifyPending* pending supervisor acceptance; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+ClassifyBridge* bridge rejection recovery; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+RecordPending* pending recipient trust; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+ResolvePending* pending recipient trust; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+RollbackPending* pending recipient trust; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+AuthorizeMember* member trust wiring, peer rebind, overlay and endpoint migration; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+AuthorizeRetiring* retiring member trust cleanup; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+CleanupRetiring* retiring member wiring cleanup; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+RestoreRetiring* retiring member wiring restore; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+AuthorizeExternal* external peer trust; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+AuthorizeRoute* route removal before unwire; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+RecordExternal* external route install; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+RecordRoute* route install; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+ResolveExternal* external route install; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+ResolveRoute* route install; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+RollbackExternal* external route install; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+RollbackRoute* route install; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+WireExternal* external peer wiring; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+UnwireExternal* external peer wiring; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+RecoverExternal* external peer wiring replay; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+SetExternal* external member rebind capability; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+WireMembersWithTrust* trust-carrying member wiring; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+WireMembersPlacedPeerWake* a wiring edge that wakes a Dormant member it joins to a placed member; placed members (member hosts) are outside the audits: no audit binds a host or places a member
+ResolveWiringEdgeRealization* edge trust realization outcomes in the Stopped, Completed and Destroyed phases (late outcomes); member_residency_audit's edge run drives the Running arms
+ResolveExternalEdgeRealization* external edge trust realization outcomes; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+WireMembersAlreadyWired idempotent re-wire of an edge member_residency_audit's edge run already wired
+UnwireMembers* member unwiring; member_residency_audit's edge run keeps its one edge
+RecoverRosterWiringAlreadyRecovered idempotent wiring replay; member_residency_audit's edge run drives the fresh replay
+RecoverRosterUnwire* member unwiring replay; member_residency_audit's edge run keeps its one edge
+OperationPeer* operation peer trust; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+PeerInput* peer input admission bookkeeping; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+MemberPeer* member peer exposure; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+RegisterMemberPeerAlreadyCurrentRunning idempotent endpoint registration; member_residency_audit drives the fresh registration
+RecoverSpawned* the idempotent spawned member endpoint replay; member_residency_audit's wake run drives the fresh arm
+RecoverMemberPeerEndpointAlreadyCurrentRunning idempotent endpoint replay; member_residency_audit drives the fresh arm
+RecoverMemberPeerEndpointChangedRunning endpoint migration replay; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
+SubscribeAgent* event subscriptions and polling over the journal; they change no member residency, no audit drives them
+SubscribeAll* event subscriptions and polling over the journal; they change no member residency, no audit drives them
+SubscribeMob* event subscriptions and polling over the journal; they change no member residency, no audit drives them
+SubscribeStructural* event subscriptions and polling over the journal; they change no member residency, no audit drives them
+PollEvents* event subscriptions and polling over the journal; they change no member residency, no audit drives them
+AuthorizeMob* event router member subscriptions; event subscriptions and polling over the journal; they change no member residency, no audit drives them
+ResolveCreate* admission and policy classifiers over operator, profile and spawn requests; no audit drives them
+ResolveCurrent* admission and policy classifiers over operator, profile and spawn requests; no audit drives them
+ResolveOwned* admission and policy classifiers over operator, profile and spawn requests; no audit drives them
+ResolveProfile* admission and policy classifiers over operator, profile and spawn requests; no audit drives them
+ResolveMemberOperator* member-operator upcall admission; admission and policy classifiers over operator, profile and spawn requests; no audit drives them
+ClassifyMemberOperation* member operation eligibility; admission and policy classifiers over operator, profile and spawn requests; no audit drives them
+SetSpawn* spawn policy; admission and policy classifiers over operator, profile and spawn requests; no audit drives them
+RecordOperator* operator action provenance; admission and policy classifiers over operator, profile and spawn requests; no audit drives them
+GrantOperator* operator grant scopes; no MobMachine audit drives them
+RevokeOperator* operator grant scopes; no MobMachine audit drives them
+ResolveCancel* work cancellation refusals; no audit drives them
+ResolveSubmit* work submission refusals; no audit drives them
+SubmitWork* work submission; no audit drives it
+CancelAll* work cancellation; no audit drives it
+ForceCancel* forced cancellation; no audit drives it
+ResolveRuntime* runtime ingress and retire refusal feedback from MeerkatMachine; member_residency_audit drives the binding refusal and its stale twins
+ClassifyMemberWait* member wait classification over runtime material; no audit drives it
+ClassifyIdentity* identity reconciliation decisions; no audit drives them
+ConvergeRecovered* recovered roster and respawn topology convergence; no audit drives it
+ObserveRespawn* respawn topology preservation records; no audit drives them
+ResolveRespawn* respawn topology restore; no audit drives it
+RecoverIdentity* generation high-water recovery; generation_highwater_audit drives it and checks its witnesses, without a coverage list
+SealIdentity* generation high-water seal; generation_highwater_audit drives it and checks its witnesses, without a coverage list
+AdvanceDefinition* definition epoch advance; no audit drives it
+Reconcile* desired-roster reconcile; no audit drives it
+ResetToRunning mob reset; no audit drives it
+RetireAll* they change only the phase and the step count (member_lifecycle_audit header)
+ShutdownStopped Shutdown outside Running; member_residency_audit drives ShutdownRunning
+ShutdownCompleted Shutdown outside Running; member_residency_audit drives ShutdownRunning
+BeginCleanup* post-stop cleanup custody; no audit drives it
+FinishCleanup* post-stop cleanup custody; no audit drives it
+RecoverCompleted* completed-with-cleanup-custody replay; no audit drives it
+DestroyFromAny the forced destroy from any phase; member_lifecycle_audit and member_residency_audit drive DestroyMob behind its quiesce instead
+AdmitDestroyMemberRetire* member retirement inside the mob's own destroy while Stopped, and for placed, peer-only, runtime-ended or archived members; member_residency_audit's retire run drives the Running arms of a local member
+ObserveDestroy* member archives inside the mob's own destroy while Stopped, and for placed or already-cleared members; member_residency_audit's retire run drives the Running arms of a local member
+AdmitDestroyStorageFinalizing destroy storage finalization; no audit drives it
+AdmitDestroyCleanupStopped destroy admission outside Running; the audits drive AdmitDestroyCleanup
+AdmitDestroyCleanupCompleted destroy admission outside Running; the audits drive AdmitDestroyCleanup
+SeedOrphan* orphan budget seed; no audit drives it
+StartupMark* startup readiness ladder step after the runtime-ready observation; member residency reads only the runtime-ready rung (live_member_records_its_epoch), no audit drives it
+SessionIngressDetachFailed* session ingress detach failure for a mob destroy; no audit drives it
+RequestPending* session ingress detach request for a mob destroy; no audit drives it
+MemberTerminalized* member terminal notice bookkeeping; no audit drives it
+ResolveAutonomous* autonomous member shutdown action classification; no audit drives it
+ClassifyExplicitResumeMemberOutcome* explicit resume outcome classification; member_residency_audit's resume run settles from the wake attempt's outcome instead
+BeginExplicitResumeCleanup* explicit resume rollback cleanup; the resume run does not cancel
+SettleExplicitResumeCleanup* explicit resume rollback cleanup; the resume run does not cancel
+CancelExplicit* explicit resume cancellation; the resume run does not cancel
+FinishExplicitResumeCancelledStopped explicit resume cancellation; the resume run does not cancel
+CommitMemberRotationLiveKickoff* the rotation terminal of a spec that owes a kickoff, which it records pending; no residency audit drives the kickoff arms that settle it, and member_residency_audit drives the kickoff-free twin, which shares every other guard and update
+CommitMemberRotationRetiredKickoff* the rotation terminal of a spec that owes a kickoff, which it records pending; no residency audit drives the kickoff arms that settle it, and member_residency_audit drives the kickoff-free twin, which shares every other guard and update

@@ -1089,7 +1089,7 @@ OpenAiPromptCacheMode = Literal['implicit', 'explicit']
 
 
 # Minimum lifetime for GPT-5.6 prompt-cache entries.
-OpenAiPromptCacheTtl = Literal['30m']
+OpenAiPromptCacheTtl = Literal['30m', '12h']
 
 
 class OpenAiPromptCacheOptions(TypedDict, total=False):

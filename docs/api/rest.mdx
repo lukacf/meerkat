@@ -1018,7 +1018,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 6},
+  "contract_version": {"major": 0, "minor": 9, "patch": 7},
   "providers": [
     {
       "provider": "anthropic",
@@ -1052,7 +1052,7 @@ Returns runtime capabilities with status resolved against config.
 
 ```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 6},
+  "contract_version": {"major": 0, "minor": 9, "patch": 7},
   "capabilities": [
     {
       "id": "sessions",
@@ -1538,7 +1538,11 @@ response.
 A failed send returns HTTP `500` whose `code` and `details.code` name the
 failure with the JSON-RPC vocabulary: `peer_not_found_or_not_trusted`,
 `peer_unreachable`, `peer_admission_dropped`, `peer_input_rejected`,
-`send_ambiguous` or `send_failed`. `send_ambiguous` means the envelope may
+`peer_wake_refused`, `send_ambiguous` or `send_failed`. `peer_wake_refused`
+means the peer is a seated member whose wake was refused or did not finish:
+nothing was delivered, its `details` carry the `envelope_id`, the typed
+`refusal` (tagged on `kind`) and `retryable`, and a retry cannot duplicate the
+message. `send_ambiguous` means the envelope may
 already be delivered: its `details` carry the `envelope_id`,
 `retry_safe: false` and `required_action: "reconcile"`. Reconcile by that
 envelope before any new attempt; a retry can duplicate it.

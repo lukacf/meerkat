@@ -81,9 +81,20 @@ pub enum ReviewRetirementReason {
     RunEnded,
 }
 
+/// The entered effect of one spent (`Used`) attempt: `Open` while its
+/// admitting dispatch runs, `Closing` once that dispatch ended while admitted
+/// steps were still in flight. A closing effect admits no step, and its last
+/// step's finish releases the attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum EnteredEffectPhase {
+    #[default]
+    Open,
+    Closing,
+}
+
 machine! {
     machine ApprovalLifecycleMachine {
-        version: 5,
+        version: 6,
         rust: "self" / "catalog::dsl::approval_lifecycle",
 
         state {
@@ -107,6 +118,11 @@ machine! {
             review_ids: Set<String>,
             review_statuses: Map<String, Enum<ReviewAttemptStatus>>,
             review_retirements: Map<String, Enum<ReviewRetirementReason>>,
+            // The entered effect of each spent (`Used`) attempt, from its one
+            // spend until its release: its phase, and its admitted steps
+            // still in flight.
+            review_entered_phase: Map<String, Enum<EnteredEffectPhase>>,
+            review_entered_steps: Map<String, u64>,
         }
 
         init(Ready) {
@@ -123,6 +139,8 @@ machine! {
             review_ids = EmptySet,
             review_statuses = EmptyMap,
             review_retirements = EmptyMap,
+            review_entered_phase = EmptyMap,
+            review_entered_steps = EmptyMap,
         }
 
         terminal []
@@ -216,6 +234,15 @@ machine! {
                 review_id: String,
             },
             ReleaseReview {
+                review_id: String,
+            },
+            // One later step of an entered effect begins: admitted only
+            // against the attempt its entry spent, while that effect is open.
+            AdmitEnteredStep {
+                review_id: String,
+            },
+            // One admitted step of an entered effect finished.
+            FinishEnteredStep {
                 review_id: String,
             },
         }
@@ -338,6 +365,25 @@ machine! {
                     || (self.approval_statuses.get_cloned(id) == Some(ApprovalLifecycleStatus::Approved)
                         && self.approval_consent_authenticated.get_cloned(id) == Some(true)
                         && self.approval_consent_review.contains_key(id) == false))
+        }
+
+        // The entered state exists exactly for the spent (`Used`) attempts:
+        // a spend opens it, and only the attempt's release ends it.
+        invariant entered_state_covers_exactly_the_used_attempts {
+            self.review_entered_steps.keys() == self.review_entered_phase.keys()
+                && for_all(id in self.review_entered_phase.keys(),
+                    self.review_statuses.get_cloned(id) == Some(ReviewAttemptStatus::Used))
+                && for_all(id in self.review_statuses.keys(),
+                    self.review_statuses.get_cloned(id) != Some(ReviewAttemptStatus::Used)
+                        || self.review_entered_phase.contains_key(id))
+        }
+
+        // A closing effect still has an admitted step in flight: its last
+        // step's finish released it.
+        invariant closing_entered_effect_has_a_step_in_flight {
+            for_all(id in self.review_entered_phase.keys(),
+                self.review_entered_phase.get_cloned(id) != Some(EnteredEffectPhase::Closing)
+                    || self.review_entered_steps.get_cloned(id) != Some(0))
         }
 
         transition CreateRejectedEmptyAllowedDecisions {
@@ -1132,6 +1178,8 @@ machine! {
                 self.review_statuses.insert(review_id, ReviewAttemptStatus::Used);
                 self.approval_consent_review.remove(approval_id);
                 self.review_consent_approval.remove(review_id);
+                self.review_entered_phase.insert(review_id, EnteredEffectPhase::Open);
+                self.review_entered_steps.insert(review_id, 0);
             }
             to Ready
             emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Used }
@@ -1657,6 +1705,8 @@ machine! {
             }
             update {
                 self.review_statuses.insert(review_id, ReviewAttemptStatus::Used);
+                self.review_entered_phase.insert(review_id, EnteredEffectPhase::Open);
+                self.review_entered_steps.insert(review_id, 0);
             }
             to Ready
             emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Used }
@@ -1783,6 +1833,8 @@ machine! {
             emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Retired }
         }
 
+        // An entered effect ends with no admitted step in flight: the spent
+        // attempt is released.
         transition ReleaseReviewUsed {
             on input ReleaseReview { review_id }
             guard {
@@ -1790,11 +1842,229 @@ machine! {
                 && self.review_ids.contains(review_id)
                 && self.review_consent_approval.contains_key(review_id) == false
                 && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Used
+                && self.review_entered_steps.get_cloned(review_id).get("value") == 0
             }
             update {
                 self.review_ids.remove(review_id);
                 self.review_statuses.remove(review_id);
                 self.review_retirements.remove(review_id);
+                self.review_entered_phase.remove(review_id);
+                self.review_entered_steps.remove(review_id);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Used }
+        }
+
+        // The entered state of one effect is its spent attempt's `Used`
+        // status with its entered phase and in-flight steps. A later step of
+        // that effect begins only here (AdmitEnteredStep), against that
+        // attempt while its effect is open, and ends with FinishEnteredStep;
+        // neither ever spends. The admitting dispatch's end (ReleaseReview)
+        // releases the attempt with no step in flight, and otherwise closes
+        // the effect: no new step, and the last step's finish releases it.
+        // An unknown or released attempt, a consent-linked one (its consent
+        // is unspent), a retired one and one never spent admit no step.
+        transition AdmitEnteredStepRejectedMissing {
+            on input AdmitEnteredStep { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id) == false
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::NotFound }
+        }
+
+        transition AdmitEnteredStepRejectedConsentLinked {
+            on input AdmitEnteredStep { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_consent_approval.contains_key(review_id)
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::ConsentLinked }
+        }
+
+        transition AdmitEnteredStepRejectedRetired {
+            on input AdmitEnteredStep { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_consent_approval.contains_key(review_id) == false
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Retired
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::ReviewRetired }
+        }
+
+        transition AdmitEnteredStepRejectedNotEntered {
+            on input AdmitEnteredStep { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_consent_approval.contains_key(review_id) == false
+                && (self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Pending
+                    || self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Allowed
+                    || self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Denied
+                    || self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Escalated
+                    || self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Unavailable)
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::ReviewNotSatisfied }
+        }
+
+        transition AdmitEnteredStep {
+            on input AdmitEnteredStep { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_consent_approval.contains_key(review_id) == false
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Used
+                && self.review_entered_phase.get_cloned(review_id).get("value") == EnteredEffectPhase::Open
+            }
+            update {
+                self.review_entered_steps.insert(review_id, self.review_entered_steps.get_cloned(review_id).get("value") + 1);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Used }
+        }
+
+        // The admitting dispatch ended while admitted steps are still in
+        // flight (closing): no new step of its effect begins. The existing
+        // reason `Expired` stands for that ended dispatch, so no public
+        // enum changes; once the attempt is released, a step answers
+        // `NotFound` instead. Core maps both to the same ended refusal.
+        transition AdmitEnteredStepRejectedClosing {
+            on input AdmitEnteredStep { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_consent_approval.contains_key(review_id) == false
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Used
+                && self.review_entered_phase.get_cloned(review_id).get("value") == EnteredEffectPhase::Closing
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::Expired }
+        }
+
+        // The admitting dispatch ended while admitted steps are still in
+        // flight: the attempt stays registered as Used, closing, until the
+        // last of them finishes.
+        transition ReleaseReviewUsedClosing {
+            on input ReleaseReview { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_consent_approval.contains_key(review_id) == false
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Used
+                && self.review_entered_steps.get_cloned(review_id).get("value") != 0
+                && self.review_entered_phase.get_cloned(review_id).get("value") == EnteredEffectPhase::Open
+            }
+            update {
+                self.review_entered_phase.insert(review_id, EnteredEffectPhase::Closing);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Used }
+        }
+
+        transition ReleaseReviewRejectedClosing {
+            on input ReleaseReview { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_consent_approval.contains_key(review_id) == false
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Used
+                && self.review_entered_steps.get_cloned(review_id).get("value") != 0
+                && self.review_entered_phase.get_cloned(review_id).get("value") == EnteredEffectPhase::Closing
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::AlreadyDecided }
+        }
+
+        transition FinishEnteredStepRejectedMissing {
+            on input FinishEnteredStep { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id) == false
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::NotFound }
+        }
+
+        transition FinishEnteredStepRejectedNotInFlight {
+            on input FinishEnteredStep { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && (self.review_consent_approval.contains_key(review_id)
+                    || self.review_statuses.get_cloned(review_id).get("value") != ReviewAttemptStatus::Used
+                    || self.review_entered_steps.get_cloned(review_id).get("value") == 0)
+            }
+            update {}
+            to Ready
+            emit ReviewLifecycleRejected { review_id: review_id, reason: ApprovalLifecycleRejectionReason::AlreadyDecided }
+        }
+
+        transition FinishEnteredStepOpen {
+            on input FinishEnteredStep { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_consent_approval.contains_key(review_id) == false
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Used
+                && self.review_entered_steps.get_cloned(review_id).get("value") != 0
+                && self.review_entered_phase.get_cloned(review_id).get("value") == EnteredEffectPhase::Open
+            }
+            update {
+                self.review_entered_steps.insert(review_id, self.review_entered_steps.get_cloned(review_id).get("value") - 1);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Used }
+        }
+
+        transition FinishEnteredStepClosing {
+            on input FinishEnteredStep { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_consent_approval.contains_key(review_id) == false
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Used
+                && self.review_entered_steps.get_cloned(review_id).get("value") != 0
+                && self.review_entered_steps.get_cloned(review_id).get("value") != 1
+                && self.review_entered_phase.get_cloned(review_id).get("value") == EnteredEffectPhase::Closing
+            }
+            update {
+                self.review_entered_steps.insert(review_id, self.review_entered_steps.get_cloned(review_id).get("value") - 1);
+            }
+            to Ready
+            emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Used }
+        }
+
+        // The last admitted step of a closing effect finished: the spent
+        // attempt is released now, after the work it admitted.
+        transition FinishEnteredStepReleases {
+            on input FinishEnteredStep { review_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.review_ids.contains(review_id)
+                && self.review_consent_approval.contains_key(review_id) == false
+                && self.review_statuses.get_cloned(review_id).get("value") == ReviewAttemptStatus::Used
+                && self.review_entered_steps.get_cloned(review_id).get("value") == 1
+                && self.review_entered_phase.get_cloned(review_id).get("value") == EnteredEffectPhase::Closing
+            }
+            update {
+                self.review_ids.remove(review_id);
+                self.review_statuses.remove(review_id);
+                self.review_retirements.remove(review_id);
+                self.review_entered_phase.remove(review_id);
+                self.review_entered_steps.remove(review_id);
             }
             to Ready
             emit ReviewStatusResolved { review_id: review_id, status: ReviewAttemptStatus::Used }

@@ -1728,6 +1728,25 @@ impl meerkat_session::McpAttemptGuardSource for FactoryAgentBuilder {
 impl SessionAgentBuilder for FactoryAgentBuilder {
     type Agent = FactoryAgent;
 
+    /// A build resolves an explicit binding on its realm's chain and records
+    /// it stamped with the realm that declares it; this is that resolution,
+    /// on the config a build would read.
+    async fn recorded_auth_binding(
+        &self,
+        auth_binding: &meerkat_core::AuthBindingRef,
+    ) -> Result<Option<meerkat_core::AuthBindingRef>, SessionError> {
+        let config = self.resolve_config().await?;
+        meerkat_core::resolve_explicit_auth_binding_target(&config, auth_binding)
+            .map(|target| Some(target.auth_binding))
+            .map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::ConfigError(format!(
+                    "auth binding '{}' in realm '{}' does not resolve: {error}",
+                    auth_binding.binding.as_str(),
+                    auth_binding.realm.as_str()
+                )))
+            })
+    }
+
     async fn abort_absent_session_compaction_stages(
         &self,
         session_id: &meerkat_core::SessionId,

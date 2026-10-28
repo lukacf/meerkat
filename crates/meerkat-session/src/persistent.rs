@@ -4398,6 +4398,16 @@ impl<'a> MachineSessionArchiveProtocol<'a> {
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
+    /// The auth binding a build of this service that names `auth_binding`
+    /// records in its session's metadata (see
+    /// [`SessionAgentBuilder::recorded_auth_binding`]).
+    pub async fn recorded_auth_binding(
+        &self,
+        auth_binding: &meerkat_core::AuthBindingRef,
+    ) -> Result<Option<meerkat_core::AuthBindingRef>, SessionError> {
+        self.inner.recorded_auth_binding(auth_binding).await
+    }
+
     /// Commit one typed instruction activation while the caller holds this
     /// session's runtime-turn finalization boundary.
     ///
@@ -19980,7 +19990,46 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// ([`ColdAttachSettlement::ContinuesOpenRun`]). Whether the run
     /// continues is the store-owned recovery's own disposition; the snapshot
     /// only serves the caller's reads.
+    ///
+    /// A session another owner holds in this process (a mob holding the
+    /// session's member dormant, see
+    /// [`meerkat_core::session_owner_wake`]) is materialized by that owner,
+    /// never by the caller's attach: when no live actor of this service
+    /// hosts the session, its owner is asked to wake it first. Once it is
+    /// woken the session is live and nothing is left to settle; the owner's
+    /// refusal is this attach's error. The session's owner settling its own
+    /// session uses [`Self::prepare_cold_attach_reporting_as_owner`].
     pub async fn prepare_cold_attach_reporting(
+        &self,
+        id: &SessionId,
+        claim: meerkat_core::session_hosting::HostingClaim,
+    ) -> Result<ColdAttachSettlement, SessionError> {
+        self.require_cold_attach_claim(id, &claim)?;
+        if self.wake_session_owner_before_cold_attach(id).await? {
+            return Ok(ColdAttachSettlement::Settled);
+        }
+        meerkat_core::session_hosting::with_write_hosting(
+            claim,
+            self.prepare_cold_attach_hosted(id, false),
+        )
+        .await
+    }
+
+    /// [`Self::prepare_cold_attach`] for the session's own owner (a mob
+    /// settling its member's session): its owner is not asked to wake it.
+    pub async fn prepare_cold_attach_as_owner(
+        &self,
+        id: &SessionId,
+        claim: meerkat_core::session_hosting::HostingClaim,
+    ) -> Result<(), SessionError> {
+        self.prepare_cold_attach_reporting_as_owner(id, claim)
+            .await
+            .map(|_settlement| ())
+    }
+
+    /// [`Self::prepare_cold_attach_reporting`] for the session's own owner:
+    /// its owner is not asked to wake it.
+    pub async fn prepare_cold_attach_reporting_as_owner(
         &self,
         id: &SessionId,
         claim: meerkat_core::session_hosting::HostingClaim,
@@ -19991,6 +20040,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             self.prepare_cold_attach_hosted(id, false),
         )
         .await
+    }
+
+    /// Ask the owner of a session no live actor of this service hosts to
+    /// wake it, before a cold attach would materialize it: `true` once its
+    /// owner woke it (the session is live), `false` when no owner in this
+    /// process holds it or its owner no longer binds it (the attach goes on
+    /// as before). The owner's refusal is the error.
+    async fn wake_session_owner_before_cold_attach(
+        &self,
+        id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        if self.inner.has_live_session(id).await? {
+            return Ok(false);
+        }
+        match meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+            .wake(id)
+            .await
+        {
+            Some(Ok(meerkat_core::session_owner_wake::SessionOwnerWakeOutcome::Ready)) => Ok(true),
+            Some(Ok(_)) | None => Ok(false),
+            Some(Err(error)) => Err(error),
+        }
     }
 
     /// [`Self::prepare_cold_attach`] for a caller that holds the session's
@@ -22090,6 +22161,67 @@ mod tests {
             }
             other => panic!("expected machine-owned exact-interrupt refusal, got {other:?}"),
         }
+    }
+
+    /// A cold attach of a session another owner holds in this process (a
+    /// mob holding its member dormant) asks that owner to wake it and
+    /// settles nothing itself once it is woken. The owner's own settle of
+    /// the session never asks it.
+    #[tokio::test]
+    async fn a_cold_attach_of_an_owned_session_asks_its_owner_first() {
+        use meerkat_core::session_owner_wake::{
+            SessionOwnerWakeFuture, SessionOwnerWakeOutcome, SessionOwnerWakeRegistry,
+            SessionOwnerWaker,
+        };
+
+        struct CountingOwner {
+            asked: AtomicUsize,
+        }
+
+        impl SessionOwnerWaker for CountingOwner {
+            fn wake_session_owner(&self, _session_id: &SessionId) -> SessionOwnerWakeFuture {
+                self.asked.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(SessionOwnerWakeOutcome::Ready) })
+            }
+        }
+
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let session_id = SessionId::new();
+        let owner = Arc::new(CountingOwner {
+            asked: AtomicUsize::new(0),
+        });
+        let owner_entry: Arc<dyn SessionOwnerWaker> = owner.clone();
+        let registry = SessionOwnerWakeRegistry::global();
+        registry.publish(session_id.clone(), Arc::downgrade(&owner_entry));
+
+        let claim = service
+            .grant_session_hosting(&session_id)
+            .expect("the service's hosting claim");
+        let settlement = service
+            .prepare_cold_attach_reporting(&session_id, claim)
+            .await
+            .expect("the owner woke the session");
+        assert!(matches!(settlement, ColdAttachSettlement::Settled));
+        assert_eq!(owner.asked.load(Ordering::SeqCst), 1);
+
+        let claim = service
+            .grant_session_hosting(&session_id)
+            .expect("the service's hosting claim");
+        let _ = service
+            .prepare_cold_attach_reporting_as_owner(&session_id, claim)
+            .await;
+        assert_eq!(
+            owner.asked.load(Ordering::SeqCst),
+            1,
+            "the owner's own settle never asks the owner"
+        );
+        assert!(registry.retract(&session_id, &Arc::downgrade(&owner_entry)));
     }
 
     #[tokio::test]
@@ -24771,6 +24903,12 @@ mod tests {
         > {
             self.inner.load_ops_lifecycle(runtime_id).await
         }
+
+        async fn list_runtimes_with_recovery_work(
+            &self,
+        ) -> Result<Vec<LogicalRuntimeId>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.list_runtimes_with_recovery_work().await
+        }
     }
 
     struct GatedSnapshotRuntimeStore {
@@ -25768,6 +25906,12 @@ mod tests {
             meerkat_runtime::store::RuntimeStoreError,
         > {
             self.inner.load_ops_lifecycle(runtime_id).await
+        }
+
+        async fn list_runtimes_with_recovery_work(
+            &self,
+        ) -> Result<Vec<LogicalRuntimeId>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.list_runtimes_with_recovery_work().await
         }
     }
 
@@ -29978,6 +30122,12 @@ mod tests {
                 .load_committed_whole_blob_snapshot(runtime_id)
                 .await
         }
+
+        async fn list_runtimes_with_recovery_work(
+            &self,
+        ) -> Result<Vec<LogicalRuntimeId>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.list_runtimes_with_recovery_work().await
+        }
     }
 
     impl WholeBlobAuthorityReadProbe {
@@ -30985,6 +31135,12 @@ mod tests {
             runtime_id: &LogicalRuntimeId,
         ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
             self.inner.delete_ops_lifecycle(runtime_id).await
+        }
+
+        async fn list_runtimes_with_recovery_work(
+            &self,
+        ) -> Result<Vec<LogicalRuntimeId>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.list_runtimes_with_recovery_work().await
         }
     }
 
@@ -54755,6 +54911,12 @@ mod tests {
             meerkat_runtime::store::RuntimeStoreError,
         > {
             self.inner.load_ops_lifecycle(runtime_id).await
+        }
+
+        async fn list_runtimes_with_recovery_work(
+            &self,
+        ) -> Result<Vec<LogicalRuntimeId>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.list_runtimes_with_recovery_work().await
         }
     }
 

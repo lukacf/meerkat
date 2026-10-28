@@ -462,10 +462,20 @@ for a store whose commits are slow.
 - **On open.** After acquiring the fence, and before its first commit, Core
   lists every scope's head once.
 - **Only what recovery needs.** A session's body is loaded at open only when
-  recovery must act on it: it has unsettled inputs, an open run cursor or a
-  current run. Archived sessions are never loaded at open.
+  recovery must act on it: it has unsettled inputs, input rows without a
+  lifecycle record, a background operation completion not yet delivered, a
+  running detached job wait, pending terminal owners, an open run cursor or
+  a current run. Archived sessions are never loaded at open. A mob's start
+  then reads only the members it wakes; under the default restore policy a
+  dormant member's session is not read.
 - **The rest on first use.** Every other session loads the first time it is
   used, and then stays in memory until it is archived.
+- **Bounded rows.** Core re-bases a session's rows once they pass 256 KiB or
+  four times its live state, whichever is larger, so the rows a load reads
+  stay within that bound however long the session has run.
+
+The [Host Store SPI reference](/reference/host-store-spi#what-core-reads)
+lists every read and the re-base rule.
 
 ### Failures
 

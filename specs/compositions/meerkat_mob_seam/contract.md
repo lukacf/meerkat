@@ -12,6 +12,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `retire_request_reaches_meerkat`: `mob`.`RequestRuntimeRetire` -> `meerkat`.`Retire` [Immediate]
 - `destroy_request_reaches_meerkat`: `mob`.`RequestRuntimeDestroy` -> `meerkat`.`Destroy` [Immediate]
 - `runtime_bound_reaches_mob`: `meerkat`.`RuntimeBound` -> `mob`.`ObserveRuntimeReady` [Immediate]
+- `runtime_registration_released_reaches_mob`: `meerkat`.`RuntimeRegistrationReleased` -> `mob`.`ReleaseMemberMaterialization` [Immediate]
 - `runtime_retired_reaches_mob`: `meerkat`.`RuntimeRetired` -> `mob`.`ObserveRuntimeRetired` [Immediate]
 - `runtime_destroyed_reaches_mob`: `meerkat`.`RuntimeDestroyed` -> `mob`.`ObserveRuntimeDestroyed` [Immediate]
 

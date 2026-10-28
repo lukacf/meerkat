@@ -2023,12 +2023,15 @@ async fn resume_after_crash(
     let machine = governed_machine(&restarted);
     crash_stop_and_release_routes(handle).await;
     drop(service);
+    // The rows assert what the start's restore asks the host, so the start
+    // materializes the member.
     let builder = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         Arc::clone(events),
         Arc::clone(runtime_metadata),
     ))
     .with_session_service(restarted.clone())
-    .with_member_runtime_registration_hook(host);
+    .with_member_runtime_registration_hook(host)
+    .with_member_restore_policy(crate::runtime::MemberRestorePolicy::Eager);
     let builder = match customizer {
         Some(customizer) => builder.with_spawn_member_customizer(customizer),
         None => builder,
@@ -2666,6 +2669,8 @@ async fn recreated_mob(second_boot: Arc<SelectingHost>) -> RecreatedMob {
     let machine = governed_machine(&restarted);
     crash_stop_and_release_routes(handle).await;
     drop(service);
+    // The rows assert the members the start recreates, so the start
+    // materializes every member.
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,
         runtime_metadata,
@@ -2673,6 +2678,7 @@ async fn recreated_mob(second_boot: Arc<SelectingHost>) -> RecreatedMob {
     .with_session_service(restarted)
     .with_member_runtime_registration_hook(second_boot)
     .allow_ephemeral_sessions(true)
+    .with_member_restore_policy(crate::runtime::MemberRestorePolicy::Eager)
     .resume()
     .await
     .expect("the boot recreates every member; a host refusal breaks only the member refused");
@@ -2914,4 +2920,222 @@ async fn a_member_its_host_refuses_to_revive_stays_broken_with_the_typed_refusal
         "the repeat answers exactly the first refusal"
     );
     let _ = mob.handle.stop().await;
+}
+
+/// A hooked mob over member comms identities, for the seat rows.
+async fn hooked_seat_mob(
+    keys: &std::path::Path,
+) -> (
+    MobHandle,
+    Arc<MockSessionService>,
+    Arc<MeerkatMachine>,
+    Arc<SelectingHost>,
+) {
+    let service = Arc::new(MockSessionService::new());
+    let machine = governed_machine(&service);
+    let host = SelectingHost::new(false, false);
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .with_member_runtime_registration_hook(host.clone())
+        .with_member_comms_identity_root(keys)
+        .create()
+        .await
+        .expect("create the hooked mob");
+    (handle, service, machine, host)
+}
+
+fn session_unborn(handle: &MobHandle, member: &AgentIdentity) -> bool {
+    crate::runtime::boot_plan::domain_member_seat_session_unborn(
+        &handle.machine_state_watch_rx.borrow(),
+        member,
+    )
+}
+
+/// After a member's first wake: its seat's session was created exactly once,
+/// through the host's registration (destination selected and bound, surface
+/// gate installed on the member's registration), and the session is no
+/// longer unborn.
+async fn assert_created_once_through_the_host(
+    handle: &MobHandle,
+    service: &MockSessionService,
+    machine: &MeerkatMachine,
+    host: &SelectingHost,
+    member: &AgentIdentity,
+    session: &SessionId,
+    host_selections_before: usize,
+) {
+    let creates = service
+        .recorded_create_requests()
+        .await
+        .into_iter()
+        .filter(|record| &record.session_id == session)
+        .count();
+    assert_eq!(creates, 1, "the first wake creates the seat's session once");
+    assert_eq!(
+        host.selections_of(member),
+        host_selections_before + 1,
+        "the create went through the host's registration"
+    );
+    assert!(
+        machine.session_tool_surface_gate(session).await.is_some(),
+        "the member's registration carries its host's surface gate"
+    );
+    assert_bound_at(machine, session, GENERATION).await;
+    assert!(
+        !session_unborn(handle, member),
+        "the created session is no longer unborn"
+    );
+}
+
+/// A fresh dormant seat builds nothing: no session is created and its host is
+/// not asked, so no tool or MCP server of the member is built outside the
+/// host's registration. MobMachine records the seat's session unborn; the
+/// member's first wake creates it once, through the spawn provision path,
+/// whose registration asks the host before anything is built.
+#[tokio::test]
+async fn a_fresh_seat_builds_nothing_and_its_first_wake_creates_the_session_through_the_host() {
+    let keys = tempfile::tempdir().expect("a comms identity root");
+    let (handle, service, machine, host) = hooked_seat_mob(keys.path()).await;
+    let member = AgentIdentity::from("seated-worker");
+    let mut spec = SpawnMemberSpec::new("worker", member.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    let outcomes = handle
+        .seat_dormant_members(vec![spec])
+        .await
+        .expect("the seat batch answers");
+    let session = match &outcomes[0] {
+        crate::runtime::DormantSeatOutcome::Seated { session_id, .. } => session_id.clone(),
+        other => panic!("the fresh spec is seated: {other:?}"),
+    };
+    assert!(
+        service.recorded_create_requests().await.is_empty(),
+        "the seat creates no session"
+    );
+    assert_eq!(
+        host.selections_of(&member),
+        0,
+        "the seat asks the host nothing"
+    );
+    assert!(
+        !machine.contains_session(&session).await,
+        "the seat registers no runtime"
+    );
+    assert!(
+        session_unborn(&handle, &member),
+        "MobMachine holds the seat's session unborn"
+    );
+
+    handle
+        .ensure_member_live(&member)
+        .await
+        .expect("the first wake materializes the member");
+    assert_created_once_through_the_host(&handle, &service, &machine, &host, &member, &session, 0)
+        .await;
+    handle.stop().await.unwrap();
+}
+
+/// A rotation's next incarnation is seated as a fresh seat is: the rotation
+/// creates no session for it and asks the host nothing, and its first wake
+/// creates the new session once through the host's registration.
+#[tokio::test]
+async fn a_rotations_next_incarnation_builds_nothing_until_its_first_wake() {
+    let keys = tempfile::tempdir().expect("a comms identity root");
+    let (handle, service, machine, host) = hooked_seat_mob(keys.path()).await;
+    let member = AgentIdentity::from("rotated-worker");
+    let spec = || {
+        let mut spec = SpawnMemberSpec::new("worker", member.clone());
+        spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+        spec
+    };
+    handle.spawn_spec(spec()).await.expect("spawn the member");
+    let creates_before = service.recorded_create_requests().await.len();
+    let selections_before = host.selections_of(&member);
+    let next = handle
+        .rotate_member(spec())
+        .await
+        .expect("the rotation seats the next incarnation");
+    assert_eq!(
+        service.recorded_create_requests().await.len(),
+        creates_before,
+        "the rotation creates no session"
+    );
+    assert_eq!(
+        host.selections_of(&member),
+        selections_before,
+        "the rotation asks the host nothing"
+    );
+    assert!(
+        session_unborn(&handle, &member),
+        "the next incarnation's session is unborn"
+    );
+
+    handle
+        .ensure_member_live(&member)
+        .await
+        .expect("the first wake materializes the next incarnation");
+    assert_created_once_through_the_host(
+        &handle,
+        &service,
+        &machine,
+        &host,
+        &member,
+        &next,
+        selections_before,
+    )
+    .await;
+    handle.stop().await.unwrap();
+}
+
+/// A first wake whose host refuses the registration of the seat's session
+/// breaks the member, typed, as a boot restore's refusal does: the host is
+/// asked once, no actor is built and no registration stays current, and
+/// the session stays unborn, so a later wake creates it rather than resuming
+/// a session that was never built.
+#[tokio::test]
+async fn a_refused_registration_at_a_seats_first_wake_breaks_the_member_and_keeps_it_unborn() {
+    let keys = tempfile::tempdir().expect("a comms identity root");
+    let (handle, service, machine, host) = hooked_seat_mob(keys.path()).await;
+    let member = AgentIdentity::from("refused-seat");
+    let mut spec = SpawnMemberSpec::new("worker", member.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    let outcomes = handle
+        .seat_dormant_members(vec![spec])
+        .await
+        .expect("the seat batch answers");
+    let session = match &outcomes[0] {
+        crate::runtime::DormantSeatOutcome::Seated { session_id, .. } => session_id.clone(),
+        other => panic!("the fresh spec is seated: {other:?}"),
+    };
+    host.refuse.store(true, Ordering::SeqCst);
+
+    let refused = handle
+        .ensure_member_live(&member)
+        .await
+        .expect_err("the host refused the member's registration");
+
+    RebootedMob::assert_refused(&refused);
+    assert_eq!(host.selections_of(&member), 1, "the host is asked once");
+    assert!(
+        !service.has_live_session(&session).await.unwrap(),
+        "no actor of the refused session is built"
+    );
+    assert!(
+        machine
+            .current_session_registration_witness(&session)
+            .await
+            .is_none(),
+        "no registration of the refused member stays current"
+    );
+    let status = handle.member_status(&member).await.unwrap();
+    assert_eq!(status.status, MobMemberStatus::Broken);
+    assert_eq!(
+        status.registration_refusal,
+        Some(crate::MemberRegistrationHookCall::SelectDestination),
+        "the member's status carries the typed refusal"
+    );
+    assert!(
+        session_unborn(&handle, &member),
+        "a refused create leaves the seat's session unborn"
+    );
+    handle.stop().await.unwrap();
 }

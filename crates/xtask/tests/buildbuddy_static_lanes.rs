@@ -209,13 +209,16 @@ fn buildbuddy_machine_authority_lane_runs_tlc_machine_verify() {
         "xtask BUILD must declare machine_verify_all_tlc_test"
     );
     // The lane is split so each part fits a CI job limit: the machine-verify
-    // sweep and four hand-written audit shards, run in parallel; together
+    // sweep and seven hand-written audit shards, run in parallel; together
     // they are exactly `make machine-verify` (`--part all`).
     for (target, part) in [
         ("machine_verify_audits_a_tlc_test", "audits-a"),
         ("machine_verify_audits_b_tlc_test", "audits-b"),
         ("machine_verify_audits_c_tlc_test", "audits-c"),
         ("machine_verify_audits_d_tlc_test", "audits-d"),
+        ("machine_verify_audits_e_tlc_test", "audits-e"),
+        ("machine_verify_audits_f_tlc_test", "audits-f"),
+        ("machine_verify_audits_g_tlc_test", "audits-g"),
     ] {
         assert!(
             build.contains(&format!("name = \"{target}\""))

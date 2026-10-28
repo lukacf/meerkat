@@ -818,6 +818,26 @@ impl WorkAuthorization for NativeRunAuthorization {
             .run_if_current_within(binding, prepared, further, operation)
     }
 
+    fn run_entered_if_current_within(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+        prepared: Option<&meerkat_core::authorization::OperationValidity>,
+        further: &(dyn std::any::Any + Send + Sync),
+        operation: &mut dyn FnMut(),
+        entered_tier: meerkat_core::authorization::OperationReviewTier,
+    ) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        // Run custody first, as for every step under the inner owner's
+        // exclusion: an ended run admits no further step.
+        self.run.check(binding)?;
+        self.inner.run_entered_if_current_within(
+            binding,
+            prepared,
+            further,
+            operation,
+            entered_tier,
+        )
+    }
+
     fn validate_child_issuance(
         &self,
         further: &(dyn std::any::Any + Send + Sync),

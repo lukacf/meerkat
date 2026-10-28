@@ -281,18 +281,20 @@ impl SpawnActivationWorkerContext {
             SubmitWorkDispatchCompletion::AwaitAutonomousDispatch {
                 agent_identity,
                 readiness,
-                material,
+                mut material,
             } => {
-                if let Some(readiness) = readiness {
-                    MobActor::run_local_turn_readiness(
+                if let Some(readiness) = readiness
+                    && let Some(session) = MobActor::run_local_turn_readiness(
                         &self.readiness,
                         &self.session_service,
                         &self.command_tx,
                         &agent_identity,
-                        &readiness,
+                        readiness,
                         &material.member_ref,
                     )
-                    .await?;
+                    .await?
+                {
+                    material.follow_session(&session);
                 }
                 self.readiness
                     .dispatch_autonomous(&agent_identity, *material)
@@ -302,7 +304,7 @@ impl SpawnActivationWorkerContext {
                 operation_id,
                 agent_identity,
                 readiness,
-                member_ref,
+                mut member_ref,
                 req,
                 completion_tx,
                 llm_identity_applied_tx,
@@ -310,16 +312,18 @@ impl SpawnActivationWorkerContext {
                 placed_incarnation,
                 placed_input_id,
             } => {
-                if let Some(readiness) = readiness {
-                    MobActor::run_local_turn_readiness(
+                if let Some(readiness) = readiness
+                    && let Some(session) = MobActor::run_local_turn_readiness(
                         &self.readiness,
                         &self.session_service,
                         &self.command_tx,
                         &agent_identity,
-                        &readiness,
+                        readiness,
                         &member_ref,
                     )
-                    .await?;
+                    .await?
+                {
+                    member_ref = MobActor::member_ref_on_session(&member_ref, &session);
                 }
                 // A placed first turn rides the ordinary placed ingress lane
                 // (see the rustdoc above): no carrier intent covers it, and a
@@ -3041,6 +3045,17 @@ impl MobActor {
                      stale-transport polls back off until liveness lapses"
                 );
             }
+        }
+        // The host's preparer learns every member Core builds live here, as
+        // it learns a woken one: a fresh spawn (an embodied seat included), a
+        // held create once it is activated, a respawn. A placed member is
+        // built by its host, not here. A host preparer exists only with the
+        // runtime adapter.
+        #[cfg(feature = "runtime-adapter")]
+        if state.remote.is_none()
+            && let Some(session_id) = state.member_ref.bridge_session_id().cloned()
+        {
+            self.report_member_built_to_host(&agent_identity, session_id);
         }
         tracing::debug!(
             agent_identity = %agent_identity,

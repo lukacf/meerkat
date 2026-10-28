@@ -703,6 +703,19 @@ pub enum CommsSendErrorData {
     InvalidCommand {
         message: String,
     },
+    /// The peer is a seated member that was not materialized, and the wake
+    /// the message needed was refused or did not finish. Not delivered:
+    /// nothing reached the peer, so a retry cannot duplicate it. `retryable`
+    /// says whether a later retry can succeed without an operator action
+    /// (the refusal kind decides it). A peer that is not a member is
+    /// `peer_not_found_or_not_trusted`, never this.
+    PeerWakeRefused {
+        peer: String,
+        envelope_id: String,
+        refusal: meerkat_core::comms::PeerWakeRefusal,
+        retryable: bool,
+        message: String,
+    },
 }
 
 impl CommsSendErrorData {
@@ -714,6 +727,31 @@ impl CommsSendErrorData {
             peer: peer.to_string(),
             envelope_id: envelope_id.to_string(),
             message: format!("peer '{peer}' durably rejected envelope {envelope_id}"),
+        }
+    }
+
+    /// A peer wake refusal (`SendError::PeerWakeRefused`). Every surface
+    /// builds this payload here, so they cannot drift.
+    #[must_use]
+    pub fn peer_wake_refused(
+        peer: &str,
+        envelope_id: uuid::Uuid,
+        refusal: &meerkat_core::comms::PeerWakeRefusal,
+    ) -> Self {
+        let next = if refusal.is_retryable() {
+            "retry later"
+        } else {
+            "retrying will not help until the member is repaired"
+        };
+        Self::PeerWakeRefused {
+            peer: peer.to_string(),
+            envelope_id: envelope_id.to_string(),
+            refusal: refusal.clone(),
+            retryable: refusal.is_retryable(),
+            message: format!(
+                "peer '{peer}' was not woken for envelope {envelope_id} ({refusal}); not \
+                 delivered, so a retry cannot duplicate it: {next}"
+            ),
         }
     }
 
@@ -742,6 +780,7 @@ impl CommsSendErrorData {
             Self::PeerUnreachable { .. } => "peer_unreachable",
             Self::PeerAdmissionDropped { .. } => "peer_admission_dropped",
             Self::PeerInputRejected { .. } => "peer_input_rejected",
+            Self::PeerWakeRefused { .. } => "peer_wake_refused",
             Self::SendAmbiguous { .. } => "send_ambiguous",
             Self::SendFailed { .. } => "send_failed",
             Self::InvalidCommand { .. } => "invalid_command",
@@ -756,6 +795,7 @@ impl CommsSendErrorData {
             | Self::PeerUnreachable { message, .. }
             | Self::PeerAdmissionDropped { message, .. }
             | Self::PeerInputRejected { message, .. }
+            | Self::PeerWakeRefused { message, .. }
             | Self::SendAmbiguous { message, .. }
             | Self::SendFailed { message }
             | Self::InvalidCommand { message } => message,
@@ -981,6 +1021,56 @@ mod tests {
         ));
     }
 
+    /// A seated member's refused wake is its own typed code with the closed
+    /// refusal (tagged on `kind`) and whether a retry can succeed; a broken
+    /// member carries its recorded reason and the durable hold.
+    #[test]
+    fn comms_send_error_data_carries_typed_peer_wake_refusal() {
+        use meerkat_core::comms::PeerWakeRefusal;
+
+        let envelope_id = uuid::Uuid::new_v4();
+        let data = CommsSendErrorData::peer_wake_refused(
+            "peer-a",
+            envelope_id,
+            &PeerWakeRefusal::MobNotRunning,
+        );
+        let message = data.message().to_string();
+        let value = serde_json::to_value(&data).expect("wake refusal should serialize");
+        assert_eq!(
+            value,
+            json!({
+                "code": "peer_wake_refused",
+                "peer": "peer-a",
+                "envelope_id": envelope_id.to_string(),
+                "refusal": { "kind": "mob_not_running" },
+                "retryable": true,
+                "message": message,
+            })
+        );
+
+        let broken = CommsSendErrorData::peer_wake_refused(
+            "peer-a",
+            envelope_id,
+            &PeerWakeRefusal::MemberBroken {
+                reason: "missing durable session snapshot".to_string(),
+                hold: Some(meerkat_core::service::DurableResumeHold::TailHeldForRecovery),
+            },
+        );
+        let value = serde_json::to_value(&broken).expect("broken refusal should serialize");
+        assert_eq!(value["retryable"], false);
+        assert_eq!(
+            value["refusal"],
+            json!({
+                "kind": "member_broken",
+                "reason": "missing durable session snapshot",
+                "hold": "tail_held_for_recovery",
+            })
+        );
+        let roundtrip: CommsSendErrorData =
+            serde_json::from_value(value).expect("broken refusal should deserialize");
+        assert_eq!(roundtrip, broken);
+    }
+
     #[test]
     fn comms_send_error_data_names_ambiguous_delivery() {
         let envelope_id = uuid::Uuid::new_v4();
@@ -1030,6 +1120,11 @@ mod tests {
                 message: "m".to_string(),
             },
             CommsSendErrorData::peer_input_rejected("peer-a", envelope_id),
+            CommsSendErrorData::peer_wake_refused(
+                "peer-a",
+                envelope_id,
+                &meerkat_core::comms::PeerWakeRefusal::WakeTimedOut,
+            ),
             CommsSendErrorData::ambiguous_delivery(envelope_id, "ack timed out"),
             CommsSendErrorData::SendFailed {
                 message: "m".to_string(),

@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `5`
+- Version: `6`
 - Rust owner: `self` / `catalog::dsl::approval_lifecycle`
 
 ## State
@@ -20,6 +20,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `review_ids`: `Set<String>`
 - `review_statuses`: `Map<String, ReviewAttemptStatus>`
 - `review_retirements`: `Map<String, ReviewRetirementReason>`
+- `review_entered_phase`: `Map<String, EnteredEffectPhase>`
+- `review_entered_steps`: `Map<String, u64>`
 
 ## Inputs
 - `CreateApproval`(approval_id: String, approve_allowed: Bool, deny_allowed: Bool, has_expiry: Bool)
@@ -38,6 +40,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RetireReview`(review_id: String, reason: ReviewRetirementReason)
 - `ConsumeReviewForEntry`(review_id: String)
 - `ReleaseReview`(review_id: String)
+- `AdmitEnteredStep`(review_id: String)
+- `FinishEnteredStep`(review_id: String)
 
 ## Signals
 
@@ -60,6 +64,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `consent_link_is_a_bijection_over_live_attempts`
 - `linked_attempt_allowed_iff_approved`
 - `consumed_consent_is_approved_authenticated_and_unlinked`
+- `entered_state_covers_exactly_the_used_attempts`
+- `closing_entered_effect_has_a_step_in_flight`
 
 ## Transitions
 ### `CreateRejectedEmptyAllowedDecisions`
@@ -830,9 +836,113 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `ReviewStatusResolved`
 - To: `Ready`
 
+### `AdmitEnteredStepRejectedMissing`
+- From: `Ready`
+- On: `AdmitEnteredStep`(review_id)
+- Guards:
+  - ``
+- Emits: `ReviewLifecycleRejected`
+- To: `Ready`
+
+### `AdmitEnteredStepRejectedConsentLinked`
+- From: `Ready`
+- On: `AdmitEnteredStep`(review_id)
+- Guards:
+  - ``
+- Emits: `ReviewLifecycleRejected`
+- To: `Ready`
+
+### `AdmitEnteredStepRejectedRetired`
+- From: `Ready`
+- On: `AdmitEnteredStep`(review_id)
+- Guards:
+  - ``
+- Emits: `ReviewLifecycleRejected`
+- To: `Ready`
+
+### `AdmitEnteredStepRejectedNotEntered`
+- From: `Ready`
+- On: `AdmitEnteredStep`(review_id)
+- Guards:
+  - ``
+- Emits: `ReviewLifecycleRejected`
+- To: `Ready`
+
+### `AdmitEnteredStep`
+- From: `Ready`
+- On: `AdmitEnteredStep`(review_id)
+- Guards:
+  - ``
+- Emits: `ReviewStatusResolved`
+- To: `Ready`
+
+### `AdmitEnteredStepRejectedClosing`
+- From: `Ready`
+- On: `AdmitEnteredStep`(review_id)
+- Guards:
+  - ``
+- Emits: `ReviewLifecycleRejected`
+- To: `Ready`
+
+### `ReleaseReviewUsedClosing`
+- From: `Ready`
+- On: `ReleaseReview`(review_id)
+- Guards:
+  - ``
+- Emits: `ReviewStatusResolved`
+- To: `Ready`
+
+### `ReleaseReviewRejectedClosing`
+- From: `Ready`
+- On: `ReleaseReview`(review_id)
+- Guards:
+  - ``
+- Emits: `ReviewLifecycleRejected`
+- To: `Ready`
+
+### `FinishEnteredStepRejectedMissing`
+- From: `Ready`
+- On: `FinishEnteredStep`(review_id)
+- Guards:
+  - ``
+- Emits: `ReviewLifecycleRejected`
+- To: `Ready`
+
+### `FinishEnteredStepRejectedNotInFlight`
+- From: `Ready`
+- On: `FinishEnteredStep`(review_id)
+- Guards:
+  - ``
+- Emits: `ReviewLifecycleRejected`
+- To: `Ready`
+
+### `FinishEnteredStepOpen`
+- From: `Ready`
+- On: `FinishEnteredStep`(review_id)
+- Guards:
+  - ``
+- Emits: `ReviewStatusResolved`
+- To: `Ready`
+
+### `FinishEnteredStepClosing`
+- From: `Ready`
+- On: `FinishEnteredStep`(review_id)
+- Guards:
+  - ``
+- Emits: `ReviewStatusResolved`
+- To: `Ready`
+
+### `FinishEnteredStepReleases`
+- From: `Ready`
+- On: `FinishEnteredStep`(review_id)
+- Guards:
+  - ``
+- Emits: `ReviewStatusResolved`
+- To: `Ready`
+
 ## Coverage
 ### Code Anchors
-- `approval_lifecycle_authority` (machine `ApprovalLifecycleMachine`): `crates/meerkat-core/src/generated/approval_lifecycle.rs` — generated ApprovalLifecycleMachine owner for CreateRejectedEmptyAllowedDecisions, CreateRejectedAlreadyExists, CreatePending, CreateConsentRejectedEmptyAllowedDecisions, CreateConsentRejectedAlreadyExists, CreateConsentPending, RestoreRejectedDuplicate, RestoreRejectedEmptyAllowedDecisions, RestorePending, RestoreExpired, RestoreCancelled, RestoreApproved, RestoreDenied, RestoreRejectedInvalidRecord, ReconcileRejectedMissing, ReconcileRejectedLinked, ReconcileRejectedInvalidRecord, ReconcileAppliedPending, ReconcileAppliedExpired, ReconcileAppliedCancelled, ReconcileAppliedApproved, ReconcileAppliedDenied, ObserveExpiryRejectedMissing, ObserveExpiryExpiresPending, ObserveExpiryPendingNoop, ObserveExpiryApprovedNoop, ObserveExpiryDeniedNoop, ObserveExpiryExpiredNoop, ObserveExpiryCancelledNoop, DecideRejectedMissing, DecideRejectedExpired, DecideRejectedAlreadyDecided, DecideRejectedAuthenticationRequired, DecideRejectedApproveNotAllowed, DecideRejectedDenyNotAllowed, DecideApprove, DecideDeny, DecideConsentRejectedMissing, DecideConsentRejectedMismatch, DecideConsentRejectedExpired, DecideConsentRejectedAlreadyDecided, DecideConsentRejectedAuthenticationRequired, DecideConsentRejectedNotAllowed, DecideConsentApprove, DecideConsentDeny, ConsumeConsentRejectedMissing, ConsumeConsentRejectedAlreadyConsumed, ConsumeConsentRejectedMismatch, ConsumeConsentRejectedNotSatisfied, ConsumeConsentForEntry, WithdrawConsentRejectedMissing, WithdrawConsentRejectedMismatch, WithdrawConsentPending, WithdrawConsentSettled, SettleUnlinkedRejectedMissing, SettleUnlinkedRejectedNotConsent, SettleUnlinkedRejectedLinked, SettleUnlinkedRejectedConsumed, SettleUnlinkedRejectedExpired, SettleUnlinkedRejectedSettled, SettleUnlinkedPending, SettleUnlinkedApproved, BeginReviewRejectedDuplicate, BeginReviewPending, RecordReviewVerdictRejectedMissing, RecordReviewVerdictRejectedConsentLinked, RecordReviewVerdictRejectedRetired, RecordReviewVerdictRejectedSettled, RecordReviewVerdictAllowed, RecordReviewVerdictDenied, RecordReviewVerdictEscalated, RecordReviewUnavailableRejectedMissing, RecordReviewUnavailableRejectedConsentLinked, RecordReviewUnavailableRejectedRetired, RecordReviewUnavailableRejectedSettled, RecordReviewUnavailable, RetireReviewRejectedMissing, RetireReviewRejectedConsentLinked, RetireReviewRejectedRetired, RetireReviewRejectedSettled, RetireReview, ConsumeReviewRejectedMissing, ConsumeReviewRejectedConsentLinked, ConsumeReviewRejectedRetired, ConsumeReviewRejectedUsed, ConsumeReviewRejectedNotSatisfied, ConsumeReviewForEntry, ReleaseReviewRejectedMissing, ReleaseReviewRejectedConsentLinked, ReleaseReviewRejectedPending, ReleaseReviewAllowed, ReleaseReviewDenied, ReleaseReviewEscalated, ReleaseReviewUnavailable, ReleaseReviewRetired, ReleaseReviewUsed, ApprovalStatusResolved, ApprovalLifecycleRejected, ReviewStatusResolved, and ReviewLifecycleRejected
+- `approval_lifecycle_authority` (machine `ApprovalLifecycleMachine`): `crates/meerkat-core/src/generated/approval_lifecycle.rs` — generated ApprovalLifecycleMachine owner for CreateRejectedEmptyAllowedDecisions, CreateRejectedAlreadyExists, CreatePending, CreateConsentRejectedEmptyAllowedDecisions, CreateConsentRejectedAlreadyExists, CreateConsentPending, RestoreRejectedDuplicate, RestoreRejectedEmptyAllowedDecisions, RestorePending, RestoreExpired, RestoreCancelled, RestoreApproved, RestoreDenied, RestoreRejectedInvalidRecord, ReconcileRejectedMissing, ReconcileRejectedLinked, ReconcileRejectedInvalidRecord, ReconcileAppliedPending, ReconcileAppliedExpired, ReconcileAppliedCancelled, ReconcileAppliedApproved, ReconcileAppliedDenied, ObserveExpiryRejectedMissing, ObserveExpiryExpiresPending, ObserveExpiryPendingNoop, ObserveExpiryApprovedNoop, ObserveExpiryDeniedNoop, ObserveExpiryExpiredNoop, ObserveExpiryCancelledNoop, DecideRejectedMissing, DecideRejectedExpired, DecideRejectedAlreadyDecided, DecideRejectedAuthenticationRequired, DecideRejectedApproveNotAllowed, DecideRejectedDenyNotAllowed, DecideApprove, DecideDeny, DecideConsentRejectedMissing, DecideConsentRejectedMismatch, DecideConsentRejectedExpired, DecideConsentRejectedAlreadyDecided, DecideConsentRejectedAuthenticationRequired, DecideConsentRejectedNotAllowed, DecideConsentApprove, DecideConsentDeny, ConsumeConsentRejectedMissing, ConsumeConsentRejectedAlreadyConsumed, ConsumeConsentRejectedMismatch, ConsumeConsentRejectedNotSatisfied, ConsumeConsentForEntry, WithdrawConsentRejectedMissing, WithdrawConsentRejectedMismatch, WithdrawConsentPending, WithdrawConsentSettled, SettleUnlinkedRejectedMissing, SettleUnlinkedRejectedNotConsent, SettleUnlinkedRejectedLinked, SettleUnlinkedRejectedConsumed, SettleUnlinkedRejectedExpired, SettleUnlinkedRejectedSettled, SettleUnlinkedPending, SettleUnlinkedApproved, BeginReviewRejectedDuplicate, BeginReviewPending, RecordReviewVerdictRejectedMissing, RecordReviewVerdictRejectedConsentLinked, RecordReviewVerdictRejectedRetired, RecordReviewVerdictRejectedSettled, RecordReviewVerdictAllowed, RecordReviewVerdictDenied, RecordReviewVerdictEscalated, RecordReviewUnavailableRejectedMissing, RecordReviewUnavailableRejectedConsentLinked, RecordReviewUnavailableRejectedRetired, RecordReviewUnavailableRejectedSettled, RecordReviewUnavailable, RetireReviewRejectedMissing, RetireReviewRejectedConsentLinked, RetireReviewRejectedRetired, RetireReviewRejectedSettled, RetireReview, ConsumeReviewRejectedMissing, ConsumeReviewRejectedConsentLinked, ConsumeReviewRejectedRetired, ConsumeReviewRejectedUsed, ConsumeReviewRejectedNotSatisfied, ConsumeReviewForEntry, ReleaseReviewRejectedMissing, ReleaseReviewRejectedConsentLinked, ReleaseReviewRejectedPending, ReleaseReviewAllowed, ReleaseReviewDenied, ReleaseReviewEscalated, ReleaseReviewUnavailable, ReleaseReviewRetired, ReleaseReviewUsed, AdmitEnteredStepRejectedMissing, AdmitEnteredStepRejectedConsentLinked, AdmitEnteredStepRejectedRetired, AdmitEnteredStepRejectedNotEntered, AdmitEnteredStep, AdmitEnteredStepRejectedClosing, ReleaseReviewUsedClosing, ReleaseReviewRejectedClosing, FinishEnteredStepRejectedMissing, FinishEnteredStepRejectedNotInFlight, FinishEnteredStepOpen, FinishEnteredStepClosing, FinishEnteredStepReleases, ApprovalStatusResolved, ApprovalLifecycleRejected, ReviewStatusResolved, and ReviewLifecycleRejected
 
 ### Scenarios
 - `approval_request_pending` — CreateRejectedEmptyAllowedDecisions, CreateRejectedAlreadyExists, CreatePending, CreateConsentRejectedEmptyAllowedDecisions, CreateConsentRejectedAlreadyExists, CreateConsentPending keep request creation, and a consent approval created atomically with its linked human attempt, under ApprovalStatusResolved or ApprovalLifecycleRejected
@@ -843,3 +953,4 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `approval_restore_consistency` — RestoreRejectedDuplicate, RestoreRejectedEmptyAllowedDecisions, RestorePending, RestoreExpired, RestoreCancelled, RestoreApproved, RestoreDenied, RestoreRejectedInvalidRecord validate persisted status, decision audit, allowed-decision compatibility and consent history (authenticated and consumed) before rehydrating approval lifecycle truth, never as a live link
 - `approval_reconcile_from_store` — ReconcileRejectedMissing, ReconcileRejectedLinked, ReconcileRejectedInvalidRecord, ReconcileAppliedPending, ReconcileAppliedExpired, ReconcileAppliedCancelled, ReconcileAppliedApproved, ReconcileAppliedDenied replace one existing unlinked row's state from its stored row after restore validation, never undoing a spend and never creating a link
 - `approval_review_attempt_retirement` — BeginReviewRejectedDuplicate, BeginReviewPending, RecordReviewVerdictRejectedMissing, RecordReviewVerdictRejectedConsentLinked, RecordReviewVerdictRejectedRetired, RecordReviewVerdictRejectedSettled, RecordReviewVerdictAllowed, RecordReviewVerdictDenied, RecordReviewVerdictEscalated, RecordReviewUnavailableRejectedMissing, RecordReviewUnavailableRejectedConsentLinked, RecordReviewUnavailableRejectedRetired, RecordReviewUnavailableRejectedSettled, RecordReviewUnavailable, RetireReviewRejectedMissing, RetireReviewRejectedConsentLinked, RetireReviewRejectedRetired, RetireReviewRejectedSettled, RetireReview, ConsumeReviewRejectedMissing, ConsumeReviewRejectedConsentLinked, ConsumeReviewRejectedRetired, ConsumeReviewRejectedUsed, ConsumeReviewRejectedNotSatisfied, ConsumeReviewForEntry, ReleaseReviewRejectedMissing, ReleaseReviewRejectedConsentLinked, ReleaseReviewRejectedPending, ReleaseReviewAllowed, ReleaseReviewDenied, ReleaseReviewEscalated, ReleaseReviewUnavailable, ReleaseReviewRetired, ReleaseReviewUsed keep one process-local retained review attempt under generated status: a retired attempt rejects late verdicts and entry, an allow is consumed at most once, release disposes only settled attempts, and a linked human attempt is refused by every generic review input
+- `approval_entered_effect_steps` — AdmitEnteredStepRejectedMissing, AdmitEnteredStepRejectedConsentLinked, AdmitEnteredStepRejectedRetired, AdmitEnteredStepRejectedNotEntered, AdmitEnteredStep, AdmitEnteredStepRejectedClosing, ReleaseReviewUsedClosing, ReleaseReviewRejectedClosing, FinishEnteredStepRejectedMissing, FinishEnteredStepRejectedNotInFlight, FinishEnteredStepOpen, FinishEnteredStepClosing, FinishEnteredStepReleases keep the entered state of a spent attempt's effect: a later step begins only against the attempt its entry spent once while that effect is open, and ends with its finish; neither spends; the admitting dispatch's end releases the attempt with no step in flight and otherwise closes the effect, which admits no new step and is released by its last step's finish; an unknown or released, consent-linked, retired or never spent attempt admits none

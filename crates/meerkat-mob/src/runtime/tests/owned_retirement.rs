@@ -1163,14 +1163,15 @@ async fn a_pending_unregister_leaves_a_live_attachment_a_later_owner_reclaimed()
 
 /// R1 end to end: member m's mob stops cleanly, and its Shutdown's deadline
 /// passes before m's exact unregister is admitted. The same mob is then
-/// reconstructed in-process over the same stores and session service: the
-/// new incarnation's startup prepares m's bindings on the registration the
-/// old incarnation left, adopting it in place under the same witness.
-/// Settling the old incarnation's pending unregister then reports the
-/// takeover and leaves that registration registered and attached, and the
-/// new incarnation's explicit resume revives m on the same session.
+/// reconstructed in-process over the same stores and session service. The
+/// new incarnation's Stopped start materializes nothing, so m stays seated
+/// and dormant and nothing takes the old incarnation's registration over:
+/// settling the old incarnation's pending unregister unregisters it. After
+/// the new incarnation's explicit resume, m's first touch revives it on the
+/// same session with a registration of its own.
 #[tokio::test]
-async fn an_old_incarnations_pending_unregister_leaves_the_resumed_member_registered() {
+async fn an_old_incarnations_pending_unregister_settles_and_the_resumed_member_registers_at_its_wake()
+ {
     let definition = with_unique_mob_id(sample_definition(), "r1-resumed-member");
     let mob_id = definition.id.clone();
     let service = Arc::new(MockSessionService::new());
@@ -1240,40 +1241,32 @@ async fn an_old_incarnations_pending_unregister_leaves_the_resumed_member_regist
     .expect("reconstruct the stopped mob in-process");
     assert_eq!(resumed.status().await.expect("phase"), MobState::Stopped);
     assert_eq!(
-        adapter
-            .current_session_registration_witness(&session)
-            .await
-            .as_ref(),
-        Some(&registration),
-        "the new incarnation adopted the old registration in place"
+        resumed.member_materialization_for_test(&member),
+        Some(crate::machines::mob_machine::MemberMaterializationPhase::Dormant),
+        "the Stopped start materialized nothing"
     );
-    assert_ne!(
+    assert_eq!(
         adapter.session_registration_use(&registration).await,
         use_at_shutdown,
-        "the adoption gave the registration a new use"
+        "nothing took the old registration over"
     );
-    let attachment = adapter.current_executor_attachment_witness(&session).await;
 
     let state = settlement.settle_within(Instant::now() + STEP).await;
+    assert_eq!(state, MemberUnregisterState::Settled);
     assert_eq!(
-        adapter
-            .current_session_registration_witness(&session)
-            .await
-            .as_ref(),
-        Some(&registration),
-        "the new incarnation's registration stays registered (settlement: {state:?})"
+        adapter.current_session_registration_witness(&session).await,
+        None,
+        "the old incarnation's registration is unregistered"
     );
-    assert_eq!(
-        adapter.current_executor_attachment_witness(&session).await,
-        attachment,
-        "the new incarnation's attachment is untouched (settlement: {state:?})"
-    );
-    assert_eq!(state, MemberUnregisterState::HandedOver);
 
     tokio::time::timeout(STEP, resumed.resume())
         .await
         .expect("resume is bounded")
         .expect("explicit resume of the reconstructed mob");
+    tokio::time::timeout(STEP, resumed.ensure_member_live(&member))
+        .await
+        .expect("the wake is bounded")
+        .expect("the member's first touch wakes it");
     let revived = resumed
         .get_member(&member)
         .await
@@ -1284,14 +1277,15 @@ async fn an_old_incarnations_pending_unregister_leaves_the_resumed_member_regist
         Some(&session),
         "the member revives on the same session"
     );
-    assert!(
-        adapter
-            .current_session_registration_witness(&session)
-            .await
-            .is_some(),
-        "the revived member is registered"
+    let revived_registration = adapter
+        .current_session_registration_witness(&session)
+        .await
+        .expect("the revived member is registered");
+    assert_ne!(
+        revived_registration, registration,
+        "the revived member registered anew"
     );
-    assert_eq!(settlement.try_state(), MemberUnregisterState::HandedOver);
+    assert_eq!(settlement.try_state(), MemberUnregisterState::Settled);
     resumed.shutdown().await.expect("shutdown the resumed mob");
 }
 

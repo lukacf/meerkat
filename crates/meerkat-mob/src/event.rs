@@ -213,7 +213,11 @@ impl<'de> Deserialize<'de> for MemberRef {
 // `MemberSpawnedEvent.runtime_mode` are required.
 // v9: stored member lifecycle events may carry the internal canonical
 // `placed_spawn_id` ABA fence and exact peer endpoints; public event payloads
-// still exclude every replay-only field.
+// still exclude every replay-only field. A stored `MemberSpawned` may also
+// carry the internal `kickoff_prompt` of the kickoff its incarnation owes,
+// and a dormant seat's `seat_session_unborn` marker with the
+// `seat_build_inputs` its first build applies; a reader that predates them
+// ignores them.
 const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 9;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -945,8 +949,9 @@ pub enum MobEventKind {
         step_id: StepId,
         reason: String,
     },
-    /// An orchestrator resume notification that a cold resume handed to the
-    /// actor's lifecycle owner did not deliver.
+    /// An orchestrator resume notification that a resume (a cold resume, or
+    /// the lift of a stopped mob) handed to the actor's lifecycle owner did
+    /// not deliver.
     ///
     /// Diagnostic only: the mob keeps running and its phase is unchanged.
     /// `member_id` and `session_id` name the exact notification target the
@@ -1105,6 +1110,31 @@ pub struct MemberSpawnedEvent {
     /// event surfaces.
     #[serde(skip, default)]
     pub(crate) direct_member_fence: Option<BridgeDirectMemberFence>,
+    /// The prompt of the kickoff this incarnation owes, when its spec named
+    /// one: a rotation records the next incarnation's kickoff pending
+    /// (`MemberKickoffUpdated`), and the kickoff runs this prompt once the
+    /// incarnation is live, in this process or after a restart. Absent, an
+    /// owed kickoff runs the role's fallback prompt. Stored only by the
+    /// internal event codec, like `bridge_member_ref`; journals written
+    /// before it decode it as absent.
+    #[serde(skip, default)]
+    pub(crate) kickoff_prompt: Option<meerkat_core::types::ContentInput>,
+    /// Whether this row seats a fresh member whose session does not exist
+    /// yet: a dormant seat creates nothing, and the member's first wake
+    /// creates its session through the spawn provision path, with the host's
+    /// registration hook. Replay restores MobMachine's fact from it; the
+    /// first wake's [`MemberSessionBindingRecoveredEvent`] (marked born)
+    /// clears it durably. Stored only by the internal event codec; journals
+    /// written before it decode it as `false`.
+    #[serde(skip, default)]
+    pub(crate) seat_session_unborn: bool,
+    /// The build inputs this row's unborn seat carries to the member's first
+    /// build ([`crate::runtime::SeatBuildInputs`]): a seat builds nothing, so
+    /// its first build applies them, as a spawn of the seat's spec would. The
+    /// born row clears them. Stored only by the internal event codec;
+    /// journals written before it decode them as absent.
+    #[serde(skip, default)]
+    pub(crate) seat_build_inputs: Option<crate::runtime::SeatBuildInputs>,
 }
 
 impl MemberSpawnedEvent {
@@ -1136,7 +1166,43 @@ impl MemberSpawnedEvent {
             placed_spawn_id: None,
             member_peer_endpoint: None,
             direct_member_fence: None,
+            kickoff_prompt: None,
+            seat_session_unborn: false,
+            seat_build_inputs: None,
         }
+    }
+
+    pub(crate) fn with_seat_session_unborn(mut self, seat_session_unborn: bool) -> Self {
+        self.seat_session_unborn = seat_session_unborn;
+        self
+    }
+
+    pub(crate) fn seat_session_unborn(&self) -> bool {
+        self.seat_session_unborn
+    }
+
+    pub(crate) fn with_seat_build_inputs(
+        mut self,
+        seat_build_inputs: Option<crate::runtime::SeatBuildInputs>,
+    ) -> Self {
+        self.seat_build_inputs = seat_build_inputs;
+        self
+    }
+
+    pub(crate) fn seat_build_inputs(&self) -> Option<&crate::runtime::SeatBuildInputs> {
+        self.seat_build_inputs.as_ref()
+    }
+
+    pub(crate) fn with_kickoff_prompt(
+        mut self,
+        kickoff_prompt: Option<meerkat_core::types::ContentInput>,
+    ) -> Self {
+        self.kickoff_prompt = kickoff_prompt;
+        self
+    }
+
+    pub(crate) fn kickoff_prompt(&self) -> Option<&meerkat_core::types::ContentInput> {
+        self.kickoff_prompt.as_ref()
     }
 
     pub(crate) fn with_bridge_member_ref(mut self, bridge_member_ref: Option<MemberRef>) -> Self {
@@ -1220,6 +1286,14 @@ pub struct MemberSessionBindingRecoveredEvent {
     /// cold restart.
     #[serde(skip, default)]
     pub(crate) member_peer_endpoint: Option<TrustedPeerDescriptor>,
+    /// Whether this row records the first creation of a seated member's
+    /// session (its first wake created it under the seat's session id): the
+    /// durable clear of MobMachine's unborn-seat fact, so a session lost
+    /// later is never recreated empty. The binding itself is unchanged.
+    /// Stored only by the internal event codec; journals written before it
+    /// decode it as `false`.
+    #[serde(skip, default)]
+    pub(crate) seat_session_born: bool,
 }
 
 impl MemberSessionBindingRecoveredEvent {
@@ -1233,7 +1307,25 @@ impl MemberSessionBindingRecoveredEvent {
             agent_runtime_id,
             bridge_session_id: Some(bridge_session_id),
             member_peer_endpoint: None,
+            seat_session_born: false,
         }
+    }
+
+    /// The row a seated member's first wake writes once it created the
+    /// member's session under the seat's session id.
+    pub(crate) fn seat_session_born(
+        agent_identity: AgentIdentity,
+        agent_runtime_id: AgentRuntimeId,
+        bridge_session_id: SessionId,
+    ) -> Self {
+        Self {
+            seat_session_born: true,
+            ..Self::new(agent_identity, agent_runtime_id, bridge_session_id)
+        }
+    }
+
+    pub(crate) fn records_seat_session_born(&self) -> bool {
+        self.seat_session_born
     }
 
     pub(crate) fn with_member_peer_endpoint(
@@ -1255,6 +1347,52 @@ impl MemberSessionBindingRecoveredEvent {
 
 fn is_ephemeral_continuity(intent: &crate::runtime::SpawnContinuityIntent) -> bool {
     matches!(intent, crate::runtime::SpawnContinuityIntent::Ephemeral)
+}
+
+/// What one journal row records of MobMachine's unborn-seat fact
+/// (`member_seat_session_unborn` and `unborn_seat_sessions`): the row of a
+/// seat or a rotation that built nothing marks the member's session unborn,
+/// and the row its first wake writes once it created the session marks it
+/// born. Replay restores the machine's fact from these rows
+/// (`RecoverMemberSeatSession`), and the member binding history folds the
+/// same rows the same way, so the offline read and the machine answer one
+/// fact.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SeatSessionRow<'a> {
+    pub(crate) agent_identity: &'a AgentIdentity,
+    pub(crate) agent_runtime_id: &'a AgentRuntimeId,
+    /// The session the row names.
+    pub(crate) session_id: Option<&'a SessionId>,
+    /// `true` for the seat's row, `false` for the born row.
+    pub(crate) unborn: bool,
+}
+
+impl MobEventKind {
+    /// The unborn-seat fact this row records, when it records one (see
+    /// `SeatSessionRow`).
+    pub(crate) fn seat_session_row(&self) -> Option<SeatSessionRow<'_>> {
+        match self {
+            Self::MemberSpawned(spawned) if spawned.seat_session_unborn() => Some(SeatSessionRow {
+                agent_identity: &spawned.agent_identity,
+                agent_runtime_id: &spawned.agent_runtime_id,
+                session_id: spawned
+                    .bridge_member_ref()
+                    .and_then(MemberRef::bridge_session_id),
+                unborn: true,
+            }),
+            Self::MemberSessionBindingRecovered(recovered)
+                if recovered.records_seat_session_born() =>
+            {
+                Some(SeatSessionRow {
+                    agent_identity: &recovered.agent_identity,
+                    agent_runtime_id: &recovered.agent_runtime_id,
+                    session_id: recovered.bridge_session_id(),
+                    unborn: false,
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 #[cfg(any(not(target_arch = "wasm32"), test))]
@@ -1451,6 +1589,15 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
             serde_json::to_value(direct_member_fence)?,
         );
     }
+    if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(kickoff_prompt) = member_spawned.kickoff_prompt()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "kickoff_prompt".to_string(),
+            serde_json::to_value(kickoff_prompt)?,
+        );
+    }
     if let Some(recovered) = event.kind.member_session_binding_recovered()
         && let Some(bridge_session_id) = recovered.bridge_session_id()
         && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
@@ -1468,6 +1615,27 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
             "member_peer_endpoint".to_string(),
             serde_json::to_value(member_peer_endpoint)?,
         );
+    }
+    if let Some(member_spawned) = event.kind.member_spawned()
+        && member_spawned.seat_session_unborn()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert("seat_session_unborn".to_string(), Value::Bool(true));
+    }
+    if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(seat_build_inputs) = member_spawned.seat_build_inputs()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "seat_build_inputs".to_string(),
+            serde_json::to_value(seat_build_inputs)?,
+        );
+    }
+    if let Some(recovered) = event.kind.member_session_binding_recovered()
+        && recovered.records_seat_session_born()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert("seat_session_born".to_string(), Value::Bool(true));
     }
     if let Some((agent_identity, generation, agent_runtime_id, fence_token)) =
         event.kind.respawn_topology_abandoned_correlation()
@@ -1599,6 +1767,57 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         })
         .map(serde_json::from_value)
         .transpose()?;
+    let spawned_kickoff_prompt = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
+                kind.remove("kickoff_prompt")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value)
+        .transpose()?;
+    let spawned_seat_session_unborn = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
+                kind.remove("seat_session_unborn")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value::<bool>)
+        .transpose()?
+        .unwrap_or(false);
+    let spawned_seat_build_inputs = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
+                kind.remove("seat_build_inputs")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value::<crate::runtime::SeatBuildInputs>)
+        .transpose()?;
+    let recovered_seat_session_born = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_session_binding_recovered")
+            {
+                kind.remove("seat_session_born")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value::<bool>)
+        .transpose()?
+        .unwrap_or(false);
     let recovered_bridge_session_id = value
         .get_mut("kind")
         .and_then(Value::as_object_mut)
@@ -1711,6 +1930,11 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
     {
         member_spawned.direct_member_fence = Some(direct_member_fence);
     }
+    if let Some(kickoff_prompt) = spawned_kickoff_prompt
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.kickoff_prompt = Some(kickoff_prompt);
+    }
     if let Some(bridge_session_id) = recovered_bridge_session_id
         && let Some(recovered) = event.kind.member_session_binding_recovered_mut()
     {
@@ -1720,6 +1944,19 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         && let Some(recovered) = event.kind.member_session_binding_recovered_mut()
     {
         recovered.member_peer_endpoint = Some(member_peer_endpoint);
+    }
+    if spawned_seat_session_unborn && let Some(member_spawned) = event.kind.member_spawned_mut() {
+        member_spawned.seat_session_unborn = true;
+    }
+    if let Some(seat_build_inputs) = spawned_seat_build_inputs
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.seat_build_inputs = Some(seat_build_inputs);
+    }
+    if recovered_seat_session_born
+        && let Some(recovered) = event.kind.member_session_binding_recovered_mut()
+    {
+        recovered.seat_session_born = true;
     }
     if let Some((agent_runtime_id, fence_token)) = respawn_topology_abandoned_private {
         event
@@ -2172,6 +2409,205 @@ mod tests {
             }
             other => panic!("expected MemberSpawned, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_stored_member_spawned_roundtrip_preserves_the_owed_kickoff_prompt() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let identity = AgentIdentity::from("rotated");
+        let prompt = meerkat_core::types::ContentInput::from("start the owed work");
+        let event = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberSpawned(
+                MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::new(1),
+                    FenceToken::new(2),
+                    AgentRuntimeId::new(identity, Generation::new(1)),
+                    ProfileName::from("worker"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid)))
+                .with_kickoff_prompt(Some(prompt.clone())),
+            ),
+        };
+
+        let public = serde_json::to_value(&event).expect("public event payload");
+        assert!(
+            public["kind"].get("kickoff_prompt").is_none(),
+            "the public event never carries the kickoff prompt"
+        );
+        let encoded = encode_stored_mob_event(&event).expect("encode");
+        let mut stored: serde_json::Value = serde_json::from_slice(&encoded).expect("parse");
+        assert_eq!(stored["schema_version"], 9);
+        assert!(stored["event"]["kind"].get("kickoff_prompt").is_some());
+        match decode_stored_mob_event(&encoded).expect("decode").kind {
+            MobEventKind::MemberSpawned(member_spawned) => {
+                assert_eq!(member_spawned.kickoff_prompt(), Some(&prompt));
+            }
+            other => panic!("expected MemberSpawned, got {other:?}"),
+        }
+
+        // A journal written before the field decodes it as absent.
+        let removed = stored
+            .get_mut("event")
+            .and_then(|event| event.get_mut("kind"))
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|kind| kind.remove("kickoff_prompt"));
+        assert!(removed.is_some());
+        let legacy = serde_json::to_vec(&stored).expect("encode without the prompt");
+        match decode_stored_mob_event(&legacy).expect("decode").kind {
+            MobEventKind::MemberSpawned(member_spawned) => {
+                assert_eq!(member_spawned.kickoff_prompt(), None);
+            }
+            other => panic!("expected MemberSpawned, got {other:?}"),
+        }
+    }
+
+    /// The unborn seat marker on a seat's row and the born marker on the
+    /// first wake's binding row are internal: stored by the event codec only,
+    /// absent from the public event, and decoded as `false` from a journal
+    /// written before them.
+    #[test]
+    fn test_stored_seat_session_markers_roundtrip_and_stay_internal() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let identity = AgentIdentity::from("seated");
+        let runtime_id = AgentRuntimeId::new(identity.clone(), Generation::new(1));
+        let seat = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberSpawned(
+                MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::new(1),
+                    FenceToken::new(2),
+                    runtime_id.clone(),
+                    ProfileName::from("worker"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid.clone())))
+                .with_seat_session_unborn(true),
+            ),
+        };
+        let born = MobEvent {
+            cursor: 2,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberSessionBindingRecovered(
+                MemberSessionBindingRecoveredEvent::seat_session_born(identity, runtime_id, sid),
+            ),
+        };
+        for (event, marker) in [(&seat, "seat_session_unborn"), (&born, "seat_session_born")] {
+            let public = serde_json::to_value(event).expect("public event payload");
+            assert!(
+                public["kind"].get(marker).is_none(),
+                "the public event never carries {marker}"
+            );
+            let encoded = encode_stored_mob_event(event).expect("encode");
+            let mut stored: serde_json::Value = serde_json::from_slice(&encoded).expect("parse");
+            assert_eq!(
+                stored["event"]["kind"][marker],
+                serde_json::Value::Bool(true)
+            );
+            let decoded = decode_stored_mob_event(&encoded).expect("decode").kind;
+            assert!(
+                marker_set(&decoded),
+                "{marker} survives the stored roundtrip"
+            );
+            let removed = stored
+                .get_mut("event")
+                .and_then(|event| event.get_mut("kind"))
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|kind| kind.remove(marker));
+            assert!(removed.is_some());
+            let legacy = serde_json::to_vec(&stored).expect("encode without the marker");
+            let decoded = decode_stored_mob_event(&legacy).expect("decode").kind;
+            assert!(
+                !marker_set(&decoded),
+                "a journal written before {marker} decodes it as false"
+            );
+        }
+
+        fn marker_set(kind: &MobEventKind) -> bool {
+            match kind {
+                MobEventKind::MemberSpawned(spawned) => spawned.seat_session_unborn(),
+                MobEventKind::MemberSessionBindingRecovered(recovered) => {
+                    recovered.records_seat_session_born()
+                }
+                other => panic!("unexpected kind {other:?}"),
+            }
+        }
+    }
+
+    /// The build inputs an unborn seat carries to its first build survive the
+    /// stored roundtrip, never reach the public event, and are absent from a
+    /// row written before them.
+    #[test]
+    fn test_stored_seat_build_inputs_roundtrip_and_stay_internal() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let identity = AgentIdentity::from("seated");
+        let inputs = crate::runtime::SeatBuildInputs {
+            context: Some(serde_json::json!({"desk": "north"})),
+            additional_instructions: Some(vec!["Answer briefly.".to_string()]),
+            system_prompt_override: Some(crate::runtime::SpawnSystemPromptOverride::Replace(
+                "You keep the north desk.".to_string(),
+            )),
+            budget_limits: Some(meerkat_core::BudgetLimits {
+                max_tokens: Some(4096),
+                ..Default::default()
+            }),
+            tool_access_policy: Some(meerkat_core::ops::ToolAccessPolicy::default()),
+            application_tool_policy: Some(meerkat_core::ApplicationToolPolicyBinding::Inherit),
+            auth_binding: None,
+            web_search: meerkat_core::ToolCategoryOverride::Disable,
+        };
+        let seat = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberSpawned(
+                MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::new(1),
+                    FenceToken::new(2),
+                    AgentRuntimeId::new(identity, Generation::new(1)),
+                    ProfileName::from("worker"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid)))
+                .with_seat_session_unborn(true)
+                .with_seat_build_inputs(Some(inputs.clone())),
+            ),
+        };
+        let public = serde_json::to_value(&seat).expect("public event payload");
+        assert!(
+            public["kind"].get("seat_build_inputs").is_none(),
+            "the public event never carries the seat's build inputs"
+        );
+        let encoded = encode_stored_mob_event(&seat).expect("encode");
+        let decoded = decode_stored_mob_event(&encoded).expect("decode").kind;
+        let MobEventKind::MemberSpawned(spawned) = &decoded else {
+            panic!("unexpected kind {decoded:?}");
+        };
+        assert_eq!(spawned.seat_build_inputs(), Some(&inputs));
+
+        let mut stored: serde_json::Value = serde_json::from_slice(&encoded).expect("parse");
+        let removed = stored
+            .get_mut("event")
+            .and_then(|event| event.get_mut("kind"))
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|kind| kind.remove("seat_build_inputs"));
+        assert!(removed.is_some(), "the stored row carries the inputs");
+        let legacy = serde_json::to_vec(&stored).expect("encode without the inputs");
+        let decoded = decode_stored_mob_event(&legacy).expect("decode").kind;
+        let MobEventKind::MemberSpawned(spawned) = &decoded else {
+            panic!("unexpected kind {decoded:?}");
+        };
+        assert_eq!(
+            spawned.seat_build_inputs(),
+            None,
+            "a row written before the inputs decodes them as absent"
+        );
     }
 
     #[test]

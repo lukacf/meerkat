@@ -1020,6 +1020,7 @@ async fn downstream_consumed_checkpoint_recovers_from_attached_without_replacing
                 fence_token: mm::FenceToken::from(1),
                 generation: Some(mm::Generation::from(0)),
                 runtime_epoch_id: None,
+                residency_owner: mm::SessionResidencyOwner::Session,
             },
         )
         .unwrap();

@@ -116,7 +116,9 @@ use meerkat_core::{
     OperationAuthorizationError, OperationRefusalKind, OperationRefused, PrincipalRef,
 };
 use meerkat_runtime::input_authority::{NativeAdmissionError, NativeIngressContext};
-use meerkat_runtime::meerkat_machine::{ScopedMandateOwner, review_bounds_text};
+use meerkat_runtime::meerkat_machine::{
+    RetainedInvocationOwner, ScopedMandateOwner, review_bounds_text,
+};
 
 use super::StockPrincipals;
 use super::caller::{StockCallerPosture, StockCallerRequest, StockLoginLifetime};
@@ -379,6 +381,27 @@ impl ScopedMandateOwner for StockInvocationPolicy {
         self.admit(association)
             .map(|_| ())
             .map_err(NativeAdmissionError::from)
+    }
+}
+
+impl RetainedInvocationOwner for StockInvocationPolicy {
+    /// The retained-resume face: the one stock requester rule, asked now for
+    /// the retained original's own claims, exactly as admission asked it
+    /// (`ScopedMandateOwner::authorize_invocation`). No ingress observes a
+    /// resume, so the claims' own requester, ingress actor and realm are the
+    /// ones compared. A host-authenticated caller is asked of the host again,
+    /// and a login past its deadline admits nothing.
+    fn reauthorize_retained(
+        &self,
+        association: &InputAuthorityAssociation,
+    ) -> Result<(), NativeAdmissionError> {
+        let (_, login) = self
+            .admit(association)
+            .map_err(NativeAdmissionError::from)?;
+        if !login.is_current_now() {
+            return Err(NativeAdmissionError::Refused(denied()));
+        }
+        Ok(())
     }
 }
 

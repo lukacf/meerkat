@@ -4132,6 +4132,53 @@ fn coupling_invariants() -> Vec<CouplingInvariantEntry> {
             "one shared actor predicate for admission + list_runnable_members re-check at every step execution + typed InsufficientTargets terminal + ownership-ledger debt expiring at 0.9.6",
             EntryStatus::Closed,
         ),
+        invariant(
+            "mob_member_materialization_authority",
+            Subsystem::Mob,
+            &[
+                "MobMachine member_materialization",
+                "MobMachine member_wake_attempts",
+                "MobMachine member_materialization_epoch",
+            ],
+            "member residency (Dormant, Waking, Live) is MobMachine state that only generated transitions change: WakeMember, the attempt-fenced wake resolutions and ReleaseMemberMaterialization; no shell field mirrors it, and every other reader reads the machine state projection",
+            "MobMachine member_materialization through WakeMember, ReleaseMemberMaterialization and MemberMaterializationPhase",
+            "generated MobMachine transitions and invariants + member lifecycle TLC audits over populated domains + rmat-audit live-session observation and release-seam discard rules",
+            EntryStatus::Closed,
+        ),
+        invariant(
+            "mob_inproc_wake_route_projection",
+            Subsystem::Mob,
+            &[
+                "InprocRegistry wake routes",
+                "MobMachine member_peer_endpoints",
+                "MobMachine member_session_bindings",
+            ],
+            "the inproc wake-route table is a projection: its source is MobMachine membership of local session-bound members plus member_peer_endpoints; only the PublishWakeRoute, RetractWakeRoute and RebuildWakeRoutes machine effects rebuild it; a live route always wins, and a stale wake route only reaches the mob actor, which answers from the machine; it is used only for inproc resolution of a pubkey with no live route",
+            "InprocRegistry wake routes rebuilt from MobMachine PublishWakeRoute, RetractWakeRoute and RebuildWakeRoutes",
+            "effect-driven rebuild in the mob actor + WakeMember verdict on every use + rmat-audit PeerNotFound construction rule",
+            EntryStatus::Closed,
+        ),
+        invariant(
+            "mob_session_owner_wake_registry_projection",
+            Subsystem::Mob,
+            &[
+                "session-owner wake registry",
+                "MobMachine member_session_bindings",
+            ],
+            "the session-owner wake registry is a projection keyed by session id, rebuilt from the same PublishWakeRoute, RetractWakeRoute and RebuildWakeRoutes effects, so a successor repoint republishes it; a session-keyed live operation on a dormant member's session applies WakeMember with a host-delivery cause, and an interrupt or cancel answers from the machine without waking",
+            "MobMachine PublishWakeRoute rebuilds and WakeMember decides",
+            "effect-driven rebuild + WakeMember verdict on every use",
+            EntryStatus::Closed,
+        ),
+        invariant(
+            "mob_inproc_live_route_mechanics",
+            Subsystem::Mob,
+            &["InprocRegistry live routes"],
+            "the inproc live route is mechanics: it carries a delivery to a materialized inbox and decides neither membership nor residency; a miss or a closed route for a pubkey that has a wake route is a raw observation the MobMachine answers through WakeMember",
+            "InprocRegistry live routes, answered by MobMachine WakeMember on a miss",
+            "PeerNotFound constructed only at registered sites (rmat-audit) + the wake path on a miss or a closed route",
+            EntryStatus::Closed,
+        ),
     ]
 }
 
@@ -4261,6 +4308,28 @@ mod tests {
             .expect("runtime external event projection invariant must exist");
         assert_eq!(invariant.subsystem, Subsystem::Runtime);
         assert_eq!(invariant.status, EntryStatus::Closed);
+    }
+
+    /// Member residency is owned by `MobMachine`; the wake-route table and the
+    /// session-owner wake registry are its declared projections and the inproc
+    /// live route is mechanics.
+    #[test]
+    fn member_materialization_ownership_rows_are_closed_mob_invariants() {
+        let registry = ownership_registry();
+        for name in [
+            "mob_member_materialization_authority",
+            "mob_inproc_wake_route_projection",
+            "mob_session_owner_wake_registry_projection",
+            "mob_inproc_live_route_mechanics",
+        ] {
+            let invariant = registry
+                .coupling_invariants
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap_or_else(|| panic!("ownership row {name} must exist"));
+            assert_eq!(invariant.subsystem, Subsystem::Mob, "{name}");
+            assert_eq!(invariant.status, EntryStatus::Closed, "{name}");
+        }
     }
 
     #[test]

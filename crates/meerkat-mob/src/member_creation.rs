@@ -144,6 +144,30 @@ impl MemberCreationSourceWitness {
             successor: false,
         }
     }
+
+    /// The creation record of the runtime successor this witness names,
+    /// created on `session_id`: the predecessor's creation id, with Successor
+    /// provenance naming the predecessor's session and binding. A witness
+    /// that names no predecessor, or names `session_id` itself, records a new
+    /// unproven creation, never a root.
+    pub(crate) fn successor_record(&self, session_id: &SessionId) -> MemberCreationRecord {
+        match self.source.as_ref() {
+            Some(source) if self.successor && source.session_id != *session_id => {
+                MemberCreationRecord {
+                    creation_id: Some(source.creation_id),
+                    provenance: MemberCreationProvenance::Successor {
+                        predecessor_session_id: source.session_id.clone(),
+                        predecessor_member_binding: source.member_binding.clone(),
+                        predecessor_creation_id: source.creation_id,
+                    },
+                }
+            }
+            _ => MemberCreationRecord {
+                creation_id: Some(MemberCreationId::new()),
+                provenance: MemberCreationProvenance::Unproven,
+            },
+        }
+    }
 }
 
 /// A failed provenance read is not evidence of a root or an absent ancestor.

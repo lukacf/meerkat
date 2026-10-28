@@ -4707,10 +4707,12 @@ struct AcrossTheCrash {
 /// The drain writes nothing, so the restart finds what a crash between a
 /// Stop and its Shutdown always left. The mob comes back Stopped. The queued
 /// input is still Queued with its row unchanged, and no run started for it.
-/// The interrupted turn's input is back in Queued, as for any run a crash
-/// cut off. Once the restarted mob resumes, the interrupted input runs to
-/// completion first and the queued one after it, each exactly once, and a
-/// same-key replay of each answers its result.
+/// The interrupted turn's input is still Staged with its row unchanged too:
+/// a stopped start materializes no member (the on-demand default), so the
+/// recovery that puts a run a crash cut off back in Queued waits for the
+/// resume's wake of the member. Once the restarted mob resumes, the
+/// interrupted input runs to completion first and the queued one after it,
+/// each exactly once, and a same-key replay of each answers its result.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_crash_mid_drain_leaves_the_queued_input_for_the_restarted_mob() {
     use meerkat_runtime::input_state::InputLifecycleState;
@@ -4824,8 +4826,11 @@ async fn a_crash_mid_drain_leaves_the_queued_input_for_the_restarted_mob() {
         .collect();
     // A process exit frees the member's comms name. The crashed
     // incarnation's in-memory session state outlives its runtime in this
-    // process, so the restart frees the name itself. That writes nothing:
-    // both rows and the event log read the same as at the crash.
+    // process, so the restart retires its route itself. The Stop already
+    // closed that route for peer ingress, and a closed route holds no name:
+    // the retire only forgets the closed route and answers that it freed no
+    // name. That writes nothing: both rows and the event log read the same
+    // as at the crash.
     let name_freed = comms.upgrade().map(|runtime| runtime.retire_inproc_route());
     let mut unchanged_since_crash = Vec::new();
     for (index, (key, input_id, _)) in inputs.iter().enumerate() {
@@ -4935,13 +4940,13 @@ async fn a_crash_mid_drain_leaves_the_queued_input_for_the_restarted_mob() {
                 )],
                 1,
             ),
-            (Some(true), vec![true, true, true]),
+            (Some(false), vec![true, true, true]),
             MobState::Stopped,
             vec![
                 AcrossTheCrash {
                     phase_at_crash: InputLifecycleState::Staged,
-                    phase_at_reopen: InputLifecycleState::Queued,
-                    row_unchanged_at_reopen: false,
+                    phase_at_reopen: InputLifecycleState::Staged,
+                    row_unchanged_at_reopen: true,
                     recovery_count_at_reopen: 0,
                     replay: StopAnswer::Succeeded,
                     phase_after_resume: InputLifecycleState::Consumed,

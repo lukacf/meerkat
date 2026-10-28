@@ -1474,6 +1474,23 @@ impl MobIdentityMemberStore for SpiMobIdentityStore {
             )
             .await
     }
+
+    /// M + I: read (the journal tail and the intent rows, from one locked
+    /// state).
+    async fn read_member_binding_journal_from(
+        &self,
+        mob_id: &MobId,
+        from_cursor: u64,
+    ) -> Result<MemberBindingJournalRead, MobStoreError> {
+        self.bundle
+            .read(
+                mob_and_identity_read(),
+                self.bundle
+                    .identity
+                    .read_member_binding_journal_from(mob_id, from_cursor),
+            )
+            .await
+    }
 }
 
 // ---------------------------------------------------------------------------

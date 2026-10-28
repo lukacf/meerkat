@@ -421,6 +421,90 @@ async fn an_activated_held_spawn_is_published_through_the_ordinary_path() {
     assert!(in_roster(&handle, "held-worker").await);
 }
 
+/// Records every member build the mob reports to its host.
+#[derive(Default)]
+struct BuildReports {
+    built: std::sync::Mutex<Vec<crate::runtime::MemberBuildReport>>,
+}
+
+impl BuildReports {
+    fn built(&self) -> Vec<crate::runtime::MemberBuildReport> {
+        self.built.lock().expect("build reports").clone()
+    }
+
+    async fn wait_built(&self, count: usize) {
+        tokio::time::timeout(STEP, async {
+            while self.built.lock().expect("build reports").len() < count {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the build is reported");
+    }
+}
+
+#[async_trait]
+impl crate::runtime::MemberBuildPreparer for BuildReports {
+    async fn prepare_member_build(
+        &self,
+        _request: crate::runtime::MemberBuildPreparation,
+    ) -> Result<crate::runtime::MemberBuildPrepared, crate::runtime::MemberBuildPreparationRefusal>
+    {
+        Ok(crate::runtime::MemberBuildPrepared::Prepared)
+    }
+
+    async fn member_built(&self, report: crate::runtime::MemberBuildReport) {
+        self.built.lock().expect("build reports").push(report);
+    }
+}
+
+/// A held create is a member Core builds: once its activation published it,
+/// the host's build preparer is told, as for a woken member. While it is
+/// held nothing is reported.
+#[tokio::test]
+async fn an_activated_held_spawn_is_reported_built_to_the_host() {
+    let reports = Arc::new(BuildReports::default());
+    let service = Arc::new(MockSessionService::new());
+    let machine = Arc::new(
+        meerkat_runtime::MeerkatMachine::ephemeral()
+            .with_native_work_authorization_host(Arc::new(AdmitsNothing))
+            .expect("install the governed work host"),
+    );
+    service.set_runtime_adapter(machine);
+    service.decide_tool_surface_at_create();
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .with_member_runtime_registration_hook(Arc::new(SelectingHost::default()))
+        .with_member_build_preparer(reports.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let spawn = held(&handle, "held-built-worker", deadline_in(STEP)).await;
+    tokio::time::sleep(STILL_PENDING).await;
+    assert!(
+        reports.built().is_empty(),
+        "a held member is not reported built"
+    );
+    tokio::time::timeout(STEP, spawn.activate())
+        .await
+        .expect("activation completes promptly")
+        .expect("activation publishes the member");
+
+    reports.wait_built(1).await;
+    let built = reports.built();
+    assert_eq!(built.len(), 1, "one build report for the activated member");
+    assert_eq!(
+        built[0].agent_identity,
+        AgentIdentity::from("held-built-worker")
+    );
+    let session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from("held-built-worker"))
+        .await
+        .expect("the published member's session");
+    assert_eq!(built[0].session_id, session);
+}
+
 #[tokio::test]
 async fn an_aborted_held_spawn_publishes_nothing_and_frees_the_identity() {
     let handle = create_holding_mob().await;

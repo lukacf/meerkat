@@ -3868,9 +3868,27 @@ async fn comms_send(
         .await
         .is_none()
     {
-        return Err(ApiError::NotFound(format!(
-            "Session not found or comms not enabled: {session_id}"
-        )));
+        // Comms sent as a dormant mob member wake it through its owner
+        // first.
+        let woken = match meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+            .wake(&session_id)
+            .await
+        {
+            Some(Ok(meerkat_core::session_owner_wake::SessionOwnerWakeOutcome::Ready)) => true,
+            Some(Err(error)) => return Err(create_session_error_to_api(error)),
+            Some(Ok(_)) | None => false,
+        };
+        if !woken
+            || state
+                .session_service
+                .comms_runtime(&session_id)
+                .await
+                .is_none()
+        {
+            return Err(ApiError::NotFound(format!(
+                "Session not found or comms not enabled: {session_id}"
+            )));
+        }
     }
 
     let peer_name = req.peer_label();
@@ -3972,6 +3990,17 @@ fn normalize_rest_comms_send_error(
                 *envelope_id,
             ))
         }
+        // A seated member that was not woken: typed, not delivered, never
+        // "not found". Nothing was handed off, so a retry cannot duplicate.
+        meerkat_core::comms::SendError::PeerWakeRefused {
+            peer,
+            envelope_id,
+            refusal,
+        } => typed_rest_comms_send_error(&CommsSendErrorData::peer_wake_refused(
+            peer_name.unwrap_or(peer.as_str()),
+            *envelope_id,
+            refusal,
+        )),
         // An ambiguous delivery is NOT a failed send, and it must not arrive at
         // a caller under a code that says it was. The envelope may already be on
         // the receiver's queue and a later drain may still commit it, so the
@@ -6890,6 +6919,27 @@ async fn update_system_prompt(
         })
 }
 
+/// A session-keyed live operation on a session no runtime registration
+/// serves asks the session's owner first: a mob that holds the session's
+/// member dormant wakes it ([`meerkat_core::session_owner_wake`]), so this
+/// surface never registers a member's session on its own. A session no owner
+/// holds, or one its owner no longer binds, proceeds as before.
+async fn wake_session_owner_if_unserved(
+    state: &AppState,
+    session_id: &SessionId,
+) -> Result<(), ApiError> {
+    if state.runtime_adapter.contains_session(session_id).await {
+        return Ok(());
+    }
+    match meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+        .wake(session_id)
+        .await
+    {
+        None | Some(Ok(_)) => Ok(()),
+        Some(Err(error)) => Err(create_session_error_to_api(error)),
+    }
+}
+
 /// Continue an existing session. Extracts the optional request-lifecycle
 /// context from `X-Meerkat-Request-Id`, runs the typed inner body, and routes
 /// the `RequestTerminal` outcome through the canonical surface request
@@ -6949,6 +6999,13 @@ async fn continue_session_inner(
         return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
             details: None,
         }));
+    }
+
+    // A dormant mob member's session is woken by its owner before this
+    // surface would register or rebuild the session on its own (and before
+    // any session lock: the member's wake resumes the session itself).
+    if let Err(error) = wake_session_owner_if_unserved(state, &session_id).await {
+        return RequestTerminal::RespondWithoutPublish(Err(error));
     }
 
     // Set up event forwarding: caller channel -> broadcast
@@ -10067,6 +10124,14 @@ mod tests {
                 ));
             }
             meerkat_runtime::RuntimeStore::delete_ops_lifecycle(self.inner.as_ref(), runtime_id)
+                .await
+        }
+
+        async fn list_runtimes_with_recovery_work(
+            &self,
+        ) -> Result<Vec<meerkat_runtime::LogicalRuntimeId>, meerkat_runtime::RuntimeStoreError>
+        {
+            meerkat_runtime::RuntimeStore::list_runtimes_with_recovery_work(self.inner.as_ref())
                 .await
         }
     }

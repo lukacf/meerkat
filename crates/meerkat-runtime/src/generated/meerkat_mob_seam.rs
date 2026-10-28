@@ -113,6 +113,10 @@ pub mod effects {
             EffectVariantId::parse("RuntimeDestroyed").expect("effect variant slug")
         }
 
+        pub fn runtime_registration_released() -> EffectVariantId {
+            EffectVariantId::parse("RuntimeRegistrationReleased").expect("effect variant slug")
+        }
+
         pub fn runtime_retired() -> EffectVariantId {
             EffectVariantId::parse("RuntimeRetired").expect("effect variant slug")
         }
@@ -187,6 +191,10 @@ pub mod signals {
     pub fn observe_runtime_retired() -> SignalVariantId {
         SignalVariantId::parse("ObserveRuntimeRetired").expect("signal variant slug")
     }
+
+    pub fn release_member_materialization() -> SignalVariantId {
+        SignalVariantId::parse("ReleaseMemberMaterialization").expect("signal variant slug")
+    }
 }
 
 /// Generated field ids referenced by route bindings.
@@ -199,6 +207,14 @@ pub mod fields {
 
     pub fn agent_runtime_id() -> FieldId {
         FieldId::parse("agent_runtime_id").expect("field slug")
+    }
+
+    pub fn attempt() -> FieldId {
+        FieldId::parse("attempt").expect("field slug")
+    }
+
+    pub fn cause() -> FieldId {
+        FieldId::parse("cause").expect("field slug")
     }
 
     pub fn fence_token() -> FieldId {
@@ -219,6 +235,14 @@ pub mod fields {
 
     pub fn refusal_code() -> FieldId {
         FieldId::parse("refusal_code").expect("field slug")
+    }
+
+    pub fn residency_owner() -> FieldId {
+        FieldId::parse("residency_owner").expect("field slug")
+    }
+
+    pub fn runtime_epoch_id() -> FieldId {
+        FieldId::parse("runtime_epoch_id").expect("field slug")
     }
 
     pub fn runtime_id() -> FieldId {
@@ -359,6 +383,12 @@ pub fn refusal_closure_binding_request_reaches_meerkat() -> TypedDispatchRefusal
                 GeneratedRefusalFieldSource::ConsumerErrorMessage,
                 FieldId::parse("reason").expect("feedback field slug"),
             ),
+            (
+                GeneratedRefusalFieldSource::EffectField(
+                    FieldId::parse("attempt").expect("effect field slug"),
+                ),
+                FieldId::parse("attempt").expect("feedback field slug"),
+            ),
         ],
     }
 }
@@ -486,6 +516,34 @@ pub fn route_runtime_bound_reaches_mob() -> TypedRoutedSignal {
                 FieldId::parse("fence_token").expect("route producer field slug"),
                 FieldId::parse("fence_token").expect("route consumer field slug"),
             ),
+            (
+                FieldId::parse("runtime_epoch_id").expect("route producer field slug"),
+                FieldId::parse("runtime_epoch_id").expect("route consumer field slug"),
+            ),
+        ],
+    }
+}
+
+/// Generated facts for signal route `runtime_registration_released_reaches_mob`.
+pub fn route_runtime_registration_released_reaches_mob() -> TypedRoutedSignal {
+    TypedRoutedSignal {
+        route_id: RouteId::parse("runtime_registration_released_reaches_mob").expect("route slug"),
+        instance_id: MachineInstanceId::parse("mob").expect("composition instance slug"),
+        variant: SignalVariantId::parse("ReleaseMemberMaterialization")
+            .expect("composition signal slug"),
+        bindings: vec![
+            (
+                FieldId::parse("agent_runtime_id").expect("route producer field slug"),
+                FieldId::parse("agent_runtime_id").expect("route consumer field slug"),
+            ),
+            (
+                FieldId::parse("fence_token").expect("route producer field slug"),
+                FieldId::parse("fence_token").expect("route consumer field slug"),
+            ),
+            (
+                FieldId::parse("runtime_epoch_id").expect("route producer field slug"),
+                FieldId::parse("runtime_epoch_id").expect("route consumer field slug"),
+            ),
         ],
     }
 }
@@ -566,6 +624,11 @@ pub fn route_to_signal(
         && effect_variant == &effects::meerkat::runtime_bound()
     {
         return Some(route_runtime_bound_reaches_mob());
+    }
+    if producer_instance == &producers::meerkat_instance_id()
+        && effect_variant == &effects::meerkat::runtime_registration_released()
+    {
+        return Some(route_runtime_registration_released_reaches_mob());
     }
     if producer_instance == &producers::meerkat_instance_id()
         && effect_variant == &effects::meerkat::runtime_retired()

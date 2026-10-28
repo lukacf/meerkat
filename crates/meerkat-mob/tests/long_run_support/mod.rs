@@ -2848,7 +2848,7 @@ pub async fn restart_deploy(
 
 /// Reopen a row's store with `gate`, wait until every worker's input is
 /// terminal, read each worker's report, then run `follow_up` on each
-/// worker's session.
+/// worker's session, waking the worker first (members start dormant).
 pub async fn restart_workers(
     store: &Store,
     plan: LongRunPlan,
@@ -2916,7 +2916,29 @@ pub async fn restart_workers(
         FollowUp::Queued => QUEUED,
         FollowUp::Scripted => FOLLOW,
     };
-    for (restart, (_, killed)) in restarted.iter_mut().zip(workers) {
+    for (restart, (member, killed)) in restarted.iter_mut().zip(workers) {
+        // Members start dormant, and one that holds no recovery work at this
+        // start stays so. The follow-up is accepted on the runtime machine
+        // itself, whose ingress does not wake a member (the mob handle and
+        // the surfaces do), so the worker is woken first, as any host that
+        // feeds a member's session through the runtime machine wakes it. A
+        // worker the start already made live is left as it is.
+        match tokio::time::timeout(
+            STEP,
+            incarnation
+                .mob
+                .ensure_member_live(&AgentIdentity::from(*member)),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                return Err(format!(
+                    "{member} could not be woken for its follow-up input: {error}"
+                ));
+            }
+            Err(_) => return Err(format!("{member} never woke for its follow-up input")),
+        }
         let follow_up = incarnation.accept(&killed.session, follow_up_tag).await;
         restart.follow_up_consumed = incarnation
             .wait_terminal(&killed.session, &follow_up, STEP)

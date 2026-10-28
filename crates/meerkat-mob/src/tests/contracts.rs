@@ -183,6 +183,7 @@ fn initialized_test_comms_dsl(session_id: &str) -> Arc<meerkat_runtime::HandleDs
             session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
                 session_id.to_string(),
             ),
+            residency_owner: meerkat_runtime::meerkat_machine::dsl::SessionResidencyOwner::Session,
         },
         "test::prepare_bindings",
     )

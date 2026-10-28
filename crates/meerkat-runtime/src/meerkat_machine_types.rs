@@ -110,6 +110,27 @@ pub struct SessionLlmCapabilitySurface {
 }
 
 impl SessionLlmCapabilitySurface {
+    /// The capability surface a session bound to `profile`'s model resolves
+    /// to: the surface a session build hydrates from the same profile.
+    #[must_use]
+    pub fn from_model_profile(profile: &meerkat_core::model_profile::ModelProfile) -> Self {
+        Self {
+            supports_temperature: profile.supports_temperature,
+            supports_thinking: profile.supports_thinking,
+            supports_reasoning: profile.supports_reasoning,
+            inline_video: profile.inline_video,
+            vision: profile.vision,
+            image_input: profile.image_input,
+            image_tool_results: profile.image_tool_results,
+            supports_web_search: profile.supports_web_search,
+            supports_mid_conversation_system_messages: profile
+                .supports_mid_conversation_system_messages,
+            image_generation: profile.image_generation,
+            realtime: profile.realtime,
+            call_timeout_secs: profile.call_timeout_secs,
+        }
+    }
+
     #[must_use]
     pub fn to_wire_resolved(&self) -> meerkat_contracts::WireResolvedModelCapabilities {
         meerkat_contracts::WireResolvedModelCapabilities {
@@ -1314,6 +1335,12 @@ meerkat_machine_runtime_internal_inputs!(
     // The operator's held-tail repair (resolve-held-tail).
     FailureRecoveryLifecycle => [
         AuthorizeOperatorDurableTailRepair,
+    ],
+    // The empty-resume verdict: whether a resume batch that ended with no
+    // pending boundary retires the registration.
+    SessionUnregisterDrainLifecycle => [
+        ResolveEmptyResumeRetirement,
+        ClaimCompositionResidency,
     ],
 );
 

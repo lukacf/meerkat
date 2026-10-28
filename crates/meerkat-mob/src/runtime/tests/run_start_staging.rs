@@ -252,12 +252,9 @@ async fn a_running_restore_drops_a_stale_staged_hold() {
     .await
     .expect("reopen the mob");
     assert_eq!(reopened.status().await.expect("phase"), MobState::Running);
-    assert_eq!(
-        adapter.run_starts_held_for_test(&session_id).await,
-        Some(false),
-        "the reopened member's registration is not held"
-    );
 
+    // The member is materialized by its first delivery, after the restore
+    // dropped the stale stage: its registration is not held, and it runs.
     let prompt = "delivered after the reopen";
     reopened
         .member(&identity)
@@ -273,6 +270,11 @@ async fn a_running_restore_drops_a_stale_staged_hold() {
             .any(|executed| executed == prompt)
     })
     .await;
+    assert_eq!(
+        adapter.run_starts_held_for_test(&session_id).await,
+        Some(false),
+        "the reopened member's registration is not held"
+    );
 }
 
 /// A member retired while its mob is Stopped takes the `MobStop` staged for

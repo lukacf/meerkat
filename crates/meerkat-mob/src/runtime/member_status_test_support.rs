@@ -52,12 +52,19 @@ pub async fn member_status_deadline_after_snapshot_wait_for_test()
 -> MemberStatusDeadlineTestObservation {
     let service = Arc::new(DelayedStatusService::default());
     let view_reads = MemberStatusViewReads::default();
+    let target = super::state::MemberStatusProjectionTarget {
+        bridge_session_id: Some(SessionId::new()),
+        include_local_session_details: true,
+        agent_runtime_id: None,
+        fence_token: None,
+        dormant: false,
+        unborn_seat: false,
+    };
     let (observation, drain) = MobActor::observe_member_status_session(
         service.clone(),
         None,
         AgentIdentity::from("member-status-deadline-fixture"),
-        Some(SessionId::new()),
-        true,
+        &target,
         0,
         &view_reads,
     )

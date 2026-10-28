@@ -1734,7 +1734,12 @@ fn is_phase_field_expr(expr: &ExprDef, phase_field_name: &str) -> bool {
 /// For stored-phase machines, guards like `self.lifecycle_phase == Phase::Pending`
 /// are handled by the `from` list, not by schema guards. This function removes
 /// those comparisons, returning `None` if the entire guard was phase-only.
-fn strip_phase_guards(def: &MachineDef, expr: &ExprDef) -> Option<ExprDef> {
+///
+/// A guard that is a CALL taking the phase as an argument is removed too, and
+/// a phase predicate inside `||` is dropped from the disjunction: both make the
+/// lowered model differ from production, so new arms split per phase instead
+/// (the self-tests pin both through `guard_mentions_phase`).
+pub(crate) fn strip_phase_guards(def: &MachineDef, expr: &ExprDef) -> Option<ExprDef> {
     if !def.is_stored_phase() {
         return Some(expr.clone());
     }
@@ -1797,6 +1802,94 @@ fn is_phase_ref(def: &MachineDef, expr: &ExprDef) -> bool {
     match expr {
         ExprDef::Field(name) => def.phase_field_name() == Some(name),
         ExprDef::CurrentPhase => true,
+        _ => false,
+    }
+}
+
+/// Whether a guard reads the stored phase anywhere: directly, in a
+/// comparison, inside a disjunction or a conjunction, or as an argument of a
+/// helper call at any depth. Phase literals (`Phase::X`) are not reads.
+///
+/// `strip_phase_guards` removes a phase comparison, a call taking the phase
+/// and a phase disjunct, so a mixed guard lowers to a model stronger or weaker
+/// than production. The self-tests pin that, and the machine-schema scan
+/// refuses any member-residency arm whose guard, or a call inside one,
+/// mentions the phase beyond the plain source predicate.
+#[cfg(test)]
+pub(crate) fn guard_mentions_phase(def: &MachineDef, expr: &ExprDef) -> bool {
+    if is_phase_ref(def, expr) {
+        return true;
+    }
+    let any = |exprs: &[&ExprDef]| exprs.iter().any(|item| guard_mentions_phase(def, item));
+    match expr {
+        ExprDef::Bool(_)
+        | ExprDef::U64(_)
+        | ExprDef::U64Max
+        | ExprDef::StringLit(_)
+        | ExprDef::None
+        | ExprDef::EmptySeq
+        | ExprDef::EmptySet
+        | ExprDef::EmptyMap
+        | ExprDef::Field(_)
+        | ExprDef::Binding(_)
+        | ExprDef::CurrentPhase
+        | ExprDef::Phase(_)
+        | ExprDef::NamedVariant { .. } => false,
+        ExprDef::Some(inner)
+        | ExprDef::Not(inner)
+        | ExprDef::Len(inner)
+        | ExprDef::MapKeys(inner)
+        | ExprDef::IsSome(inner)
+        | ExprDef::IsNone(inner) => guard_mentions_phase(def, inner),
+        ExprDef::FieldAccess { base, .. } => guard_mentions_phase(def, base),
+        ExprDef::EnumVariantIs { value, .. } | ExprDef::EnumStringSetPayload { value, .. } => {
+            guard_mentions_phase(def, value)
+        }
+        ExprDef::And(exprs) | ExprDef::Or(exprs) => {
+            exprs.iter().any(|item| guard_mentions_phase(def, item))
+        }
+        ExprDef::Eq(left, right)
+        | ExprDef::Neq(left, right)
+        | ExprDef::Gt(left, right)
+        | ExprDef::Gte(left, right)
+        | ExprDef::Lt(left, right)
+        | ExprDef::Lte(left, right)
+        | ExprDef::Add(left, right)
+        | ExprDef::Sub(left, right) => any(&[left.as_ref(), right.as_ref()]),
+        ExprDef::Contains { collection, value } | ExprDef::Count { collection, value } => {
+            any(&[collection.as_ref(), value.as_ref()])
+        }
+        ExprDef::MapContainsKey { map, key }
+        | ExprDef::MapGet { map, key }
+        | ExprDef::MapGetCopied { map, key }
+        | ExprDef::MapGetCloned { map, key }
+        | ExprDef::MapValue { map, key } => any(&[map.as_ref(), key.as_ref()]),
+        ExprDef::ForAll { over, body, .. } | ExprDef::Exists { over, body, .. } => {
+            any(&[over.as_ref(), body.as_ref()])
+        }
+        ExprDef::Call { args, .. } => args.iter().any(|arg| guard_mentions_phase(def, arg)),
+        ExprDef::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => any(&[condition.as_ref(), then_expr.as_ref(), else_expr.as_ref()]),
+    }
+}
+
+/// Whether a guard is only the stored-phase source predicate
+/// `phase == Phase::X`, or a disjunction of such comparisons. That is the
+/// legitimate `from` set of an arm written without `per_phase`, which
+/// lowering moves into `from` whole.
+#[cfg(test)]
+pub(crate) fn is_source_phase_guard(def: &MachineDef, expr: &ExprDef) -> bool {
+    match expr {
+        ExprDef::Eq(left, right) => {
+            (is_phase_ref(def, left) && matches!(right.as_ref(), ExprDef::Phase(_)))
+                || (is_phase_ref(def, right) && matches!(left.as_ref(), ExprDef::Phase(_)))
+        }
+        ExprDef::Or(exprs) => {
+            !exprs.is_empty() && exprs.iter().all(|item| is_source_phase_guard(def, item))
+        }
         _ => false,
     }
 }

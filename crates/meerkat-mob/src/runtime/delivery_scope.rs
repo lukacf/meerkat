@@ -52,7 +52,7 @@ use meerkat_core::service::MobIncarnationId;
 use meerkat_core::types::SessionId;
 use meerkat_runtime::{InputLifecycleState, InputTerminalOutcome};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The serialized form version a [`MemberDeliveryScope`] is written with.
 /// Decoding any other version is a typed [`DeliveryScopeDecodeError`], so a
@@ -702,7 +702,7 @@ struct JournalHead {
 }
 
 /// One fold over a mob's journal, before its bindings are resolved.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct JournalFold {
     memberships: u64,
     /// Each identity's latest incarnation since the latest mob reset.
@@ -710,6 +710,13 @@ struct JournalFold {
     /// The identity and incarnation that held each session last, across
     /// mob resets.
     sessions: BTreeMap<SessionId, (AgentIdentity, JournalIncarnation)>,
+    /// The sessions MobMachine holds unborn (`unborn_seat_sessions`) as its
+    /// replay of this journal restores them: since the latest mob reset, a
+    /// seat's or a rotation's row adds its session and the row of the
+    /// session's creation removes it.
+    unborn_sessions: BTreeSet<SessionId>,
+    /// The sessions a binding named since the latest mob reset.
+    epoch_sessions: BTreeSet<SessionId>,
 }
 
 impl JournalFold {
@@ -729,6 +736,18 @@ impl JournalFold {
     }
 
     fn apply(&mut self, kind: &MobEventKind) {
+        // MobMachine's unborn-seat fact, from the rows its replay restores it
+        // from (`MobEventKind::seat_session_row`). A retirement keeps it: a
+        // session no build created stays unborn after its member left.
+        if let Some(row) = kind.seat_session_row()
+            && let Some(session_id) = row.session_id
+        {
+            if row.unborn {
+                self.unborn_sessions.insert(session_id.clone());
+            } else {
+                self.unborn_sessions.remove(session_id);
+            }
+        }
         match kind {
             // A spawn starts the identity's next membership, bound to the
             // session its bridge reference names (none for a peer-only
@@ -751,6 +770,7 @@ impl JournalFold {
                         session_id.clone(),
                         (spawned.agent_identity.clone(), incarnation.clone()),
                     );
+                    self.epoch_sessions.insert(session_id.clone());
                 }
                 self.heads.insert(
                     spawned.agent_identity.clone(),
@@ -775,6 +795,7 @@ impl JournalFold {
                             session_id.clone(),
                             (agent_identity.clone(), head.incarnation.clone()),
                         );
+                        self.epoch_sessions.insert(session_id.clone());
                     }
                 }
             }
@@ -794,6 +815,7 @@ impl JournalFold {
                         session_id.clone(),
                         (recovered.agent_identity.clone(), head.incarnation.clone()),
                     );
+                    self.epoch_sessions.insert(session_id.clone());
                 }
             }
             // Retiring the exact incarnation ends its membership; a late
@@ -811,9 +833,12 @@ impl JournalFold {
                     head.live = false;
                 }
             }
-            // A mob reset ends every membership.
+            // A mob reset ends every membership, and MobMachine's unborn-seat
+            // fact with it (its replay starts after the latest mob reset).
             MobEventKind::MobReset => {
                 self.heads.clear();
+                self.unborn_sessions.clear();
+                self.epoch_sessions.clear();
             }
             _ => {}
         }
@@ -883,6 +908,8 @@ impl JournalFold {
             last_bindings,
             session_bindings,
             intent_rows,
+            unborn_sessions: self.unborn_sessions,
+            epoch_sessions: self.epoch_sessions,
         }
     }
 }
@@ -896,6 +923,157 @@ fn identity_management_of(
         .get(identity)
         .copied()
         .unwrap_or(MemberIdentityManagement::CommandDriven)
+}
+
+/// A fold of a mob's journal up to one journal event, kept between member
+/// binding history reads.
+#[derive(Debug, Clone, Default)]
+struct MemberBindingFold {
+    fold: JournalFold,
+    /// The cursor of the newest journal event folded, of any mob (0 before
+    /// the first): a history resolved from this fold answers it as its
+    /// journal cursor.
+    cursor: u64,
+    /// The journal event at `cursor`, as the store answered it.
+    last: Option<MobEvent>,
+}
+
+impl MemberBindingFold {
+    /// A fold of a whole journal read.
+    fn of_journal(events: &[MobEvent], mob_id: &MobId) -> Self {
+        let mut fold = Self::default();
+        fold.fold_events(events, mob_id);
+        fold
+    }
+
+    /// This fold advanced over `events`, a store read from `self.cursor`.
+    /// `None` when the read does not start with the event the fold ended at:
+    /// the journal no longer holds what was folded (a destroy cleared it,
+    /// and a journal written since may reuse its cursors), so only a whole
+    /// read can be folded.
+    fn advanced(&self, events: &[MobEvent], mob_id: &MobId) -> Option<Self> {
+        let tail = match &self.last {
+            None => events,
+            Some(last) => match events.split_first() {
+                Some((first, tail)) if same_journal_event(first, last) => tail,
+                _ => return None,
+            },
+        };
+        let mut next = self.clone();
+        next.fold_events(tail, mob_id);
+        Some(next)
+    }
+
+    /// Fold `mob_id`'s events of `events`, a journal slice in cursor order,
+    /// as [`MemberBindingHistory::from_journal`] folds a whole journal.
+    fn fold_events(&mut self, events: &[MobEvent], mob_id: &MobId) {
+        for event in events
+            .iter()
+            .filter(|event| &event.mob_id == mob_id && JournalFold::folds(&event.kind))
+        {
+            self.fold.apply(&event.kind);
+        }
+        if let Some(last) = events.last() {
+            self.cursor = last.cursor;
+            self.last = Some(last.clone());
+        }
+    }
+
+    fn resolve(
+        self,
+        intent_rows: BTreeMap<AgentIdentity, MemberIdentityManagement>,
+    ) -> MemberBindingHistory {
+        self.fold.resolve(self.cursor, intent_rows)
+    }
+}
+
+/// Whether a journal event read now is the event a fold read before.
+fn same_journal_event(read: &MobEvent, folded: &MobEvent) -> bool {
+    read.cursor == folded.cursor
+        && read.timestamp == folded.timestamp
+        && read.mob_id == folded.mob_id
+        && read.kind == folded.kind
+}
+
+/// The member binding fold a [`MobHandle`] and its clones keep between
+/// history reads, so a read folds only the journal events appended since
+/// the fold, never the whole journal again.
+#[derive(Debug, Default)]
+pub(crate) struct MemberBindingFoldCache {
+    fold: std::sync::Mutex<MemberBindingFold>,
+}
+
+impl MemberBindingFoldCache {
+    /// `mob_id`'s member binding history over `store`'s journal: the kept
+    /// fold advanced over the journal events from its cursor on, read with
+    /// the intent rows in one store transaction. A journal that no longer
+    /// holds the last folded event is read and folded whole. The lock is
+    /// held only to copy the fold out and to keep the newer one, never
+    /// across a store read.
+    pub(crate) async fn read(
+        &self,
+        store: &dyn crate::store::MobIdentityMemberStore,
+        mob_id: &MobId,
+    ) -> Result<MemberBindingHistory, crate::store::MobStoreError> {
+        let cached = self.cached();
+        let crate::store::MemberBindingJournalRead {
+            events,
+            intent_rows,
+        } = store
+            .read_member_binding_journal_from(mob_id, cached.cursor)
+            .await?;
+        let (next, intent_rows, rebuilt) = match cached.advanced(&events, mob_id) {
+            Some(next) => (next, intent_rows, false),
+            None => {
+                let whole = store.read_member_binding_journal_from(mob_id, 0).await?;
+                (
+                    MemberBindingFold::of_journal(&whole.events, mob_id),
+                    whole.intent_rows,
+                    true,
+                )
+            }
+        };
+        self.keep(&next, rebuilt);
+        Ok(next.resolve(intent_rows))
+    }
+
+    fn cached(&self) -> MemberBindingFold {
+        self.fold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Keep `next` unless a concurrent read kept a fold further along. A
+    /// fold rebuilt from a whole read replaces the kept one whatever its
+    /// cursor: the journal no longer holds what the kept one folded.
+    fn keep(&self, next: &MemberBindingFold, rebuilt: bool) {
+        let mut fold = self
+            .fold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if rebuilt || next.cursor >= fold.cursor {
+            *fold = next.clone();
+        }
+    }
+
+    /// Forget the kept fold. The destroy that clears the mob's journal calls
+    /// it, so no fold of the removed journal outlives it. A read in flight
+    /// across the clear may keep its fold of the removed journal again; the
+    /// next read finds that fold's last event gone and folds the journal
+    /// whole, so no answer depends on this call.
+    pub(crate) fn clear(&self) {
+        *self
+            .fold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = MemberBindingFold::default();
+    }
+
+    /// The journal cursor of the kept fold (0 when none is kept).
+    #[cfg(test)]
+    pub(crate) fn kept_cursor(&self) -> u64 {
+        self.cached().cursor
+    }
 }
 
 /// One mob's member binding history: one fold of its durable journal, read
@@ -922,6 +1100,11 @@ pub struct MemberBindingHistory {
     session_bindings: BTreeMap<SessionId, MemberBinding>,
     /// How each identity Core holds an identity intent row for reads.
     intent_rows: BTreeMap<AgentIdentity, MemberIdentityManagement>,
+    /// The sessions MobMachine holds unborn, as its replay of the same
+    /// journal restores them.
+    unborn_sessions: BTreeSet<SessionId>,
+    /// The sessions a binding named since the latest mob reset.
+    epoch_sessions: BTreeSet<SessionId>,
 }
 
 impl MemberBindingHistory {
@@ -951,7 +1134,8 @@ impl MemberBindingHistory {
     /// without a session names no session and is skipped), and `intent_rows`
     /// how the identities Core holds an identity intent row for read
     /// (every other identity reads command-driven). The bindings are kept
-    /// exactly as given.
+    /// exactly as given; every session binding reads as bound since the
+    /// latest mob reset ([`Self::session_bindings_since_reset`]).
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(
         last_bindings: impl IntoIterator<Item = MemberBinding>,
@@ -959,18 +1143,31 @@ impl MemberBindingHistory {
         intent_rows: impl IntoIterator<Item = (AgentIdentity, MemberIdentityManagement)>,
         journal_cursor: u64,
     ) -> Self {
+        let session_bindings: BTreeMap<SessionId, MemberBinding> = session_bindings
+            .into_iter()
+            .filter_map(|binding| Some((binding.session_id.clone()?, binding)))
+            .collect();
         Self {
             journal_cursor,
             last_bindings: last_bindings
                 .into_iter()
                 .map(|binding| (binding.identity.clone(), binding))
                 .collect(),
-            session_bindings: session_bindings
-                .into_iter()
-                .filter_map(|binding| Some((binding.session_id.clone()?, binding)))
-                .collect(),
+            epoch_sessions: session_bindings.keys().cloned().collect(),
+            session_bindings,
             intent_rows: intent_rows.into_iter().collect(),
+            unborn_sessions: BTreeSet::new(),
         }
+    }
+
+    /// Test support: this history with `sessions` read as unborn
+    /// ([`Self::session_unborn`]), for a host's test double of these reads.
+    /// [`Self::for_test`] holds none unborn.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn with_unborn_sessions(mut self, sessions: impl IntoIterator<Item = SessionId>) -> Self {
+        self.unborn_sessions = sessions.into_iter().collect();
+        self
     }
 
     /// Whether Core holds an identity intent row for `identity`, and whether
@@ -1033,6 +1230,40 @@ impl MemberBindingHistory {
             )
         })
     }
+
+    /// Whether `session_id` is unborn: a seat or a member rotation named it
+    /// for a member that builds nothing until its first wake, and that wake
+    /// has not created it yet. No store holds such a session, and none is
+    /// missing: the member's first wake creates it under this id. A member
+    /// retired before its first wake leaves its session unborn.
+    ///
+    /// This is MobMachine's unborn-seat fact (`unborn_seat_sessions`) as the
+    /// machine's own replay of this journal restores it: the seat's row
+    /// marks the session unborn, the row of its creation marks it born, and
+    /// a mob reset clears the fact. A running mob answers the same fact live
+    /// through [`MobHandle::session_unborn`]. `false` for a session the
+    /// journal does not name unborn, including every session a build
+    /// created. One journal reads otherwise: one whose destroy is finalizing
+    /// keeps its never-created sessions unborn here, while the machine clears
+    /// them at the destroy.
+    pub fn session_unborn(&self, session_id: &SessionId) -> bool {
+        self.unborn_sessions.contains(session_id)
+    }
+
+    /// The latest binding of each session a binding named since the latest
+    /// mob reset, in session order: what [`Self::binding_for_session`]
+    /// answers for each of them, live, moved or retired. It reaches past
+    /// each identity's last binding: a member reset (a rotation) seats the
+    /// next life on a new session, unborn until its first wake, while the
+    /// session of the life before it, created and then archived, stays in
+    /// this list. With [`Self::session_unborn`] a host tells whether an
+    /// identity had a session that was created since the latest mob reset.
+    pub fn session_bindings_since_reset(&self) -> impl Iterator<Item = &MemberBinding> {
+        self.session_bindings
+            .iter()
+            .filter(|(session_id, _)| self.epoch_sessions.contains(*session_id))
+            .map(|(_, binding)| binding)
+    }
 }
 
 impl MobHandle {
@@ -1040,6 +1271,13 @@ impl MobHandle {
     /// journal, read together with Core's identity intent rows in one store
     /// transaction. See [`MemberBindingHistory`] for what each read on it
     /// answers.
+    ///
+    /// The handle and its clones keep the fold between reads, so a read
+    /// reads only the journal events appended since the previous one (with
+    /// the intent rows, in one store transaction), never the whole journal:
+    /// it costs those events plus the size of the history it answers (its
+    /// members and sessions). A journal that no longer holds the last
+    /// folded event (a destroy cleared it) is read whole again.
     ///
     /// A pure store read: it records nothing, never enters the actor queue
     /// (a busy actor cannot delay it) and never consults the live machine
@@ -1056,12 +1294,10 @@ impl MobHandle {
             .identity_member
             .as_ref()
             .ok_or(crate::store::MobStoreError::IdentityMemberAtomicPersistenceUnavailable)?;
-        let read = store.read_member_binding_journal(self.mob_id()).await?;
-        Ok(MemberBindingHistory::from_journal(
-            &read.events,
-            read.intent_rows,
-            Some(self.mob_id()),
-        ))
+        Ok(self
+            .member_binding_fold
+            .read(store.as_ref(), self.mob_id())
+            .await?)
     }
 
     /// [`MemberBindingHistory::binding_for_session`] over a fresh
@@ -1873,5 +2109,158 @@ mod tests {
             MemberIdentityManagement::IntentManaged
         );
         assert_eq!(history.journal_cursor(), 9);
+    }
+
+    /// A built-in in-memory member binding journal store and the event
+    /// store that writes its journal (another handle's writes, as far as a
+    /// fold cache is concerned).
+    fn journal_store() -> (
+        crate::store::InMemoryMobEventStore,
+        crate::store::InMemoryMobIdentityStore,
+    ) {
+        let events = crate::store::InMemoryMobEventStore::new();
+        let store = crate::store::InMemoryMobIdentityStore::paired_with_event_store(
+            &events,
+            std::sync::Arc::new(crate::store::SystemMobIdentityStoreClock),
+        );
+        (events, store)
+    }
+
+    async fn append(
+        events: &crate::store::InMemoryMobEventStore,
+        mob_id: &MobId,
+        kind: MobEventKind,
+    ) {
+        use crate::store::MobEventStore as _;
+        events
+            .append(crate::event::NewMobEvent {
+                mob_id: mob_id.clone(),
+                timestamp: None,
+                kind,
+            })
+            .await
+            .expect("append a journal event");
+    }
+
+    /// What a fold of the whole journal answers.
+    async fn whole_fold(
+        store: &crate::store::InMemoryMobIdentityStore,
+        mob_id: &MobId,
+    ) -> MemberBindingHistory {
+        use crate::store::MobIdentityMemberStore as _;
+        let read = store
+            .read_member_binding_journal(mob_id)
+            .await
+            .expect("read the whole journal");
+        MemberBindingHistory::from_journal(&read.events, read.intent_rows, Some(mob_id))
+    }
+
+    /// Every fact a history answers, in one comparable form.
+    fn facts(history: &MemberBindingHistory) -> String {
+        format!("{history:?}")
+    }
+
+    // A kept fold, read after each journal change, answers what a fold of
+    // the whole journal answers: spawns, a member reset, a recovered session
+    // binding, a retirement, a mob reset, another mob's events, and appends
+    // made outside the reading handle. A second handle's fold, started
+    // later, agrees. After a destroy's clear, and after a new journal that
+    // reuses the cleared cursors (so the fold's cursor names another
+    // event), the kept fold is never extended: it reads the whole journal
+    // again.
+    #[tokio::test]
+    async fn a_kept_fold_answers_what_a_whole_journal_fold_answers() {
+        let (events, store) = journal_store();
+        let mob_id = MobId::from("history-mob");
+        let other_mob = MobId::from("other-history-mob");
+        let alice = AgentIdentity::from("alice");
+        let bob = AgentIdentity::from("bob");
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let moved = SessionId::new();
+        let kept = MemberBindingFoldCache::default();
+        let steps: Vec<Vec<(MobId, MobEventKind)>> = vec![
+            vec![(mob_id.clone(), spawned(&alice, 1, Some(&first), true))],
+            vec![
+                (mob_id.clone(), spawned(&bob, 1, Some(&second), false)),
+                (other_mob.clone(), spawned(&alice, 1, None, false)),
+            ],
+            vec![(mob_id.clone(), member_reset(&alice, 1, 2))],
+            vec![(mob_id.clone(), recovered(&alice, 2, &moved))],
+            vec![(mob_id.clone(), retired(&bob, 1))],
+            vec![
+                (other_mob.clone(), retired(&alice, 1)),
+                (mob_id.clone(), MobEventKind::MobReset),
+            ],
+            vec![(mob_id.clone(), spawned(&bob, 2, Some(&second), true))],
+        ];
+        for step in steps {
+            for (owner, kind) in step {
+                append(&events, &owner, kind).await;
+            }
+            let read = kept
+                .read(&store, &mob_id)
+                .await
+                .expect("read the kept fold");
+            assert_eq!(facts(&read), facts(&whole_fold(&store, &mob_id).await));
+        }
+        let later = MemberBindingFoldCache::default();
+        let second_handle = later
+            .read(&store, &mob_id)
+            .await
+            .expect("another handle's first read");
+        assert_eq!(
+            facts(&second_handle),
+            facts(&whole_fold(&store, &mob_id).await)
+        );
+        let cleared_cursor = second_handle.journal_cursor();
+
+        // A destroy clears the journal.
+        {
+            use crate::store::MobEventStore as _;
+            events.clear().await.expect("clear the journal");
+        }
+        let cleared = kept
+            .read(&store, &mob_id)
+            .await
+            .expect("read the cleared journal");
+        assert_eq!(cleared.journal_cursor(), 0);
+        assert_eq!(facts(&cleared), facts(&whole_fold(&store, &mob_id).await));
+
+        // A new journal reuses the cleared cursors and passes the cursor
+        // the later handle's fold ended at, with other events.
+        let carol = AgentIdentity::from("carol");
+        let mut generation = 1_u64;
+        loop {
+            let latest = {
+                use crate::store::MobEventStore as _;
+                events
+                    .latest_cursor()
+                    .await
+                    .expect("read the latest cursor")
+            };
+            if latest > cleared_cursor + 1 {
+                break;
+            }
+            append(
+                &events,
+                &mob_id,
+                spawned(&carol, generation, Some(&moved), false),
+            )
+            .await;
+            append(&events, &mob_id, retired(&carol, generation)).await;
+            generation += 1;
+        }
+        let reused = later
+            .read(&store, &mob_id)
+            .await
+            .expect("the later handle reads the new journal");
+        assert_eq!(facts(&reused), facts(&whole_fold(&store, &mob_id).await));
+        let rebuilt = kept
+            .read(&store, &mob_id)
+            .await
+            .expect("read the new journal");
+        assert_eq!(facts(&rebuilt), facts(&whole_fold(&store, &mob_id).await));
+        assert!(rebuilt.journal_cursor() > cleared_cursor);
     }
 }

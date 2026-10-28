@@ -526,6 +526,12 @@ pub enum MobMachineRuntimeInternalReason {
     /// step it guards, so MobMachine alone decides whether the scope's
     /// incarnation is current, gone, or replaced.
     RetireAtScopeAuthority,
+    /// Machine-owned member residency (Dormant, Waking, Live): the build
+    /// seed, the per-member boot verdict and its seal, the wake verdict, the
+    /// peer-notice disposition, the dormant seat, the host's preparation
+    /// carry-out and the rotation seat. The actor and the wake paths drive
+    /// them; none is an independent public command.
+    MemberResidencyAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1362,6 +1368,46 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::RetireAtScope,
         reason: MobMachineRuntimeInternalReason::RetireAtScopeAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::SeedMemberResidency,
+        reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::WakeMember,
+        reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::PlanBootMaterialization,
+        reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::SealBootMaterializationPlan,
+        reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ClassifyPeerNotice,
+        reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::CommitDormantSeat,
+        reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveMemberHostPreparation,
+        reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::BeginMemberRotation,
+        reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::CommitMemberRotation,
+        reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ClassifyMemberRelease,
+        reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
     },
 ];
 

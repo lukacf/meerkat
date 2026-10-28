@@ -337,6 +337,7 @@ pub enum ProviderCacheTtl {
     ThirtyMinutes,
     TwentyFourHours,
     ProviderDefault,
+    TwelveHours,
 }
 
 /// Proof that an exact provider lowering authored a cache breakpoint at one
@@ -734,6 +735,11 @@ impl ProviderCacheBreakpointClaim {
 
     pub fn model(&self) -> &str {
         self.evidence.model()
+    }
+
+    /// The provider cache lifetime the lowering selected for this breakpoint.
+    pub const fn ttl(&self) -> ProviderCacheTtl {
+        self.evidence.ttl()
     }
 }
 

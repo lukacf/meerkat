@@ -984,11 +984,12 @@ impl Bundle {
             *cursor = last;
             return;
         }
-        for event in aggregate
+        // The log is in cursor order (`import_mob` refuses any other), so the
+        // events after the sent cursor start at a binary search.
+        let start = aggregate
             .events
-            .iter()
-            .filter(|event| event.cursor > *cursor)
-        {
+            .partition_point(|event| event.cursor <= *cursor);
+        for event in &aggregate.events[start..] {
             let _ = self.committed_events.send(event.clone());
         }
         *cursor = last;
@@ -1014,10 +1015,16 @@ impl Bundle {
         after: Option<u64>,
     ) -> Result<Vec<(String, EntryBytes)>, MobStoreError> {
         let aggregate = self.events.aggregate.read().await;
-        aggregate
-            .events
+        // The log is in cursor order, so the events after `after` start at
+        // a binary search: an append exports its own events without walking
+        // the whole log.
+        let start = after.map_or(0, |after| {
+            aggregate
+                .events
+                .partition_point(|event| event.cursor <= after)
+        });
+        aggregate.events[start..]
             .iter()
-            .filter(|event| after.is_none_or(|after| event.cursor > after))
             .map(|event| Ok((event_name(event.cursor), encode_event(event)?)))
             .collect()
     }

@@ -56,7 +56,11 @@ pub struct RoleWiringRule {
 /// Wiring rules controlling automatic peer connections.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WiringRules {
-    /// Automatically wire every spawned member to the orchestrator.
+    /// Automatically wire every member to the orchestrator's members: a
+    /// member spawned or seated after an orchestrator member is wired to it,
+    /// and an orchestrator member seated or rotated after members of the
+    /// other profiles is wired to them. An orchestrator member spawned after
+    /// them is not wired to them.
     #[serde(default)]
     pub auto_wire_orchestrator: bool,
     /// Fan-out wiring rules between profile roles.

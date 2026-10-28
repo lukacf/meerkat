@@ -169,6 +169,10 @@ pub fn collect_findings(root: &Path, policy: &AuditPolicy) -> Result<Vec<Finding
     let mut findings = Vec::new();
     let files = collect_repo_rs_files(root)?;
     let route_coverage = collect_route_realization_findings(root, policy);
+    let mut materialization_gates =
+        crate::materialization_authority_gates::MaterializationAuthorityGates::new(
+            crate::materialization_authority_gates::GateAllowlists::canonical(),
+        );
 
     for file in files {
         let relative = file
@@ -184,6 +188,8 @@ pub fn collect_findings(root: &Path, policy: &AuditPolicy) -> Result<Vec<Finding
         findings.extend(collect_dead_authority_wiring_findings(
             &relative, &source, &parsed, policy,
         ));
+
+        findings.extend(materialization_gates.file_findings(&relative, &source, &parsed));
 
         let mut guarded_apply = GuardedApplyVisitor::new(&relative, &source);
         guarded_apply.visit_file(&parsed);
@@ -220,6 +226,7 @@ pub fn collect_findings(root: &Path, policy: &AuditPolicy) -> Result<Vec<Finding
     }
 
     findings.extend(route_coverage);
+    findings.extend(materialization_gates.stale_findings());
 
     // Structural seam rules (hard errors)
     findings.extend(collect_handoff_protocol_coverage_findings(policy));
@@ -1673,7 +1680,7 @@ fn collect_protocol_feedback_constraint_findings(
 
 /// Structurally drop every `#[cfg(test)]` item (top-level, nested in `mod`,
 /// or impl member) so production-only audits never see test fixtures.
-fn strip_cfg_test_items(items: &mut Vec<syn::Item>) {
+pub(crate) fn strip_cfg_test_items(items: &mut Vec<syn::Item>) {
     fn attr_is_cfg_test(attr: &syn::Attribute) -> bool {
         if !attr.path().is_ident("cfg") {
             return false;
@@ -1782,7 +1789,7 @@ fn is_feedback_authority_implementation_path(relative: &str) -> bool {
         || relative.contains("/handles/")
 }
 
-fn is_test_source_path(relative: &str) -> bool {
+pub(crate) fn is_test_source_path(relative: &str) -> bool {
     relative.contains("/tests/")
         || relative.ends_with("_tests.rs")
         || relative.ends_with("/tests.rs")
@@ -2576,7 +2583,7 @@ pub(crate) fn error_finding(
     }
 }
 
-fn warn_finding(
+pub(crate) fn warn_finding(
     rule: &str,
     path: &str,
     symbol: &str,

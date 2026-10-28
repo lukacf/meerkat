@@ -5814,11 +5814,12 @@ impl RuntimeLoopAuthorityBinding {
             .await
     }
 
-    /// Same as [`Self::begin_durable_unregister_for_teardown`], but declines
-    /// to stage `BeginUnregisterSession` when admitted input is still queued
-    /// under the session mutation gate. Only the no-pending terminal path may
-    /// use this: a failed run that requires teardown must still fail closed.
-    async fn begin_durable_unregister_for_teardown_unless_queued(
+    /// Same as [`Self::begin_durable_unregister_for_teardown`], but stages
+    /// `BeginUnregisterSession` only on MeerkatMachine's empty-resume verdict
+    /// `Retire`, asked under the session mutation gate. Only the no-pending
+    /// terminal path may use this: a failed run that requires teardown must
+    /// still fail closed.
+    async fn begin_durable_unregister_for_empty_resume(
         &self,
         driver: &crate::meerkat_machine::SharedDriver,
     ) -> Result<RuntimeLoopTeardownUnregisterAdmission, crate::traits::RuntimeDriverError> {
@@ -5829,7 +5830,7 @@ impl RuntimeLoopAuthorityBinding {
                     state: crate::runtime_state::RuntimeState::Destroyed,
                 })?;
         machine
-            .begin_unregister_from_runtime_loop_teardown_unless_queued(&self.session_id, driver)
+            .begin_unregister_from_runtime_loop_empty_resume(&self.session_id, driver)
             .await
     }
 }
@@ -5870,10 +5871,6 @@ static RUNTIME_LOOP_SERVING_RUNTIME: std::sync::OnceLock<
     std::sync::Mutex<Option<tokio::runtime::Runtime>>,
 > = std::sync::OnceLock::new();
 
-#[cfg(not(target_arch = "wasm32"))]
-// Same budget as every host binary's workers (see `crate::host_stack`).
-const RUNTIME_LOOP_SERVING_THREAD_STACK_SIZE: usize = crate::host_stack::HOST_WORKER_STACK_BUDGET;
-
 #[derive(Clone)]
 pub(crate) struct RuntimeLoopTaskSpawner {
     #[cfg(not(target_arch = "wasm32"))]
@@ -5894,10 +5891,18 @@ impl RuntimeLoopTaskSpawner {
                 });
             }
 
+            // Its threads follow the host stack budget and its knobs (see
+            // `crate::host_stack`).
+            let stack_bytes =
+                crate::host_stack::process_runtime_stack_bytes().map_err(|error| {
+                    crate::traits::RuntimeDriverError::Internal(format!(
+                        "failed to start runtime-loop serving runtime: {error}"
+                    ))
+                })?;
             let candidate = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .thread_name("meerkat-runtime-serving")
-                .thread_stack_size(RUNTIME_LOOP_SERVING_THREAD_STACK_SIZE)
+                .thread_stack_size(stack_bytes)
                 .enable_all()
                 .build()
                 .map_err(|error| {
@@ -8590,11 +8595,6 @@ async fn process_queue(
 
                 // Lock again to update driver state
                 let d = driver.lock().await;
-                // Observed under the driver lock, before the terminal is
-                // classified: whether any admitted input outside this batch
-                // is still queued. A no-pending terminal may only retire the
-                // registration when nothing else is waiting on it.
-                let other_work_queued = d.has_queued_input_outside(&input_ids);
                 match result {
                     Ok(output) => {
                         drop(d);
@@ -8724,22 +8724,25 @@ async fn process_queue(
                             .chain(join_resolution.retained.iter().cloned())
                             .collect();
                         // A resume against a session that has no pending
-                        // boundary is a successful terminal observation, but
-                        // the executor must not remain attached afterward
-                        // when no other input is admitted. Commit and resolve
-                        // this batch first, then exit so the loop guard
-                        // publishes the exact executor to the machine-owned
-                        // unregister saga. When other admitted input is still
-                        // queued (for example a `turn/start` prompt admitted
-                        // behind a detached-op completion wake), the
-                        // registration stays serving: the materialized actor
-                        // remains attached and the queued input is applied by
-                        // the next batch instead of resolving
-                        // `RuntimeTerminated`.
-                        let teardown_after_commit = matches!(
+                        // boundary (an empty resume, for example an idle
+                        // detached-op completion wake) is a successful
+                        // terminal observation. Commit and resolve this batch
+                        // first; then MeerkatMachine decides whether the
+                        // registration retires (`ResolveEmptyResumeRetirement`,
+                        // asked under the session mutation gate). `Retire` (a
+                        // session-owned registration with nothing queued)
+                        // exits so the loop guard publishes the exact
+                        // executor to the machine-owned unregister saga.
+                        // `KeepServing` keeps the materialized actor attached:
+                        // admitted input queued behind the wake (for example a
+                        // `turn/start` prompt) is applied by the next batch
+                        // instead of resolving `RuntimeTerminated`, and a
+                        // composition-owned registration (a mob member) stays
+                        // loaded, its other operations still running.
+                        let empty_resume_after_commit = matches!(
                             terminal.as_ref(),
                             Some(CoreApplyTerminal::NoPendingBoundary)
-                        ) && !other_work_queued;
+                        );
                         // Keep one cheap clone of the sealed carrier for
                         // post-commit publication. WholeBlob clones share the
                         // lazy byte cell; HeadCanonical clones only an Arc to
@@ -9112,26 +9115,27 @@ async fn process_queue(
                             }
                             continue;
                         }
-                        if teardown_after_commit {
+                        if empty_resume_after_commit {
                             let prior_disposition = std::mem::replace(
                                 &mut handoff.disposition,
                                 RuntimeLoopTeardownDisposition::UnregisterRequired,
                             );
                             match authority_binding
-                                .begin_durable_unregister_for_teardown_unless_queued(driver)
+                                .begin_durable_unregister_for_empty_resume(driver)
                                 .await
                             {
                                 Ok(RuntimeLoopTeardownUnregisterAdmission::Began) => {}
-                                Ok(RuntimeLoopTeardownUnregisterAdmission::QueuedWorkPresent) => {
-                                    // Input was admitted between the queue
-                                    // observation above and the mutation gate.
-                                    // Nothing has been staged, so keep serving
-                                    // and let the next batch apply it.
+                                Ok(RuntimeLoopTeardownUnregisterAdmission::KeepServing) => {
+                                    // The machine kept the registration
+                                    // serving: input is queued, or the
+                                    // composition owns its residency. Nothing
+                                    // has been staged, so keep serving and let
+                                    // the next batch apply any queued input.
                                     handoff.disposition = prior_disposition;
                                     tracing::debug!(
                                         session_id = %authority_binding.session_id,
                                         %run_id,
-                                        "no-pending runtime apply found newly admitted input; keeping the registration serving"
+                                        "empty resume kept the registration serving"
                                     );
                                     continue;
                                 }
@@ -15395,6 +15399,178 @@ mod tests {
 
         // The construction runtime and its handle have been dropped here.
         assert_serving_runtime_thread(spawner);
+    }
+
+    /// The thread stack of the two process-owned runtimes (machine cleanup
+    /// and runtime-loop serving), probed in child processes: a stack
+    /// overflow aborts the whole process, so it is observed from outside.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod process_runtime_stack {
+        use crate::host_stack::HOST_WORKER_STACK_ENV;
+        use crate::runtime_loop::RuntimeLoopTaskSpawner;
+        use std::time::Duration;
+
+        /// Arms [`process_owned_runtime_stack_probe_child`] and names the
+        /// runtime it probes, `cleanup` or `serving`. Without it the fixture
+        /// does nothing, so a run of ignored tests stays harmless.
+        const STACK_PROBE_RUNTIME_ENV: &str = "MEERKAT_TEST_PROCESS_RUNTIME_STACK_PROBE";
+
+        /// The probe's frame: more than the 8 MiB default stack, less than
+        /// the 32 MiB the raised cases give.
+        const STACK_PROBE_FRAME_BYTES: usize = 12 * 1024 * 1024;
+
+        /// The stack the raised cases ask for, in bytes: 32 MiB.
+        const STACK_PROBE_RAISED_BYTES: &str = "33554432";
+
+        /// Reserve and touch a [`STACK_PROBE_FRAME_BYTES`] frame on the
+        /// calling thread's stack; `black_box` keeps the array in any build
+        /// profile.
+        #[inline(never)]
+        #[allow(clippy::large_stack_arrays)]
+        fn touch_stack_probe_frame() -> u8 {
+            let mut frame = [0_u8; STACK_PROBE_FRAME_BYTES];
+            std::hint::black_box(&mut frame);
+            frame[STACK_PROBE_FRAME_BYTES - 1]
+        }
+
+        /// The child process of
+        /// [`process_owned_runtimes_size_their_threads_from_the_host_stack_knobs`]:
+        /// runs the probe frame on one process-owned runtime and checks that
+        /// it ran there.
+        #[test]
+        #[ignore = "child-process fixture of the process-owned runtime stack test"]
+        fn process_owned_runtime_stack_probe_child() {
+            let Some(runtime) = std::env::var_os(STACK_PROBE_RUNTIME_ENV) else {
+                return;
+            };
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let probe = async move {
+                let touched = touch_stack_probe_frame();
+                let thread = std::thread::current()
+                    .name()
+                    .unwrap_or("<unnamed>")
+                    .to_string();
+                let _ = tx.send((thread, touched));
+            };
+            let expected = match runtime.to_str() {
+                Some("cleanup") => {
+                    crate::meerkat_machine::RuntimeCleanupTaskSpawner::acquire()
+                        .expect("machine cleanup runtime should start")
+                        .spawn_detached(probe);
+                    "meerkat-machine-cleanup"
+                }
+                Some("serving") => {
+                    drop(
+                        RuntimeLoopTaskSpawner::acquire_process_owned()
+                            .expect("serving runtime should start")
+                            .spawn(probe),
+                    );
+                    "meerkat-runtime-serving"
+                }
+                other => panic!("unknown process-owned runtime {other:?}"),
+            };
+            let (thread, touched) = rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the probe task should report");
+            assert_eq!(thread, expected);
+            assert_eq!(touched, 0);
+        }
+
+        /// The child's test name without the crate name, as libtest's
+        /// `--exact` matches it.
+        fn stack_probe_child_test_name() -> String {
+            let module = module_path!();
+            let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+            format!("{module}::process_owned_runtime_stack_probe_child")
+        }
+
+        /// Run [`process_owned_runtime_stack_probe_child`] for `runtime` in
+        /// a child process whose only stack settings are `stack_override`
+        /// (`RKAT_WORKER_STACK_BYTES`) and `min_stack` (`RUST_MIN_STACK`).
+        #[allow(clippy::disallowed_methods)] // the test binary's own child process
+        fn run_stack_probe_child(
+            runtime: &str,
+            stack_override: Option<&str>,
+            min_stack: Option<&str>,
+        ) -> (std::process::ExitStatus, String) {
+            let child_test = stack_probe_child_test_name();
+            let mut command =
+                std::process::Command::new(std::env::current_exe().expect("test binary"));
+            command
+                .args([
+                    "--exact",
+                    child_test.as_str(),
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(STACK_PROBE_RUNTIME_ENV, runtime)
+                .env_remove(HOST_WORKER_STACK_ENV)
+                .env_remove("RUST_MIN_STACK")
+                .stdin(std::process::Stdio::null());
+            if let Some(bytes) = stack_override {
+                command.env(HOST_WORKER_STACK_ENV, bytes);
+            }
+            if let Some(bytes) = min_stack {
+                command.env("RUST_MIN_STACK", bytes);
+            }
+            let output = command.output().expect("start the probe child");
+            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            (output.status, text)
+        }
+
+        /// Whether `output` reports a stack overflow on a thread named
+        /// `thread` (std prints the thread's id between the two).
+        fn reports_stack_overflow(output: &str, thread: &str) -> bool {
+            let prefix = format!("thread '{thread}'");
+            output
+                .lines()
+                .any(|line| line.starts_with(&prefix) && line.ends_with("has overflowed its stack"))
+        }
+
+        /// The last lines of a child's output, for a failure message.
+        fn output_tail(output: &str) -> String {
+            let lines = output.lines().collect::<Vec<_>>();
+            lines[lines.len().saturating_sub(40)..].join("\n")
+        }
+
+        /// The two process-owned runtimes size their threads from the host
+        /// stack knobs: `RKAT_WORKER_STACK_BYTES` exactly, otherwise the
+        /// 8 MiB budget raised to `RUST_MIN_STACK`. A probe that needs a
+        /// 12 MiB frame fits 32 MiB from either variable, and overflows the
+        /// default: the control, without which the raised cases prove
+        /// nothing. With an explicit 8 MiB that neither variable reached, an
+        /// embedding's debug build whose mob member work needed more aborted
+        /// on `meerkat-machine-cleanup` however it set `RUST_MIN_STACK`.
+        #[test]
+        fn process_owned_runtimes_size_their_threads_from_the_host_stack_knobs() {
+            for (runtime, thread) in [
+                ("cleanup", "meerkat-machine-cleanup"),
+                ("serving", "meerkat-runtime-serving"),
+            ] {
+                for (variable, stack_override, min_stack) in [
+                    ("RUST_MIN_STACK", None, Some(STACK_PROBE_RAISED_BYTES)),
+                    (HOST_WORKER_STACK_ENV, Some(STACK_PROBE_RAISED_BYTES), None),
+                ] {
+                    let (status, output) =
+                        run_stack_probe_child(runtime, stack_override, min_stack);
+                    assert!(
+                        status.success() && output.contains("test result: ok. 1 passed"),
+                        "{thread} must fit a {STACK_PROBE_FRAME_BYTES}-byte frame with \
+                         {variable}={STACK_PROBE_RAISED_BYTES}; the child exited with {status}\n{}",
+                        output_tail(&output)
+                    );
+                }
+                let (status, output) = run_stack_probe_child(runtime, None, None);
+                assert!(
+                    !status.success() && reports_stack_overflow(&output, thread),
+                    "the default stack must not fit the probe on {thread}, or the raised \
+                     cases prove nothing; the child exited with {status}\n{}",
+                    output_tail(&output)
+                );
+            }
+        }
     }
 
     #[test]

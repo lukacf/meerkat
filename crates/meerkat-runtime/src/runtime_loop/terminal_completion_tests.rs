@@ -286,6 +286,7 @@ impl Fixture {
                 fence_token: mm::FenceToken::from(1),
                 generation: Some(mm::Generation::from(0)),
                 runtime_epoch_id: None,
+                residency_owner: mm::SessionResidencyOwner::Session,
             },
         ] {
             mm::MeerkatMachineMutator::apply(&mut *machine, input).unwrap();

@@ -25,6 +25,30 @@ pub(crate) struct StoredScope {
     pub(crate) end: u64,
 }
 
+/// One call the host answered or refused, with the scope it named (a
+/// listing names its kind, a commit names none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HostCall {
+    AcquireFence,
+    RenewFence,
+    LoadHead { kind: ScopeKind, name: String },
+    ListHeads { kind: ScopeKind },
+    ReadRows { kind: ScopeKind, name: String },
+    Commit,
+}
+
+/// One visible scope as a row reads it, without copying its rows: its
+/// name, its head, its first visible row, the index its next row takes, and
+/// the length of each visible row by index.
+#[derive(Debug, Clone)]
+pub(crate) struct ScopeWindow {
+    pub(crate) name: String,
+    pub(crate) head: Vec<u8>,
+    pub(crate) start: u64,
+    pub(crate) end: u64,
+    pub(crate) row_lens: BTreeMap<u64, usize>,
+}
+
 #[derive(Debug, Default)]
 struct HostState {
     token: u64,
@@ -57,6 +81,16 @@ pub(crate) struct Faults {
     pub(crate) renew_delay: Option<Duration>,
     /// How long the next listing call takes before it answers (once).
     pub(crate) list_delay: Option<Duration>,
+    /// The most heads every listing call answers, whatever limit it was
+    /// asked for: a store whose pages are shorter than Core's.
+    pub(crate) list_page_cap: Option<usize>,
+    /// How long every row read of a session scope takes before it answers.
+    /// The reads waiting meanwhile are counted ([`TestHost::session_read_peak`]).
+    pub(crate) session_read_delay: Option<Duration>,
+    /// Row reads of the session scopes whose host name starts with this
+    /// prefix wait this long (instead of `session_read_delay`) and then answer
+    /// `Unavailable`.
+    pub(crate) failing_session_reads: Option<(String, Duration)>,
 }
 
 /// The test host store.
@@ -69,6 +103,35 @@ pub(crate) struct TestHost {
     pub(crate) commit_gate: Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
     /// Commits that started, counted before they wait at the gate.
     pub(crate) commits_started: std::sync::atomic::AtomicU64,
+    /// Reads of the host's scopes: head loads, head listings and row reads.
+    reads: std::sync::atomic::AtomicU64,
+    /// Row reads of session scopes waiting at `Faults::session_read_delay`
+    /// now, and the most that waited at once.
+    session_reads_waiting: std::sync::atomic::AtomicUsize,
+    session_reads_peak: std::sync::atomic::AtomicUsize,
+    /// Every call, in order, until a row takes them.
+    calls: Mutex<Vec<HostCall>>,
+}
+
+/// One row read waiting at its delay, counted until it is dropped (answered
+/// or abandoned).
+struct WaitingRead<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> WaitingRead<'a> {
+    fn enter(
+        waiting: &'a std::sync::atomic::AtomicUsize,
+        peak: &std::sync::atomic::AtomicUsize,
+    ) -> Self {
+        let now = waiting.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+        peak.fetch_max(now, std::sync::atomic::Ordering::AcqRel);
+        Self(waiting)
+    }
+}
+
+impl Drop for WaitingRead<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 impl TestHost {
@@ -83,6 +146,10 @@ impl TestHost {
             faults: Mutex::new(Faults::default()),
             commit_gate: Mutex::new(None),
             commits_started: std::sync::atomic::AtomicU64::new(0),
+            reads: std::sync::atomic::AtomicU64::new(0),
+            session_reads_waiting: std::sync::atomic::AtomicUsize::new(0),
+            session_reads_peak: std::sync::atomic::AtomicUsize::new(0),
+            calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -96,6 +163,78 @@ impl TestHost {
         self.faults
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn count_read(&self) {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    fn record(&self, call: HostCall) {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(call);
+    }
+
+    /// Every call recorded since the last take, in order.
+    pub(crate) fn take_calls(&self) -> Vec<HostCall> {
+        std::mem::take(
+            &mut *self
+                .calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// How many visible scopes of `kind` the host holds.
+    pub(crate) fn scope_count(&self, kind: ScopeKind) -> usize {
+        self.state()
+            .scopes
+            .keys()
+            .filter(|(scope_kind, _)| *scope_kind == kind)
+            .count()
+    }
+
+    /// The first visible scope of `kind`, by name, whose name starts with
+    /// `prefix`.
+    pub(crate) fn window_of(&self, kind: ScopeKind, prefix: &str) -> Option<ScopeWindow> {
+        let state = self.state();
+        state
+            .scopes
+            .iter()
+            .find(|((scope_kind, name), _)| *scope_kind == kind && name.starts_with(prefix))
+            .map(|((_, name), stored)| ScopeWindow {
+                name: name.clone(),
+                head: stored.head.clone(),
+                start: stored.start,
+                end: stored.end,
+                row_lens: stored
+                    .rows
+                    .iter()
+                    .map(|(index, row)| (*index, row.len()))
+                    .collect(),
+            })
+    }
+
+    /// The visible row `index` of the scope of `kind` named `name`.
+    pub(crate) fn row_at(&self, kind: ScopeKind, name: &str, index: u64) -> Option<Vec<u8>> {
+        self.state()
+            .scopes
+            .get(&(kind, name.to_string()))
+            .and_then(|stored| stored.rows.get(&index).cloned())
+    }
+
+    /// How many reads of the host's scopes (head loads, head listings and
+    /// row reads) the host answered or refused.
+    pub(crate) fn read_count(&self) -> u64 {
+        self.reads.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The most row reads of session scopes that waited at
+    /// `Faults::session_read_delay` at once.
+    pub(crate) fn session_read_peak(&self) -> usize {
+        self.session_reads_peak
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// End the current holder's lease now (a crashed writer's lease ran
@@ -123,6 +262,7 @@ impl TestHost {
 #[async_trait]
 impl HostStore for TestHost {
     async fn acquire_fence(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
+        self.record(HostCall::AcquireFence);
         {
             let mut faults = self.faults();
             if faults.acquire_unavailable > 0 {
@@ -153,6 +293,7 @@ impl HostStore for TestHost {
     }
 
     async fn renew_fence(&self, token: FenceToken) -> Result<(), HostStoreError> {
+        self.record(HostCall::RenewFence);
         let delay = {
             let mut faults = self.faults();
             if faults.renew_unavailable > 0 {
@@ -179,6 +320,11 @@ impl HostStore for TestHost {
     }
 
     async fn load_head(&self, scope: &ScopeRef) -> Result<Option<VersionedHead>, HostStoreError> {
+        self.count_read();
+        self.record(HostCall::LoadHead {
+            kind: scope.kind,
+            name: scope.name.as_str().to_string(),
+        });
         {
             let mut faults = self.faults();
             if faults.load_head_unavailable > 0 {
@@ -203,10 +349,16 @@ impl HostStore for TestHost {
         after: Option<&ScopeName>,
         limit: usize,
     ) -> Result<HeadPage, HostStoreError> {
-        let delay = self.faults().list_delay.take();
+        self.count_read();
+        self.record(HostCall::ListHeads { kind });
+        let (delay, cap) = {
+            let mut faults = self.faults();
+            (faults.list_delay.take(), faults.list_page_cap)
+        };
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
+        let limit = cap.map_or(limit, |cap| limit.min(cap));
         let state = self.state();
         let mut heads = Vec::new();
         let mut more = false;
@@ -241,6 +393,31 @@ impl HostStore for TestHost {
         from: RowIndex,
         limit: usize,
     ) -> Result<Vec<Row>, HostStoreError> {
+        self.count_read();
+        self.record(HostCall::ReadRows {
+            kind: scope.kind,
+            name: scope.name.as_str().to_string(),
+        });
+        if scope.kind == ScopeKind::Session {
+            let (delay, failing) = {
+                let faults = self.faults();
+                let failing = faults
+                    .failing_session_reads
+                    .as_ref()
+                    .filter(|(prefix, _)| scope.name.as_str().starts_with(prefix.as_str()))
+                    .map(|(_, delay)| *delay);
+                (faults.session_read_delay, failing)
+            };
+            if let Some(delay) = failing {
+                tokio::time::sleep(delay).await;
+                return Err(HostStoreError::Unavailable("injected".into()));
+            }
+            if let Some(delay) = delay {
+                let _waiting =
+                    WaitingRead::enter(&self.session_reads_waiting, &self.session_reads_peak);
+                tokio::time::sleep(delay).await;
+            }
+        }
         let state = self.state();
         let Some(stored) = state
             .scopes
@@ -262,6 +439,7 @@ impl HostStore for TestHost {
     }
 
     async fn commit(&self, batch: &CommitBatch) -> Result<(), HostStoreError> {
+        self.record(HostCall::Commit);
         self.commits_started
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let gate = self

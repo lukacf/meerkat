@@ -338,6 +338,64 @@ fn wire_metadata_openai_gpt_56_advanced_params_round_trip() {
     );
 }
 
+/// The 12-hour OpenAI prompt-cache TTL crosses the turn-metadata wire as
+/// `"12h"` in both directions, and the wire enum's serde form agrees with
+/// the core type for every lifetime.
+#[test]
+fn wire_metadata_openai_twelve_hour_prompt_cache_ttl_round_trips() {
+    use meerkat_contracts::wire::runtime::WireOpenAiPromptCacheTtl;
+    use meerkat_core::lifecycle::run_primitive::{
+        OpenAiPromptCacheOptions, OpenAiProviderTag, ProviderTag,
+    };
+    use meerkat_core::model_profile::capabilities::{OpenAiPromptCacheMode, OpenAiPromptCacheTtl};
+
+    let twelve_hours = OpenAiPromptCacheOptions {
+        mode: Some(OpenAiPromptCacheMode::Implicit),
+        ttl: Some(OpenAiPromptCacheTtl::TwelveHours),
+    };
+    let wire: WireRuntimeTurnMetadata = RuntimeTurnMetadata {
+        provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
+            provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                prompt_cache_options: Some(twelve_hours),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+    .into();
+
+    let json = serde_json::to_value(&wire).expect("serialize wire metadata");
+    assert_eq!(
+        json["provider_params"]["value"]["provider_tag"]["prompt_cache_options"],
+        serde_json::json!({"mode": "implicit", "ttl": "12h"})
+    );
+
+    let round_tripped: RuntimeTurnMetadata =
+        serde_json::from_value::<WireRuntimeTurnMetadata>(json)
+            .expect("deserialize wire metadata")
+            .into();
+    let Some(TurnMetadataOverride::Set(params)) = round_tripped.provider_params else {
+        panic!("provider params set override expected");
+    };
+    let Some(ProviderTag::OpenAi(tag)) = params.provider_tag else {
+        panic!("openai provider tag expected");
+    };
+    assert_eq!(tag.prompt_cache_options, Some(twelve_hours));
+
+    for ttl in [
+        OpenAiPromptCacheTtl::ThirtyMinutes,
+        OpenAiPromptCacheTtl::TwelveHours,
+    ] {
+        let wire_ttl = WireOpenAiPromptCacheTtl::from(ttl);
+        assert_eq!(
+            serde_json::to_value(wire_ttl).expect("serialize wire ttl"),
+            serde_json::json!(ttl.as_wire_str())
+        );
+        assert_eq!(OpenAiPromptCacheTtl::from(wire_ttl), ttl);
+    }
+}
+
 #[test]
 fn wire_metadata_prompt_cache_fields_round_trip() {
     use meerkat_core::lifecycle::run_primitive::{

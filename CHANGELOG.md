@@ -35,6 +35,1345 @@ them.
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-10-28
+
+### Breaking
+
+- `comms/send` gains the closed error code `peer_wake_refused`
+  (`meerkat-contracts`: new variant `CommsSendErrorData::PeerWakeRefused { peer,
+  envelope_id, refusal, retryable, message }`; constructor
+  `CommsSendErrorData::peer_wake_refused`). A peer message to a member that is
+  seated but not materialized in its process now waits for the member's wake
+  inside the sender's own send budget (`CommsConfig::ack_timeout_secs`) and is
+  then delivered once through the ordinary receipt path; when the wake is
+  refused or does not finish, the send fails with this code instead of
+  `peer_not_found_or_not_trusted`. `peer_not_found_or_not_trusted` is now
+  reserved for a peer that is not a member, or that the sender does not trust
+  (a member it is not wired to). The refusal is the closed
+  `meerkat_core::comms::PeerWakeRefusal` (tagged on `kind`: `member_broken {
+  reason, hold }`, `member_retiring`, `mob_not_running`, `admission_closed`,
+  `wake_timed_out`, `mob_unavailable`, `materialization_lost`,
+  `non_authoritative_composition`, `host_preparation_pending`,
+  `resume_gate_unavailable`, `host_owned`, `lifecycle_origin_fenced`,
+  `sender_waking`). Every refusal means "not delivered": nothing was handed to
+  the recipient, so a retry cannot duplicate the message; `retryable` says
+  whether a retry can succeed. SDKs that parse the `comms/send` error vocabulary
+  closed must add the code (the Python and TypeScript SDKs do).
+
+- `meerkat-core`: `comms::SendError` gains
+  `PeerWakeRefused { peer, envelope_id, refusal }`, and
+  `comms::PeerWakeRefusal` is new. `meerkat-comms`: `inproc::InprocSendError`
+  gains `WakeRefused(PeerWakeRefusal)`, and `router::SendError` gains
+  `PeerWakeRefused { envelope_id, refusal }`. `InprocSendError` is exhaustive,
+  so a downstream exhaustive match needs the arm; both `SendError` enums are
+  `#[non_exhaustive]`.
+
+- `meerkat-runtime`: `meerkat_machine::composition::MeerkatSeamSignal::RuntimeBound`
+  gains `runtime_epoch_id`, and the enum gains `RuntimeRegistrationReleased {
+  agent_runtime_id, fence_token, runtime_epoch_id }`. Every final unregister of
+  a session registration now publishes the released registration to the mob
+  that owns the session, once the unregister committed; the mob demotes exactly
+  that materialization of its member to dormant, and a release for any other
+  registration changes nothing.
+
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`,
+  `meerkat-runtime`: the mob and runtime machines gain member residency (see
+  Added). In the mob machine, `MobMachineInput` (meerkat-machine-schema and
+  meerkat-mob), `MobMachineInputVariant`, `MobMachineCatalogInput` and the
+  kernel `generated::mob` `Input` and `InputKind` gain `SeedMemberResidency`,
+  `WakeMember`, `PlanBootMaterialization`, `SealBootMaterializationPlan`,
+  `ClassifyPeerNotice`, `CommitDormantSeat`, `ResolveMemberHostPreparation`,
+  `BeginMemberRotation`, `CommitMemberRotation` and `ClassifyMemberRelease`;
+  `MobMachineSignal`, `MobMachineSignalVariant` and the kernel `Signal` and
+  `SignalKind` gain `ResolveMemberRevivalBound`,
+  `ResolveMemberRevivalRetryable`, `AbandonMemberWake`,
+  `ReleaseMemberMaterialization`, `ResolveWiringEdgeRealization`,
+  `ResolveExternalEdgeRealization`, `ResolveMemberRevivalSessionCreated` and
+  `RecoverMemberSeatSession`; `MobMachineEffect`, `MobMachineEffectVariant`
+  and the kernel `Effect` and `EffectKind` gain `MaterializeMember`,
+  `VerifyMember`, `BootMaterializationPlanned`, `MemberWakeClassified`,
+  `MemberWakeFeedbackResolved`, `MemberWakesAbandoned`,
+  `RotationSessionsAbandoned`, `CloseMemberPeerIngress`,
+  `ReopenMemberPeerIngress`, `PublishWakeRoute`, `RetractWakeRoute`,
+  `RebuildWakeRoutes`, `PeerNoticeClassified`,
+  `MemberMaterializationReleased`, `MemberReleaseClassified`,
+  `RuntimeBindingRefusalStale`, `OwedMemberWakesRecorded`,
+  `OwedEdgeRepairsRecorded` and `PersistMemberSeatSessionBorn`; and
+  `MobMachineRuntimeInternalReason` gains `MemberResidencyAuthority`, each
+  appended last. `MobMachineState` and the kernel `State` gain the public
+  fields `member_materialization`, `member_wake_attempts`,
+  `member_wake_attempt_sequence`, `member_wake_bound`,
+  `member_materialization_epoch`, `member_materialization_drift_count`,
+  `member_boot_obligation_owed`, `member_restore_policy`,
+  `composition_authority`, `member_host_preparation_pending`,
+  `boot_plan_sealed`, `member_rotation_session_ids`,
+  `member_rotation_peer_endpoints`, `runtime_retire_archive_only`,
+  `owed_edge_repairs`, `owed_external_edge_repairs`,
+  `member_seat_session_unborn` and `unborn_seat_sessions`, and lose
+  `member_revival_pending`. `MemberPeerEndpoint` (meerkat-machine-schema and
+  meerkat-mob) gains `transport`; the input `ResolveRuntimeBindingRefusal`,
+  the signals `ResolveMemberRevivalSucceeded`, `ResolveMemberRevivalFailed`,
+  `ResolveMemberRevivalHostRefused` and
+  `ResolveRecreatedMemberSessionSucceeded`, and the effects
+  `RequestRuntimeBinding` and `MemberLiveMaterializationClassified` gain
+  `attempt`, and the signal `ObserveRuntimeReady` gains `runtime_epoch_id`
+  (struct literals need them). The kernel `generated::mob::TransitionId` gains
+  `SeedMemberResidencyRunning`, `SeedMemberResidencyStopped`,
+  `SeedMemberResidencyCompleted`, `WakeMemberAuthorizedRunning`,
+  `WakeMemberJoinedRunning`, `WakeMemberAlreadyLiveRunning`,
+  `WakeMemberRefusedRunning`, `WakeMemberRefusedStopped`,
+  `WakeMemberRefusedCompleted`, `WakeMemberRefusedDestroyed`,
+  `PlanBootMaterializationWake`, `PlanBootMaterializationVerify`,
+  `PlanBootMaterializationStayDormant`, `SealBootMaterializationPlan`,
+  `ClassifyPeerNoticeRunning`, `ClassifyPeerNoticeStopped`,
+  `ClassifyPeerNoticeCompleted`, `ClassifyPeerNoticeDestroyed`,
+  `CommitDormantSeatRunning`, `ResolveMemberHostPreparationRunning`,
+  `ResolveMemberHostPreparationStopped`,
+  `ResolveMemberHostPreparationCompleted`, `BeginMemberRotationRunning`,
+  `CommitMemberRotationLiveRunning`, `CommitMemberRotationLiveStopped`,
+  `CommitMemberRotationRetiredRunning`, `CommitMemberRotationRetiredStopped`,
+  `ResolveMemberRevivalBoundRunning`, `ResolveMemberRevivalRetryableRunning`,
+  `AbandonMemberWakeDormantRunning`, `AbandonMemberWakeBrokenRunning`,
+  `ResolveMemberRevivalBoundStaleRunning`,
+  `ResolveMemberRevivalBoundStaleStopped`,
+  `ResolveMemberRevivalBoundStaleCompleted`,
+  `ResolveMemberRevivalBoundStaleDestroyed`,
+  `ResolveMemberRevivalSucceededStaleRunning`,
+  `ResolveMemberRevivalSucceededStaleStopped`,
+  `ResolveMemberRevivalSucceededStaleCompleted`,
+  `ResolveMemberRevivalSucceededStaleDestroyed`,
+  `ResolveMemberRevivalFailedStaleRunning`,
+  `ResolveMemberRevivalFailedStaleStopped`,
+  `ResolveMemberRevivalFailedStaleCompleted`,
+  `ResolveMemberRevivalFailedStaleDestroyed`,
+  `ResolveMemberRevivalHostRefusedStaleRunning`,
+  `ResolveMemberRevivalHostRefusedStaleStopped`,
+  `ResolveMemberRevivalHostRefusedStaleCompleted`,
+  `ResolveMemberRevivalHostRefusedStaleDestroyed`,
+  `ResolveMemberRevivalRetryableStaleRunning`,
+  `ResolveMemberRevivalRetryableStaleStopped`,
+  `ResolveMemberRevivalRetryableStaleCompleted`,
+  `ResolveMemberRevivalRetryableStaleDestroyed`,
+  `AbandonMemberWakeStaleRunning`, `AbandonMemberWakeStaleStopped`,
+  `AbandonMemberWakeStaleCompleted`, `AbandonMemberWakeStaleDestroyed`,
+  `ResolveRecreatedMemberSessionSucceededStaleRunning`,
+  `ResolveRecreatedMemberSessionSucceededStaleStopped`,
+  `ResolveRecreatedMemberSessionSucceededStaleCompleted`,
+  `ResolveRecreatedMemberSessionSucceededStaleDestroyed`,
+  `ReleaseMemberMaterializationReleasedRunning`,
+  `ReleaseMemberMaterializationReleasedStopped`,
+  `ReleaseMemberMaterializationReleasedCompleted`,
+  `ReleaseMemberMaterializationStaleRunning`,
+  `ReleaseMemberMaterializationStaleStopped`,
+  `ReleaseMemberMaterializationStaleCompleted`,
+  `ReleaseMemberMaterializationStaleDestroyed`,
+  `ClassifyMemberLiveMaterializationTerminalDormant`,
+  `AuthorizeExplicitResumeMemberLiveRunning`,
+  `AuthorizeExplicitResumeMemberJoinRunning`, `ClassifyMemberReleaseRunning`,
+  `ClassifyMemberReleaseStopped`, `ClassifyMemberReleaseCompleted`,
+  `ClassifyMemberReleaseDestroyed`, `CommitMemberRotationLiveKickoffRunning`,
+  `CommitMemberRotationLiveKickoffStopped`,
+  `CommitMemberRotationRetiredKickoffRunning`,
+  `CommitMemberRotationRetiredKickoffStopped`,
+  `ResolveRuntimeBindingRefusalStaleRunning`,
+  `ResolveRuntimeBindingRefusalStaleStopped`,
+  `ResolveRuntimeBindingRefusalStaleCompleted`,
+  `ResolveRuntimeBindingRefusalStaleDestroyed`,
+  `WireMembersPlacedPeerWakeFirstEnd`, `WireMembersPlacedPeerWakeSecondEnd`,
+  `WireMembersWithTrustPlacedPeerWakeFirstEnd`,
+  `WireMembersWithTrustPlacedPeerWakeSecondEnd`,
+  `ResolveWiringEdgeRealizationRealizedRunning`,
+  `ResolveWiringEdgeRealizationRealizedStopped`,
+  `ResolveWiringEdgeRealizationRealizedCompleted`,
+  `ResolveWiringEdgeRealizationRealizedDestroyed`,
+  `ResolveWiringEdgeRealizationOwedRunning`,
+  `ResolveWiringEdgeRealizationOwedStopped`,
+  `ResolveWiringEdgeRealizationOwedCompleted`,
+  `ResolveWiringEdgeRealizationOwedDestroyed`,
+  `ResolveWiringEdgeRealizationStaleRunning`,
+  `ResolveWiringEdgeRealizationStaleStopped`,
+  `ResolveWiringEdgeRealizationStaleCompleted`,
+  `ResolveWiringEdgeRealizationStaleDestroyed`,
+  `ResolveExternalEdgeRealizationRealizedRunning`,
+  `ResolveExternalEdgeRealizationRealizedStopped`,
+  `ResolveExternalEdgeRealizationRealizedCompleted`,
+  `ResolveExternalEdgeRealizationRealizedDestroyed`,
+  `ResolveExternalEdgeRealizationOwedRunning`,
+  `ResolveExternalEdgeRealizationOwedStopped`,
+  `ResolveExternalEdgeRealizationOwedCompleted`,
+  `ResolveExternalEdgeRealizationOwedDestroyed`,
+  `ResolveExternalEdgeRealizationStaleRunning`,
+  `ResolveExternalEdgeRealizationStaleStopped`,
+  `ResolveExternalEdgeRealizationStaleCompleted`,
+  `ResolveExternalEdgeRealizationStaleDestroyed`, `RetireMemberArchiveOnly`,
+  `AdmitDestroyMemberRetireArchiveOnlyRunning`,
+  `AdmitDestroyMemberRetireArchiveOnlyStopped`,
+  `WireExternalPeerDormantRunning`, `WireExternalPeerAlreadyWiredDormant`,
+  `UnwireExternalPeerDormantRunning`, `RetireRunningReleasingArchiveOnly`,
+  `RetireRunningPreservingBindingArchiveOnly`,
+  `RetireStoppedReleasingArchiveOnly`,
+  `RetireStoppedPreservingBindingArchiveOnly`,
+  `ResolveMemberRevivalSessionCreatedRunning`,
+  `ResolveMemberRevivalSessionCreatedStaleRunning`,
+  `ResolveMemberRevivalSessionCreatedStaleStopped`,
+  `ResolveMemberRevivalSessionCreatedStaleCompleted`,
+  `ResolveMemberRevivalSessionCreatedStaleDestroyed`,
+  `RecoverMemberSeatSessionUnbornRunning`,
+  `RecoverMemberSeatSessionBornRunning` and
+  `AuthorizeSpawnProfileSeatedRunning`, appended last, so no existing
+  variant's implicit discriminant moves. In the runtime machine,
+  `MeerkatMachineInput` (meerkat-machine-schema and meerkat-runtime),
+  `MeerkatMachineInputVariant`, `MeerkatMachineRuntimeInternalInput` and the
+  kernel `generated::meerkat` `Input` and `InputKind` gain
+  `ResolveEmptyResumeRetirement` and `ClaimCompositionResidency`;
+  `MeerkatMachineEffect`, `MeerkatMachineEffectVariant` and the kernel
+  `Effect` and `EffectKind` gain `RuntimeRegistrationReleased` and
+  `EmptyResumeRetirementResolved`, appended last. `MeerkatMachineState` and
+  the kernel `State` gain `residency_owner`, the input `PrepareBindings` gains
+  `residency_owner` and the effect `RuntimeBound` gains `runtime_epoch_id`;
+  the kernel `generated::meerkat::TransitionId` gains
+  `ResolveEmptyResumeRetirementRetireIdle`,
+  `ResolveEmptyResumeRetirementRetireAttached`,
+  `ResolveEmptyResumeRetirementRetireRunning`,
+  `ResolveEmptyResumeRetirementRetireRetired`,
+  `ResolveEmptyResumeRetirementRetireStopped`,
+  `ResolveEmptyResumeRetirementKeepServingIdle`,
+  `ResolveEmptyResumeRetirementKeepServingAttached`,
+  `ResolveEmptyResumeRetirementKeepServingRunning`,
+  `ResolveEmptyResumeRetirementKeepServingRetired`,
+  `ResolveEmptyResumeRetirementKeepServingStopped`,
+  `ClaimCompositionResidencyIdle`, `ClaimCompositionResidencyAttached`,
+  `ClaimCompositionResidencyRunning`, `ClaimCompositionResidencyRetired` and
+  `ClaimCompositionResidencyStopped`, appended last. Every enum named here is
+  exhaustive, so a downstream exhaustive match needs the new arms, or a
+  wildcard arm.
+
+- `meerkat-core` (`generated::approval_lifecycle`), `meerkat-machine-schema`
+  (`catalog::dsl::approval_lifecycle`) and `meerkat-machine-kernels`
+  (`generated::approval_lifecycle`): the approval lifecycle machine
+  (`ApprovalLifecycleMachine`, version 6) gains the inputs
+  `AdmitEnteredStep { review_id }` and `FinishEnteredStep { review_id }`,
+  which admit and finish a later step of an entered reviewed effect (see
+  Added, the entered state of a reviewed effect). `ApprovalLifecycleInput`
+  (meerkat-core and meerkat-machine-schema), `ApprovalLifecycleInputVariant`
+  (meerkat-machine-schema) and the kernel `Input` and `InputKind` gain
+  `AdmitEnteredStep` and `FinishEnteredStep`, appended last. The kernel
+  `TransitionId` gains `AdmitEnteredStepRejectedMissing`,
+  `AdmitEnteredStepRejectedConsentLinked`, `AdmitEnteredStepRejectedRetired`,
+  `AdmitEnteredStepRejectedNotEntered`, `AdmitEnteredStep`,
+  `AdmitEnteredStepRejectedClosing`, `ReleaseReviewUsedClosing`,
+  `ReleaseReviewRejectedClosing`, `FinishEnteredStepRejectedMissing`,
+  `FinishEnteredStepRejectedNotInFlight`, `FinishEnteredStepOpen`,
+  `FinishEnteredStepClosing` and `FinishEnteredStepReleases`, appended last,
+  so no existing implicit discriminant changes. The enums are exhaustive: a
+  `match` outside the crates needs the new arms.
+  `ApprovalLifecycleMachineState` (meerkat-machine-schema) and the kernel
+  `State` gain `review_entered_phase` and `review_entered_steps`, the entered
+  phase and the admitted steps in flight of each spent attempt; code that
+  builds either with a struct literal must set them (empty maps for a state
+  with no entered attempt).
+
+- `meerkat-core`, `meerkat-contracts`: the OpenAI prompt-cache TTL
+  vocabulary gains the 12-hour lifetime, appended last:
+  `OpenAiPromptCacheTtl::TwelveHours` (`meerkat_core::model_profile::capabilities`,
+  wire `"12h"`) and `WireOpenAiPromptCacheTtl::TwelveHours`
+  (`meerkat_contracts::wire::runtime`, wire `"12h"`). The provider cache
+  lifetime recorded on authored cache-breakpoint evidence gains
+  `ProviderCacheTtl::TwelveHours` (wire `twelve_hours`), appended last.
+  The three enums are exhaustive, so a downstream exhaustive match needs an
+  arm.
+
+- Python and TypeScript SDKs (not measured by the gate): the fork-cache
+  evidence lifetime `ForkAuthoredCacheBreakpoint.ttl` is now
+  `ForkCacheTtl | ForkCacheTtlUnknown`. A lifetime the SDK does not know
+  reads as `{"unknown": <value>}` instead of failing the fork result with
+  `INVALID_RESPONSE`; code that treats `ttl` as a `ForkCacheTtl` string must
+  handle the unknown form. A missing, empty or non-string `ttl` still fails
+  closed.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`:
+  `MobBuilder::resume` and the lift of a stopped mob (`MobHandle::resume`) no
+  longer materialize every member. Under the default `OnDemand` policy a start
+  materializes the members that hold durable work (an open or suspended run,
+  queued inputs, a provisional tail, a pending delivery, a background
+  operation completion not yet delivered), a member that owes a kickoff, a
+  member whose endpoint is a network transport or that has no durable
+  endpoint, a member wired to a placed member, an orchestrator the resume
+  notifies, and the members the host requires; every other member stays
+  Dormant and is materialized by its first delivery, on its own session. Reads
+  (member lists, status, history, console projections) never materialize a
+  member: a Dormant member's status reports its peer connectivity from
+  MobMachine's membership and its capabilities from the catalog model its wake
+  binds (its profile with its model override), and its status reads like an
+  idle live member's: run state `idle`, health `healthy`, no in-flight work,
+  with its preview and token count read on demand from its committed durable
+  head. A seated member never woken (its seat session unborn) reads like a
+  member created eagerly with an empty session: no preview, zero tokens and no
+  `preview_unavailable`, with nothing read. `MobHandle::collect_completed`
+  reads nothing of a Dormant member, and the kickoff waits poll its status
+  from MobMachine. Wiring and unwiring with a Dormant member commit the edge
+  without waking it (except a new edge to a placed member, which wakes it: the
+  placed member, in another process, cannot use its in-process wake route),
+  and lifecycle notices to or from a member that is not materialized are not
+  sent (its wake installs the trust they carry). This holds for an edge to an
+  external peer too; a wire or unwire of one whose member is being woken waits
+  for that wake. A kickoff status notice is content, not a lifecycle notice:
+  it wakes a Dormant recipient and is delivered. Retiring a Dormant member,
+  and destroying a mob with Dormant members, archive their durable sessions
+  without waking them, and so does a retirement that a restart recovered. The
+  start of a stopped mob registers no runtime for a Dormant member. A Stop or
+  Complete of the mob no longer waits for a member's wake or durability reload
+  in flight (in 0.9.6 a Stop waited for a member's
+  `MobHandle::reload_member_registration`): the wake is abandoned and its
+  waiters are answered `MemberWakeRefusal::MobNotRunning`, and a Retire of a
+  waking member answers its waiters `MemberWakeRefusal::Retiring` at once.
+  Destroy, Reset, RetireAll and Shutdown still wait for a wake in flight.
+  `MemberRestorePolicy::Eager` restores the previous start. A lift wakes the
+  members its plan materializes at most the restore concurrency at a time
+  (`MobBuilder::with_resume_restore_concurrency`, 16 by default), starting the
+  next wake only as an earlier one finishes: a member it has not reached yet
+  stays Dormant, with no wake timeout running while it waits, and a message or
+  an operation for it wakes it at once, never queued behind the lift; the lift
+  then waits for that wake and, if the member is still Dormant after it, wakes
+  the member itself.
+
+- Behaviour-only (not measured by the gate): a peer message to a live member
+  of a stopped mob is now refused `peer_wake_refused { mob_not_running }`, the
+  same answer a dormant member of a stopped mob gives. Before, it was either
+  delivered to an inbox no drain claimed or answered as an unconfirmed
+  (ambiguous) delivery. The stop closes each live member's in-process route
+  for peer ingress and the resume reopens it, so the sender retries after the
+  mob resumes.
+
+- Behaviour-only (not measured by the gate): `rkat resume` and the MCP
+  server's `meerkat_resume` refuse a mob member's session that no mob in their
+  own process owns (`SESSION_UNSUPPORTED`, the message names the member and
+  its mob): deliver to the member through its mob, which wakes it. Before,
+  they rebuilt the member's session outside its mob, without its wiring and
+  tools. The refusal covers every session built as a mob member's, a retired
+  member's session included: neither command reads the mob's store to tell a
+  retired member from a seated one. A session whose mob runs in the same
+  process is woken through the mob instead, as every other session-keyed live
+  operation is.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`: a Resume-mode
+  spawn (attaching an existing session, an idempotent `ensure_member` that
+  resumes a session) whose session has a live actor reuses that actor only
+  when it runs the auth binding the spec names: the binding the session
+  recorded is the named one, or the form a build of it records (stamped with
+  the realm that declares it). Otherwise the spawn is refused with the new
+  `MobError::MemberAuthBindingConflict { member_id, session_id, requested, recorded }`
+  (wire code `INVALID_PARAMS`, structured data kind
+  `member_auth_binding_conflict`), and nothing changes. A restore at a mob's
+  start, a wake or a durability reload that would keep a member's live actor,
+  or a live successor session, applies the same check: on a conflict the
+  member's restore, wake or reload fails with that typed reason, the member is
+  recorded broken, and the live actor is retired (its runtime registration
+  closed, work in flight interrupted), so no surface reaches the old binding.
+  Before, the live actor was reused on whatever binding it ran.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`: the lift of a mob
+  stopped in this process (`MobHandle::resume`) keeps a member's live actor
+  only when it runs the auth binding the member's resume request names (the
+  spawn member customizer's answer, which the lift now asks for such a member
+  too). Otherwise the member's runtime attachment is retired and the member is
+  rebuilt on that binding, on its own session. A backend with no runtime
+  attachment to retire refuses the member instead: it is recorded broken with
+  `MobError::MemberAuthBindingConflict`, and its live actor is retired. The
+  lift releases the run starts the stop held only after every member's check
+  (and any retirement) completed, so a run queued while the mob was stopped
+  never starts on the old binding. The retirement keeps the member's queued
+  inputs durably queued for its rebuilt runtime, as a graceful process
+  shutdown does (`UnregisterQueuedInputs::Requeue` with the default 15-minute
+  max age), so such a run starts on the new binding instead of ending as
+  stopped. Before, the lift released them first and kept every live actor on
+  whatever binding it ran.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`:
+  `MobHandle::resume` no longer fails when the resume notification turn of
+  a turn-driven or placed orchestrator fails. As `MobBuilder::resume`
+  already did, it hands that turn to the mob and answers without waiting
+  for it; a failed notification is recorded as an
+  `OrchestratorResumeNotificationFailed` mob event naming the orchestrator
+  and its session, and the mob keeps running.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`: the lift of a
+  stopped mob (`MobHandle::resume`) answers a typed error only for a member
+  it rebuilds whose restore failed terminally before its provision (its
+  reads, the spawn customizer, the host's build preparation, a successor
+  repoint, its reservation), as 0.9.6 answered such a rebuild; the member is
+  recorded Broken. Every other end is the member's own outcome, recorded
+  with the member, and the lift answers Ok with the mob Running: a member
+  that ended retryable (Dormant with its owed retry, a wake bound and a host
+  that asks to prepare later included), a member whose provision, custody or
+  readiness failed (Broken with its reason, or woken again when its comms
+  runtime is gone), a member whose durable session is missing, and a member
+  woken through the wake path. A caller waiting on a member still gets that
+  member's own typed answer. In 0.9.6 a resume view the store could not
+  serve, and a member's readiness failure after the durable Resume, made the
+  lift answer an error. A lift whose durable Resume committed re-drives the
+  mob's stuck retirements whatever it answers; in 0.9.6 a lift that answered
+  an error re-drove none.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`: a member the lift
+  of a stopped mob rebuilds on its durable session is bounded by the mob's
+  wake bound (`MobBuilder::with_member_wake_timeout`) until its rebuild is
+  accepted. A delivery or `MobHandle::ensure_member_live` that waits on it is
+  answered `MemberWakeRefused { WakeTimedOut }` at the bound, and the member
+  stays Dormant with its owed retry; in 0.9.6 such a caller was refused at
+  once with `LifecycleOperationPending`.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`: a member restore
+  that waits on work still in flight on the member's session (the takeover of
+  an attachment an earlier handle left), or that the session service cannot
+  serve now (a store failure that clears on its own, a busy session,
+  unavailable runtime authority, a hosting claim another owner holds), no
+  longer records the member Broken. The member stays Dormant with its owed
+  retry, and a caller waiting on its wake is refused retryably with
+  `MemberWakeRefusal::ResumeGateUnavailable` (`peer_wake_refused {
+  resume_gate_unavailable }` for a peer send). A malformed or refusing
+  persisted state, a held durable tail and every other cause still record the
+  member Broken with the typed reason.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`: a member whose
+  durable tail its store's recovery holds (the session owner cannot prove its
+  committed boundary) no longer fails the start of a stopped mob, which reads
+  no member session: the mob starts Stopped with the member Dormant, and the
+  tail is kept. The member's first materialization (the lift's plan, or a
+  wake) records it Broken, and its callers get `MobError::MemberRestoreFailed`
+  whose `durable_resume_hold()` answers `TailHeldForRecovery` (also on the
+  wire, under `durable_resume_hold`), as the start's
+  `MemberStartupRecoveryFailed` did in 0.9.6. `MobError::durable_resume_hold`
+  answers `TailHeldForRecovery` for `SessionUnavailableForResume` with
+  `CommittedBoundaryUnprovable` too, and so does the new
+  `SessionResumeRejection::durable_resume_hold`.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`: a subscription to
+  the agent events of a member that is not materialized in this process
+  (dormant, or waking) opens without waking it and attaches at the member's
+  wake, from the woken actor's earliest retained event, so a host that
+  subscribes and then sends receives the run its send starts from
+  `RunStarted`. Before, `MobHandle::subscribe_agent_events` and
+  `subscribe_agent_events_from` refused it `MemberSessionNotLive`, and
+  `subscribe_agent_events_observation` failed with an internal "stream not
+  found" error. Such a subscription names no `actor` and no `epoch`; the new
+  `AgentEventSubscription::attached_epoch` is set when the stream attaches, to
+  the sequence space the woken actor's stream names, before its first event.
+  `subscribe_all_agent_events` no longer fails while a member is dormant: each
+  dormant member's stream attaches at its wake. The mob event router
+  (`subscribe_mob_events`) carries a member that was dormant when it
+  subscribed, from its wake, and a member released and woken again, from its
+  new actor; before, it never carried either. A member the machine holds live
+  whose session actor is gone is still refused `MemberSessionNotLive`, and
+  `subscribe_agent_events_observation` now refuses it typed the same way.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob-mcp`: the agent
+  tool `mob_spawn_member` reports what `auto_wire_parent` did. Its result
+  carries `wired`, true only when the caller and the new member are wired
+  peers once the spawn returns, and `parent_wiring`: `member_peer`,
+  `not_requested`, `caller_outside_mob` (the caller is not a member of the
+  target mob, so nothing is wired to it) or `not_wired`. Both are read from
+  the target mob's committed wiring. The result carried neither before, and
+  the tool's description promised a wiring to "the mob's orchestrator" that
+  a caller outside the mob never got.
+
+- Behaviour-only (not measured by the gate): `meerkat` (governed helper work):
+  a governed helper admission fence and a helper child issuance built from a
+  tool dispatch (`GovernedHelperAdmissionFence::from_dispatch`,
+  `GovernedHelperChildIssuance::from_dispatch`) now answer `Denied`, as their
+  documentation and the prepared path always did, when the dispatch's review
+  settles the step: an R2 or R3 decision at the fence (no review runs under
+  the graph lock), a review already spent, an ended dispatch, or a refused
+  review. Before, they answered `Unavailable`, which tells a host that a later
+  attempt may succeed; a host that retried on `Unavailable` now stops there.
+  Such a refusal is final for that dispatch only: a new call is reviewed anew.
+  The review owner's own unavailability (contention, an unconfirmed store,
+  unreadable review material, a failed reviewer) stays `Unavailable`.
+
+### Added
+
+- `meerkat-mob`: member residency. A seated member is Dormant (a member, not
+  materialized), Waking or Live, and MobMachine decides every change of it.
+  - `MobBuilder::with_member_restore_policy(MemberRestorePolicy)`:
+    `OnDemand` (the default) materializes at start only the members that
+    must run (see Breaking), `OnDemandVerified` also reads each member it
+    leaves Dormant once, read-only, and records one whose durable session
+    cannot be resumed as Broken, and `Eager` materializes every member, as
+    before. On a host store, `OnDemandVerified`'s read loads each dormant
+    member's stored session rows at every start, so use `OnDemand` there.
+  - `MobBuilder::with_host_required_members` (members the host needs live at
+    start), `MobBuilder::with_host_pending_members` (members whose host
+    preparation is still pending: never materialized, and every wake of one
+    is refused retryable until the host's seat step clears it), and
+    `MobBuilder::with_composition_authority(MobCompositionAuthority)` (a
+    `NonAuthoritative` composition materializes and seats nothing).
+  - `MobBuilder::with_member_wake_timeout` and
+    `MobBuilder::with_member_wake_retry_backoff` bound a member's wake and
+    the retry of a member whose start-up work is still owed after a
+    retryable refusal.
+  - `MobHandle::boot_set_basis` with `MobBootSetBasis` and
+    `MobBootSetUnobservedCause`: whether the latest start could tell which
+    members hold durable work; a start that could not materialized every
+    member, and the cause names the read the store could not make, or is
+    `ScanFailed` for a read that failed (a failed read does not fail the
+    start).
+  - `MobHandle::seat_dormant_members(specs)` with `DormantSeatOutcome`: seats
+    members Dormant without materializing them, at most 256 per journal batch,
+    one typed outcome per spec. A fresh spec is seated under a name-based
+    session id and builds nothing (no session, tools, MCP connection or
+    runtime registration): the member's first wake creates its session through
+    the spawn provision path, with the runtime registration and the host's
+    registration hook, and applies the spec's build inputs there as a spawn of
+    the spec would, with the spawn customizer asked after them. The seat's
+    journal row keeps its context, additional instructions, system prompt
+    override, budget limits, tool access and application tool policies, auth
+    binding and web search override, so a restart before the first wake keeps
+    them; its tools overlay, compaction curator, dispatch admission and shell
+    environment stay in the process that seated it (after a restart the spawn
+    customizer supplies them, as for any member). A resume spec binds its
+    session (never an archived one); a resume of a session a seat named and no
+    build created (its member was retired before its first wake) seats it
+    unborn again, and its first wake creates it with the first seat's inputs
+    and what the resume spec names over them. A fresh spec that owes a kickoff
+    is spawned instead, as a spawn is. A spec whose member inherits its
+    creator's tool visibility is refused (spawn it). A resume spec of a built
+    session whose comms endpoint no journal row recorded (a session imported
+    without its key pair) mints the missing key pair where the session's
+    builds load it, records the endpoint and logs a warning; a session whose
+    recorded endpoint has lost its key pair is refused, typed, since peers
+    trust that key. `MobBuilder::with_member_comms_identity_root` (inproc
+    comms) or `MobBuilder::with_network_member_comms` (Tcp or Uds comms) names
+    where a seat's endpoint comes from. A seated member is wired to the edges
+    the definition declares (`auto_wire_orchestrator` and `role_wiring`), as a
+    spawn of it would be, in its chunk's own step, so the members seated
+    together see each other, and an orchestrator member is wired to the
+    members seated before it that auto-wire to it: every such edge is
+    MobMachine's in the chunk's step, with its `MembersWired` row in the
+    chunk's one journal batch with its seats, so a seat is never durable
+    without its declared edges, and no member is woken (as for any wire, but
+    for an edge to a placed member). Each edge's trust is realized once the
+    step committed: a live member trusts a seated member's recorded endpoint
+    at once, an edge to a placed or peer-only member takes that edge's repair,
+    and a member on network comms, which has no endpoint until its boot wake
+    registers one, gets the trust of both ends at that wake. An edge whose
+    trust cannot be realized is owed a repair, which the mob retries. An
+    identity answered `AlreadySeated` keeps the edges it holds.
+  - `MobHandle::rotate_member(spec)`: a fresh life for a seated member (a
+    reset): its current incarnation is retired and the next one is seated
+    Dormant under a new name-based session id in the retirement's terminal
+    step, both journal rows in one batch, so the identity is never a
+    non-member, and the next incarnation keeps the member's creation id (a
+    `Successor` of the retired incarnation's session; `Unproven` with a new
+    id, never a new root, when that one recorded no creation token); nothing
+    is built for it until its first wake, which applies
+    the spec's build inputs as a fresh seat's first wake does. A spec
+    that owes a kickoff (an `AutonomousHost` member, or an initial message)
+    records it on the new incarnation in the same batch: it wakes the new
+    incarnation once and runs exactly once on its new session, also across
+    a restart. The new incarnation keeps none of the old one's edges and is
+    wired to the edges the definition declares, as a seat is, in the
+    rotation's own journal batch (a rotated orchestrator member is wired to
+    every member that auto-wires to it again). A rotation is
+    refused typed unless the mob is Running, and a refused rotation retires
+    nothing.
+
+- `meerkat-mob`: member wakes. A seated member that is not materialized in its
+  process (dormant) is materialized on its first delivery, through
+  MobMachine's wake verdict, and the delivery then proceeds as to a live
+  member: a host delivery (`MobHandle::start_work_*`, steer included), a peer
+  message, a mob peer message it sends, a continuation's address resolution, a
+  session-keyed live operation on its session, an instruction activation
+  (`MobHandle::activate_member_instruction`), and
+  `MobHandle::ensure_member_live`. Every cause of one member joins one wake. A
+  refused wake is typed:
+  `MobError::MemberWakeRefused { member_id, refusal: MemberWakeRefusal }`
+  (`MemberWakeRefusal::is_retryable`), or the member's restore failure as a
+  boot restore records it. Reads never wake. A woken member is built with the
+  per-spawn tool overlay this process last built it with, as a warm revival
+  is; a fork child this process did not build follows the overlay its source
+  holds here, or else the one its source would be rebuilt with, and the source
+  is not woken for it. The first wake of a member whose seat built nothing
+  creates its session under the id the seat named (see
+  `MobHandle::seat_dormant_members`), after the host's build preparation, as
+  any wake prepares it; a registration the host refuses there
+  (`MobError::MemberRegistrationRefused`, with the host's own reason) is the
+  member's restore failure, as is a create the factory or the host refuses for
+  any other reason. A create that fails for a cause that clears on its own
+  (the session store, the session's runtime authority or its hosting claim
+  unavailable) leaves the member dormant with its session not created,
+  answered `MemberWakeRefusal::ResumeGateUnavailable`, and its next delivery
+  tries again. Either way an eager start ends only that member's restore and
+  goes on with the others. A wake that ends retryable after that create keeps
+  the session, and the next wake resumes it instead of creating it again.
+  Before that first wake, `MobHandle::reload_member_registration` of the
+  member is refused (`MobError::UnsupportedForMode`): its session is created
+  at its first wake. A wake feedback MobMachine has no transition for (a
+  precondition no longer holds) closes the member's wake attempt and leaves
+  the member dormant for its next delivery.
+
+- `meerkat-mob`: `MobHandle::release_member(identity)` makes a member dormant:
+  it releases the member's materialization in its process while the member is
+  quiescent, and keeps it seated at the same session, generation and fence;
+  its next delivery wakes it. On a session service that keeps no durable
+  sessions (an in-memory one), a member's session exists only while the
+  member is materialized, so the member stays materialized and the release
+  closes nothing; a host that releases idle members to free memory frees
+  nothing there. A member being woken, one whose runtime binding
+  has not landed yet (right after a spawn), or one with work in flight is
+  refused retryably (`MobError::LifecycleOperationPending`). A member wired
+  to a placed member stays live while that wiring exists
+  (`MobError::UnsupportedForMode`, as for a placed member itself).
+
+- `meerkat-mob`: `MobHandle::session_unborn(session_id)` and
+  `MemberBindingHistory::session_unborn(session_id)` answer whether a session
+  is unborn: a seat or a rotation named it for a member that builds nothing
+  until its first wake, and that wake has not created it yet. No store holds
+  such a session, and none is missing. The handle reads it from the running
+  mob; the history reads it with no running mob, from the journal rows the
+  mob's own restart restores it from, so a host that checks a stopped state
+  directory for lost sessions can leave unborn ones out.
+  `MemberBindingHistory::with_unborn_sessions` (`test-support`) gives a host's
+  test double of these reads its unborn sessions. `MobHandle::member_history`
+  of a member whose session is unborn answers an empty page, and the read does
+  not wake the member; Core's reads by session id (RPC `session/history`, REST
+  `GET /sessions/{id}/history`) answer not found for it, since no store holds
+  it. `MemberBindingHistory::session_bindings_since_reset` lists the latest
+  binding of each session named since the latest mob reset, so a host can tell
+  whether an identity had a created session before its last binding (a member
+  reset seats the next life on a new, unborn session).
+
+- `meerkat-mob`: `MobHandle::member_unmaterialized(identity)` answers whether
+  a seated member is not materialized in this process (dormant, or waking
+  while its wake runs), from the published machine state and without waking
+  it; the read stays true until the wake ends. A subscription to the member's
+  agent events opens meanwhile and attaches at its wake (see the behaviour
+  entry under Breaking). The answer can be stale by the time the host acts on
+  it, and the read is never a write path.
+
+- `meerkat-mob`: `MemberBuildPreparer` (with `MemberBuildPreparation`,
+  `MemberBuildPrepared`, `MemberBuildPreparationRefusal` and
+  `MemberBuildReport`): a host's preparation of each member build, asked once
+  per build right before the member's provision, on every wake and every
+  restore at a mob's start (`Prepared`, or `HoldUntilReleased`, which holds
+  the member's run starts until the host releases them; a retryable refusal
+  leaves the member dormant, a final one records it broken), and told the
+  built tool surface once the member is live (`member_built`).
+  `MemberWakeRetryBackoff` is the backoff of the retry of a member whose boot
+  work is still owed after its boot wake ended retryably. `member_built` is
+  also told about every member a spawn builds live, once its activation
+  committed (a fresh spawn, a held create once activated, a respawn), so a
+  host records the tool surface of every member Core built.
+
+- `meerkat-core`: `session_owner_wake` (`SessionOwnerWakeRegistry`,
+  `SessionOwnerWaker`, `SessionOwnerWakeOutcome`): the process-wide registry
+  through which a session-keyed live operation on a session that has no live
+  actor asks the session's owner (a mob, for a dormant member's session) to
+  wake it first. Interrupts and reads never wake. A mob whose admission has
+  closed (stood down, its last owner gone, shut down, destroyed, or stopped by
+  a failure) answers for none of its members' sessions: a session-keyed
+  operation on such a member's session (a turn, a live channel, a cold attach,
+  or a successor runtime's) proceeds as for a session no mob owns. A peer wake
+  addressed to a member of a closed mob is still refused.
+
+- `meerkat-session`: `PersistentSessionService::prepare_cold_attach_as_owner`
+  and `prepare_cold_attach_reporting_as_owner`: the cold attach of a session
+  by its own owner (a mob settling its member's session), which does not ask
+  that owner to wake the session first. `prepare_cold_attach` and
+  `prepare_cold_attach_reporting` now ask the owner of a session another
+  owner holds in the process (a mob holding the member dormant) to wake it
+  before they would attach it themselves.
+
+- `meerkat-comms`: in-process wake routes. `InprocRegistry::publish_wake_route`
+  and `retract_wake_route` keep, per seated member, a route to the owner that
+  can wake it (`InprocPeerWaker`, asked with a `PeerWakeRequest`); a wake route
+  never delivers and never claims a name, and a live route always wins.
+  `CommsRuntime::close_inproc_route` and `reopen_inproc_route` (also on the
+  `meerkat-core` `CommsRuntime` trait, defaulting to no route) close a live
+  route for peer ingress and reopen it without rebuilding the runtime.
+
+- `meerkat-session`: `SessionAgentBuilder::recorded_auth_binding` (default
+  `Ok(None)`), with `EphemeralSessionService::recorded_auth_binding` and
+  `PersistentSessionService::recorded_auth_binding` forwarding to it: the
+  auth binding a build that names a binding records in its session's
+  metadata, stamped with the realm that declares it. `FactoryAgentBuilder`
+  answers it from the config a build reads. `meerkat-mob`:
+  `MobSessionService::recorded_auth_binding` (default `Ok(None)`) forwards it
+  for the session services.
+
+- `meerkat-runtime`: `RuntimeStore::list_runtimes_with_recovery_work`, the
+  runtimes whose durable state holds recovery work, from the head summary each
+  runtime already pins (no body load), implemented by the SQLite, memory and
+  host stores; the default answers `Unsupported`, and a store decorator must
+  forward it. `MeerkatMachine::boot_recovery_obligations` with
+  `RuntimeBootObligations`, `RuntimeRecoveryWork` and
+  `RuntimeRecoveryWorkUnobserved` reads it with the pending-delivery scan.
+  `SessionLlmCapabilitySurface::from_model_profile` gives the capability
+  surface a session bound to a model profile resolves to.
+
+- `meerkat-runtime`: `MeerkatMachine::serving_member_binding_ops_registry`
+  answers, without waiting on anything a run holds, whether a session's
+  registration already serves one exact member binding (an attached, live,
+  durability-ready registration with no unregister, stop cleanup or
+  materialization claim in flight, whose active runtime id, fence and
+  generation are the given ones, with the given composition endpoint), and
+  returns its operation registry when it does. The lift of a stopped mob
+  uses it to bind such a member without queueing behind its run.
+
+- `meerkat-runtime`:
+  `PreparedRuntimeExecutorAttachmentRetirement::commit_with_queued_inputs`
+  commits a prepared attachment retirement with the unregister's disposition
+  for the inputs queued on the registration (`UnregisterQueuedInputs`);
+  `commit` keeps ending them as stopped. A disposition that
+  `UnregisterQueuedInputs::check` refuses answers
+  `RuntimeDriverError::QueuedInputsRefused` and starts nothing.
+
+- `meerkat-mob-mcp`: `MobMcpState::with_member_restore_policy` and
+  `MobMcpState::with_resume_restore_concurrency`. Every mob the state creates
+  or resumes, the child mobs its agents create included, starts with that
+  member restore policy and restore concurrency
+  (`MobBuilder::with_member_restore_policy`,
+  `MobBuilder::with_resume_restore_concurrency`). A host that builds mobs of
+  its own with a policy passes the same one here, so its child mobs start the
+  way its own mobs do. Without them a mob gets the builder's defaults.
+
+- `meerkat-mob`: `MobBuilder::with_resume_restore_concurrency(usize)` bounds
+  how many members `MobBuilder::resume` restores at once, and how many members
+  the lift of a stopped mob (`MobHandle::resume`) wakes, or observes among the
+  members it rebuilds, at once. The default is 16; `1` restores one member at
+  a time, as before; `0` counts as `1`, and a value above tokio's
+  `Semaphore::MAX_PERMITS` (such as `usize::MAX`) counts as that maximum.
+
+- `meerkat-models`, `meerkat-openai`, `meerkat-core`, `meerkat`, SDKs:
+  OpenAI's 12-hour prompt-cache lifetime. Every GPT-5.6 and GPT-6 catalog
+  row (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.6`,
+  `gpt-6-astra`, `gpt-6-sol`, `gpt-6.1-sol`, `gpt-6-luna`) now accepts
+  `prompt_cache_options.ttl = "12h"` beside `"30m"`, and its `params_schema`
+  lists both. Set it in a profile, an agent's or session's
+  `provider_params`, or a turn override:
+  `{"provider_tag": {"provider": "open_ai", "prompt_cache_options": {"ttl": "12h"}}}`.
+  The request then carries `prompt_cache_options.ttl = "12h"`; Meerkat's
+  breakpoints carry no lifetime of their own, so it applies to every
+  breakpoint, and the authored cache-breakpoint evidence records
+  `twelve_hours` (`ProviderCacheBreakpointClaim::ttl()` reads it). Choose
+  it for a long-lived agent with a stable prefix that responds every few
+  hours. Every cache write of a `12h` request costs 2.5x the uncached input
+  rate, the conversation tail included, against 1.25x for `30m`; cache
+  reads cost the same. The default stays `30m`; `12h` is only an explicit
+  choice. Rows without GPT-5.6-and-later prompt caching (`gpt-5.5`,
+  `gpt-5.5-pro` and earlier) refuse a TTL when the agent is built
+  (`BuildAgentError::Config`, like `prompt_cache_retention`) on the public
+  OpenAI API, the only backend that sends it; the ChatGPT backend, Azure
+  OpenAI and Copilot drop the prompt-cache fields, so their agents build as
+  before. The request lowering keeps the same check, a typed
+  `InvalidRequest` before anything is sent, for a per-turn override. The
+  Python, TypeScript and Web SDK vocabularies (`WireOpenAiPromptCacheTtl`,
+  `OpenAiPromptCacheTtl`, and the fork-cache evidence `ForkCacheTtl`, now
+  with `ForkCacheTtlUnknown`) carry the new values. The
+  `prompt_cache_options.ttl` description in the schemas and the REST API now
+  reads "`30m` (default) or `12h` on GPT-5.6 and later". The adaptive
+  mobpack `LayerDecision` schema stays pinned to its released form: it keeps
+  the released description and does not list `12h`, and a decision that
+  carries `12h` anyway is parsed and judged by the member's build.
+
+- `meerkat-core`: entered governed operations. A governed tool call whose
+  operation requires review (R2, or R3 human consent) spends it once, at its
+  effect's entry. `ToolDispatchContext::enter_governed_operation(call)` makes
+  that entry and returns `EnteredDispatchOperation`, the typed witness of the
+  entered operation; `GovernedDispatchOperation::into_entered(custody)` mints
+  it from the custody a leaf's own entry returned
+  (`enter_reviewed_effect_held`, `ReviewedEntryTicket::enter`). With it the
+  same call performs further governed steps of the same exact operation
+  without a second spend and without running any review:
+  `EnteredDispatchOperation::run_if_current_within` and
+  `issue_child_if_current_within`. A leaf that keeps the context its entry
+  returned (refreshed when staging re-prepared the decision) takes the
+  operation from that context: every clone of a dispatch context shares the
+  dispatch's one review entry, so it converts the same custody, and the
+  entered tier and window are always those of the decision the entry spent.
+  Each step is decided afresh by the work's own owners under their single
+  exclusion, is refused when the current decision needs more review than was
+  entered (`entered_tier`), stays within the entered decision's validity, and
+  is admitted by the review owner only while the admitting dispatch is live: a
+  step admitted before the dispatch ended runs to completion, and the review
+  stays in use until the last such step has finished. A step answers
+  `AuthorizationRefused` (with no not-dispatched certificate) or
+  `OperationAuthorizationUnavailable`, never a review settlement, and speaks
+  only for itself. An unreviewed (R1) entry's witness spends nothing and, like
+  the plain R1 path, is bounded by its run. `WorkAuthorization` gains the
+  provided method `run_entered_if_current_within`, whose default is
+  unavailable (fail closed).
+
+- `meerkat-authorization`, `meerkat-runtime`, `meerkat`: entered governed
+  operations run on the native owners. The native work owner implements
+  `run_entered_if_current_within` with the issuance's tier rule (the current
+  decision may require no more review than was entered), and both production
+  wrappers forward it (the audited work authorization, and the runtime's
+  run-custody wrapper, which checks run custody first).
+  `GovernedHelperAdmissionFence::from_entered` and
+  `GovernedHelperChildIssuance::from_entered` build the governed helper
+  WorkGraph admission and the helper child issuance as further steps of a
+  call's `EnteredDispatchOperation`: one witness serves the fence and every
+  issuance of the call, each decided afresh, none spending again, so a
+  reviewed call can admit its helper item and issue several children with one
+  review spend (retrying an issued intent answers `Recovered`). A refused step
+  answers `Denied` (an ended dispatch, a source cancelled, revoked or no
+  longer retained, a decision needing more review than was entered, an
+  expired window) or `Unavailable` (contention, a rebuild request, owners
+  that cannot answer now), and speaks only for its own step. See
+  docs/rust/native-authorization.mdx, "Continue a reviewed call with governed
+  helper steps".
+
+- `meerkat-core`, `meerkat-machine-schema`, `meerkat-machine-kernels`: the
+  entered state of a reviewed effect is machine-owned
+  (`ApprovalLifecycleMachine` version 6). A spend at an effect's entry (a
+  model review's allow, or a consented candidate's human consent) now leaves
+  its attempt registered as `Used`, with an entered phase (the new public enum
+  `EnteredEffectPhase`: `Open`, `Closing`) and a count of admitted steps in
+  flight. `AdmitEnteredStep` admits a later step of that effect only while it
+  is `Open`, and `FinishEnteredStep` ends one; neither spends. The admitting
+  dispatch's end releases the attempt when no admitted step is in flight, and
+  otherwise closes the effect: no new step is admitted, and the last admitted
+  step's finish releases the attempt. The generated authority
+  `ApprovalLifecycleMachineAuthority` (meerkat-core) gains
+  `admit_entered_step` and `finish_entered_step`, and the kernel gains the
+  input structs `inputs::AdmitEnteredStep` and `inputs::FinishEnteredStep`.
+
+### Changed
+
+- `meerkat-mob`: `MobBuilder::resume` restores a running mob's members
+  concurrently, up to the builder's restore concurrency, instead of one at a
+  time. A member counts against the bound from the start of its restore until
+  its writes are applied. Each member's session reads and provision run
+  alongside other members', so a resume no longer takes the member count times
+  the session store's latency. Everything a restore writes (the mob's
+  MobMachine authority, roster, journal and restore diagnostics, and each
+  member's runtime binding) is still applied one member at a time in roster
+  order, so the resumed mob is the one a restore of one member at a time
+  leaves; at concurrency 1 it is that restore, with one difference at any
+  concurrency: a restore no longer checks the recovered MobMachine state
+  against the machine's invariants for each member. On a state that breaks
+  one, a durable member was left unrestored with a restore failure and a
+  recreated member failed the resume; each member is now restored on it as
+  on any other state. A fork of a member of the same mob, a member bound to
+  the session an earlier member is bound to, and, from its successor search
+  on, a member whose bound session is absent are restored in their own turn,
+  after every member before them. The first failure in roster order fails
+  the resume with the error it failed with before. Once a member's restore
+  or turn has failed the resume, no further member's restore starts; the
+  restores already running finish first, and every member they restored but
+  that the resume does not apply (at most the bound minus one) then has its
+  provision released: a resumed session is detached and kept durable, as a
+  failed revival's is, and a session a service without durable sessions
+  recreated is retired. The error is returned after those restores and
+  releases; detaching a resumed session waits for a turn that session is
+  already running to end. The spawn member customizer and the default
+  external tools provider stay synchronous calls on the resume's task, never
+  two at once, but one that blocks holds up every member restore in flight.
+  The member runtime registration hook runs inside each member's provision,
+  so for several members at once, in no fixed order across members; each
+  member's own calls keep their order.
+
+- `meerkat-mob`: seating and waking a mob with many wired members is much
+  faster. A member's declared wiring is seated in one journal append, an
+  orchestrator's wake restores its edges in a few batched steps, and the boot
+  plan scans the placed members once instead of every wiring edge for each
+  member.
+
+- Host-store realms: opening a realm loads the sessions that hold recovery
+  work (an unsettled input, an undelivered background result, an open run)
+  up to 16 at a time, instead of one after another. With K such sessions,
+  an open over a store whose reads are slow waits about ceil(K / 16) times
+  as long as one session's reads, not K times. Each session's rows are still
+  read in order, and a failed read still fails the open with nothing loaded.
+
+- `meerkat-runtime`: a host store realm asks `list_heads` for 2048 heads per
+  call, instead of 256, when it opens and when a writer that stopped acquires
+  the fence again. Every listing visits every scope the realm holds, archived
+  sessions and chunk scopes included, so it takes `ceil(scopes / 2048)` calls
+  per scope kind (at least one): about an eighth of the calls for a realm with
+  many scopes. No stored format changes.
+
+- `meerkat-runtime`: the recovery scan a mob start reads
+  (`RuntimeStore::list_runtimes_with_recovery_work`) and the host store
+  adapter's open read a runtime as archived by the rule the session owner
+  applies: its catalog entry carries the Archived terminal, or its machine
+  lifecycle record names a Retired or Destroyed runtime. A retire records the
+  archive only in the lifecycle record, so before, a retired runtime was read
+  as live: every SQLite scan decoded the ops lifecycle snapshot each retired
+  runtime keeps, the host store adapter's open loaded the body of each one
+  whose snapshot still owed work, and the scan listed it. An archived runtime
+  now holds no recovery work, and none of that is read. A mob member still
+  seated on a session whose runtime was retired outside the mob (through
+  `RuntimeControlPlane`) now stays Dormant at a start instead of having that
+  session revived, and its owed work is delivered at its next wake or at a
+  resume that names the session; the model sees it at the member's next turn.
+  A destroyed runtime's session is never revived: for a member seated on one,
+  the refused restore moves from the start to its next wake. A session
+  archived by a retire still revives on a resume that names it.
+
+- `meerkat`: a build that continues a session that already had a model
+  request (a restart, a wake, a revival or a reload of a session) waits for
+  its MCP servers to connect before its first request, bounded by their
+  connect timeout, so that request carries the same tools array as the
+  requests before the rebuild and the provider's prompt cache still matches.
+  A server still connecting at the bound keeps connecting in the background,
+  as before, with a warning. A new session's first build does not wait.
+
+- `meerkat-mob`: a member's per-spawn external tools (a spawn customizer's or
+  a spawn request's) are listed in name order, whatever order the host
+  returns them in, so a member rebuilt by a wake, which asks the customizer
+  again, sends the tools array it sent before.
+
+- `meerkat-runtime`: a background operation completion the runtime injected
+  into its owner as a continuation is recorded durably with the ops
+  lifecycle snapshot. A restart no longer reads it as owed, so the owner is
+  not woken for it and does not run its continuation a second time. A
+  completion the agent applied in a model call is recorded with the next
+  snapshot: until then a restart presents it again (one more wake and one
+  repeated notice, never a lost completion).
+
+### Fixed
+
+- `meerkat-mob`: a member rebuilt on its durable session (an explicit resume
+  of a stopped mob, a revival or registration reload of a missing live
+  materialization, and a Resume-mode spawn such as attaching an existing
+  session, respawning or waking an identity) now runs on the auth binding its
+  current spec names (the host customizer's), as a restore at a mob's start
+  always did, instead of the binding the session recorded at an earlier
+  build. A host that changed a member's binding between launches no longer
+  gets the member back on the old account, or broken when the old credential
+  is gone.
+
+- `meerkat-mob`: resuming a stopped mob (`MobHandle::resume`), as a host
+  does after a graceful restart, no longer stalls while members' runs that
+  the restart suspended are still running. The resume answers once its own
+  work is done, without waiting for any member's resumed run to finish,
+  short or long, or for the orchestrator's resume notification turn. A
+  member run that spawns, wires or retires a member while the resume
+  finishes its last steps is no longer held until the resume ends. Before,
+  such a run and the resume could wait on each other for good, and a
+  resume that waited on long runs could exceed the host's stall budget. A
+  resume that does stall now also logs how many members it still waits on.
+
+- `meerkat-mob`: a mob's start no longer stops when the runtime
+  unregistered a member's session registration after the start restored
+  the member, for example when a run on that session failed and the
+  runtime tore the registration down. Before, the start registered the
+  session again, refused it as holding "a different operation-registry
+  binding incarnation" and came up Stopped, and a host had to resume the
+  mob to bring the members back. The start now replaces the binding to the
+  unregistered registration and binds the session to its new one, and the
+  mob comes up Running.
+
+- `meerkat-mob`: a member's kickoff that a crash left starting (its start
+  was recorded, then its run or the mob's wait for it was lost) now resumes
+  after the restart. The start wakes the member for it and admits the
+  kickoff's input again under the kickoff's own key, which attaches to the
+  input the runtime still holds and runs it only when the runtime holds none,
+  so the kickoff runs once and its status resolves. Before, the restart did
+  not resume it, and the kickoff's status stayed `starting`.
+
+- `meerkat-runtime`: a mob member's runtime registration keeps serving after
+  an empty resume (a background operation's completion waking an idle
+  member, or the same wake recovered at a start, that finds nothing pending).
+  The registration retires only on MeerkatMachine's verdict, and the verdict
+  keeps a registration the mob's composition placed (a member's, a placed
+  member's on its host) and one with input queued; a standalone session's
+  registration still retires as before. Before, every such completion
+  detached the member and terminated its other running operations, and peer
+  messages to it found no route until it was revived.
+
+- `meerkat-mob`: every readiness path (a wake, a registration reload, a
+  restore at a mob's start or resume) binds a member's comms drain by the
+  rule a spawn uses: an autonomous member and a wired member need it, and an
+  unwired turn-driven member binds it only when its runtime has comms. Before,
+  a restore or a reload of an unwired turn-driven member whose session
+  builder makes no comms failed its readiness, although its spawn succeeded.
+
+- `meerkat-mob`: destroying a mob and immediately re-creating the same id
+  could corrupt the new mob's database if a background read of the destroyed
+  mob was still in flight. A store read or write now holds on to the database
+  until it finishes, even when its caller was cancelled, and the destroy
+  removes the files only after that (`SqliteMobStores::drain_observers`
+  refuses while one runs).
+
+- Host-store realms: a session no longer keeps up to 4 MiB of superseded
+  copies of its runtime's registry of background operations. Core rewrites
+  that registry whole each time an operation finishes or its result is
+  delivered, and dropped the earlier copies only once the session's rows
+  passed four times its live state or 4 MiB, whichever is larger. The floor
+  is now 256 KiB: in one batch, Core writes the session's live state again
+  and drops every earlier row, so its rows stay within 256 KiB or four times
+  its live state, plus its last change. A wake or a recovery of the session
+  reads that much less, and an append-only store has that much less to
+  compact. The stored format is unchanged and 0.9.6 reads a session written
+  this way, so a rollback needs nothing. A session's existing rows shrink at
+  its next commit; a dormant member's session keeps its rows until the
+  member is next woken, and Core does not read them meanwhile.
+
+- `meerkat-mob`: reading a mob's member binding history
+  (`MobHandle::member_binding_history`, and `last_member_binding`,
+  `member_binding_for_session`, `durable_identity_members` and
+  `identity_management`, which read it) no longer reads the mob's whole
+  event journal each time. A handle and its clones keep the fold between
+  reads: a read reads only the events appended since the previous one,
+  together with the identity intent rows in one store transaction, so it no
+  longer reads or decodes the whole journal: it costs the events appended
+  since the previous read plus the size of the history it answers (its
+  members and sessions). Before, every read decoded every stored event on a
+  SQLite store and copied the whole journal on the in-memory and host stores
+  (on a host store while holding the locks the mob's writes wait for), so a
+  host that reads the history on every page load or message got slower as
+  the journal grew. A journal that a destroy cleared is read whole again.
+
+- `meerkat-mob`: reading a mob's events after a cursor (`poll`, `poll_events`,
+  the `mob/events` RPC, and an event subscription catching up from a cursor)
+  on the in-memory and host-store mob stores finds the first event by binary
+  search instead of scanning the event log from its start, and a host-store
+  event append exports its new events the same way. A subscription catching
+  up from an old cursor no longer slows down with the square of the log's
+  length.
+
+- `meerkat-mob`: a mob with no member placed on a host no longer reads every
+  flow run it ever started on each burst of mob events. The remote-turn
+  reconciler that every mob runs listed every run and replayed each run's
+  flow authority log to validate it, about once per 100 ms while events
+  arrived. It now skips that scan while no member is placed on a host and
+  its last scan found nothing to do, and scans again once a member is
+  placed. Its in-memory copy of the mob's current events now keeps only the
+  run starts, step dispatches and remote-turn records it reads, instead of
+  every event of the mob, step outputs included.
+
+- `meerkat-mob`: a mob member's MCP source filter (`tools.mcp`) and its
+  name-collision filter (which hides external tools whose names another of
+  the member's tools already uses) now pass each allowed tool's review
+  support and mutation class (`review_entry_support`,
+  `tool_mutation_class`) through, so a tool that requires operation review
+  reaches consent and a read-only member can use tools declared read-only.
+  Filtered-out tools stay refused. Before, both filters answered
+  `Unsupported` and `Unknown` for every tool behind them: a call that
+  required review settled as `ReviewUnavailable { UnsupportedEntry }`
+  before any reviewer or consent, and a read-only member was refused every
+  tool behind them.
+
+- `meerkat-comms`: `Keypair::load_or_generate` stores a new key pair
+  atomically and never replaces a stored one, so concurrent first calls on
+  one directory all get the one key it then holds. Before, concurrent first
+  calls (two runtimes or processes sharing an identity directory) could each
+  generate and save a key, the last save replacing the others, so a caller
+  could go on using a key the directory no longer held. The key is written
+  to a temporary file in the directory and hard-linked into place (created
+  exclusively where the file system has no hard links); the key file's
+  permissions are unchanged (`0600` on Unix).
+
+- `meerkat-runtime`: the threads of the crate's two process-wide Tokio
+  runtimes (`meerkat-machine-cleanup` and `meerkat-runtime-serving`) now
+  follow the host stack knobs: `RKAT_WORKER_STACK_BYTES` sets their stack
+  exactly, and without it they take the 8 MiB budget, or `RUST_MIN_STACK`
+  when that asks for more. Before, they always ran on 8 MiB: their explicit
+  size kept `RUST_MIN_STACK` out, and `RKAT_WORKER_STACK_BYTES` reached only
+  a host's own runtime. These runtimes run session and mob work for the
+  whole process, so an embedding whose debug build needed deeper stacks
+  aborted with a stack overflow on a `meerkat-machine-cleanup` thread
+  whatever it set, and the documented `RKAT_WORKER_STACK_BYTES` sweep could
+  not tell a large frame from recursion there. Nothing changes when neither
+  variable is set. An invalid `RKAT_WORKER_STACK_BYTES` now also fails every
+  operation that needs one of these runtimes until it is corrected, with the
+  refusal a host binary gives at startup.
+
+- `meerkat-core`: the documentation of
+  `GovernedDispatchOperation::issue_child_if_current_within` said that a
+  consented R3 operation refuses there. It does not: a fresh attempt of a
+  consented candidate (R3, or an R2 decision a human took over) spends its
+  human consent at this entry and issues the child. For R2 and R3 the method
+  is the dispatch's single consuming entry, so a second call finds the review
+  spent (`AlreadyConsumed`); an R1 entry spends nothing and can issue again.
+
+- `meerkat`, `meerkat-runtime`: on a stock governed realm, the approved
+  notice of consent parked at a run's close is now admitted as a resume of
+  that run, and the parked consent moves into the resumed run. The stock
+  composition installed no retained-resume owner, so such a notice, like any
+  other retained completion, stayed pending forever (`UnsupportedScope`). It
+  now resumes retained work through the owners that admitted it: its
+  originals ledger, the stock requester rule (a host-authenticated caller is
+  asked of the host again), the realm's grants and the controller pinned by
+  the session's newest governed binding. A resume of work this process's
+  ledger does not hold, such as an earlier process's, or of a requester no
+  longer admitted is refused, and its notice records `Failed`. An approval
+  resumes the parked run only while the session keeps the registration that
+  ran it and no later governed prompt has moved its destination: on any
+  governed composition, a retained resume whose destination its session has
+  since bound a later generation of is now refused for good
+  (`NoAdmissibleWorkBinding`) before any owner is asked, so its notice
+  records `Failed` and the parked consent is withdrawn, instead of staying
+  pending forever. After a stock session is closed and reopened in the same
+  process, the notice stays owed until the session's destination is next
+  bound, and then fails.
+
+- `meerkat-runtime`: a WholeBlob session whose run a restart continued from
+  its provisional tail compacts again. The continued run's session is now
+  decoded from the tail's bytes exactly as a committed body is, so it keeps
+  the row lineage of those bytes. Before, every compaction of that session
+  made its summary call and then failed with "live transcript has no exact
+  row-lineage authority", so the transcript did not compact until the
+  session was next loaded from a committed body.
+
+- `meerkat-core`: a loaded WholeBlob session keeps compacting after an
+  inline image reaches its transcript. The in-place scan that moves inline
+  images to the blob store, which a checkpoint and a compaction run, dropped
+  the session's row lineage when it changed a row, and every later
+  compaction then failed with the same "live transcript has no exact
+  row-lineage authority" until the session was next loaded. The scan now
+  keeps the lineage.
+
+### Upgrade notes
+
+- No storage migration: 0.9.7 opens every 0.9.6 store as it is. No SQLite
+  schema or record format changed, and every row 0.9.7 writes has a shape and
+  version that 0.9.6 reads, with one opt-in exception, the 12-hour
+  prompt-cache TTL (below). On-demand restore adds no record kind: whether a
+  member is dormant is derived again at every start, a seat is a member spawn
+  row in the mob's journal (its build inputs and unborn-session markers are
+  internal fields 0.9.6 ignores), and the runtime heads a host store keeps are
+  still read by 0.9.6. Rolling back to 0.9.6 restores every member at start
+  again, as 0.9.6 does, with two exceptions for members seated or rotated
+  under 0.9.7 (below): a fresh seat that never woke is restored broken, and a
+  rotated member's owed kickoff does not run. Take a WAL-complete backup
+  before upgrading, as for 0.9.6.
+
+- Mobs now start on demand by default. `MobBuilder::resume` and the start of a
+  stopped mob materialize only the members that must run (see Breaking), and
+  every other member stays dormant until its first delivery, which wakes it
+  while the caller waits; reads never wake a member. Every mob a `MobMcpState`
+  creates or resumes starts the same way, so the mobs of `rkat-rpc`,
+  `rkat-rest`, `rkat-mcp` and the CLI do too. To start every member at once,
+  as 0.9.6 did, build the mob with
+  `MobBuilder::with_member_restore_policy(MemberRestorePolicy::Eager)`, and
+  pass the same policy to `MobMcpState::with_member_restore_policy` for the
+  mobs it creates or resumes; the stock servers have no setting for it in this
+  release. Under the default:
+  - a member whose durable session cannot be resumed reads active until its
+    first delivery, which fails with a typed refusal (`peer_wake_refused` with
+    `member_broken` for a peer message), and reads broken from then on; under
+    `Eager` it read broken as soon as the start finished.
+    `MemberRestorePolicy::OnDemandVerified` keeps that early verdict without
+    materializing anything: it reads each dormant member's durable state once,
+    read-only, before the mob reports ready;
+  - lifecycle notices to or from a member that is not materialized are not
+    sent; its wake installs the trust they carry;
+  - a member's first delivery after a start includes its build, its MCP
+    servers connecting included, and a peer message waits for it within the
+    sender's `CommsConfig::ack_timeout_secs`;
+  - the members a start materializes are restored up to
+    `MobBuilder::with_resume_restore_concurrency` at once (16 by default), so
+    a member runtime registration hook runs for several members at once, in no
+    fixed order across members; `1` restores one member at a time, as before.
+
+- Host-store realms: the first 0.9.7 start over a realm that 0.9.6 or an
+  earlier release last wrote wakes every mob member that is not archived,
+  once. The session heads those releases wrote cannot show that no
+  background operation completion is still owed, so the start treats each
+  member as holding work rather than risk losing one. Each member's next
+  commit records its state in the 0.9.7 form, and later starts wake only
+  the members that hold work. Expect that first start to take about as long
+  as a 0.9.6 start. 0.9.6 still reads the heads 0.9.7 writes.
+
+- Host store authors: a realm now asks `list_heads` for 2048 heads per call
+  (see Changed), and one answer of typical runtime heads is now several MiB. A
+  store whose backend or transport caps an answer below that must answer the
+  heads that fit with `HeadPage::next` set, as the SPI already requires; a
+  store that sets `next` only after a full page of `limit` heads ends the
+  listing early, and the realm opens without the scopes it was not given.
+
+- Upgrade the Python and TypeScript SDKs with the server. A peer message to a
+  dormant member whose wake is refused or does not finish, and to a member of
+  a stopped mob, now fails with `peer_wake_refused` (see Breaking). The SDKs
+  of 0.9.6 and earlier still raise it as an error, but do not know the code:
+  their `comms_send_error` (Python) and `commsSendError` (TypeScript) answer
+  `None` and `undefined` for it, so code that branches on the typed
+  `comms/send` data cannot read its `refusal` or `retryable`.
+
+- Upgrade the Python and TypeScript SDKs with the server before selecting
+  `prompt_cache_options.ttl = "12h"` for a session you fork. Once such a
+  session runs in `explicit` mode (the GPT-5.6 default), its cache-breakpoint
+  evidence names `twelve_hours`, and the SDKs of 0.9.6 and earlier read that
+  field from a closed list: they refuse the whole fork result as
+  `INVALID_RESPONSE`. The SDKs of this release read a lifetime they do not
+  know as `{"unknown": <value>}`.
+
+- Rolling back to 0.9.6 after selecting `12h` (opt-in): 0.9.6 does not know
+  the value. A session whose stored `provider_params` carry `ttl = "12h"`
+  panics the first time 0.9.6 decodes its metadata (resuming it, or
+  building its view) with
+  ``generated session-metadata authority rejected durable restore: unknown variant `12h`, expected `30m` ``,
+  logged first at error level as `generated authority rejected durable
+  restore`. A profile or mob definition that carries it fails its parse with
+  ``unknown variant `12h`, expected `30m` ``. Cache-breakpoint evidence that
+  names `twelve_hours` is not fatal there: a fork reports cache inheritance
+  unavailable (`authored_evidence_invalid`) and the next turn drops the row
+  as `evidence_unusable`. Remove the setting before rolling back.
+
+- Rolling back to 0.9.6 while a rotation's kickoff is still owed: 0.9.6
+  ignores the kickoff prompt 0.9.7 stores for a member rotated with
+  `MobHandle::rotate_member`, so a rotated member whose owed kickoff has not
+  run yet does not run it after the rollback.
+
+- Rolling back to 0.9.6 with fresh seats that never woke: a fresh dormant seat
+  (`MobHandle::seat_dormant_members` or a `MobHandle::rotate_member` next
+  incarnation) has no session until its first wake. A rollback to 0.9.6
+  restores such a member that never woke as Broken, with a missing session;
+  0.9.6 ignores the build inputs 0.9.7 stores for its first build.
+
+- Wrappers and decorators outside this repository must forward the new
+  provided methods, whose defaults do less:
+  - a `RuntimeStore` decorator: `list_runtimes_with_recovery_work` (its
+    default answers `Unsupported`, so a mob start over it cannot tell which
+    members hold work and materializes every member, as
+    `MobHandle::boot_set_basis` then reports);
+  - a `CommsRuntime` wrapper (`meerkat-core`): `close_inproc_route` and
+    `reopen_inproc_route` (their defaults close no route, so a peer message to
+    a live member of a stopped mob is not refused `mob_not_running` and meets
+    the open route, as before this release);
+  - a `SessionAgentBuilder` or `MobSessionService` wrapper:
+    `recorded_auth_binding` (its default answers `None`, so a live actor whose
+    session recorded the realm-stamped form of the binding its spec names is
+    refused `MemberAuthBindingConflict` instead of being reused);
+  - a `WorkAuthorization` wrapper (`meerkat-core`):
+    `run_entered_if_current_within` (its default answers unavailable, so every
+    further step of an entered governed operation through the wrapper is
+    refused).
+
+### Known limitations
+
+- A session-keyed live operation (a turn, a live channel, comms sent as the
+  member, a scheduled session target, a session-addressed delivery) whose
+  session belongs to a dormant mob member that cannot be woken has no typed
+  session error yet. A retryable wake refusal is reported as
+  `SessionError::Busy` (retry later); a final one as an internal agent error
+  whose message names the refusal. Do not parse that message: a typed form is
+  planned for the next release.
+
+- A durable job delivery to a dormant member whose wake is refused is never
+  settled: the row stays pending, in order, and is retried on later delivery
+  wakes, also for a broken member, so a repaired member still gets it.
+
+- A durable worker woken while its host's durable resume gate stays
+  unavailable still has its interrupted run settled as refused after the
+  runtime's attempts, and that run's own kept inputs are abandoned, as in
+  0.9.6. The delivery that woke the member is a new input and is not
+  abandoned with them.
+
+- `meerkat-mob`: under the default `OnDemand` restore policy, a member found
+  broken at its first delivery is not recorded broken in the mob's journal:
+  after the next start it reads active again until its next delivery, which
+  fails the same way. `OnDemandVerified` and `Eager` find it before the mob
+  reports ready, at every start.
+
+- With TCP or UDS member comms (`MobBuilder::with_network_member_comms`),
+  members are not lazy: every start of the mob, and every lift of a stopped
+  one, wakes every member, whatever the restore policy. A dormant member has
+  no listener for peers that reach it over the network, and a seat records
+  no durable endpoint for it, so Core keeps such members live. Lazy
+  residency applies to members on in-process comms, the default.
+
+- `meerkat-mob`: on a host store, seating a member on an existing session (a
+  resume spec of `MobHandle::seat_dormant_members`) reads that session once,
+  to check that it can be resumed (a fresh seat reads nothing), and
+  `OnDemandVerified` reads every dormant member's session rows once at every
+  start, so both cost grows with the members seated or checked; the on-demand
+  start itself reads the heads and the members it wakes.
+
+- `meerkat-mob`, `meerkat-runtime`: Meerkat purges no history on its own yet:
+  a mob's journal keeps every event until the mob is destroyed, and a store
+  keeps the stored state of every retired session, so both grow for as long as
+  they are used. A purge is planned for a later release.
+
+- `meerkat-runtime`: every start lists every session the store has ever held,
+  retired sessions included, so the work of a start grows with the number of
+  sessions ever created until retired sessions can be purged (planned for a
+  later release).
+
+- `meerkat`: on a stock governed realm, an approved consent resumes the run
+  that parked it only in the process that admitted that run (the stock
+  originals ledger is process memory), only while the session keeps the
+  registration that ran it, and only while no later governed prompt has moved
+  that session's destination (see Fixed). Otherwise the resume is refused for
+  good: the notice records `Failed` and the parked consent is withdrawn. After
+  the session is closed and reopened in the same process, the notice stays
+  owed until the session's destination is next bound, and then fails.
+
+- `meerkat-core`: Core reports no uncertain completion for a step of an
+  entered governed operation that finishes after its dispatch ended (a held
+  helper step of a call whose run was cancelled): the call has no result, the
+  run ends cancelled, and the step's own outcome reaches only the code that
+  awaits it. The host, which cancelled, reports the effect of such a step as
+  uncertain if it reports it at all.
+
+- `meerkat-mob`, `meerkat-runtime`: the turns of runtime-backed mob members
+  (their agent loop, model streaming and tool calls) run on the two worker
+  threads of the process-wide `meerkat-machine-cleanup` runtime, unchanged
+  since 0.8.39. A tool that blocks its thread holds one of those workers, and
+  with both blocked every member's turn and every session's cleanup in the
+  process waits: keep member tools non-blocking (move blocking work off the
+  worker, for example with `tokio::task::spawn_blocking`).
+
+- `meerkat-mob`: the lift of a stopped mob (`MobHandle::resume`) applies the
+  0.9.6 recovery rules to the members it rebuilds: it waits for a held hosting
+  claim's release, reclaims an unattached retained actor, and parks unproven
+  or cleanup-held custody. A member woken later by a delivery or a retry uses
+  the wake's restore instead, where a held claim or a hosting conflict ends
+  the wake retryable and the member is retried, rather than waiting for the
+  release.
+
+- `meerkat-mob`, `meerkat-session`: on the stock persistent session service, a
+  transient store read fault during a member's restore still surfaces as an
+  internal error, so the member is recorded Broken (it needs a respawn) rather
+  than retried. Typed store faults are planned for a later release.
+
+- `meerkat-mob`: a member whose durable tail is held for recovery stays
+  Broken, with the hold visible in its broken reason, as in 0.9.6.
+
+- `meerkat-core`: a WholeBlob session document written by an older release
+  that still holds inline media below its loaded rows can lose its row lineage
+  until the session is next loaded, so its compactions are refused until then.
+
+- `meerkat-mob`: under `auto_wire_orchestrator`, an orchestrator member
+  spawned after the members that auto-wire to it is not wired to them, as in
+  0.9.6; seat or rotate it instead (a seated or rotated orchestrator is wired
+  to them, see Added).
+
+- `meerkat-mob`: with TCP or UDS member comms, a spawn whose declared wiring
+  targets a member still waiting for its first wake (its endpoint is owed
+  until that wake registers one) fails with a typed `MobError::WiringError`;
+  retry once the member is live.
+
+- `meerkat-mob`: while many members of a mob wake at once, a woken member's
+  wiring edge to a peer that is itself still waking can fail its first
+  preparation, because the peer's owner binding is not in place yet. Core then
+  logs one WARN per such edge ("a woken member's wiring edge could not be
+  prepared; its repair is owed") and repairs the edge on its own, at its first
+  retry or once the peer has woken; no message is lost, and later retries log
+  at debug. It appears only when a host wakes many members at once, for
+  example by materializing every member at boot; with on-demand residency and
+  no host pre-materialization it does not occur. A fix is planned for the next
+  release.
+
+- `meerkat-mob`: after a member's warm reload completes on an otherwise idle
+  mob, its runtime binding is recorded at the mob's next command, so a host's
+  first `MobHandle::release_member` in that window can be refused once,
+  retryably (`MobError::LifecycleOperationPending`); a retry releases the
+  member. A fix is planned for a later release.
+
+- `meerkat-mob`: a host `MemberBuildPreparer` that never returns holds the
+  Destroy, Reset, RetireAll and Shutdown of its mob, the post-start steps of a
+  Retire of that member, and a Resume issued after a Stop that abandoned the
+  member's wake, as a spawn's preparation has held them since 0.9.6. Stop
+  itself is not held: it abandons the wake. A bound on the preparer is planned
+  for a later release.
+
+- The known limitations listed for 0.9.6 still apply; this release changes
+  none of them.
+
 ## [0.9.6] - 2026-10-27
 
 ### Breaking
@@ -36017,7 +37356,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.6...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.7...HEAD
+[0.9.7]: https://github.com/lukacf/meerkat/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/lukacf/meerkat/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/lukacf/meerkat/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/lukacf/meerkat/compare/v0.9.3...v0.9.4

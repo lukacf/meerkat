@@ -12,6 +12,12 @@ impl MobActor {
         {
             return;
         }
+        // The lift's plan still has members to reach: it dispatches them as
+        // its open wakes close (`boot_lift`), and the lift goes on after the
+        // last of them settled.
+        if self.explicit_resume_boot_dispatch_pending() {
+            return;
+        }
         let Some(pending) = self.pending_resume_lifecycle.take_if(|pending| {
             matches!(
                 pending.phase,
@@ -39,6 +45,9 @@ impl MobActor {
             return;
         };
         if self.dsl_authority.state().explicit_resume_cancel_requested {
+            // The rebuilt members are settled as every other member is: the
+            // lifecycle control that superseded the resume takes them over.
+            let _ = self.settle_held_member_readiness(Vec::new()).await;
             let result =
                 self.finish_explicit_resume_attempt(Err(MobError::LifecycleOperationPending {
                     intent: "explicit_resume superseded by lifecycle control".to_string(),
@@ -46,10 +55,27 @@ impl MobActor {
             let _ = reply_tx.send(result);
             return;
         }
+        // A lift that rebuilt no attachment observed its members' readiness
+        // before the durable Resume (settled), and each member its plan
+        // materialized ran its readiness in its own wake, which this resume
+        // joined and settled. Nothing is left to observe, and MobMachine
+        // admits one readiness per resume attempt.
+        if self.dsl_authority.state().explicit_resume_readiness_settled {
+            let _ = self.settle_held_member_readiness(Vec::new()).await;
+            self.begin_resume_lifecycle_post_commit(
+                admission,
+                progress,
+                post_commit_error,
+                reply_tx,
+            )
+            .await;
+            return;
+        }
         progress
             .awaiting_stage(crate::runtime::state::LifecycleProgressStage::PostRebuildReadiness);
         match self.collect_member_readiness_targets(false).await {
             Err(error) => {
+                let _ = self.settle_held_member_readiness(Vec::new()).await;
                 self.begin_resume_lifecycle_post_commit(
                     admission,
                     progress,
@@ -59,6 +85,7 @@ impl MobActor {
                 .await;
             }
             Ok(None) => {
+                let _ = self.settle_held_member_readiness(Vec::new()).await;
                 self.begin_resume_lifecycle_post_commit(
                     admission,
                     progress,
@@ -67,13 +94,33 @@ impl MobActor {
                 )
                 .await;
             }
-            Ok(Some(targets)) => {
+            Ok(Some(mut targets)) => {
+                // Each rebuilt member ran its own readiness right after its
+                // acceptance, before its work settled, and is Live or Broken.
+                // A member still held Waking for a readiness pass (none, once
+                // every member's work settled) is settled by this one.
+                targets.extend(self.held_member_readiness_targets().await);
+                let target_epochs: BTreeMap<_, _> = {
+                    let epochs = &self.dsl_authority.state().member_materialization_epoch;
+                    targets
+                        .iter()
+                        .filter_map(|target| {
+                            let identity =
+                                mob_dsl::AgentIdentity::from_domain(&target.entry.agent_identity);
+                            let epoch = epochs.get(&identity).cloned()?;
+                            Some((identity, epoch))
+                        })
+                        .collect()
+                };
                 self.spawn_resume_readiness_fanout(
                     targets,
                     Some(progress.clone()),
                     PendingResumeLifecycle {
                         ticket: ResumeStepTicket::default(),
-                        phase: ResumeLifecyclePhase::PostCommitReadiness { post_commit_error },
+                        phase: ResumeLifecyclePhase::PostCommitReadiness {
+                            post_commit_error,
+                            target_epochs,
+                        },
                         admission,
                         progress,
                         reply_tx,
@@ -137,6 +184,41 @@ impl MobActor {
         }
     }
 
+    /// End a rebuilt member's open wake attempt retryable for a restore
+    /// error that clears on its own
+    /// ([`crate::runtime::builder::restore_error_is_retryable`]): the member
+    /// is Dormant again and a boot obligation it owes stays owed with its
+    /// retry armed. That is the member's own outcome: the explicit resume
+    /// answers Ok for it. A refused resolution is what the resume answers
+    /// instead (the attempt is then abandoned before the member's work
+    /// settles).
+    fn resolve_explicit_resume_member_retryable(
+        &mut self,
+        identity: &mob_dsl::AgentIdentity,
+        attempt: u64,
+        error: MobError,
+    ) {
+        match self.apply_dsl_signal_collect_transition(
+            mob_dsl::MobMachineSignal::ResolveMemberRevivalRetryable {
+                agent_identity: identity.clone(),
+                attempt,
+                kind: mob_dsl::MemberWakeRetryableKind::ResumeGateUnavailable,
+            },
+            "resolve_retryable_explicit_resume_member",
+        ) {
+            Ok(_) => {
+                tracing::info!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %identity.0,
+                    %error,
+                    "an explicitly resumed member's restore waits on work in flight or an unavailable store; its owed retry is armed"
+                );
+                self.schedule_owed_member_wake_retry(&AgentIdentity::from(identity.0.as_str()));
+            }
+            Err(refused) => self.retain_explicit_resume_error(refused),
+        }
+    }
+
     pub(super) async fn explicit_resume_member_observed(
         &mut self,
         work: Arc<ExplicitResumeMemberWork>,
@@ -162,13 +244,19 @@ impl MobActor {
             Err(error) => {
                 self.explicit_resume_member_settled(
                     work,
-                    ExplicitResumeMemberCompletion::Failed(error),
+                    ExplicitResumeMemberCompletion::ObservationFailed(error),
                 )
                 .await;
                 return;
             }
         };
         if matches!(observation, ExplicitResumeLiveObservation::AlreadyLive) {
+            // The live actor keeps its registration: no new one applies the
+            // run-start hold the host's build preparation staged.
+            if work.rebuild.build_hold_staged {
+                self.unstage_member_build_hold(&work.rebuild.bridge_session_id)
+                    .await;
+            }
             self.spawn_explicit_resume_provision(work, None);
             return;
         }
@@ -217,7 +305,7 @@ impl MobActor {
             Err(error) => {
                 self.explicit_resume_member_settled(
                     work,
-                    ExplicitResumeMemberCompletion::Failed(error),
+                    ExplicitResumeMemberCompletion::ObservationFailed(error),
                 )
                 .await;
                 return;
@@ -234,6 +322,12 @@ impl MobActor {
         });
         match verdict {
             Some(mob_dsl::MemberRevivalVerdictKind::BrokenRecorded) => {
+                // Nothing is provisioned for a Broken member: no registration
+                // applies the run-start hold its build preparation staged.
+                if work.rebuild.build_hold_staged {
+                    self.unstage_member_build_hold(&work.rebuild.bridge_session_id)
+                        .await;
+                }
                 self.record_member_restore_failure(
                     &work.rebuild.entry.agent_identity,
                     crate::runtime::handle::RestoreFailureDiagnostic {
@@ -424,6 +518,9 @@ impl MobActor {
             generated_self_owned_operation_owner: Some(work.rebuild.bridge_session_id.clone()),
             direct_member_incarnation: None,
             continuity_intent,
+            // The customized restore spec's binding, as a boot restore
+            // applies it; `None` keeps the one the session recorded.
+            auth_binding: work.rebuild.restore_spec.auth_binding.clone(),
         }))
     }
 
@@ -525,18 +622,12 @@ impl MobActor {
             self.publish_machine_state_projection();
         }
         let identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
-        if self
-            .dsl_authority
-            .state()
-            .member_revival_pending
-            .contains(&identity)
-        {
-            self.apply_dsl_signal(
-                mob_dsl::MobMachineSignal::ResolveMemberRevivalSucceeded {
-                    agent_identity: identity,
-                },
-                "resolve_explicit_resume_member_revival",
-            )?;
+        if let Some(attempt) = work.wake_attempt {
+            self.resolve_explicit_resume_member_bound(&identity, attempt)?;
+            // Held Waking until its own readiness, run right after this
+            // acceptance, settles it Live (or Broken).
+            self.startup_boot_attempts
+                .insert(entry.agent_identity.clone(), attempt);
         }
         self.restore_diagnostics
             .write()
@@ -545,48 +636,179 @@ impl MobActor {
         Ok(())
     }
 
+    /// Resolve the wake attempt the rebuild of `identity` holds bound: the
+    /// member's runtime binding is requested, and the member stays Waking.
+    /// Its own readiness, run right after its acceptance, then settles it Live
+    /// (Live means ready), or Broken with its readiness failure; its topology
+    /// runs with the resume's, as for every member the resume finds live. A
+    /// stale attempt (the member's wake was abandoned or superseded meanwhile)
+    /// is the machine's no-op, and the rebuild is refused, so its provision
+    /// is rolled back rather than committed.
+    fn resolve_explicit_resume_member_bound(
+        &mut self,
+        identity: &mob_dsl::AgentIdentity,
+        attempt: u64,
+    ) -> Result<(), MobError> {
+        let transition = self.apply_dsl_signal_collect_transition(
+            mob_dsl::MobMachineSignal::ResolveMemberRevivalBound {
+                agent_identity: identity.clone(),
+                attempt,
+            },
+            "resolve_explicit_resume_member_bound",
+        )?;
+        if !crate::runtime::boot_plan::wake_feedback_applied(
+            transition.effects(),
+            identity,
+            attempt,
+        ) {
+            return Err(MobError::Internal(format!(
+                "the wake attempt {attempt} of '{}' was superseded before its explicit resume settled",
+                identity.0
+            )));
+        }
+        Ok(())
+    }
+
     pub(super) async fn explicit_resume_member_settled(
         &mut self,
         work: Arc<ExplicitResumeMemberWork>,
         completion: ExplicitResumeMemberCompletion,
     ) {
+        // An accepted member is held Waking until its readiness settles it
+        // (Live means ready). It runs that readiness now, its own, and its
+        // work settles once the readiness resolved its attempt: the resume's
+        // readiness stage only begins once every member's work settled.
+        if matches!(completion, ExplicitResumeMemberCompletion::Accepted)
+            && self.explicit_resume_member_held_for_readiness(&work)
+        {
+            self.spawn_explicit_resume_member_readiness(work).await;
+            return;
+        }
+        // A rebuild that was not accepted leaves no registration to apply the
+        // run-start hold its host's build preparation staged.
+        if !matches!(completion, ExplicitResumeMemberCompletion::Accepted)
+            && work.rebuild.build_hold_staged
+        {
+            self.unstage_member_build_hold(&work.rebuild.bridge_session_id)
+                .await;
+        }
         let identity = mob_dsl::AgentIdentity::from_domain(&work.rebuild.entry.agent_identity);
-        if let ExplicitResumeMemberCompletion::Failed(error) = completion {
+        let (failure, answered) = match completion {
+            ExplicitResumeMemberCompletion::Failed(error) => (Some(error), false),
+            ExplicitResumeMemberCompletion::ObservationFailed(error) => (Some(error), true),
+            ExplicitResumeMemberCompletion::Accepted
+            | ExplicitResumeMemberCompletion::Superseded => (None, false),
+        };
+        if let Some(error) = failure {
             if matches!(
                 self.classify_explicit_resume_work(&work),
                 Ok(mob_dsl::ResumeMemberOutcomeDisposition::Current)
             ) {
-                if self
-                    .dsl_authority
-                    .state()
-                    .member_revival_pending
-                    .contains(&identity)
+                // Only the rebuild's own, still open wake attempt resolves the
+                // member Broken; a stale attempt is the machine's no-op.
+                let open_attempt = work.wake_attempt.filter(|attempt| {
+                    self.dsl_authority
+                        .state()
+                        .member_wake_attempts
+                        .get(&identity)
+                        == Some(attempt)
+                });
+                if let Some(attempt) = open_attempt
+                    && crate::runtime::builder::restore_error_is_retryable(&error)
                 {
+                    // Work still in flight on the member's session (its
+                    // attachment's takeover) or a store that cannot serve it
+                    // now never breaks the member: its attempt ends retryable
+                    // (Dormant, a boot obligation kept owed) and the resume
+                    // answers the typed error.
+                    self.resolve_explicit_resume_member_retryable(&identity, attempt, error);
+                } else if let Some(attempt) = open_attempt {
                     let (signal, reason) = Self::member_revival_failure_signal(
                         identity.clone(),
+                        attempt,
                         &work.rebuild.bridge_session_id,
                         &error,
                     );
-                    if let Err(error) =
-                        self.apply_dsl_signal(signal, "resolve_failed_explicit_resume_member")
-                    {
-                        self.retain_explicit_resume_error(error);
-                    } else {
-                        self.record_member_restore_failure(
-                            &work.rebuild.entry.agent_identity,
-                            crate::runtime::handle::RestoreFailureDiagnostic {
-                                bridge_session_id: Some(work.rebuild.bridge_session_id.clone()),
-                                reason,
-                                hold: None,
-                                registration_refusal: None,
-                            },
+                    let resolved = self
+                        .apply_dsl_signal_collect_transition(
+                            signal,
+                            "resolve_failed_explicit_resume_member",
                         )
-                        .await;
+                        .map(|transition| {
+                            crate::runtime::boot_plan::wake_feedback_applied(
+                                transition.effects(),
+                                &identity,
+                                attempt,
+                            )
+                        });
+                    match resolved {
+                        Err(error) => self.retain_explicit_resume_error(error),
+                        Ok(true) => {
+                            self.record_member_restore_failure(
+                                &work.rebuild.entry.agent_identity,
+                                crate::runtime::handle::RestoreFailureDiagnostic {
+                                    bridge_session_id: Some(work.rebuild.bridge_session_id.clone()),
+                                    reason,
+                                    hold: error.durable_resume_hold(),
+                                    registration_refusal: None,
+                                },
+                            )
+                            .await;
+                        }
+                        // The attempt closed meanwhile: the machine kept the
+                        // member's state, and nothing is recorded here.
+                        Ok(false) => {}
+                    }
+                    // A member whose observation failed, before MobMachine
+                    // authorized its revival, is the resume's typed answer,
+                    // as a member it could not prepare is. A failure after
+                    // that authorization (the member's recipe, provision or
+                    // custody) is the member's own outcome, and the resume
+                    // answers Ok for it.
+                    if answered {
+                        self.retain_explicit_resume_member_failure(error);
                     }
                 } else {
                     self.retain_explicit_resume_error(error);
                 }
             }
+        }
+        self.settle_explicit_resume_member_work(work).await;
+    }
+
+    /// Settle `work`'s member in MobMachine and let the resume go on. Settle
+    /// requires the member's wake attempt closed. A resume that ends without
+    /// resolving the attempt it opened (its work was classified stale, or its
+    /// own resolution was refused) abandons it first: the member is Dormant
+    /// again, and its next delivery wakes it. No provision of such an attempt
+    /// was committed.
+    async fn settle_explicit_resume_member_work(&mut self, work: Arc<ExplicitResumeMemberWork>) {
+        let identity = mob_dsl::AgentIdentity::from_domain(&work.rebuild.entry.agent_identity);
+        let still_open = work.wake_attempt.filter(|attempt| {
+            self.dsl_authority
+                .state()
+                .member_wake_attempts
+                .get(&identity)
+                == Some(attempt)
+        });
+        if let Some(attempt) = still_open
+            && let Err(error) = self.apply_dsl_signal(
+                mob_dsl::MobMachineSignal::AbandonMemberWake {
+                    agent_identity: identity.clone(),
+                    attempt,
+                    kind: mob_dsl::MemberWakeAbandonKind::Unsettled,
+                    reason: format!(
+                        "the explicit resume of bridge session '{}' ended before its member settled",
+                        work.rebuild.bridge_session_id
+                    ),
+                },
+                "abandon_unsettled_explicit_resume_member_wake",
+            )
+        {
+            tracing::warn!(
+                %error,
+                "an explicit resume member's open wake attempt could not be abandoned before its settlement"
+            );
         }
         if let Err(error) = self.apply_dsl_input(
             mob_dsl::MobMachineInput::SettleExplicitResumeMember {
@@ -605,7 +827,104 @@ impl MobActor {
                 crate::runtime::state::LifecycleProgressStage::MemberLiveMaterialization,
             );
         }
+        // A member the lift's plan rebuilt frees its slot of the plan: the
+        // plan dispatches the members it has not reached yet.
+        self.advance_explicit_resume_boot_plan().await;
         self.continue_explicit_resume_after_rebuild().await;
+    }
+
+    /// Whether `work`'s member was accepted and is held Waking for its
+    /// readiness under the attempt its rebuild realized
+    /// ([`Self::accept_explicit_resume_member`]).
+    fn explicit_resume_member_held_for_readiness(&self, work: &ExplicitResumeMemberWork) -> bool {
+        let Some(attempt) = work.wake_attempt else {
+            return false;
+        };
+        let identity = mob_dsl::AgentIdentity::from_domain(&work.rebuild.entry.agent_identity);
+        self.startup_boot_attempts
+            .get(&work.rebuild.entry.agent_identity)
+            == Some(&attempt)
+            && self
+                .dsl_authority
+                .state()
+                .member_wake_attempts
+                .get(&identity)
+                == Some(&attempt)
+    }
+
+    /// Run the readiness of one accepted member held Waking, off the actor
+    /// (bounded as every member readiness is), and hand its outcome back
+    /// ([`Self::explicit_resume_member_readiness_resolved`]).
+    async fn spawn_explicit_resume_member_readiness(
+        &mut self,
+        work: Arc<ExplicitResumeMemberWork>,
+    ) {
+        let entry = self
+            .roster
+            .read()
+            .await
+            .get(&work.rebuild.entry.agent_identity)
+            .cloned();
+        let Some(entry) = entry else {
+            // A member that left the roster closed its attempt as it left.
+            self.settle_explicit_resume_member_work(work).await;
+            return;
+        };
+        let target = MemberReadinessTarget {
+            stage: member_readiness_stage(&entry),
+            drain_required: member_requires_comms_drain(self.dsl_authority.state(), &entry),
+            entry,
+        };
+        let expected = member_readiness_expectations(std::slice::from_ref(&target));
+        let progress = self
+            .pending_resume_lifecycle
+            .as_ref()
+            .map(|pending| pending.progress.clone());
+        let readiness = self.spawn_member_readiness_tasks(vec![target], progress);
+        let command_tx = self.command_tx.clone();
+        let mob_id = self.definition.id.clone();
+        self.actor_io_tasks.spawn(async move {
+            let outcomes = collect_member_readiness_outcomes(readiness, expected, &mob_id).await;
+            let _ = command_tx
+                .send(RoutedMobCommand::internal(
+                    MobCommand::ResumeLifecycleMemberReadinessResolved { work, outcomes },
+                ))
+                .await;
+        });
+    }
+
+    /// An accepted member's own readiness resolved: MobMachine holds it Live
+    /// (Live means ready), or Broken with its readiness failure (the
+    /// member's own outcome, recorded with the member: the resume answers Ok
+    /// for it); then its work settles and the resume goes on.
+    pub(super) async fn explicit_resume_member_readiness_resolved(
+        &mut self,
+        work: Arc<ExplicitResumeMemberWork>,
+        outcomes: Vec<MemberReadinessOutcome>,
+    ) {
+        let (outcomes, _member_failure) = self
+            .settle_held_member_readiness_of(&work.rebuild.entry.agent_identity, outcomes)
+            .await;
+        if let Err(error) = self.apply_member_readiness_outcomes(outcomes).await {
+            self.retain_explicit_resume_member_failure(error);
+        }
+        self.settle_explicit_resume_member_work(work).await;
+    }
+
+    /// [`Self::retain_explicit_resume_error`] while the resume still waits on
+    /// its members' work. A member that settles after a lifecycle control
+    /// superseded the resume has no caller to answer.
+    pub(super) fn retain_explicit_resume_member_failure(&mut self, error: MobError) {
+        if matches!(
+            self.pending_resume_lifecycle
+                .as_ref()
+                .map(|pending| &pending.phase),
+            Some(ResumeLifecyclePhase::RebuildingMembers { .. })
+        ) {
+            self.retain_explicit_resume_error(error);
+        } else {
+            tracing::warn!(%error, "an explicit resume member settled after its resume moved on");
+        }
     }
 
     pub(super) async fn explicit_resume_member_cleanup_held(
@@ -888,8 +1207,15 @@ async fn provision_explicit_resume_member(
         };
     };
     let finalized = async {
+        // One rule for every readiness path: an autonomous or wired member
+        // requires its drain; an unwired turn-driven one binds it only when
+        // its runtime has comms.
         readiness
-            .ensure_mob_comms_drain(&work.rebuild.entry.agent_identity, &work.rebuild.member_ref)
+            .ensure_member_comms_drain(
+                &work.rebuild.entry.agent_identity,
+                &work.rebuild.member_ref,
+                work.drain_required,
+            )
             .await?;
         if work.rebuild.superseded_session_id.is_none()
             || work.rebuild.recovered_peer_endpoint.is_some()

@@ -197,6 +197,21 @@ this uncertainty as `send_ambiguous`, with the `envelope_id`,
 `retry_safe: false` and `required_action: "reconcile"`. None of them flattens
 the result into `send_failed`.
 
+A peer that is a seated member of a mob need not be materialized in its
+process: its mob keeps a wake route for it. A send that finds no live inbox for
+such a member waits, inside the same `ack_timeout_secs` budget, while the
+member's mob wakes it, then hands the envelope off once through the ordinary
+receipt path. The envelope stays in the sender's send call meanwhile; nothing
+is buffered anywhere else. When the wake is refused or does not finish, the
+send fails `peer_wake_refused` with a typed `refusal`: nothing was delivered,
+so a retry cannot duplicate the message. If the budget ends after the hand-off,
+the result is the ordinary ambiguous delivery. Only a peer that is not a member,
+or one the sender does not trust (a member it is not wired to), is
+`peer_not_found_or_not_trusted`. A send from a member that is itself being
+woken (from inside its own build) to a member that is not live is refused
+`sender_waking` instead of waiting, so two builds that message each other
+cannot wait on each other.
+
 External events use `session/external_event`, stdin, REST webhook, or an
 explicit plain TCP/UDS event listener. Plain listeners are separate from the
 signed peer listener and require an explicit open-auth posture. Do not expose

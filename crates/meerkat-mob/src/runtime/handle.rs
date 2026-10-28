@@ -590,6 +590,59 @@ pub(super) mod retire_at_scope_hold {
     }
 }
 
+/// Test-only record of where a watched mob's seat chunks spend their time,
+/// for the seat scale rows: the plan on the actor, the preparation off it,
+/// and the commit on the actor. Keyed by mob, which each test keeps unique.
+#[cfg(test)]
+pub(super) mod seat_chunk_timing {
+    use crate::ids::MobId;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::time::Duration;
+
+    /// One seat chunk's steps.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct SeatChunkTiming {
+        /// Specs the chunk carried.
+        pub(crate) specs: usize,
+        /// `PlanDormantSeats` on the actor, the round trip included.
+        pub(crate) plan: Duration,
+        /// Everything between the plan and the commit: each seat's
+        /// preparation off the actor (and any embodied spawn).
+        pub(crate) prepare: Duration,
+        /// `CommitDormantSeats` on the actor, the round trip included.
+        pub(crate) commit: Duration,
+    }
+
+    type Timings = Arc<Mutex<Vec<SeatChunkTiming>>>;
+
+    static WATCHED: Mutex<BTreeMap<MobId, Timings>> = Mutex::new(BTreeMap::new());
+
+    /// Record the seat chunks of `mob_id` from now on, in order.
+    pub(crate) fn watch(mob_id: &MobId) -> Timings {
+        let timings = Timings::default();
+        WATCHED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(mob_id.clone(), Arc::clone(&timings));
+        timings
+    }
+
+    pub(super) fn record(mob_id: &MobId, timing: SeatChunkTiming) {
+        let watched = WATCHED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(mob_id)
+            .cloned();
+        if let Some(timings) = watched {
+            timings
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(timing);
+        }
+    }
+}
+
 #[cfg(test)]
 fn assert_retirement_result_slot_removed_before_publication(
     key: &RetirementOperationKey,
@@ -2768,6 +2821,11 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::SessionUnavailableForResume { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::SessionError
         }
+        // The resumed session's live actor runs another auth binding: the
+        // SESSION could not serve this resume - session-class failure.
+        MobError::MemberAuthBindingConflict { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::SessionError
+        }
         // Process-incarnation provisioning terminals are not a public
         // spawn-many failure family. Keep the exhaustive classifier
         // fail-closed rather than laundering callback-transport state into a
@@ -2831,6 +2889,11 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         }
         MobError::MemberRestoreFailed { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::MemberRestoreFailed
+        }
+        // A refused member wake (a resume spawn of a seated member that is
+        // not materialized): the member's session could not be served now.
+        MobError::MemberWakeRefused { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::SessionError
         }
         // Never a spawn outcome today (a spawn on a stopped actor gets
         // ActorCommandChannelClosed, and a spawn acts on no deferred member);
@@ -6205,6 +6268,9 @@ pub struct MobHandle {
     /// composition has one: member binding history reads its journal and
     /// identity intent rows in one store transaction. Read-only here.
     pub(super) identity_member: Option<Arc<dyn crate::store::MobIdentityMemberStore>>,
+    /// The member binding fold this handle and its clones keep between
+    /// member binding history reads, so a read folds only the journal tail.
+    pub(super) member_binding_fold: Arc<super::delivery_scope::MemberBindingFoldCache>,
     pub(super) run_store: Arc<dyn MobRunStore>,
     pub(super) runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     pub(super) flow_streams:
@@ -6274,6 +6340,9 @@ pub struct MobHandle {
     /// The realm profile store member builds read realm-referenced roles
     /// from.
     pub(super) realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
+    /// Whether the latest member plan of this mob's start could not observe
+    /// recovery work; see [`MobHandle::boot_set_basis`].
+    pub(super) boot_set_basis: super::boot_plan::MobBootSetBasisCell,
 }
 
 /// Per-member retained per-spawn tool overlays (`SpawnMemberSpec::external_tools`)
@@ -6777,6 +6846,14 @@ impl ResumedMemberView {
 ///   restore and [`MobHandle::resume`]):
 ///   [`customize_resume`](Self::customize_resume), with what the session
 ///   holds. Its default asks `customize_spawn` with `SpawnSource::Resume`.
+///   [`MobHandle::resume`] of a mob stopped in this process asks it too for
+///   each member whose live actor the stop kept: the actor is kept only when
+///   it runs the auth binding the answer names, and otherwise the member is
+///   rebuilt on that binding.
+/// - The first build of a dormant seat's member, which creates the session
+///   its seat named: [`customize_resume`](Self::customize_resume) too, with
+///   the build inputs of the seat's spec already on the request, as a
+///   spawn's caller sets them before `customize_spawn`.
 ///
 /// # Which spawns never ask it
 ///
@@ -7048,6 +7125,11 @@ pub struct SpawnMemberSpec {
     /// arguments; the spawn folds it into `operator_authority_ceiling` after
     /// the customizer, so nothing can widen past it.
     pub(crate) inherited_operator_authority_bound: Option<super::MemberOperatorAuthorityCeiling>,
+    /// The pre-assigned id of a fresh member's new session. Set only by a
+    /// dormant seat that spawns a spec owing a kickoff, so the spawn's
+    /// session is the seat's name-based one and a re-driven seat finds it;
+    /// never taken from caller-supplied arguments.
+    pub(crate) fresh_session_id: Option<SessionId>,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -7166,6 +7248,7 @@ impl SpawnMemberSpec {
             fork_build_inheritance: None,
             operator_authority_ceiling: None,
             inherited_operator_authority_bound: None,
+            fresh_session_id: None,
         }
     }
 
@@ -7942,6 +8025,7 @@ impl MobHandle {
                         let elapsed = Instant::now().saturating_duration_since(stalled.observed_at);
                         tracing::warn!(
                             agent_identity = ?stalled.member_id,
+                            members_owed = ?stalled.members_owed,
                             stage = stalled.stage.as_str(),
                             elapsed_ms = elapsed.as_millis(),
                             "explicit resume lifecycle progress stalled"
@@ -8768,6 +8852,10 @@ impl MobHandle {
                 let (authorized_runtimes, authorized_external) =
                     Self::all_agent_event_subscription_authority_from_effects(effects)?;
                 let mut streams = Vec::new();
+                // Members refused not live while not materialized in this
+                // process (dormant, or waking): their streams attach at
+                // their wakes, all through one wait.
+                let mut at_wake = Vec::new();
                 for (dsl_identity, runtime_id) in &machine_state.identity_to_runtime {
                     if !authorized_runtimes.contains(runtime_id) {
                         continue;
@@ -8785,10 +8873,32 @@ impl MobHandle {
                     let agent_identity = AgentIdentity::from(dsl_identity.0.as_str());
                     let session_id =
                         Self::session_id_from_dsl(dsl_session_id, "all-agent event subscription")?;
-                    let stream = self
+                    match self
                         .subscribe_authorized_agent_session_events(&agent_identity, &session_id)
-                        .await?;
-                    streams.push((agent_identity, stream));
+                        .await
+                    {
+                        Ok(stream) => streams.push((agent_identity, stream)),
+                        Err(MobError::MemberSessionNotLive { .. })
+                            if super::boot_plan::domain_member_is_unmaterialized(
+                                &machine_state,
+                                &agent_identity,
+                            ) || self.member_unmaterialized(&agent_identity) =>
+                        {
+                            at_wake.push(agent_identity);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                if !at_wake.is_empty() {
+                    streams.extend(
+                        super::member_event_attach::spawn_wake_attach(
+                            self,
+                            at_wake,
+                            super::member_event_attach::AttachPath::Authorized,
+                        )
+                        .into_iter()
+                        .map(|(identity, subscription)| (identity, subscription.stream)),
+                    );
                 }
                 // Authorized external members ride pump taps (same item
                 // shape as the local entries).
@@ -9302,6 +9412,378 @@ impl MobHandle {
         self.incarnation
     }
 
+    /// What the member plan of this mob's latest start (its resume, or the
+    /// lift of a stopped mob) was based on.
+    /// [`super::MobBootSetBasis::Unobserved`] means the runtime store could
+    /// not tell which runtimes hold recovery work (its typed cause names the
+    /// read it could not make), so the start materialized every seated member
+    /// instead of only those the plan selects. A host surfaces it on its own
+    /// boot report.
+    pub fn boot_set_basis(&self) -> super::MobBootSetBasis {
+        self.boot_set_basis.get()
+    }
+
+    /// Seat members Dormant: each becomes a member, wireable and reachable,
+    /// without being materialized. Its first delivery wakes it (or MobMachine
+    /// does at once, for a member whose session holds runtime work, a network
+    /// endpoint or a member the host requires live).
+    ///
+    /// Each spec is a spawn spec: `Fresh` seats the identity under a
+    /// name-based session id and builds nothing (no session, no tools, no
+    /// MCP connection, no runtime registration): the member's first wake
+    /// creates its session through the spawn provision path, with the
+    /// runtime registration and the host's registration hook
+    /// ([`super::MobBuilder::with_member_runtime_registration_hook`]) any
+    /// member build has. That first build applies the spec's build inputs
+    /// exactly as a spawn of the spec would: its context, additional
+    /// instructions, system prompt override, budget limits, tool access and
+    /// application tool policies, auth binding and web search override (kept
+    /// in the seat's journal row, so a restart before the first wake keeps
+    /// them), and its per-spawn tools overlay, compaction curator, dispatch
+    /// admission and shell environment (kept by this process only; after a
+    /// restart the spawn customizer supplies them, as for any member's
+    /// rebuild). The spawn customizer is asked at that build, after the
+    /// inputs are set. `Resume` binds the session it names, which is never
+    /// archived; a session a seat named and no build created yet (its member
+    /// retired before its first wake) is seated unborn again, and its first
+    /// wake creates it. A fresh spec that owes a kickoff (an `AutonomousHost`
+    /// member, or one with an initial message) is not seated: it is spawned
+    /// through the ordinary spawn path and answered
+    /// [`super::DormantSeatOutcome::Embodied`]. A fork, a placed member and a
+    /// member that inherits its creator's tool visibility are refused.
+    /// Seating needs the members' comms transport
+    /// ([`super::MobBuilder::with_member_comms_identity_root`] or
+    /// [`super::MobBuilder::with_network_member_comms`]) and a running mob.
+    /// A seat reads its session's resume observation once, to refuse an
+    /// archived or lost session; on a host store (`meerkat_core::host_store`)
+    /// that read loads the session's stored rows, so seating members on
+    /// existing sessions reads each one's rows once. A session that does not
+    /// exist yet is not read.
+    ///
+    /// Outcomes come back in input order, one per spec: a spec the machine or
+    /// its session refuses is answered alone and nothing of it is written.
+    /// Specs are committed in chunks of at most 256, one journal batch each;
+    /// only a store failure fails the call, and the chunks committed before
+    /// it stay seated, so re-sending the same specs answers those
+    /// [`super::DormantSeatOutcome::AlreadySeated`]. Seating an identity
+    /// clears its host-pending mark
+    /// ([`super::MobBuilder::with_host_pending_members`]) in the same step.
+    ///
+    /// A seated member is wired to the edges the definition declares
+    /// (`auto_wire_orchestrator` and `role_wiring`), as a spawn of it would
+    /// be, in its chunk's own commit, whose one journal append carries the
+    /// seats and their edges: the members seated in one call see each other,
+    /// and a member seated later sees the ones seated before (an orchestrator
+    /// member seated after the members that auto-wire to it is wired to
+    /// them, which a spawn of it is not). The edges are MobMachine's and
+    /// journaled, and none wakes a member (except as MobMachine wakes a
+    /// Dormant member an edge joins to a placed one): a live member trusts a
+    /// seated one's recorded endpoint at once, and the seated member's own
+    /// trust is installed by its wake. A member on network comms has no
+    /// recorded endpoint until its boot wake registers it, which then
+    /// installs the trust of both ends. An identity answered `AlreadySeated`
+    /// keeps the edges it holds.
+    pub async fn seat_dormant_members(
+        &self,
+        specs: Vec<SpawnMemberSpec>,
+    ) -> Result<Vec<super::DormantSeatOutcome>, MobError> {
+        let agent_lane = matches!(
+            self.command_authority_kind(),
+            crate::control_policy::CommandAuthorityKind::AgentLane
+        );
+        let mut outcomes = Vec::with_capacity(specs.len());
+        let mut specs = specs.into_iter();
+        loop {
+            let mut chunk = specs
+                .by_ref()
+                .take(super::dormant_seat::DORMANT_SEAT_CHUNK)
+                .collect::<Vec<_>>();
+            if chunk.is_empty() {
+                break;
+            }
+            if agent_lane {
+                for spec in &mut chunk {
+                    spec.mark_agent_creation();
+                }
+            }
+            outcomes.extend(Box::pin(self.seat_dormant_chunk(chunk)).await?);
+        }
+        Ok(outcomes)
+    }
+
+    /// Rotate a member onto a fresh life (a reset, or a deleted identity
+    /// created anew): its current incarnation is retired and the next one is
+    /// seated Dormant, at the next generation, under a name-based session id
+    /// in the retirement's terminal step. Nothing is built for it: its first
+    /// wake creates its session with the spec's build inputs, as a fresh
+    /// seat's first wake does. Both journal rows are written in one batch, so
+    /// the identity is never a non-member: during the retirement its current
+    /// incarnation is Retiring, and deliveries to it are refused typed.
+    /// Returns the new session. The next incarnation of a seated identity is
+    /// the same member's successor, as a respawn's is: it keeps the member's
+    /// creation id, with [`crate::MemberCreationProvenance::Successor`]
+    /// provenance naming the retired incarnation's session, whatever creation
+    /// origin the spec names. When the retired incarnation recorded no
+    /// creation token, the next one is recorded
+    /// [`crate::MemberCreationProvenance::Unproven`] with a new id, never as a
+    /// new root. An identity that is not seated (below) is created with the
+    /// spec's origin, as a seat is: a host-root spec is a new root.
+    ///
+    /// The spec launches `Fresh`. When it owes a kickoff (an
+    /// `AutonomousHost` member's one kickoff turn, or an initial message),
+    /// the new incarnation owes it: the kickoff wakes it once and runs
+    /// exactly once on its new session. Its wiring is not carried over: the
+    /// new incarnation is wired to the edges the definition declares, as a
+    /// spawn of it would be (see [`Self::seat_dormant_members`]). An
+    /// identity that is not seated (its last retirement already completed) is
+    /// seated as one fresh seat, which a spec that owes a kickoff spawns live,
+    /// as [`Self::seat_dormant_members`] does. Refused typed unless the mob is
+    /// Running; a refused rotation retires nothing.
+    ///
+    /// The rotation's intent lives in this process until its terminal step.
+    /// A host that may crash between the call and its answer must record its
+    /// own intent durably, and on its next start pass the identity to
+    /// [`super::MobBuilder::with_host_pending_members`] and call this again
+    /// with the same spec: the restarted mob does not finish the interrupted
+    /// retirement as a plain one while the identity is host-pending, and the
+    /// re-issued rotation re-seats it on the same name-based session (the
+    /// same generation always names the same session). A host that does not
+    /// may find the identity retired, not rotated, after such a crash. Needs
+    /// the members' comms transport, as [`Self::seat_dormant_members`] does.
+    pub async fn rotate_member(&self, mut spec: SpawnMemberSpec) -> Result<SessionId, MobError> {
+        use super::dormant_seat::DormantSeatCommitEntry;
+
+        if matches!(
+            self.command_authority_kind(),
+            crate::control_policy::CommandAuthorityKind::AgentLane
+        ) {
+            spec.mark_agent_creation();
+        }
+        let plan = self
+            .send_actor_command(|reply_tx| MobCommand::PlanMemberRotation {
+                spec: Box::new(spec),
+                reply_tx,
+            })
+            .await??;
+        let entry = match plan {
+            super::dormant_seat::MemberRotationPlan::Seat {
+                candidate,
+                seated,
+                endpoint_source,
+            } => {
+                let entry = super::dormant_seat::prepare_dormant_seat(
+                    self.session_service.as_ref(),
+                    endpoint_source.as_ref(),
+                    &self.definition.id,
+                    candidate,
+                )
+                .await
+                .map_err(|outcome| (*outcome).into_unseated_error())?;
+                if seated {
+                    let DormantSeatCommitEntry::Seat {
+                        candidate,
+                        endpoint,
+                    } = entry
+                    else {
+                        return Err(MobError::Internal(
+                            "a rotation's preparation produced no seat".into(),
+                        ));
+                    };
+                    return self
+                        .send_actor_command(|reply_tx| MobCommand::StartMemberRotation {
+                            candidate,
+                            endpoint,
+                            reply_tx,
+                        })
+                        .await?;
+                }
+                entry
+            }
+            // An identity that is not seated, whose spec owes a kickoff: a
+            // seat of it, which is a spawn; the commit step clears its host
+            // preparation as it does for a seat chunk's spawn.
+            super::dormant_seat::MemberRotationPlan::Embody(spec) => {
+                let agent_identity = spec.identity.clone();
+                let member_ref = Box::pin(self.spawn_spec_internal(*spec)).await?;
+                let session_id = member_ref.bridge_session_id().cloned().ok_or_else(|| {
+                    MobError::Internal(format!("the spawn of '{agent_identity}' bound no session"))
+                })?;
+                DormantSeatCommitEntry::Embodied {
+                    agent_identity,
+                    session_id,
+                }
+            }
+        };
+        let outcome = self
+            .send_actor_command(|reply_tx| MobCommand::CommitDormantSeats {
+                entries: vec![entry],
+                reply_tx,
+            })
+            .await??
+            .into_iter()
+            .next()
+            .ok_or_else(|| MobError::Internal("a rotation's seat was not answered".into()))?;
+        match outcome {
+            super::DormantSeatOutcome::Seated { session_id, .. }
+            | super::DormantSeatOutcome::AlreadySeated { session_id, .. }
+            | super::DormantSeatOutcome::Embodied { session_id, .. } => Ok(session_id),
+            other => Err(other.into_unseated_error()),
+        }
+    }
+
+    /// One chunk of [`Self::seat_dormant_members`]: plan on the actor,
+    /// prepare here (sessions and endpoints, off the actor), commit on the
+    /// actor in one step.
+    async fn seat_dormant_chunk(
+        &self,
+        specs: Vec<SpawnMemberSpec>,
+    ) -> Result<Vec<super::DormantSeatOutcome>, MobError> {
+        use super::dormant_seat::{DormantSeatCommitEntry, DormantSeatPlanEntry};
+        use futures::StreamExt as _;
+
+        #[cfg(test)]
+        let (chunk_specs, chunk_started) = (specs.len(), std::time::Instant::now());
+        let super::dormant_seat::DormantSeatPlan {
+            entries,
+            endpoint_source,
+        } = self
+            .send_actor_command(|reply_tx| MobCommand::PlanDormantSeats { specs, reply_tx })
+            .await??;
+        #[cfg(test)]
+        let chunk_planned = std::time::Instant::now();
+        let mut outcomes = Vec::with_capacity(entries.len());
+        outcomes.resize_with(entries.len(), || None);
+        let mut to_prepare = Vec::new();
+        let mut to_commit = Vec::new();
+        for (index, entry) in entries.into_iter().enumerate() {
+            match entry {
+                DormantSeatPlanEntry::Done(outcome) => outcomes[index] = Some(outcome),
+                DormantSeatPlanEntry::AlreadySeated {
+                    agent_identity,
+                    session_id,
+                } => to_commit.push((
+                    index,
+                    DormantSeatCommitEntry::AlreadySeated {
+                        agent_identity,
+                        session_id,
+                    },
+                )),
+                // Spawned exactly as a spawn is, under this handle's
+                // authority, one at a time as the host's own embodiment was.
+                DormantSeatPlanEntry::Embody(spec) => {
+                    let agent_identity = spec.identity.clone();
+                    match Box::pin(self.spawn_spec_internal(*spec)).await {
+                        Ok(member_ref) => match member_ref.bridge_session_id() {
+                            Some(session_id) => to_commit.push((
+                                index,
+                                DormantSeatCommitEntry::Embodied {
+                                    agent_identity,
+                                    session_id: session_id.clone(),
+                                },
+                            )),
+                            None => {
+                                outcomes[index] = Some(super::DormantSeatOutcome::Refused {
+                                    error: MobError::Internal(format!(
+                                        "the spawn of '{agent_identity}' bound no session"
+                                    )),
+                                    agent_identity,
+                                });
+                            }
+                        },
+                        Err(error) => {
+                            outcomes[index] = Some(super::DormantSeatOutcome::Refused {
+                                agent_identity,
+                                error,
+                            });
+                        }
+                    }
+                }
+                DormantSeatPlanEntry::Seat(candidate) => to_prepare.push((index, candidate)),
+            }
+        }
+        let session_service = self.session_service.as_ref();
+        let mob_id = &self.definition.id;
+        let prepared = futures::stream::iter(to_prepare)
+            .map(|(index, candidate)| {
+                let endpoint_source = endpoint_source.as_ref();
+                async move {
+                    (
+                        index,
+                        super::dormant_seat::prepare_dormant_seat(
+                            session_service,
+                            endpoint_source,
+                            mob_id,
+                            candidate,
+                        )
+                        .await,
+                    )
+                }
+            })
+            .buffered(super::dormant_seat::DORMANT_SEAT_PREPARE_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        for (index, prepared) in prepared {
+            match prepared {
+                Ok(entry) => to_commit.push((index, entry)),
+                Err(outcome) => outcomes[index] = Some(*outcome),
+            }
+        }
+        #[cfg(test)]
+        let chunk_prepared = std::time::Instant::now();
+        if !to_commit.is_empty() {
+            to_commit.sort_by_key(|(index, _)| *index);
+            let (indices, entries): (Vec<_>, Vec<_>) = to_commit.into_iter().unzip();
+            let committed = self
+                .send_actor_command(|reply_tx| MobCommand::CommitDormantSeats { entries, reply_tx })
+                .await??;
+            if committed.len() != indices.len() {
+                return Err(MobError::Internal(format!(
+                    "a seat chunk committed {} outcomes for {} entries",
+                    committed.len(),
+                    indices.len()
+                )));
+            }
+            for (index, outcome) in indices.into_iter().zip(committed) {
+                outcomes[index] = Some(outcome);
+            }
+        }
+        #[cfg(test)]
+        seat_chunk_timing::record(
+            &self.definition.id,
+            seat_chunk_timing::SeatChunkTiming {
+                specs: chunk_specs,
+                plan: chunk_planned.duration_since(chunk_started),
+                prepare: chunk_prepared.duration_since(chunk_planned),
+                commit: chunk_prepared.elapsed(),
+            },
+        );
+        outcomes
+            .into_iter()
+            .map(|outcome| {
+                outcome.ok_or_else(|| {
+                    MobError::Internal("a seat spec was left without an outcome".into())
+                })
+            })
+            .collect()
+    }
+
+    /// The materialization phase MobMachine holds for `identity` in this
+    /// process, read from the published machine state without an actor round
+    /// trip: test support for rows that prove a read never wakes a member.
+    /// No public surface reports the phase itself; a host reads whether a
+    /// member is unmaterialized through [`Self::member_unmaterialized`].
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn member_materialization_for_test(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Option<crate::machines::mob_machine::MemberMaterializationPhase> {
+        super::boot_plan::member_materialization_phase(
+            &self.machine_state_watch_rx.borrow(),
+            &crate::machines::mob_machine::AgentIdentity::from_domain(identity),
+        )
+    }
+
     /// The witness that this mob's runtime runs at [`Self::incarnation`], for
     /// the mob operator grants
     /// (`meerkat_runtime::mob_operator_authority::grant_manage_mob` and the
@@ -9380,6 +9862,60 @@ impl MobHandle {
         }
     }
 
+    /// Whether `session_id` is unborn: a seat or a member rotation named it
+    /// for a member that builds nothing until its first wake, and that wake
+    /// has not created it yet. No store holds such a session and none is
+    /// missing: the member's first wake creates it under this id. A member
+    /// retired before its first wake leaves its session unborn.
+    ///
+    /// This is MobMachine's unborn-seat fact (`unborn_seat_sessions`), read
+    /// from the machine state the actor last published, without a command.
+    /// Core's member history read ([`Self::member_history`]) answers a member
+    /// whose session is unborn as one with no history yet, and no read wakes
+    /// the member (a delivery does). Core's reads by session id (RPC
+    /// `session/history`, REST `GET /sessions/{id}/history`) answer not
+    /// found, since no store holds the session; a host that serves its own
+    /// reads of member sessions by id checks this first. The same fact is
+    /// read offline, with no running mob, through
+    /// [`crate::MemberBindingHistory::session_unborn`]. `false` for every
+    /// session a build created and for a session this mob never named.
+    pub fn session_unborn(&self, session_id: &SessionId) -> bool {
+        super::boot_plan::domain_seat_session_never_born(
+            &self.machine_state_watch_rx.borrow(),
+            session_id,
+        )
+    }
+
+    /// Whether MobMachine holds `identity` seated and not materialized in
+    /// this process: Dormant, or Waking while its one wake attempt runs. A
+    /// Dormant member has no session actor; a Waking one may already have
+    /// one (the wake builds it before its readiness settles) or may not, and
+    /// this read stays `true` until the wake ends Live. A subscription to
+    /// its agent events ([`Self::subscribe_agent_events_from`]) opens all the
+    /// same and attaches at the wake. The end of the wake changes the
+    /// machine state ([`Self::machine_state_changes`]): a host that keeps
+    /// many members' agent events attached can instead subscribe a member
+    /// after the change that makes this read `false`, with no command to the
+    /// actor while it reads `true`, and replay from
+    /// [`SessionEventCursor::Earliest`], so the run the wake started is read
+    /// from its first event.
+    ///
+    /// Read from the machine state the actor last published, without a
+    /// command; reading it never wakes the member. The answer can be stale
+    /// by the time the caller acts on it (the actor may publish the next
+    /// state right after the read), so a caller treats a refusal of what it
+    /// then asks as the answer that counts. It is an observation, never a
+    /// write path: only MobMachine's transitions move the member's
+    /// residency, and a host that needs the member live wakes it with a
+    /// delivery or [`Self::ensure_member_live`]. `false` for a live member
+    /// and for an identity this mob does not hold seated in this process.
+    pub fn member_unmaterialized(&self, identity: &AgentIdentity) -> bool {
+        super::boot_plan::domain_member_is_unmaterialized(
+            &self.machine_state_watch_rx.borrow(),
+            identity,
+        )
+    }
+
     /// Wait until no explicit-resume lifecycle operation is pending for
     /// `identity`: the operation a `MobError::LifecycleOperationPending`
     /// naming `explicit_resume member <identity>` refers to (the mob's resume
@@ -9427,9 +9963,19 @@ impl MobHandle {
         bridge_session_id: &SessionId,
         _roster_snapshot: &Roster,
     ) -> Option<MobPeerConnectivitySnapshot> {
-        self.session_service
-            .comms_runtime(bridge_session_id)
-            .await?;
+        // A member seated and not materialized in this process has no live
+        // comms runtime; its connectivity is the machine's wiring, projected
+        // exactly as a live member's is, so a dormant member reads like an
+        // idle live one. A read never wakes it.
+        let unmaterialized = {
+            let machine_state = self.machine_state_watch_rx.borrow();
+            super::boot_plan::domain_member_is_unmaterialized(&machine_state, &entry.agent_identity)
+        };
+        if !unmaterialized {
+            self.session_service
+                .comms_runtime(bridge_session_id)
+                .await?;
+        }
 
         let reachable_peer_count = 0usize;
         // Watch-borrow discipline: the borrow guard blocks the actor's next
@@ -9545,6 +10091,18 @@ impl MobHandle {
     pub(super) fn project_remote_turn_custody_is_quiet_from_current_machine_state(&self) -> bool {
         let machine_state = self.machine_state_watch_rx.borrow();
         super::remote_turn_reconciler::remote_turn_custody_is_quiet(&machine_state)
+    }
+
+    /// Whether any member is placed on a host, from the published machine
+    /// state: MobMachine records a remote turn only for a placed member, so
+    /// the remote-turn reconciler's scan of a mob without one can skip its
+    /// private rows.
+    pub(super) fn project_any_member_placed_from_current_machine_state(&self) -> bool {
+        !self
+            .machine_state_watch_rx
+            .borrow()
+            .member_placement
+            .is_empty()
     }
 
     /// Observation-only member projection that never enters the mob actor queue.
@@ -9807,6 +10365,10 @@ impl MobHandle {
     /// `ReadHistory`-scoped at chokepoint (a); local and remote pages share
     /// ONE wire projection. RPC/REST/MCP exposure is phase 7 (the DTOs
     /// already exist).
+    ///
+    /// A local member whose session is unborn ([`Self::session_unborn`])
+    /// answers an empty page: it has no history until its first wake creates
+    /// the session. The read never wakes the member.
     pub async fn member_history(
         &self,
         caller: crate::control_policy::MobControlPrincipal,
@@ -11068,6 +11630,29 @@ impl MobHandle {
         )
     }
 
+    /// The status and finality of a member MobMachine holds Dormant, read
+    /// from the published machine state: no command to the actor and no read
+    /// of the member's session. Both come from the member's machine lifecycle
+    /// alone, so they are the ones [`Self::member_status`] answers, without
+    /// the durable-head read that call makes for the preview. `None` for a
+    /// member that is not Dormant (Waking and Live members included).
+    ///
+    /// For the waits that use only these two fields; a caller that returns a
+    /// snapshot reads it through [`Self::member_status`].
+    fn dormant_member_status_from_machine_state(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Option<(MobMemberStatus, bool)> {
+        let machine_state = self.machine_state_watch_rx.borrow();
+        if !super::boot_plan::domain_member_is_dormant(&machine_state, identity) {
+            return None;
+        }
+        let lifecycle = Self::member_lifecycle_from_machine_state(identity, &machine_state);
+        Some(MobMemberLifecycleProjection::status_and_finality(
+            &lifecycle,
+        ))
+    }
+
     fn project_roster_from_machine_state(
         roster: Roster,
         machine_state: &mob_dsl::MobMachineState,
@@ -11711,9 +12296,14 @@ impl MobHandle {
     /// Delivers only events published after the subscription attaches; use
     /// [`Self::subscribe_agent_events_from`] to replay retained events.
     ///
+    /// A member that is not materialized in this process (dormant, or waking)
+    /// is subscribed without waking it: the stream attaches at its wake, as
+    /// [`Self::subscribe_agent_events_from`] describes.
+    ///
     /// Returns `MobError::MemberNotFound` if the member is not in the
     /// roster or has no backing bridge session, and
-    /// `MobError::MemberSessionNotLive` if its session has no live actor.
+    /// `MobError::MemberSessionNotLive` if its session has no live actor
+    /// while MobMachine holds it live.
     pub async fn subscribe_agent_events(
         &self,
         identity: &AgentIdentity,
@@ -11740,7 +12330,38 @@ impl MobHandle {
     /// The subscription names the exact actor incarnation of a local member
     /// (`None` for a placed member), so a host can let a revoked
     /// predecessor's stream drain before a successor's.
+    ///
+    /// A member MobMachine holds seated and not materialized in this process
+    /// (dormant, or waking) has no live actor to attach to yet. Its
+    /// subscription opens anyway, without waking it and with no command to
+    /// the mob while it waits: the stream attaches at the member's wake, from
+    /// the woken actor's earliest retained event whatever `cursor` is (all of
+    /// it happened after the wake, so a cursor into an earlier incarnation
+    /// has nothing newer to skip), so the run the host's next delivery starts
+    /// is read from its `RunStarted`. Such a subscription names no actor and
+    /// no epoch; its `attached_epoch` is set at the attach, to the sequence
+    /// space the woken actor's stream names. Its stream ends with no event
+    /// when the member leaves the mob or the mob ends first. A member
+    /// MobMachine holds live whose session actor is gone is refused
+    /// `MobError::MemberSessionNotLive`.
     pub async fn subscribe_agent_events_from(
+        &self,
+        identity: &AgentIdentity,
+        cursor: SessionEventCursor,
+    ) -> Result<AgentEventSubscription, MobError> {
+        super::member_event_attach::subscribe_or_attach_at_wake(
+            self,
+            identity,
+            cursor,
+            super::member_event_attach::AttachPath::Authorized,
+        )
+        .await
+    }
+
+    /// One subscription attempt through MobMachine's subscription authority,
+    /// which refuses a member with no live session actor
+    /// `MobError::MemberSessionNotLive`.
+    pub(super) async fn subscribe_agent_events_once(
         &self,
         identity: &AgentIdentity,
         cursor: SessionEventCursor,
@@ -11767,10 +12388,35 @@ impl MobHandle {
     /// local bridge session. Placed members require the actor-owned external
     /// event pump, so this non-blocking helper rejects them explicitly rather
     /// than treating their host-resident session id as a local session id.
+    ///
+    /// A member that is not materialized in this process (dormant, or waking)
+    /// is subscribed without waking it and attaches at its wake, at the
+    /// session MobMachine binds it to then, as
+    /// [`Self::subscribe_agent_events_from`] describes. A member MobMachine
+    /// holds live whose session actor is gone is refused
+    /// `MobError::MemberSessionNotLive`.
     pub async fn subscribe_agent_events_observation(
         &self,
         identity: &AgentIdentity,
     ) -> Result<EventStream, MobError> {
+        super::member_event_attach::subscribe_or_attach_at_wake(
+            self,
+            identity,
+            SessionEventCursor::Live,
+            super::member_event_attach::AttachPath::Observation,
+        )
+        .await
+        .map(|subscription| subscription.stream)
+    }
+
+    /// One observation-only subscription attempt at the session MobMachine
+    /// binds `identity` to now, refused `MobError::MemberSessionNotLive`
+    /// when that session has no live actor.
+    pub(super) async fn subscribe_agent_events_observation_once(
+        &self,
+        identity: &AgentIdentity,
+        cursor: SessionEventCursor,
+    ) -> Result<AgentEventSubscription, MobError> {
         let runtime_mode = {
             let roster = self.roster.read().await;
             let entry = roster
@@ -11778,36 +12424,35 @@ impl MobHandle {
                 .ok_or_else(|| MobError::MemberNotFound(identity.clone()))?;
             entry.runtime_mode
         };
-        let machine_state = self.machine_state_watch_rx.borrow().clone();
-        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
-        if super::member_runtime_is_host_owned(&machine_state, identity) {
-            return Err(MobError::UnsupportedForMode {
-                mode: runtime_mode,
-                reason: "observation-only agent event subscriptions for placed members require the actor-owned external event pump"
-                    .to_string(),
-            });
-        }
-        let session_id = machine_state
-            .member_session_bindings
-            .get(&dsl_identity)
-            .ok_or_else(|| MobError::UnsupportedForMode {
-                mode: runtime_mode,
-                reason: "agent event subscriptions are not supported for peer-only members"
-                    .to_string(),
-            })
-            .and_then(|session_id| {
-                Self::session_id_from_dsl(session_id, "observation agent event subscription")
-            })?;
-        crate::runtime::session_service::MobSessionService::subscribe_session_events(
+        let session_id = {
+            let machine_state = self.machine_state_watch_rx.borrow();
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+            if super::member_runtime_is_host_owned(&machine_state, identity) {
+                return Err(MobError::UnsupportedForMode {
+                    mode: runtime_mode,
+                    reason: "observation-only agent event subscriptions for placed members require the actor-owned external event pump"
+                        .to_string(),
+                });
+            }
+            machine_state
+                .member_session_bindings
+                .get(&dsl_identity)
+                .ok_or_else(|| MobError::UnsupportedForMode {
+                    mode: runtime_mode,
+                    reason: "agent event subscriptions are not supported for peer-only members"
+                        .to_string(),
+                })
+                .and_then(|session_id| {
+                    Self::session_id_from_dsl(session_id, "observation agent event subscription")
+                })?
+        };
+        crate::runtime::session_service::MobSessionService::subscribe_agent_session_events_from(
             self.session_service.as_ref(),
             &session_id,
+            cursor,
         )
         .await
-        .map_err(|error| {
-            MobError::Internal(format!(
-                "failed to subscribe to agent events for '{identity}': {error}"
-            ))
-        })
+        .map_err(|error| agent_event_subscription_error(identity, &session_id, error))
     }
 
     /// Subscribe to agent events for all active members (point-in-time snapshot).
@@ -15413,7 +16058,10 @@ impl MobHandle {
     /// too: its pending unregister is completed and the same session is
     /// re-attached (`Reattached`). `NotDegraded` is a success no-op and is
     /// reported only for a registration with a committed attachment. Placed
-    /// members are reloaded by their member host and are rejected typed.
+    /// members are reloaded by their member host and are rejected typed. A
+    /// member whose seat built nothing has no session to reload: its session
+    /// is created at its first wake, and until then the reload is refused
+    /// with [`MobError::UnsupportedForMode`] saying so; a delivery wakes it.
     /// While the mob is Stopped the reload discards the degraded registration
     /// and publishes its successor, which the Stop's staged `MobStop` holds,
     /// and answers `Discarded`: the successor's revival waits for Running,
@@ -16181,13 +16829,13 @@ impl MobHandle {
 
     fn kickoff_wait_is_satisfied(
         entry: &RosterEntry,
-        snapshot: &MobMemberSnapshot,
+        status: MobMemberStatus,
         pending_kickoff_member_ids: &BTreeSet<String>,
     ) -> bool {
         if entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost {
             return true;
         }
-        match snapshot.status {
+        match status {
             MobMemberStatus::Unknown => false,
             MobMemberStatus::Active => {
                 !pending_kickoff_member_ids.contains(entry.agent_identity.as_str())
@@ -16214,15 +16862,26 @@ impl MobHandle {
                 if super::member_runtime_is_host_owned(machine_state, &entry.agent_identity) {
                     machine_state.placed_member_ready_for_identity(&dsl_identity)
                 } else {
-                    machine_state
-                        .identity_to_runtime
-                        .get(&dsl_identity)
-                        .is_some_and(|runtime_id| {
-                            machine_state
-                                .member_startup_runtime_ready
-                                .contains(runtime_id)
-                                || machine_state.member_startup_ready.contains(runtime_id)
-                        })
+                    match super::boot_plan::member_materialization_phase(
+                        machine_state,
+                        &dsl_identity,
+                    ) {
+                        // A Dormant member's startup is owed only at its
+                        // wake: as a member it is ready, and the wait never
+                        // materializes it.
+                        Some(mob_dsl::MemberMaterializationPhase::Dormant) => true,
+                        // A Waking member's startup is in flight: wait for it.
+                        Some(mob_dsl::MemberMaterializationPhase::Waking) => false,
+                        Some(mob_dsl::MemberMaterializationPhase::Live) | None => machine_state
+                            .identity_to_runtime
+                            .get(&dsl_identity)
+                            .is_some_and(|runtime_id| {
+                                machine_state
+                                    .member_startup_runtime_ready
+                                    .contains(runtime_id)
+                                    || machine_state.member_startup_ready.contains(runtime_id)
+                            }),
+                    }
                 }
             }
             mob_dsl::MobMemberLifecycleStatus::Retiring
@@ -16255,12 +16914,20 @@ impl MobHandle {
                 let Some(entry) = entries.get(id) else {
                     continue;
                 };
-                let member_snapshot = self
-                    .member_status(&AgentIdentity::from(id.as_str()))
-                    .await?;
+                // The poll uses only the member's status. A Dormant member's
+                // comes from the published machine state, so a poll reads no
+                // Dormant member's session.
+                let status = match self.dormant_member_status_from_machine_state(id) {
+                    Some((status, _)) => status,
+                    None => {
+                        self.member_status(&AgentIdentity::from(id.as_str()))
+                            .await?
+                            .status
+                    }
+                };
                 if !Self::kickoff_wait_is_satisfied(
                     entry,
-                    &member_snapshot,
+                    status,
                     &kickoff_snapshot.pending_kickoff_member_ids,
                 ) {
                     pending_member_ids.push(id.clone());
@@ -16488,6 +17155,16 @@ impl MobHandle {
     /// resolves live peer connectivity when a comms runtime is available,
     /// and projects the current realtime attachment status from the
     /// MeerkatMachine (when the runtime adapter is available).
+    ///
+    /// A member MobMachine holds Dormant reads like an idle live member: a
+    /// run is only ever open on a materialized member, so its progress is
+    /// idle and healthy with no in-flight work, answered from that fact
+    /// (MobMachine's recorded last progress, when it holds one). Its preview
+    /// and token count come from its committed durable head, read on
+    /// demand; the read never wakes it. A seated member never woken, whose
+    /// seat session is unborn (its first wake creates it), reads like an
+    /// eagerly created member before its first turn: no preview, zero
+    /// tokens, no `preview_unavailable`, with nothing read.
     pub async fn member_status(
         &self,
         identity: &AgentIdentity,
@@ -16655,6 +17332,26 @@ impl MobHandle {
                 return None;
             }
             let session_id = snapshot.current_bridge_session_id().cloned()?;
+            let unmaterialized = {
+                let machine_state = self.machine_state_watch_rx.borrow();
+                super::boot_plan::domain_member_is_unmaterialized(&machine_state, identity)
+            };
+            if unmaterialized {
+                // A member that is not materialized has no live registration:
+                // its capabilities are those of the model its wake binds
+                // (its incarnation's model override over its profile),
+                // resolved through the model catalog as a live member's are.
+                // Read-only: no session is registered and nothing wakes. A
+                // model the catalog does not hold (a realm-configured or
+                // self-hosted one) has no capabilities to report until the
+                // member is live.
+                let (provider, model) = self.dormant_member_llm_identity(identity).await?;
+                let profile = meerkat_models::canonical().profile_for(provider, &model)?;
+                return Some(
+                    meerkat_runtime::SessionLlmCapabilitySurface::from_model_profile(&profile)
+                        .to_wire_resolved(),
+                );
+            }
             let runtime = self.runtime_adapter.as_ref()?.as_ref();
             runtime
                 .resolved_session_llm_capabilities(&session_id)
@@ -16668,6 +17365,34 @@ impl MobHandle {
             let _ = snapshot;
             None
         }
+    }
+
+    /// The provider and model a dormant member's wake binds: its
+    /// incarnation's profile (the spawn's effective profile, or the
+    /// definition's for its role) with its model override applied, as every
+    /// materialization of the member applies it. `None` when the profile no
+    /// longer resolves or its provider is not known for the model.
+    #[cfg(feature = "runtime-adapter")]
+    async fn dormant_member_llm_identity(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Option<(meerkat_core::Provider, String)> {
+        let entry = self.roster.read().await.get(identity).cloned()?;
+        let mut profile = match entry.effective_profile_override.clone() {
+            Some(profile) => profile,
+            None => self
+                .definition
+                .resolve_profile(&entry.role, self.realm_profile_store.as_ref())
+                .await
+                .ok()?,
+        };
+        if let Some(model) = entry.effective_model_override.clone() {
+            profile.model = model;
+        }
+        let provider = profile
+            .provider
+            .or_else(|| meerkat_models::infer_provider(&profile.model))?;
+        Some((provider, profile.model))
     }
 
     async fn project_external_member_observation(
@@ -16751,6 +17476,11 @@ impl MobHandle {
     /// autonomous member leaves `pending` / `starting` and reaches a terminal
     /// completion-handle phase. `callback_pending` is terminal for this barrier
     /// (and remains visible in the member snapshot for external fulfillment).
+    ///
+    /// The wait polls only each member's status, and a Dormant member's comes
+    /// from MobMachine with no read of its session. The returned snapshots are
+    /// [`Self::member_status`]'s: one durable-head read per Dormant member per
+    /// call, for its preview and token count.
     pub async fn wait_for_kickoff_complete(
         &self,
         timeout: Option<Duration>,
@@ -16774,7 +17504,8 @@ impl MobHandle {
 
     /// Wait until the given members resolve their initial kickoff.
     ///
-    /// See [`wait_for_kickoff_complete`](Self::wait_for_kickoff_complete) for details.
+    /// See [`wait_for_kickoff_complete`](Self::wait_for_kickoff_complete) for
+    /// details, the reads of Dormant members included.
     pub async fn wait_for_members_kickoff_complete(
         &self,
         ids: &[AgentIdentity],
@@ -16790,6 +17521,13 @@ impl MobHandle {
     }
 
     /// Wait until all current members are startup-ready for orchestration.
+    /// A Dormant member is ready (its startup is owed only at its wake, and
+    /// the wait does not materialize it); a member being woken is waited for.
+    ///
+    /// Readiness is read from MobMachine, with no read of a Dormant member's
+    /// session. The returned snapshots are [`Self::member_status`]'s, the same
+    /// a live idle member's would show: one durable-head read per Dormant
+    /// member per call, for its preview and token count.
     pub async fn wait_for_ready(
         &self,
         timeout: Option<Duration>,
@@ -16811,6 +17549,11 @@ impl MobHandle {
     }
 
     /// Wait until the given members are startup-ready for orchestration.
+    /// A Dormant member is ready (its startup is owed only at its wake, and
+    /// the wait does not materialize it); a member being woken is waited for.
+    ///
+    /// Reads as [`Self::wait_for_ready`] does: readiness from MobMachine, and
+    /// one durable-head read per Dormant member per call for the snapshots.
     pub async fn wait_for_members_ready(
         &self,
         ids: &[AgentIdentity],
@@ -16857,10 +17600,21 @@ impl MobHandle {
     }
 
     /// Collect snapshots for all members that have reached terminal states.
+    ///
+    /// A Dormant member is seated and wakeable: it holds no run to collect,
+    /// and MobMachine answers that it is not terminal, so the call reads
+    /// nothing of it (no command, no session read). Other members are read
+    /// through [`Self::member_status`].
     pub async fn collect_completed(&self) -> Vec<(AgentIdentity, MobMemberSnapshot)> {
         let entries = self.list_all_members().await;
         let mut completed = Vec::new();
         for entry in entries {
+            if matches!(
+                self.dormant_member_status_from_machine_state(&entry.agent_identity),
+                Some((_, false))
+            ) {
+                continue;
+            }
             if let Ok(snapshot) = self.member_status(&entry.agent_identity).await
                 && snapshot.is_final
             {
@@ -19040,34 +19794,93 @@ impl MobHandle {
         })
     }
 
-    /// Make sure `identity`'s live session materialization exists, reviving
-    /// it through MobMachine authority when the runtime retired it (for
-    /// example an idle executor torn down, or a restart). Runs no turn.
+    /// Make sure `identity` is materialized and ready in this process,
+    /// waking it through MobMachine (`WakeMember`, cause Operator) when it is
+    /// not: a dormant member, or one whose live materialization the runtime
+    /// retired (an idle executor torn down, a restart). Joins a wake already
+    /// in flight. Runs no turn. A refusal is typed
+    /// ([`MobError::MemberWakeRefused`], [`MobError::MemberRestoreFailed`]).
     pub async fn ensure_member_live(&self, identity: &AgentIdentity) -> Result<(), MobError> {
+        self.wake_member(identity, mob_dsl::MemberWakeCause::Operator)
+            .await
+    }
+
+    /// Wake `identity` for a delivery that is about to reach it (a
+    /// continuation's address resolution): `WakeMember` with cause
+    /// HostDelivery, as Core's own host dispatch applies it.
+    pub(crate) async fn wake_member_for_delivery(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        self.wake_member(identity, mob_dsl::MemberWakeCause::HostDelivery)
+            .await
+    }
+
+    /// Apply `WakeMember` for `identity` and wait for its answer. The live
+    /// session probe is the observation that MobMachine's drift arm needs for
+    /// a member it holds Live whose materialization is gone; it decides
+    /// nothing here.
+    async fn wake_member(
+        &self,
+        identity: &AgentIdentity,
+        cause: mob_dsl::MemberWakeCause,
+    ) -> Result<(), MobError> {
         let session_id = self
             .resolve_bridge_session_id(identity)
             .await
             .ok_or_else(|| MobError::MemberNotFound(identity.clone()))?;
-        match self
+        let observed_missing = match self
             .session_service
             .live_session_actor_registered(&session_id)
             .await
         {
-            Ok(true) => return Ok(()),
-            Ok(false) | Err(meerkat_core::service::SessionError::NotFound { .. }) => {}
+            Ok(true) => false,
+            Ok(false) | Err(meerkat_core::service::SessionError::NotFound { .. }) => true,
             Err(error) => return Err(MobError::SessionError(error)),
-        }
+        };
         let agent_identity = identity.clone();
-        self.send_actor_command(
-            move |reply_tx| MobCommand::ReviveMemberLiveMaterialization {
-                agent_identity,
-                bridge_session_id: session_id,
-                scope: super::actor::MemberLiveRevivalScope::default(),
-                reply_tx,
-            },
-        )
+        self.send_actor_command(move |reply_tx| MobCommand::WakeMember {
+            agent_identity,
+            cause,
+            observed_missing,
+            input_class: mob_dsl::PeerInputClass::Content,
+            sender_waking: false,
+            reply_tx,
+        })
         .await?
         .map(|_| ())
+        .map_err(|failure| failure.into_mob_error(identity))
+    }
+
+    /// Make `identity` dormant: release its live materialization in this
+    /// process while it is quiescent. It stays seated at the same session,
+    /// generation and fence, every surface keeps showing it, and its next
+    /// delivery (host or peer) wakes it. A member that is not materialized
+    /// has nothing to release. Refused retryably
+    /// ([`MobError::LifecycleOperationPending`]) while it is being woken,
+    /// while its runtime binding has not landed yet (right after a spawn),
+    /// or while it has work in flight: nothing is closed or interrupted. A
+    /// placed member, and a member wired to a placed member (which reaches
+    /// it only while it is live), is refused with
+    /// [`MobError::UnsupportedForMode`].
+    ///
+    /// On a session service that keeps no durable sessions (an in-memory
+    /// one), a member's session exists only while the member is
+    /// materialized, so the member stays materialized and keeps serving its
+    /// deliveries: a release there is not a stop. The release is refused
+    /// retryably while the member's session holds accepted work that has not
+    /// reached a terminal (queued, held at its start, or running), and
+    /// otherwise answers `Ok` with nothing released. Releasing it would
+    /// discard the session it keeps, and its next delivery could not wake it
+    /// on that session. A host that releases idle members to free memory
+    /// frees nothing on such a service.
+    pub async fn release_member(&self, identity: &AgentIdentity) -> Result<(), MobError> {
+        let agent_identity = identity.clone();
+        self.send_actor_command(move |reply_tx| MobCommand::ReleaseMember {
+            agent_identity,
+            reply_tx,
+        })
+        .await?
     }
 
     /// Members transitively spawned by `identity` (via durable spawned_by
@@ -21066,6 +21879,7 @@ mod tests {
             .apply_signal(mob_dsl::MobMachineSignal::ObserveRuntimeReady {
                 agent_runtime_id: runtime_id,
                 fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
+                runtime_epoch_id: None,
             })
             .expect("runtime ready observation should admit for current runtime");
 

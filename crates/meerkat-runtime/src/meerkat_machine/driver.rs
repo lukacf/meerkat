@@ -11083,6 +11083,7 @@ pub(crate) fn machine_resolve_pre_resolved_runtime_completion_result(
                 generation: Some(crate::meerkat_machine::dsl::Generation::from(0)),
                 runtime_epoch_id: None,
                 session_id: dsl_session_id,
+                residency_owner: crate::meerkat_machine::dsl::SessionResidencyOwner::Session,
             },
             "PrepareBindings",
         )?;

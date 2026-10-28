@@ -845,6 +845,51 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PrepareBindingsRetired`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
+- `ResolveEmptyResumeRetirementRetireIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveEmptyResumeRetirementRetireAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveEmptyResumeRetirementRetireRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveEmptyResumeRetirementRetireRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveEmptyResumeRetirementRetireStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveEmptyResumeRetirementKeepServingIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveEmptyResumeRetirementKeepServingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveEmptyResumeRetirementKeepServingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveEmptyResumeRetirementKeepServingRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveEmptyResumeRetirementKeepServingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimCompositionResidencyIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimCompositionResidencyAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimCompositionResidencyRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimCompositionResidencyRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimCompositionResidencyStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetPeerIngressContextIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8882,6 +8927,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RunSuspendedForStop`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RuntimeRegistrationReleased`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EmptyResumeRetirementResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

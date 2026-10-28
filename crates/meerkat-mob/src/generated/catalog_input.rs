@@ -222,6 +222,16 @@ pub enum MobMachineCatalogInput {
     SettleExplicitResumeCleanup,
     FinishExplicitResume,
     RetireAtScope,
+    SeedMemberResidency,
+    WakeMember,
+    PlanBootMaterialization,
+    SealBootMaterializationPlan,
+    ClassifyPeerNotice,
+    CommitDormantSeat,
+    ResolveMemberHostPreparation,
+    BeginMemberRotation,
+    CommitMemberRotation,
+    ClassifyMemberRelease,
 }
 
 impl MobMachineCatalogInput {
@@ -444,6 +454,16 @@ impl MobMachineCatalogInput {
         Self::SettleExplicitResumeCleanup,
         Self::FinishExplicitResume,
         Self::RetireAtScope,
+        Self::SeedMemberResidency,
+        Self::WakeMember,
+        Self::PlanBootMaterialization,
+        Self::SealBootMaterializationPlan,
+        Self::ClassifyPeerNotice,
+        Self::CommitDormantSeat,
+        Self::ResolveMemberHostPreparation,
+        Self::BeginMemberRotation,
+        Self::CommitMemberRotation,
+        Self::ClassifyMemberRelease,
     ];
 
     #[must_use]
@@ -669,6 +689,16 @@ impl MobMachineCatalogInput {
             Self::SettleExplicitResumeCleanup => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SettleExplicitResumeCleanup,
             Self::FinishExplicitResume => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::FinishExplicitResume,
             Self::RetireAtScope => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RetireAtScope,
+            Self::SeedMemberResidency => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SeedMemberResidency,
+            Self::WakeMember => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::WakeMember,
+            Self::PlanBootMaterialization => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::PlanBootMaterialization,
+            Self::SealBootMaterializationPlan => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SealBootMaterializationPlan,
+            Self::ClassifyPeerNotice => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ClassifyPeerNotice,
+            Self::CommitDormantSeat => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::CommitDormantSeat,
+            Self::ResolveMemberHostPreparation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveMemberHostPreparation,
+            Self::BeginMemberRotation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::BeginMemberRotation,
+            Self::CommitMemberRotation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::CommitMemberRotation,
+            Self::ClassifyMemberRelease => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ClassifyMemberRelease,
         }
     }
 
@@ -919,6 +949,16 @@ impl MobMachineCatalogInput {
             Self::SettleExplicitResumeCleanup => "SettleExplicitResumeCleanup",
             Self::FinishExplicitResume => "FinishExplicitResume",
             Self::RetireAtScope => "RetireAtScope",
+            Self::SeedMemberResidency => "SeedMemberResidency",
+            Self::WakeMember => "WakeMember",
+            Self::PlanBootMaterialization => "PlanBootMaterialization",
+            Self::SealBootMaterializationPlan => "SealBootMaterializationPlan",
+            Self::ClassifyPeerNotice => "ClassifyPeerNotice",
+            Self::CommitDormantSeat => "CommitDormantSeat",
+            Self::ResolveMemberHostPreparation => "ResolveMemberHostPreparation",
+            Self::BeginMemberRotation => "BeginMemberRotation",
+            Self::CommitMemberRotation => "CommitMemberRotation",
+            Self::ClassifyMemberRelease => "ClassifyMemberRelease",
         }
     }
 }

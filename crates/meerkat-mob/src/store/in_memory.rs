@@ -1544,6 +1544,14 @@ impl MobIdentityMemberStore for InMemoryMobIdentityStore {
         &self,
         mob_id: &MobId,
     ) -> Result<super::MemberBindingJournalRead, MobStoreError> {
+        self.read_member_binding_journal_from(mob_id, 0).await
+    }
+
+    async fn read_member_binding_journal_from(
+        &self,
+        mob_id: &MobId,
+        from_cursor: u64,
+    ) -> Result<super::MemberBindingJournalRead, MobStoreError> {
         if self.event_tx.is_none() {
             return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
         }
@@ -1567,8 +1575,12 @@ impl MobIdentityMemberStore for InMemoryMobIdentityStore {
                 intent_rows.insert(identity.clone(), management);
             }
         }
+        // The log is in cursor order, so the tail starts at a binary search.
+        let tail = aggregate
+            .events
+            .partition_point(|event| event.cursor < from_cursor);
         Ok(super::MemberBindingJournalRead {
-            events: aggregate.events.clone(),
+            events: aggregate.events[tail..].to_vec(),
             intent_rows,
         })
     }
@@ -3301,12 +3313,12 @@ impl MobEventStore for InMemoryMobEventStore {
         }
         let aggregate = self.aggregate.read().await;
         let events = &aggregate.events;
-        Ok(events
-            .iter()
-            .filter(|event| event.cursor > after_cursor)
-            .take(limit)
-            .cloned()
-            .collect())
+        // Cursors only grow along the log (an append takes the last cursor
+        // plus one; prune and clear keep the order), so the first event after
+        // the cursor is found by binary search instead of a scan from the
+        // start.
+        let start = events.partition_point(|event| event.cursor <= after_cursor);
+        Ok(events[start..].iter().take(limit).cloned().collect())
     }
 
     async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError> {
@@ -5979,5 +5991,121 @@ mod tests {
     async fn temporary_council_unfinished_listing_tracks_settlement() {
         let store = InMemoryTemporaryCouncilStore::new();
         temporary_council_contract::unfinished_listing_tracks_settlement(&store).await;
+    }
+
+    // --- Cursor reads of the event log ---
+
+    // A cursor poll finds its first event by binary search: from every
+    // cursor, before and after a prune leaves gaps in the cursors, it
+    // answers exactly what a scan of the whole log answers.
+    #[tokio::test]
+    async fn a_poll_from_any_cursor_answers_what_a_scan_answers() {
+        let store = InMemoryMobEventStore::new();
+        let now = Utc::now();
+        for index in 0..12u32 {
+            // Every third event is old, so the prune below removes it.
+            let timestamp = if index % 3 == 1 {
+                now - chrono::Duration::minutes(10)
+            } else {
+                now
+            };
+            store
+                .append(NewMobEvent {
+                    mob_id: MobId::from(if index.is_multiple_of(2) {
+                        "mob"
+                    } else {
+                        "other-mob"
+                    }),
+                    timestamp: Some(timestamp),
+                    kind: MobEventKind::MobCompleted,
+                })
+                .await
+                .expect("append");
+        }
+        for pruned in [false, true] {
+            if pruned {
+                let removed = store
+                    .prune(now - chrono::Duration::minutes(1))
+                    .await
+                    .expect("prune");
+                assert_eq!(removed, 4, "the prune leaves gaps in the cursors");
+            }
+            let log = store.replay_all().await.expect("replay the log");
+            let last = log.last().map_or(0, |event| event.cursor);
+            for after in 0..=last + 1 {
+                for limit in [1, 2, 5, 100] {
+                    let polled = store
+                        .poll(after, limit)
+                        .await
+                        .expect("poll")
+                        .iter()
+                        .map(|event| event.cursor)
+                        .collect::<Vec<_>>();
+                    let scanned = log
+                        .iter()
+                        .filter(|event| event.cursor > after)
+                        .take(limit)
+                        .map(|event| event.cursor)
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        polled, scanned,
+                        "a poll after {after} with limit {limit} (pruned: {pruned})"
+                    );
+                }
+            }
+        }
+    }
+
+    // The member binding journal tail is the whole journal read from its
+    // cursor on, with the same intent rows: from 0 it is the whole journal,
+    // past the last cursor it is empty.
+    #[tokio::test]
+    async fn the_member_binding_journal_tail_is_the_whole_read_from_its_cursor() {
+        let events = InMemoryMobEventStore::new();
+        let store = InMemoryMobIdentityStore::paired_with_event_store(
+            &events,
+            Arc::new(crate::store::SystemMobIdentityStoreClock),
+        );
+        let mob_id = MobId::from("mob");
+        for owner in ["mob", "other-mob", "mob", "mob", "other-mob"] {
+            events
+                .append(NewMobEvent {
+                    mob_id: MobId::from(owner),
+                    timestamp: None,
+                    kind: MobEventKind::MobCompleted,
+                })
+                .await
+                .expect("append");
+        }
+        let whole = store
+            .read_member_binding_journal(&mob_id)
+            .await
+            .expect("read the whole journal");
+        assert_eq!(
+            whole.events.len(),
+            5,
+            "the journal holds every mob's events"
+        );
+        for from_cursor in 0..=7u64 {
+            let tail = store
+                .read_member_binding_journal_from(&mob_id, from_cursor)
+                .await
+                .expect("read the journal tail");
+            let expected = whole
+                .events
+                .iter()
+                .filter(|event| event.cursor >= from_cursor)
+                .map(|event| event.cursor)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                tail.events
+                    .iter()
+                    .map(|event| event.cursor)
+                    .collect::<Vec<_>>(),
+                expected,
+                "the tail from {from_cursor}"
+            );
+            assert_eq!(tail.intent_rows, whole.intent_rows);
+        }
     }
 }

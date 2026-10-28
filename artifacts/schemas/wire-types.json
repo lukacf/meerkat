@@ -4682,7 +4682,7 @@
                 "type": "null"
               }
             ],
-            "description": "Minimum cache lifetime. GPT-5.6 currently accepts only `30m`."
+            "description": "Minimum cache lifetime: `30m` (default) or `12h` on GPT-5.6 and later."
           }
         },
         "type": "object"
@@ -4705,7 +4705,8 @@
       "OpenAiPromptCacheTtl": {
         "description": "Minimum lifetime for GPT-5.6 prompt-cache entries.",
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -16731,7 +16732,8 @@
       },
       "WireOpenAiPromptCacheTtl": {
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -25050,7 +25052,8 @@
       },
       "WireOpenAiPromptCacheTtl": {
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -30586,7 +30589,7 @@
                 "type": "null"
               }
             ],
-            "description": "Minimum cache lifetime. GPT-5.6 currently accepts only `30m`."
+            "description": "Minimum cache lifetime: `30m` (default) or `12h` on GPT-5.6 and later."
           }
         },
         "type": "object"
@@ -30609,7 +30612,8 @@
       "OpenAiPromptCacheTtl": {
         "description": "Minimum lifetime for GPT-5.6 prompt-cache entries.",
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -47373,7 +47377,7 @@
                 "type": "null"
               }
             ],
-            "description": "Minimum cache lifetime. GPT-5.6 currently accepts only `30m`."
+            "description": "Minimum cache lifetime: `30m` (default) or `12h` on GPT-5.6 and later."
           }
         },
         "type": "object"
@@ -47396,7 +47400,8 @@
       "OpenAiPromptCacheTtl": {
         "description": "Minimum lifetime for GPT-5.6 prompt-cache entries.",
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -67103,7 +67108,7 @@
                 "type": "null"
               }
             ],
-            "description": "Minimum cache lifetime. GPT-5.6 currently accepts only `30m`."
+            "description": "Minimum cache lifetime: `30m` (default) or `12h` on GPT-5.6 and later."
           }
         },
         "type": "object"
@@ -67126,7 +67131,8 @@
       "OpenAiPromptCacheTtl": {
         "description": "Minimum lifetime for GPT-5.6 prompt-cache entries.",
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -73015,7 +73021,8 @@
       },
       "WireOpenAiPromptCacheTtl": {
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -79634,7 +79641,8 @@
       },
       "WireOpenAiPromptCacheTtl": {
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -88183,7 +88191,7 @@
                 "type": "null"
               }
             ],
-            "description": "Minimum cache lifetime. GPT-5.6 currently accepts only `30m`."
+            "description": "Minimum cache lifetime: `30m` (default) or `12h` on GPT-5.6 and later."
           }
         },
         "type": "object"
@@ -88206,7 +88214,8 @@
       "OpenAiPromptCacheTtl": {
         "description": "Minimum lifetime for GPT-5.6 prompt-cache entries.",
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -93781,6 +93790,219 @@
             "type": "string"
           }
         ]
+      },
+      "DurableResumeHold": {
+        "description": "Why a durable session refuses to serve a resume while its content stays\nintact on disk. Typed companion of\n[`SessionError::DurableTailHeldForRecovery`],\n[`SessionError::DurableTailRecoveryRefused`], and\n[`SessionError::DurableEvidenceQuarantined`] so surfaces route \"held,\nnothing lost\" separately from \"the service faulted\" without parsing prose.",
+        "oneOf": [
+          {
+            "const": "tail_held_for_recovery",
+            "description": "A verified durable tail sits past the last committed runtime boundary.\nOnly the recovery commit may promote or repair it; serving past it\nwould assert runtime facts that never committed.",
+            "type": "string"
+          },
+          {
+            "const": "recovery_refused",
+            "description": "Machine-authorized recovery refused to commit the verified durable\ntail because persisted runtime facts conflict with it (a live or\nundecodable runtime lifecycle, or receipts that already cover or\ncontradict the candidate). Retry after the conflicting runtime\nquiesces.",
+            "type": "string"
+          },
+          {
+            "const": "evidence_quarantined",
+            "description": "Durable evidence is forked or unverifiable, so no head is trustworthy\nenough to serve as authority.",
+            "type": "string"
+          },
+          {
+            "const": "audited_endpoint_divergence",
+            "description": "The committed WholeBlob document fails its own audited-endpoint guard.\nRows are intact; the sanctioned repair re-anchors the document.",
+            "type": "string"
+          }
+        ]
+      },
+      "PeerWakeRefusal": {
+        "description": "Why a peer message to a seated member that is not materialized in its\nprocess was not delivered: the member's mob refused, or could not finish,\nthe wake the message needed.\n\nEvery refusal means \"not delivered\": the envelope was never handed to the\nrecipient's inbox, so a retry cannot duplicate it. Only a peer that is not\na member at all is `peer not found`; a seated member is never reported\nthat way, whatever its residency.\n\nClosed vocabulary: a new refusal is a breaking change for every SDK that\nparses it.",
+        "oneOf": [
+          {
+            "description": "The member's restore failed, now or earlier: it is Broken. `reason` is\nthe failure its restore recorded; `hold` is set when its durable\nsession is intact but withheld (a held tail, quarantined evidence),\nand names what clears it.",
+            "properties": {
+              "hold": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/DurableResumeHold"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "const": "member_broken",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member is being retired.",
+            "properties": {
+              "kind": {
+                "const": "member_retiring",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member's mob is not running (stopped, completed or destroyed).\nA Live member of a stopped mob refuses the same way as a dormant one.",
+            "properties": {
+              "kind": {
+                "const": "mob_not_running",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member's mob is shutting down and admits no new work.",
+            "properties": {
+              "kind": {
+                "const": "admission_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The sender's own send budget (`ack_timeout_secs`) ended, or the\nmob's wake bound did, before the member was ready. The wake itself\nmay still finish; nothing was handed off.",
+            "properties": {
+              "kind": {
+                "const": "wake_timed_out",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member's mob actor is gone (it exited while the wake waited).",
+            "properties": {
+              "kind": {
+                "const": "mob_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member was woken, but its inbox was gone again before the hand-off\n(twice within the sender's budget).",
+            "properties": {
+              "kind": {
+                "const": "materialization_lost",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member belongs to a candidate composition, which never\nmaterializes members.",
+            "properties": {
+              "kind": {
+                "const": "non_authoritative_composition",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member's host has preparation pending for it (a first-boot row, or\nits build preparation asked to be retried).",
+            "properties": {
+              "kind": {
+                "const": "host_preparation_pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member's durable resume gate was unavailable at the wake.",
+            "properties": {
+              "kind": {
+                "const": "resume_gate_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member is placed on a member host, which owns its materialization.",
+            "properties": {
+              "kind": {
+                "const": "host_owned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member's mob is quiescing its lifecycle (completion or destroy).",
+            "properties": {
+              "kind": {
+                "const": "lifecycle_origin_fenced",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The sender is itself still being woken (the send came from inside its\nown build) and the recipient was not live: the send would have waited\non another wake, so it is refused instead of risking a wait cycle.",
+            "properties": {
+              "kind": {
+                "const": "sender_waking",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -93942,6 +94164,39 @@
         },
         "required": [
           "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The peer is a seated member that was not materialized, and the wake\nthe message needed was refused or did not finish. Not delivered:\nnothing reached the peer, so a retry cannot duplicate it. `retryable`\nsays whether a later retry can succeed without an operator action\n(the refusal kind decides it). A peer that is not a member is\n`peer_not_found_or_not_trusted`, never this.",
+        "properties": {
+          "code": {
+            "const": "peer_wake_refused",
+            "type": "string"
+          },
+          "envelope_id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "peer": {
+            "type": "string"
+          },
+          "refusal": {
+            "$ref": "#/$defs/PeerWakeRefusal"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "peer",
+          "envelope_id",
+          "refusal",
+          "retryable",
           "message"
         ],
         "type": "object"
@@ -95010,7 +95265,7 @@
                 "type": "null"
               }
             ],
-            "description": "Minimum cache lifetime. GPT-5.6 currently accepts only `30m`."
+            "description": "Minimum cache lifetime: `30m` (default) or `12h` on GPT-5.6 and later."
           }
         },
         "type": "object"
@@ -95033,7 +95288,8 @@
       "OpenAiPromptCacheTtl": {
         "description": "Minimum lifetime for GPT-5.6 prompt-cache entries.",
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -101399,7 +101655,7 @@
                 "type": "null"
               }
             ],
-            "description": "Minimum cache lifetime. GPT-5.6 currently accepts only `30m`."
+            "description": "Minimum cache lifetime: `30m` (default) or `12h` on GPT-5.6 and later."
           }
         },
         "type": "object"
@@ -101422,7 +101678,8 @@
       "OpenAiPromptCacheTtl": {
         "description": "Minimum lifetime for GPT-5.6 prompt-cache entries.",
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -120262,7 +120519,8 @@
       },
       "WireOpenAiPromptCacheTtl": {
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -123808,7 +124066,8 @@
       },
       "WireOpenAiPromptCacheTtl": {
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -132359,7 +132618,8 @@
       },
       "WireOpenAiPromptCacheTtl": {
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -133553,7 +133813,8 @@
       },
       "WireOpenAiPromptCacheTtl": {
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -138976,7 +139237,8 @@
       },
       "WireOpenAiPromptCacheTtl": {
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -140395,7 +140657,8 @@
       },
       "WireOpenAiPromptCacheTtl": {
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -145038,7 +145301,7 @@
                 "type": "null"
               }
             ],
-            "description": "Minimum cache lifetime. GPT-5.6 currently accepts only `30m`."
+            "description": "Minimum cache lifetime: `30m` (default) or `12h` on GPT-5.6 and later."
           }
         },
         "type": "object"
@@ -145061,7 +145324,8 @@
       "OpenAiPromptCacheTtl": {
         "description": "Minimum lifetime for GPT-5.6 prompt-cache entries.",
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -147558,7 +147822,7 @@
                 "type": "null"
               }
             ],
-            "description": "Minimum cache lifetime. GPT-5.6 currently accepts only `30m`."
+            "description": "Minimum cache lifetime: `30m` (default) or `12h` on GPT-5.6 and later."
           }
         },
         "type": "object"
@@ -147581,7 +147845,8 @@
       "OpenAiPromptCacheTtl": {
         "description": "Minimum lifetime for GPT-5.6 prompt-cache entries.",
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -150359,7 +150624,7 @@
                 "type": "null"
               }
             ],
-            "description": "Minimum cache lifetime. GPT-5.6 currently accepts only `30m`."
+            "description": "Minimum cache lifetime: `30m` (default) or `12h` on GPT-5.6 and later."
           }
         },
         "type": "object"
@@ -150382,7 +150647,8 @@
       "OpenAiPromptCacheTtl": {
         "description": "Minimum lifetime for GPT-5.6 prompt-cache entries.",
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -152667,7 +152933,8 @@
           "one_hour",
           "thirty_minutes",
           "twenty_four_hours",
-          "provider_default"
+          "provider_default",
+          "twelve_hours"
         ],
         "type": "string"
       }
@@ -166199,7 +166466,7 @@
                 "type": "null"
               }
             ],
-            "description": "Minimum cache lifetime. GPT-5.6 currently accepts only `30m`."
+            "description": "Minimum cache lifetime: `30m` (default) or `12h` on GPT-5.6 and later."
           }
         },
         "type": "object"
@@ -166222,7 +166489,8 @@
       "OpenAiPromptCacheTtl": {
         "description": "Minimum lifetime for GPT-5.6 prompt-cache entries.",
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },
@@ -184998,7 +185266,8 @@
       },
       "WireOpenAiPromptCacheTtl": {
         "enum": [
-          "30m"
+          "30m",
+          "12h"
         ],
         "type": "string"
       },

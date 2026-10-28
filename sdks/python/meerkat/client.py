@@ -285,6 +285,7 @@ from .types import (
     ForkCacheLoweredRequestProvenance,
     ForkCacheProvider,
     ForkCacheTtl,
+    ForkCacheTtlUnknown,
     ForkInstructionPolicy,
     ForkPoint,
     HelpExecutionMode,
@@ -8868,17 +8869,24 @@ class MeerkatClient:
                 f"{context}: unsupported boundary kind {boundary_kind!r}",
             )
         ttl = MeerkatClient._require_string_field(data, "ttl", context)
-        if ttl not in {
-            "five_minutes",
-            "one_hour",
-            "thirty_minutes",
-            "twenty_four_hours",
-            "provider_default",
-        }:
-            raise MeerkatError(
-                "INVALID_RESPONSE",
-                f"{context}: unsupported ttl {ttl!r}",
-            )
+        # Advisory evidence whose vocabulary grows with provider cache
+        # lifetimes: a lifetime this SDK does not know reads as
+        # {"unknown": <the value>}, so a newer server never fails the read.
+        # A missing, empty or non-string ttl is malformed and fails closed
+        # above.
+        parsed_ttl: ForkCacheTtl | ForkCacheTtlUnknown = (
+            cast(ForkCacheTtl, ttl)
+            if ttl
+            in {
+                "five_minutes",
+                "one_hour",
+                "thirty_minutes",
+                "twenty_four_hours",
+                "provider_default",
+                "twelve_hours",
+            }
+            else {"unknown": ttl}
+        )
         return ForkAuthoredCacheBreakpoint(
             provider=cast(ForkCacheProvider, provider),
             model=MeerkatClient._require_string_field(data, "model", context),
@@ -8919,7 +8927,7 @@ class MeerkatClient:
                     context,
                 )
             ),
-            ttl=cast(ForkCacheTtl, ttl),
+            ttl=parsed_ttl,
         )
 
     @staticmethod

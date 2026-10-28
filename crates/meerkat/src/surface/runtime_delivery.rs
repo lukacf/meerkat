@@ -91,40 +91,58 @@ where
                 interaction_lineage_id,
                 handling_mode,
                 content,
-            } => self
-                .runtime
-                .accept_input_with_completion(
-                    subscription.session_id(),
-                    crate::job_delivery_event_input(
-                        &job_id,
-                        delivery_sequence,
-                        &subscription,
-                        &interaction_lineage_id,
-                        handling_mode,
-                        &content,
-                    ),
-                )
-                .await
-                .map(|_| ())
-                .map_err(|error| match error {
-                    meerkat_runtime::RuntimeDriverError::InputRefused { refusal } => {
-                        crate::JobDeliveryApplyError::Authorization(refusal.into())
-                    }
-                    meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
-                        ..
-                    } => crate::JobDeliveryApplyError::Authorization(
-                        meerkat_core::OperationAuthorizationError::Unavailable,
-                    ),
-                    // Another runtime owner hosts the recipient (#1813): its
-                    // registration was refused; a skip, never a block.
-                    meerkat_runtime::RuntimeDriverError::ServedElsewhere { session_id } => {
-                        crate::JobDeliveryApplyError::ServedElsewhere { session_id }
-                    }
-                    meerkat_runtime::RuntimeDriverError::HostingUnavailable { session_id } => {
-                        crate::JobDeliveryApplyError::HostingUnavailable { session_id }
-                    }
-                    other => crate::JobDeliveryApplyError::Infrastructure(other.to_string()),
-                }),
+            } => {
+                // An event to a dormant mob member's session wakes the member
+                // through its owner first, as a host delivery does; a refused
+                // wake leaves the row pending for a later attempt.
+                if !self
+                    .runtime
+                    .contains_session(subscription.session_id())
+                    .await
+                    && let Some(Err(error)) =
+                        meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+                            .wake(subscription.session_id())
+                            .await
+                {
+                    return Err(crate::JobDeliveryApplyError::Infrastructure(format!(
+                        "the member owning session {} could not be woken: {error}",
+                        subscription.session_id()
+                    )));
+                }
+                self.runtime
+                    .accept_input_with_completion(
+                        subscription.session_id(),
+                        crate::job_delivery_event_input(
+                            &job_id,
+                            delivery_sequence,
+                            &subscription,
+                            &interaction_lineage_id,
+                            handling_mode,
+                            &content,
+                        ),
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| match error {
+                        meerkat_runtime::RuntimeDriverError::InputRefused { refusal } => {
+                            crate::JobDeliveryApplyError::Authorization(refusal.into())
+                        }
+                        meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                            ..
+                        } => crate::JobDeliveryApplyError::Authorization(
+                            meerkat_core::OperationAuthorizationError::Unavailable,
+                        ),
+                        // Another runtime owner hosts the recipient: its
+                        // registration was refused; a skip, never a block.
+                        meerkat_runtime::RuntimeDriverError::ServedElsewhere { session_id } => {
+                            crate::JobDeliveryApplyError::ServedElsewhere { session_id }
+                        }
+                        meerkat_runtime::RuntimeDriverError::HostingUnavailable { session_id } => {
+                            crate::JobDeliveryApplyError::HostingUnavailable { session_id }
+                        }
+                        other => crate::JobDeliveryApplyError::Infrastructure(other.to_string()),
+                    })
+            }
         }
     }
 }
@@ -174,7 +192,12 @@ impl<S> SessionServiceDeliveryHost<S> {
     /// to this host's hosting domain on the owner's rounds, and confirm them
     /// against that owner when a governed runtime admits them. A stable
     /// capability: the host opts in whether or not the owner is available
-    /// now.
+    /// now. A governed runtime admits a notice as a resume of the consent's
+    /// origin run, so its composition needs a retained-resume owner: the
+    /// stock composition installs one, and a custom composition supplies its
+    /// own (`NativeGrantWorkConfiguration::retained_resume`); without one no
+    /// notice is admitted (each stays owed, or fails once its run's
+    /// destination is superseded).
     #[must_use]
     pub fn with_consent_notices(mut self, projector: Arc<crate::ConsentNoticeProjector>) -> Self {
         self.consent_notices = Some(projector);

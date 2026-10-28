@@ -29,7 +29,9 @@ use std::sync::Arc;
 ///
 /// Dropping without consuming is a bug and always panics. The async
 /// `rollback()` method performs the actual cleanup;
-/// the synchronous `Drop` can only detect the mistake, not fix it.
+/// the synchronous `Drop` can only detect the mistake, not fix it. A guard
+/// dropped while its rollback is in flight (the task carrying it was
+/// aborted) was consumed, not forgotten: `Drop` logs it and does not panic.
 #[must_use = "provisioned member must be committed or rolled back"]
 pub(super) struct PendingProvision {
     member_ref: Option<MemberRef>,
@@ -47,6 +49,11 @@ pub(super) struct PendingProvision {
     /// cleanup custody after a failed rollback, so `Drop` does not emit a
     /// second, less informative leak record for the same resource.
     custody_settled: bool,
+    /// Set while a rollback's owner cleanup is in flight. A guard dropped
+    /// then was cancelled mid-rollback (the task carrying it was aborted at
+    /// a teardown, as a crash-stop aborts the actor's tasks), not forgotten:
+    /// its cleanup is uncertain, as a crash leaves it, and recovery owns it.
+    rollback_in_flight: bool,
 }
 
 impl PendingProvision {
@@ -70,6 +77,7 @@ impl PendingProvision {
             committed: false,
             rollback_attempted: false,
             custody_settled: false,
+            rollback_in_flight: false,
         }
     }
 
@@ -126,6 +134,7 @@ impl PendingProvision {
     /// guard remains a usable retry handle for the exact same resource.
     async fn attempt_rollback(&mut self) -> Result<(), MobError> {
         let member_ref = self.take_member_ref("rollback")?;
+        self.rollback_in_flight = true;
         let rollback = match self.session_origin {
             ProvisionSessionOrigin::Fresh => self
                 .provisioner
@@ -152,9 +161,28 @@ impl PendingProvision {
                 }
             }
         };
+        self.rollback_in_flight = false;
         match rollback {
             Ok(()) => {
                 self.committed = true;
+                // A rebuild that is rolled back leaves no run-start hold its
+                // build preparation staged for the member's next
+                // registration: that registration's build is prepared again.
+                if self.rollback_origin == RollbackOrigin::RevivalOrRebuild
+                    && let Err(error) = self
+                        .provisioner
+                        .unstage_member_registration_run_start_hold(
+                            &member_ref,
+                            meerkat_runtime::RunStartHoldReason::ToolsNotPublished,
+                        )
+                        .await
+                {
+                    tracing::warn!(
+                        agent_identity = %self.agent_identity,
+                        %error,
+                        "a rolled-back rebuild's staged run-start hold could not be removed"
+                    );
+                }
                 Ok(())
             }
             Err(error) => {
@@ -202,6 +230,13 @@ impl PendingProvision {
 impl Drop for PendingProvision {
     fn drop(&mut self) {
         if self.custody_settled {
+            return;
+        }
+        if self.rollback_in_flight {
+            tracing::error!(
+                agent_identity = %self.agent_identity,
+                "PendingProvision rollback was cancelled in flight (its task was aborted); its cleanup is uncertain until recovery"
+            );
             return;
         }
         if !self.committed && !self.rollback_attempted {
@@ -1022,6 +1057,44 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert!(provisioner.retired.load(Ordering::Acquire));
+    }
+
+    /// A teardown that aborts the task carrying an in-flight rollback (a
+    /// crash-stop aborts the actor's tasks) drops the guard mid-cleanup: a
+    /// cancellation, logged, not a guard dropped without commit or rollback,
+    /// so the leak assert does not fire and the task ends cancelled.
+    #[tokio::test]
+    async fn a_rollback_aborted_in_flight_drops_its_guard_without_the_leak_assert() {
+        let provisioner = Arc::new(MockProvisioner::barriered_cleanup());
+        let entered = Arc::clone(&provisioner.cleanup_entered);
+
+        let owner = {
+            let provisioner = Arc::clone(&provisioner);
+            tokio::spawn(async move {
+                let guard = PendingProvision::new(
+                    MemberRef::from_bridge_session_id(SessionId::new()),
+                    AgentIdentity::from("aborted-rollback-member"),
+                    provisioner,
+                    OperationId::new(),
+                    ProvisionSessionOrigin::Fresh,
+                    None,
+                    RollbackOrigin::SpawnRollback,
+                );
+                let _ = guard.rollback().await;
+            })
+        };
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the rollback's cleanup must start");
+        owner.abort();
+        let ended = owner
+            .await
+            .expect_err("the aborted rollback task does not complete");
+        assert!(
+            ended.is_cancelled(),
+            "dropping the guard mid-rollback must not panic: {ended:?}"
+        );
     }
 
     #[tokio::test]

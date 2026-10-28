@@ -989,6 +989,9 @@ mod tests {
         RuntimeBound {
             agent_runtime_id: String,
             fence_token: u64,
+            /// Projected opaque, as the live producer does, so `None`
+            /// survives the route.
+            runtime_epoch_id: Option<String>,
         },
         RuntimeRetired {
             agent_runtime_id: String,
@@ -1011,10 +1014,18 @@ mod tests {
         }
 
         fn field(&self, id: &FieldId) -> Option<FieldValue<'_>> {
+            if let Self::RuntimeBound {
+                runtime_epoch_id, ..
+            } = self
+                && id.as_str() == "runtime_epoch_id"
+            {
+                return Some(FieldValue::Opaque(Arc::new(runtime_epoch_id.clone())));
+            }
             let (agent_runtime_id, fence_token) = match self {
                 Self::RuntimeBound {
                     agent_runtime_id,
                     fence_token,
+                    ..
                 }
                 | Self::RuntimeRetired {
                     agent_runtime_id,
@@ -1119,6 +1130,7 @@ mod tests {
         let body = SeamSignal::RuntimeBound {
             agent_runtime_id: "rt-1".into(),
             fence_token: 7,
+            runtime_epoch_id: Some("epoch-1".into()),
         };
         SignalPayload::Emitted {
             variant: body.variant_id(),
@@ -1210,7 +1222,10 @@ mod tests {
         let (variant, fields) = &log[0];
         assert_eq!(variant.as_str(), "ObserveRuntimeReady");
         let field_names: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(field_names, vec!["agent_runtime_id", "fence_token"]);
+        assert_eq!(
+            field_names,
+            vec!["agent_runtime_id", "fence_token", "runtime_epoch_id"]
+        );
         match &fields[0].1 {
             OwnedFieldValue::Str(s) => assert_eq!(s, "rt-1"),
             other => panic!("expected Str, got {other:?}"),
@@ -1218,6 +1233,13 @@ mod tests {
         match &fields[1].1 {
             OwnedFieldValue::U64(v) => assert_eq!(*v, 7),
             other => panic!("expected U64, got {other:?}"),
+        }
+        match &fields[2].1 {
+            OwnedFieldValue::Opaque(value) => assert_eq!(
+                value.downcast_ref::<Option<String>>(),
+                Some(&Some("epoch-1".to_string()))
+            ),
+            other => panic!("expected Opaque, got {other:?}"),
         }
     }
 
@@ -1231,6 +1253,7 @@ mod tests {
             body: SeamSignal::RuntimeBound {
                 agent_runtime_id: "rt-1".into(),
                 fence_token: 7,
+                runtime_epoch_id: None,
             },
         };
 

@@ -1432,3 +1432,118 @@ async fn a_resumed_rebased_runs_failure_consumes_its_input_over_the_reference_ho
         "the session runs its next input after the failure"
     );
 }
+
+/// A WholeBlob run killed before it ever compacted resumes from its
+/// provisional tail and makes its first compaction after the restart. The
+/// actor of a continued run is seeded from the tail's document, so that
+/// session must carry the exact row lineage of the tail's bytes, as a
+/// session decoded from a committed body does: then the compaction's
+/// transcript rewrite commits and persists. A seed without row lineage
+/// refuses every rewrite ("live transcript has no exact row-lineage
+/// authority"), and the run finishes uncompacted. Only over the reference
+/// host store: the built-in SQLite realm is HeadCanonical, whose continued run
+/// is materialized from the store's verified rows.
+///
+/// The run is killed in round 2's tools and compacts before round 4. Nothing
+/// comes before the run, so the compaction folds the run's own completed
+/// rounds 0 to 2 into its one summary and keeps the run's prompt and its
+/// newest round, 3, verbatim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_run_resumed_from_its_tail_compacts_and_the_compaction_persists_over_the_reference_host_store()
+ {
+    let harness = Harness::new(Backend::Host);
+    let plan = LongRunPlan {
+        rounds: 6,
+        calls_per_round: 2,
+        kill_round: 2,
+        kill_point: KillPoint::DuringTools,
+        compactions: RoundSet::EMPTY.with(4),
+        image_rounds: RoundSet::EMPTY,
+        before_resume: BeforeResume::Nothing,
+    };
+    let killed = harness
+        .kill_row(&plan)
+        .await
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let (store, _) = harness
+        .current
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the killed row");
+    let restarted = restart_workers(
+        &store,
+        plan,
+        &[(WORKER, killed.clone())],
+        true,
+        None,
+        FollowUp::Queued,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
+    let restarted = &restarted[0];
+    let report = &restarted.report;
+    assert_eq!(
+        (
+            report.resumed.clone(),
+            report.runs.clone(),
+            report.model_call_rounds.clone(),
+        ),
+        (
+            Some(ResumedRun {
+                run_id: killed.run.run_id.clone(),
+                round: plan.kill_round,
+                resume_point: ResumePointKind::ToolsPending,
+            }),
+            vec![killed.run.run_id.clone()],
+            (plan.kill_round + 1..plan.rounds).collect::<Vec<_>>(),
+        ),
+        "the killed run resumes from its tail with round 2's tools pending, and no other run \
+         takes its input"
+    );
+    // The compaction ran after the restart and persisted: the committed
+    // transcript holds its one summary, the round it kept and the rounds
+    // after it.
+    let rounds = &report.transcript_rounds;
+    assert_eq!(
+        (rounds.clone(), restarted.summaries),
+        (vec![3, 4, 5], 1),
+        "the resumed run's compaction folds rounds 0 to 2 into its one summary and persists"
+    );
+    let mut results = report.transcript_results.clone();
+    results.sort();
+    let mut expected: Vec<String> = rounds
+        .iter()
+        .flat_map(|round| calls_of(&plan, *round))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        results, expected,
+        "the committed transcript holds each kept call's result once"
+    );
+    assert_eq!(
+        (report.interrupted.clone(), restarted.notices),
+        (Vec::<String>::new(), 0),
+        "nothing of the run is repaired"
+    );
+    assert_eq!(
+        (
+            restarted.terminal.clone(),
+            report.receipts,
+            report.inputs_settled,
+            restarted.prompts,
+        ),
+        (
+            Some(meerkat_runtime::InputTerminalOutcome::Consumed),
+            1,
+            true,
+            1
+        ),
+        "the resumed run consumes its input with its one receipt, and its prompt is in the \
+         committed transcript once"
+    );
+    assert!(
+        restarted.follow_up_consumed,
+        "the session runs its next input after the resumed run"
+    );
+}

@@ -137,6 +137,7 @@ pub mod session;
 pub mod session_component_sidecar;
 pub mod session_durable_config_authority;
 pub mod session_hosting;
+pub mod session_owner_wake;
 pub mod session_recovery;
 pub mod session_store;
 pub mod skills;
@@ -182,7 +183,7 @@ pub use agent::{
     dispatch_tool_execution_plan_fenced, resolve_tool_execution_plan_fenced,
     select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
 };
-pub use agent::{GovernedDispatchOperation, ReviewedEntryTicket};
+pub use agent::{EnteredDispatchOperation, GovernedDispatchOperation, ReviewedEntryTicket};
 pub use approval::review::{
     OperationReviewRefusal, ReviewUnavailableKind, ReviewUnsatisfiedKind, ReviewedEntryCustody,
 };

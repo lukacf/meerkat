@@ -4758,10 +4758,26 @@ impl MethodRouter {
             }
             #[cfg(feature = "mob")]
             Some(SessionOwner::Mob) => {
-                self.mob_state
-                    .session_service()
-                    .comms_runtime(&session_id)
-                    .await
+                let service = self.mob_state.session_service();
+                match service.comms_runtime(&session_id).await {
+                    Some(comms) => Some(comms),
+                    // Comms sent as a dormant member wake it through its
+                    // owner first.
+                    None => {
+                        match meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+                            .wake(&session_id)
+                            .await
+                        {
+                            Some(Ok(
+                                meerkat_core::session_owner_wake::SessionOwnerWakeOutcome::Ready,
+                            )) => service.comms_runtime(&session_id).await,
+                            Some(Err(error)) => {
+                                return mob_session_service_error_response(id, &session_id, error);
+                            }
+                            Some(Ok(_)) | None => None,
+                        }
+                    }
+                }
             }
             None => None,
         };
@@ -5861,6 +5877,8 @@ mod tests {
                 generation: Some(meerkat_runtime::meerkat_machine::dsl::Generation::from(0)),
                 runtime_epoch_id: None,
                 session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(session_id),
+                residency_owner:
+                    meerkat_runtime::meerkat_machine::dsl::SessionResidencyOwner::Session,
             },
             "test::prepare_bindings",
         )

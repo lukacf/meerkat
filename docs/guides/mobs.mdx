@@ -23,11 +23,15 @@ tools, and mobpack deployment all route through the mob system.
 | Need | Use |
 |------|-----|
 | One quick helper from an agent prompt | `delegate` inside `rkat run --tools full` |
-| A persistent team the agent can manage | agent-side `mob_create`, `mob_spawn_member`, `mob_wire`, `mob_check_member` |
+| A persistent team the agent can manage | agent-side `mob_create`, `mob_spawn_member`, `mob_wire`, `mob_check_member`, on a host that keeps sessions (JSON-RPC, REST, or the MCP server) |
 | An app or service orchestrating members directly | host APIs: JSON-RPC `mob/*`, public MCP `meerkat_mob_*`, Python `Mob`, TypeScript `Mob` |
 | A browser-deployed team | Web SDK `@rkat/web` with `MeerkatRuntime.createMob`, or `rkat mob web build` from a mobpack |
 | A repeatable workflow across members | mob flows |
 | A signed, portable team definition | mobpack |
+
+`rkat run` keeps its sessions in memory, so the members of a team an agent
+creates there end with that run's process. A team that must outlive the
+process belongs on a host that keeps sessions.
 
 ## Mental Model
 
@@ -628,7 +632,7 @@ Spawn defaults matter:
 | `runtime_mode` | `autonomous_host` |
 | `launch_mode` | fresh member |
 | `tool_access_policy` | inherit |
-| `auto_wire_parent` | surface-dependent helper behavior |
+| `auto_wire_parent` | `false`; when `true`, a spawn made from a member's own turn into its own mob (the agent tool `mob_spawn_member`, or the member tools `spawn_member` and `spawn_many_members`) wires the new member to that member, and any other spawn wires nothing |
 
 Autonomous members run as long-lived peers. `turn_driven` members are useful
 when a host wants explicit dispatch control.

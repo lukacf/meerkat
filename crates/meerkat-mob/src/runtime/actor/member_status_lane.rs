@@ -692,8 +692,7 @@ impl MobActor {
                         session_service,
                         runtime_adapter,
                         agent_identity.clone(),
-                        expected_target.bridge_session_id.clone(),
-                        expected_target.include_local_session_details,
+                        &expected_target,
                         observed_at_ms,
                         &view_reads,
                     )
@@ -795,6 +794,7 @@ impl MobActor {
                         &agent_identity,
                         current_target.bridge_session_id,
                         current_target.include_local_session_details,
+                        current_target.dormant,
                         observation,
                     )
                     .await

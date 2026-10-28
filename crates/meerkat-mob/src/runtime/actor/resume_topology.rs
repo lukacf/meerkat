@@ -326,6 +326,11 @@ pub(in crate::runtime) struct ResumeTopologyMemberObservation {
     pub(in crate::runtime) retiring: bool,
     pub(in crate::runtime) broken: bool,
     pub(in crate::runtime) host_owned: bool,
+    /// Seated and not materialized in this process (phase Dormant): no comms
+    /// runtime to read or to install trust on. Its own trust is realized by
+    /// its wake; a live peer's trust toward it comes from its durable
+    /// endpoint.
+    pub(in crate::runtime) dormant: bool,
     pub(in crate::runtime) peer_endpoint: Option<mob_dsl::MemberPeerEndpoint>,
     pub(in crate::runtime) prior_peer_endpoints: BTreeSet<mob_dsl::MemberPeerEndpoint>,
     pub(in crate::runtime) peer_only_overlay_allowed: bool,
@@ -429,6 +434,10 @@ pub(in crate::runtime) enum MemberCommsIdentityObservation {
     /// of its durable, host-acknowledged generation endpoint, exactly as spawn
     /// projected them.
     HostOwnedDurable,
+    /// A Dormant local member: publish the peer id and transport key of its
+    /// durable endpoint, the identity its wake materializes (and checks), so
+    /// it reads exactly like a live member.
+    DormantDurable,
 }
 
 /// Machine/roster-validated material for a V5 direct-member adoption.
@@ -1188,6 +1197,7 @@ where
                 retiring: recovered_endpoint_runtime_is_retiring(state, &identity),
                 broken: state.member_restore_failures.contains_key(&identity),
                 host_owned: crate::runtime::member_runtime_is_host_owned(state, &domain_identity),
+                dormant: crate::runtime::boot_plan::member_is_dormant(state, &identity),
                 peer_endpoint: state.member_peer_endpoints.get(&identity).cloned(),
                 prior_peer_endpoints: state
                     .member_prior_peer_endpoints
@@ -1406,6 +1416,31 @@ where
             Ok(())
         }
         _ if host_owned => Err(stale("targets a host-owned member")),
+        MemberCommsIdentityObservation::DormantDurable => {
+            if !crate::runtime::boot_plan::member_is_dormant(state, &dsl_identity) {
+                return Err(stale(
+                    "republishes a durable endpoint for a member that is not Dormant",
+                ));
+            }
+            let Some(endpoint) = durable_endpoint else {
+                return Err(stale("has no durable endpoint for a Dormant member"));
+            };
+            let peer_id = match PeerId::parse(&endpoint.peer_id.0) {
+                Ok(peer_id) => peer_id,
+                Err(error) => {
+                    let detail = format!("its durable endpoint has an invalid peer id: {error}");
+                    return record_member_endpoint_broken(ctx, &entry, &dsl_identity, &detail);
+                }
+            };
+            let transport_public_key =
+                meerkat_comms::PubKey::new(endpoint.signing_key.0).to_pubkey_string();
+            ctx.roster.resume_topology_set_member_comms_identity(
+                agent_identity,
+                Some(peer_id),
+                Some(transport_public_key),
+            );
+            Ok(())
+        }
         MemberCommsIdentityObservation::Unavailable { detail } => {
             record_member_endpoint_broken(ctx, &entry, &dsl_identity, detail)
         }
@@ -2084,7 +2119,7 @@ async fn observe_member_comms_identity(
             return Ok(None);
         }
         MemberCommsIdentityObservation::ClearBroken
-    } else if member.host_owned {
+    } else if member.host_owned || member.dormant {
         let Some(endpoint) = member.peer_endpoint.as_ref() else {
             return Ok(None);
         };
@@ -2096,7 +2131,12 @@ async fn observe_member_comms_identity(
         {
             return Ok(None);
         }
-        MemberCommsIdentityObservation::HostOwnedDurable
+        if member.host_owned {
+            MemberCommsIdentityObservation::HostOwnedDurable
+        } else {
+            // No comms runtime of a Dormant member is read: there is none.
+            MemberCommsIdentityObservation::DormantDurable
+        }
     } else {
         let Some(comms) = provisioner.comms_runtime(&entry.member_ref).await else {
             return Ok(None);
@@ -2786,6 +2826,14 @@ where
             let local_dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
             let local_member = plan.member(&local_dsl_identity);
             if local_member.broken {
+                continue;
+            }
+            // A Dormant member has no comms runtime to install trust on, and
+            // it is never a peer-only external: its own trust is realized by
+            // its wake's topology step, from machine state. A live member's
+            // trust toward it comes from its durable endpoint (below, in the
+            // live member's own entry).
+            if local_member.dormant {
                 continue;
             }
             let placed = local_member.host_owned;
@@ -3585,14 +3633,14 @@ mod tests {
 
     fn test_peer_endpoint(name: &str) -> mob_dsl::MemberPeerEndpoint {
         let signing_key = [*name.as_bytes().last().unwrap_or(&1_u8); 32];
-        mob_dsl::MemberPeerEndpoint {
-            name: mob_dsl::PeerName(name.to_string()),
-            peer_id: mob_dsl::PeerId(
+        mob_dsl::MemberPeerEndpoint::new(
+            mob_dsl::PeerName(name.to_string()),
+            mob_dsl::PeerId(
                 meerkat_core::comms::PeerId::from_ed25519_pubkey(&signing_key).to_string(),
             ),
-            address: mob_dsl::PeerAddress(format!("inproc://{name}")),
-            signing_key: mob_dsl::PeerSigningKey(signing_key),
-        }
+            mob_dsl::PeerAddress(format!("inproc://{name}")),
+            mob_dsl::PeerSigningKey(signing_key),
+        )
     }
 
     struct WiredMachineFixture {
@@ -3760,6 +3808,7 @@ mod tests {
                 session_id: fixture.a_session.clone(),
                 refusal_code: "unavailable".to_string(),
                 reason: "runtime refused the binding".to_string(),
+                attempt: None,
             },
         )
         .expect("record the restore failure");
@@ -3988,6 +4037,7 @@ mod tests {
                 session_id: fixture.a_session.clone(),
                 refusal_code: "unavailable".to_string(),
                 reason: "runtime refused the binding".to_string(),
+                attempt: None,
             },
         )
         .expect("record the restore failure");
@@ -4125,12 +4175,12 @@ mod tests {
             let placed = mob_dsl::AgentIdentity::from("placed");
             let host = mob_dsl::HostId("placed-host".to_string());
             let signing_key = [3_u8; 32];
-            let endpoint = mob_dsl::MemberPeerEndpoint {
-                name: mob_dsl::PeerName("fixture-mob/worker/placed".to_string()),
-                peer_id: mob_dsl::PeerId(peer_id),
-                address: mob_dsl::PeerAddress("tcp://placed-member.test:4200".to_string()),
-                signing_key: mob_dsl::PeerSigningKey(signing_key),
-            };
+            let endpoint = mob_dsl::MemberPeerEndpoint::new(
+                mob_dsl::PeerName("fixture-mob/worker/placed".to_string()),
+                mob_dsl::PeerId(peer_id),
+                mob_dsl::PeerAddress("tcp://placed-member.test:4200".to_string()),
+                mob_dsl::PeerSigningKey(signing_key),
+            );
             let mut authority = mob_dsl::MobMachineAuthority::new();
             authority
                 .apply_signal(mob_dsl::MobMachineSignal::RecoverOwnerBridgeSession {
@@ -4471,6 +4521,25 @@ mod tests {
         assert!(
             matches!(cleared, Some(MemberCommsIdentityObservation::ClearBroken)),
             "got {cleared:?}"
+        );
+
+        // A Dormant member reads exactly like a live one: its durable endpoint
+        // is projected, and its comms runtime is never consulted (this stub
+        // would answer a live endpoint; the Dormant observation never asks).
+        let dormant = ResumeTopologyMemberObservation {
+            dormant: true,
+            peer_endpoint: Some(test_peer_endpoint("dormant")),
+            ..ResumeTopologyMemberObservation::default()
+        };
+        let projected = observe_member_comms_identity(&provisioner, &mob_id, &entry, &dormant)
+            .await
+            .expect("observation succeeds");
+        assert!(
+            matches!(
+                projected,
+                Some(MemberCommsIdentityObservation::DormantDurable)
+            ),
+            "a Dormant member projects its durable endpoint, got {projected:?}"
         );
 
         assert_eq!(

@@ -158,7 +158,9 @@ fn exact_route_is_current(
                     != Some(&mob_dsl::MobMemberState::Retiring)
             })
         && !state.spawn_exec_phase.contains_key(identity)
-        && !state.member_revival_pending.contains(identity)
+        // Placed members are never Dormant: not reviving is no open wake
+        // attempt.
+        && !state.member_wake_attempts.contains_key(identity)
         && !state.member_materialization_failures.contains_key(identity)
 }
 

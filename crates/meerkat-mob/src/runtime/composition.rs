@@ -172,6 +172,7 @@ impl MobSeamEffect {
                 fence_token,
                 generation,
                 session_id,
+                attempt,
             } => {
                 if id == &seam_facts::fields::agent_identity() {
                     Some(FieldValue::Str(agent_identity.0.as_str()))
@@ -183,6 +184,11 @@ impl MobSeamEffect {
                     generation.map(|generation| FieldValue::U64(generation.0))
                 } else if id == &seam_facts::fields::session_id() {
                     Some(FieldValue::Str(session_id.0.as_str()))
+                } else if id == &seam_facts::fields::attempt() {
+                    // The wake attempt the request belongs to (none for a
+                    // spawn's binding), projected opaque so an absent
+                    // attempt survives to the refusal closure as `None`.
+                    Some(FieldValue::Opaque(Arc::new(*attempt)))
                 } else {
                     None
                 }
@@ -391,11 +397,71 @@ fn signal_project_u64(
         })
 }
 
+/// An optional fact the producer projects as an opaque `Option<T>` (a
+/// runtime id or epoch as `Option<String>`, a fence as `Option<u64>`), so an
+/// absent value survives the route as `None`. Only that projected `None`
+/// means absent: a field the route does not project at all is refused, as
+/// is a projected field of another shape, so a route that stops projecting
+/// a fact can never turn it into an absent one.
+#[cfg(feature = "runtime-adapter")]
+fn signal_project_optional<T>(
+    fields: &[(FieldId, OwnedFieldValue)],
+    field: &FieldId,
+) -> Result<Option<T>, String>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    match fields.iter().find(|(id, _)| id == field) {
+        None => Err(format!(
+            "missing projected signal field `{}`",
+            field.as_str()
+        )),
+        Some((_, OwnedFieldValue::Opaque(value))) => {
+            value.downcast_ref::<Option<T>>().cloned().ok_or_else(|| {
+                format!(
+                    "projected signal field `{}` is not an optional `{}`",
+                    field.as_str(),
+                    std::any::type_name::<T>()
+                )
+            })
+        }
+        Some((_, other)) => Err(format!(
+            "projected signal field `{}` is not opaque: {other:?}",
+            field.as_str()
+        )),
+    }
+}
+
 #[cfg(feature = "runtime-adapter")]
 fn build_mob_signal(
     variant: &SignalVariantId,
     projected: &[(FieldId, OwnedFieldValue)],
 ) -> Result<mob_dsl::MobMachineSignal, String> {
+    // A released registration names its own runtime id, fence and epoch,
+    // each absent when it held none: MobMachine demotes exactly the
+    // materialization they name, and a release that names none, or another
+    // one, is its accepted `Stale` no-op. The cause is this consumer's to
+    // supply: the route binds it as a literal, which only the consumer knows.
+    if variant == &seam_facts::signals::release_member_materialization() {
+        return Ok(mob_dsl::MobMachineSignal::ReleaseMemberMaterialization {
+            agent_runtime_id: signal_project_optional::<String>(
+                projected,
+                &seam_facts::fields::agent_runtime_id(),
+            )?
+            .map(mob_dsl::AgentRuntimeId::from),
+            fence_token: signal_project_optional::<u64>(
+                projected,
+                &seam_facts::fields::fence_token(),
+            )?
+            .map(mob_dsl::FenceToken),
+            runtime_epoch_id: signal_project_optional::<String>(
+                projected,
+                &seam_facts::fields::runtime_epoch_id(),
+            )?
+            .map(mob_dsl::RuntimeEpochId),
+            cause: mob_dsl::MemberMaterializationLossCause::RegistrationReleased,
+        });
+    }
     let runtime_id = mob_dsl::AgentRuntimeId::from(
         signal_project_str(projected, &seam_facts::fields::agent_runtime_id())?.to_string(),
     );
@@ -404,9 +470,16 @@ fn build_mob_signal(
         &seam_facts::fields::fence_token(),
     )?);
     if variant == &seam_facts::signals::observe_runtime_ready() {
+        // The bound registration's epoch: recorded for the member, it fences
+        // every later release of that member's materialization.
         Ok(mob_dsl::MobMachineSignal::ObserveRuntimeReady {
             agent_runtime_id: runtime_id,
             fence_token,
+            runtime_epoch_id: signal_project_optional::<String>(
+                projected,
+                &seam_facts::fields::runtime_epoch_id(),
+            )?
+            .map(mob_dsl::RuntimeEpochId),
         })
     } else if variant == &seam_facts::signals::observe_runtime_retired() {
         Ok(mob_dsl::MobMachineSignal::ObserveRuntimeRetired {
@@ -421,7 +494,8 @@ fn build_mob_signal(
     } else {
         Err(format!(
             "mob signal consumer surface does not accept routed signal `{other}`; \
-             only ObserveRuntimeReady/ObserveRuntimeRetired/ObserveRuntimeDestroyed are declared",
+             only ObserveRuntimeReady/ObserveRuntimeRetired/ObserveRuntimeDestroyed/\
+             ReleaseMemberMaterialization are declared",
             other = variant.as_str()
         ))
     }
@@ -444,6 +518,26 @@ impl SignalConsumerSurface for MobSignalConsumerSurface {
         projected_fields: Vec<(FieldId, OwnedFieldValue)>,
     ) -> Result<(), meerkat_runtime::composition::ConsumerError> {
         let signal = build_mob_signal(&variant, &projected_fields)?;
+        #[cfg(test)]
+        let held = match &signal {
+            mob_dsl::MobMachineSignal::ObserveRuntimeReady {
+                agent_runtime_id, ..
+            } => ready_signal_test_hold::held(agent_runtime_id.as_str()),
+            _ => None,
+        };
+        #[cfg(test)]
+        if let Some(mut released) = held {
+            let command_tx = self.command_tx.clone();
+            tokio::spawn(async move {
+                let _ = released.wait_for(|released| *released).await;
+                let _ = command_tx
+                    .send(super::scope_gate::RoutedMobCommand::internal(
+                        super::state::MobCommand::ProjectMachineSignal { signal },
+                    ))
+                    .await;
+            });
+            return Ok(());
+        }
         // Machine-internal lifecycle signal projection: the internal
         // authority lane (phase 5, DEC-P5E-2).
         let command = super::scope_gate::RoutedMobCommand::internal(
@@ -470,6 +564,41 @@ impl SignalConsumerSurface for MobSignalConsumerSurface {
                 ))
             }
         }
+    }
+}
+
+/// Test seam: the routed readiness observation (`ObserveRuntimeReady`) of a
+/// member's runtime held until the test releases it, so a row can act in the
+/// window between a member's Live commit and its registration's epoch
+/// record. Keyed by member identity; the runtime id renders as
+/// `identity:generation`.
+#[cfg(all(test, feature = "runtime-adapter"))]
+pub(crate) mod ready_signal_test_hold {
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, PoisonError};
+
+    use crate::tokio::sync::watch;
+
+    static HOLDS: Mutex<BTreeMap<String, watch::Receiver<bool>>> = Mutex::new(BTreeMap::new());
+
+    /// Hold every readiness observation of `identity`'s runtimes until the
+    /// returned sender sends `true`.
+    pub(crate) fn hold(identity: &str) -> watch::Sender<bool> {
+        let (released_tx, released_rx) = watch::channel(false);
+        HOLDS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(identity.to_string(), released_rx);
+        released_tx
+    }
+
+    pub(super) fn held(runtime_id: &str) -> Option<watch::Receiver<bool>> {
+        let (identity, _generation) = runtime_id.rsplit_once(':')?;
+        HOLDS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(identity)
+            .cloned()
     }
 }
 
@@ -617,6 +746,7 @@ pub(super) fn refusal_feedback_input(
                 agent_identity,
                 agent_runtime_id,
                 session_id,
+                attempt,
                 ..
             },
         ) if input == seam_facts::inputs::resolve_runtime_binding_refusal() => {
@@ -626,6 +756,7 @@ pub(super) fn refusal_feedback_input(
                 session_id: session_id.clone(),
                 refusal_code,
                 reason,
+                attempt: *attempt,
             })
         }
         (
@@ -699,6 +830,7 @@ mod tests {
             fence_token: mob_dsl::FenceToken(7),
             generation: Some(mob_dsl::Generation(3)),
             session_id: mob_dsl::SessionId::from("session-1"),
+            attempt: None,
         };
         assert_eq!(seam(body).variant_id(), ev("RequestRuntimeBinding"));
     }
@@ -711,6 +843,7 @@ mod tests {
             fence_token: mob_dsl::FenceToken(7),
             generation: Some(mob_dsl::Generation(3)),
             session_id: mob_dsl::SessionId::from("session-1"),
+            attempt: None,
         };
         let effect = seam(body);
 
@@ -726,7 +859,31 @@ mod tests {
             effect.field(&fid("generation")).expect("present"),
             FieldValue::U64(3),
         ));
+        // A spawn's binding belongs to no wake attempt; the absent attempt is
+        // still projected, opaque, so it reaches the refusal closure as None.
+        match effect.field(&fid("attempt")).expect("present") {
+            FieldValue::Opaque(value) => {
+                assert_eq!(value.downcast_ref::<Option<u64>>(), Some(&None));
+            }
+            other => panic!("the attempt is projected opaque, got {other:?}"),
+        }
         assert!(effect.field(&fid("unknown_field")).is_none());
+
+        // A wake's binding carries its attempt the same way.
+        let woken = seam(mob_dsl::MobMachineEffect::RequestRuntimeBinding {
+            agent_identity: mob_dsl::AgentIdentity::from("agent"),
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
+            fence_token: mob_dsl::FenceToken(7),
+            generation: Some(mob_dsl::Generation(3)),
+            session_id: mob_dsl::SessionId::from("session-1"),
+            attempt: Some(9),
+        });
+        match woken.field(&fid("attempt")).expect("present") {
+            FieldValue::Opaque(value) => {
+                assert_eq!(value.downcast_ref::<Option<u64>>(), Some(&Some(9)));
+            }
+            other => panic!("the attempt is projected opaque, got {other:?}"),
+        }
     }
 
     #[test]
@@ -741,6 +898,7 @@ mod tests {
                     fence_token: mob_dsl::FenceToken(7),
                     generation: Some(mob_dsl::Generation(3)),
                     session_id: mob_dsl::SessionId::from("session-1"),
+                    attempt: None,
                 }),
                 seam_facts::route_binding_request_reaches_meerkat(),
             ),
@@ -819,14 +977,33 @@ mod tests {
             fence_token: mob_dsl::FenceToken(7),
             generation: Some(mob_dsl::Generation(3)),
             session_id: mob_dsl::SessionId::from("session-1"),
+            attempt: None,
         });
         assert!(matches!(
             refusal_feedback_input(&binding, &error).expect("binding closure"),
             mob_dsl::MobMachineInput::ResolveRuntimeBindingRefusal {
                 refusal_code,
                 reason,
+                attempt: None,
                 ..
             } if refusal_code == "dsl_guard_rejected" && reason == "typed consumer detail"
+        ));
+        // A wake's binding request carries its attempt back to the refusal,
+        // so a late refusal of an earlier attempt is fenced.
+        let woken_binding = seam(mob_dsl::MobMachineEffect::RequestRuntimeBinding {
+            agent_identity: mob_dsl::AgentIdentity::from("agent"),
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
+            fence_token: mob_dsl::FenceToken(7),
+            generation: Some(mob_dsl::Generation(3)),
+            session_id: mob_dsl::SessionId::from("session-1"),
+            attempt: Some(4),
+        });
+        assert!(matches!(
+            refusal_feedback_input(&woken_binding, &error).expect("binding closure"),
+            mob_dsl::MobMachineInput::ResolveRuntimeBindingRefusal {
+                attempt: Some(4),
+                ..
+            }
         ));
 
         let ingress = seam(mob_dsl::MobMachineEffect::RequestRuntimeIngress {
@@ -920,6 +1097,7 @@ mod tests {
             fence_token: mob_dsl::FenceToken(1),
             generation: Some(mob_dsl::Generation(0)),
             session_id: mob_dsl::SessionId::from("session-1"),
+            attempt: None,
         };
         assert!(matches!(
             lift_routed_effect(&binding_in),
@@ -971,6 +1149,7 @@ mod tests {
                 fence_token: mob_dsl::FenceToken(7),
                 generation: Some(mob_dsl::Generation(3)),
                 session_id: mob_dsl::SessionId::from("session-1"),
+                attempt: None,
             },
             DslEffect::RequestRuntimeIngress {
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
@@ -1062,6 +1241,7 @@ mod tests {
                 fence_token: mob_dsl::FenceToken(1),
                 generation: Some(mob_dsl::Generation(0)),
                 session_id: mob_dsl::SessionId::from("session-1"),
+                attempt: None,
             },
             mob_dsl::MobMachineEffect::RequestRuntimeIngress {
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
@@ -1127,6 +1307,7 @@ mod tests {
         let first_signal = mob_dsl::MobMachineSignal::ObserveRuntimeReady {
             agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-first"),
             fence_token: mob_dsl::FenceToken(1),
+            runtime_epoch_id: None,
         };
         command_tx
             .try_send(super::super::scope_gate::RoutedMobCommand::internal(
@@ -1147,6 +1328,10 @@ mod tests {
                         OwnedFieldValue::Str("rt-deferred".to_string()),
                     ),
                     (seam_facts::fields::fence_token(), OwnedFieldValue::U64(7)),
+                    (
+                        seam_facts::fields::runtime_epoch_id(),
+                        OwnedFieldValue::Opaque(Arc::new(None::<String>)),
+                    ),
                 ],
             ),
         )
@@ -1160,6 +1345,7 @@ mod tests {
                 mob_dsl::MobMachineSignal::ObserveRuntimeReady {
                     agent_runtime_id,
                     fence_token: mob_dsl::FenceToken(1),
+                    ..
                 } if agent_runtime_id.0 == "rt-first"
             )),
             _ => panic!("unexpected command in test queue"),
@@ -1176,9 +1362,146 @@ mod tests {
                 mob_dsl::MobMachineSignal::ObserveRuntimeReady {
                     agent_runtime_id,
                     fence_token: mob_dsl::FenceToken(7),
+                    runtime_epoch_id: None,
                 } if agent_runtime_id.0 == "rt-deferred"
             )),
             _ => panic!("unexpected command in test queue"),
         }
+    }
+
+    /// The bound registration's epoch reaches MobMachine with the readiness
+    /// observation, so a later release is honoured only for that epoch.
+    #[cfg(feature = "runtime-adapter")]
+    #[test]
+    fn runtime_ready_signal_carries_the_bound_registration_epoch() {
+        let signal = build_mob_signal(
+            &seam_facts::signals::observe_runtime_ready(),
+            &[
+                (
+                    seam_facts::fields::agent_runtime_id(),
+                    OwnedFieldValue::Str("rt-bound".to_string()),
+                ),
+                (seam_facts::fields::fence_token(), OwnedFieldValue::U64(4)),
+                (
+                    seam_facts::fields::runtime_epoch_id(),
+                    OwnedFieldValue::Opaque(Arc::new(Some("epoch-4".to_string()))),
+                ),
+            ],
+        )
+        .expect("a bound observation with its epoch projects");
+        assert!(matches!(
+            signal,
+            mob_dsl::MobMachineSignal::ObserveRuntimeReady {
+                agent_runtime_id,
+                fence_token: mob_dsl::FenceToken(4),
+                runtime_epoch_id: Some(mob_dsl::RuntimeEpochId(epoch)),
+            } if agent_runtime_id.0 == "rt-bound" && epoch == "epoch-4"
+        ));
+
+        let refused = build_mob_signal(
+            &seam_facts::signals::observe_runtime_ready(),
+            &[
+                (
+                    seam_facts::fields::agent_runtime_id(),
+                    OwnedFieldValue::Str("rt-bound".to_string()),
+                ),
+                (seam_facts::fields::fence_token(), OwnedFieldValue::U64(4)),
+                (
+                    seam_facts::fields::runtime_epoch_id(),
+                    OwnedFieldValue::Str("epoch-4".to_string()),
+                ),
+            ],
+        );
+        assert!(
+            refused.is_err(),
+            "an epoch projected in another shape is refused, never read as absent"
+        );
+    }
+
+    /// A released registration reaches MobMachine as
+    /// `ReleaseMemberMaterialization` with the cause this consumer supplies,
+    /// whether it names its runtime id, fence and epoch or none of them: a
+    /// release is never dropped for an absent fact (the machine answers it
+    /// `Stale`).
+    #[cfg(feature = "runtime-adapter")]
+    #[test]
+    fn registration_release_signal_projects_present_and_absent_facts() {
+        let release = seam_facts::signals::release_member_materialization();
+
+        let named = build_mob_signal(
+            &release,
+            &[
+                (
+                    seam_facts::fields::agent_runtime_id(),
+                    OwnedFieldValue::Opaque(Arc::new(Some("rt-released".to_string()))),
+                ),
+                (
+                    seam_facts::fields::fence_token(),
+                    OwnedFieldValue::Opaque(Arc::new(Some(9_u64))),
+                ),
+                (
+                    seam_facts::fields::runtime_epoch_id(),
+                    OwnedFieldValue::Opaque(Arc::new(Some("epoch-9".to_string()))),
+                ),
+            ],
+        )
+        .expect("a release naming its registration projects");
+        assert!(matches!(
+            named,
+            mob_dsl::MobMachineSignal::ReleaseMemberMaterialization {
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: Some(mob_dsl::FenceToken(9)),
+                runtime_epoch_id: Some(mob_dsl::RuntimeEpochId(epoch)),
+                cause: mob_dsl::MemberMaterializationLossCause::RegistrationReleased,
+            } if agent_runtime_id.0 == "rt-released" && epoch == "epoch-9"
+        ));
+
+        let anonymous = build_mob_signal(
+            &release,
+            &[
+                (
+                    seam_facts::fields::agent_runtime_id(),
+                    OwnedFieldValue::Opaque(Arc::new(None::<String>)),
+                ),
+                (
+                    seam_facts::fields::fence_token(),
+                    OwnedFieldValue::Opaque(Arc::new(None::<u64>)),
+                ),
+                (
+                    seam_facts::fields::runtime_epoch_id(),
+                    OwnedFieldValue::Opaque(Arc::new(None::<String>)),
+                ),
+            ],
+        )
+        .expect("a release naming nothing still projects");
+        assert!(matches!(
+            anonymous,
+            mob_dsl::MobMachineSignal::ReleaseMemberMaterialization {
+                agent_runtime_id: None,
+                fence_token: None,
+                runtime_epoch_id: None,
+                cause: mob_dsl::MemberMaterializationLossCause::RegistrationReleased,
+            }
+        ));
+
+        // A release whose route stopped projecting a fact is refused, never
+        // read as a release that names nothing.
+        let unprojected = build_mob_signal(
+            &release,
+            &[
+                (
+                    seam_facts::fields::agent_runtime_id(),
+                    OwnedFieldValue::Opaque(Arc::new(Some("rt-released".to_string()))),
+                ),
+                (
+                    seam_facts::fields::fence_token(),
+                    OwnedFieldValue::Opaque(Arc::new(Some(9_u64))),
+                ),
+            ],
+        );
+        assert!(
+            unprojected.is_err(),
+            "a release missing its epoch field is refused"
+        );
     }
 }

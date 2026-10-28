@@ -1157,9 +1157,9 @@ async fn a_restored_host_mob_member_keeps_its_durable_policy() {
 }
 
 /// A persistent child mob whose member mounts the agent mob tools comes back
-/// after a cold restart. Restore rebuilds the member, and the member's build
-/// runs the generated mob-tool factory inside that restore, so the factory
-/// must not wait on the restore (it did, and the restore never finished).
+/// after a cold restart, and the member wakes. The member's build runs the
+/// generated mob-tool factory, so the factory must not wait on the restore
+/// (it did, and the restore never finished).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_member_with_mob_tools_restores_after_a_cold_restart() {
     let (mut fixture, dispatched) = fixture(|state| state);
@@ -1217,6 +1217,21 @@ async fn a_child_member_with_mob_tools_restores_after_a_cold_restart() {
         listed.iter().any(|(id, _)| *id == child_id),
         "the child mob is restored: {listed:?}"
     );
+    // The member holds no work, so the restart leaves it dormant: its build,
+    // which runs the generated mob-tool factory, happens at its wake, which
+    // must not wait on the restore either.
+    let child = fixture
+        .state
+        .handle_for(&child_id)
+        .await
+        .expect("child mob handle");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        child.ensure_member_live(&AgentIdentity::from("child-worker")),
+    )
+    .await
+    .expect("waking a child member with mob tools does not wait on the restore")
+    .expect("the child member wakes");
     fixture.teardown().await;
 }
 
@@ -1317,6 +1332,187 @@ async fn an_orchestrator_resume_notification_reaches_its_listing_follow_up_after
     assert!(
         listing_succeeded.load(Ordering::SeqCst),
         "the notification turn's mob_list succeeded"
+    );
+    fixture.teardown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Member residency of members an agent created, across a cold restart: they
+// come back Dormant, a peer message between them wakes its recipient, and the
+// agent's own `mob_retire_member` and `mob_destroy` act on Dormant members
+// without waking them.
+// ---------------------------------------------------------------------------
+
+const SENDER: &str = "agent-sender";
+const RECIPIENT: &str = "agent-recipient";
+
+/// What a member creates for itself with its agent mob tools: a child mob
+/// (`mob_create`) and two members it spawns into it (`mob_spawn_member`),
+/// wired to each other (`mob_wire`). Returns the child mob and the creating
+/// member's session.
+async fn agent_created_members(fixture: &CouncilFixture) -> (MobId, SessionId) {
+    fixture.seed_source_mob(&["creator"]).await;
+    let session = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .expect("source mob handle")
+        .resolve_bridge_session_id(&AgentIdentity::from("creator"))
+        .await
+        .expect("creator has a bridge session");
+    let surface = agent_surface(&fixture.state, session.clone(), creator_authority());
+    let child_id = format!("child-{}", fixture.scope);
+    dispatch(
+        &surface,
+        "mob_create",
+        json!({ "definition": child_definition(&child_id) }),
+    )
+    .await
+    .expect("the agent creates its child mob");
+    for member in [SENDER, RECIPIENT] {
+        dispatch(
+            &surface,
+            "mob_spawn_member",
+            json!({
+                "mob_id": child_id,
+                "profile": "worker",
+                "member_id": member,
+                "runtime_mode": "turn_driven",
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("the agent spawns {member} into its mob: {error:?}"));
+    }
+    dispatch(
+        &surface,
+        "mob_wire",
+        json!({
+            "mob_id": child_id,
+            "member_id": SENDER,
+            "peer": { "local": RECIPIENT },
+        }),
+    )
+    .await
+    .expect("the agent wires its members");
+    (MobId::from(child_id.as_str()), session)
+}
+
+/// The child mob after the cold restart, with both of its members Dormant.
+async fn restored_dormant_child(
+    fixture: &CouncilFixture,
+    child_id: &MobId,
+) -> meerkat_mob::MobHandle {
+    let listed = tokio::time::timeout(Duration::from_secs(30), fixture.state.mob_list())
+        .await
+        .expect("the restore answers")
+        .expect("restore");
+    assert!(
+        listed.iter().any(|(id, _)| id == child_id),
+        "the child mob is restored: {listed:?}"
+    );
+    let handle = fixture
+        .state
+        .handle_for(child_id)
+        .await
+        .expect("the child mob's handle");
+    for member in [SENDER, RECIPIENT] {
+        assert_eq!(
+            handle.member_materialization_for_test(&AgentIdentity::from(member)),
+            Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Dormant),
+            "{member} comes back dormant"
+        );
+    }
+    handle
+}
+
+/// Members an agent created come back Dormant after a cold restart, and a
+/// peer message from one to the other wakes its recipient: the sender is
+/// woken to send it, and the recipient by its delivery.
+#[tokio::test(flavor = "multi_thread")]
+async fn members_an_agent_created_come_back_dormant_and_a_peer_message_wakes_one() {
+    let (mut fixture, dispatched) = fixture(|state| state);
+    let (child_id, _creator) = agent_created_members(&fixture).await;
+    fixture
+        .restart_cold_with(
+            |_| ScriptedTurn::Text("done".to_string()),
+            with_host_tools(&dispatched, |state| state),
+        )
+        .await;
+    let handle = restored_dormant_child(&fixture, &child_id).await;
+    let recipient = AgentIdentity::from(RECIPIENT);
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        handle.send_peer_message(
+            AgentIdentity::from(SENDER),
+            recipient.clone(),
+            "after the restart",
+            HandlingMode::Queue,
+        ),
+    )
+    .await
+    .expect("the peer message answers")
+    .expect("the peer message is delivered");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while handle.member_materialization_for_test(&recipient)
+            != Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Live)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the peer message woke its recipient");
+    fixture.teardown().await;
+}
+
+/// Through the agent tools: after a cold restart, the creating member's
+/// `mob_retire_member` retires a Dormant member it spawned, leaving the
+/// member's wired peer Dormant, and its `mob_destroy` destroys the child mob
+/// with that Dormant member still in it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_retires_and_destroys_its_dormant_members_after_a_cold_restart() {
+    let (mut fixture, dispatched) = fixture(|state| state);
+    let (child_id, creator) = agent_created_members(&fixture).await;
+    fixture
+        .restart_cold_with(
+            |_| ScriptedTurn::Text("done".to_string()),
+            with_host_tools(&dispatched, |state| state),
+        )
+        .await;
+    let handle = restored_dormant_child(&fixture, &child_id).await;
+    let surface = agent_surface(&fixture.state, creator, creator_authority());
+    dispatch(
+        &surface,
+        "mob_retire_member",
+        json!({ "mob_id": child_id.as_str(), "member_id": RECIPIENT }),
+    )
+    .await
+    .expect("the agent retires its dormant member");
+    assert!(
+        handle
+            .list_members()
+            .await
+            .iter()
+            .all(|entry| entry.agent_identity.as_str() != RECIPIENT),
+        "the retired member left the roster"
+    );
+    assert_eq!(
+        handle.member_materialization_for_test(&AgentIdentity::from(SENDER)),
+        Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Dormant),
+        "the retirement left its wired peer dormant"
+    );
+    // A handle kept here would own the mob database's observer, and the
+    // destroy would leave its storage cleanup outstanding.
+    drop(handle);
+    dispatch(
+        &surface,
+        "mob_destroy",
+        json!({ "mob_id": child_id.as_str() }),
+    )
+    .await
+    .expect("the agent destroys its child mob of dormant members");
+    assert!(
+        fixture.state.handle_for(&child_id).await.is_err(),
+        "the child mob is gone"
     );
     fixture.teardown().await;
 }

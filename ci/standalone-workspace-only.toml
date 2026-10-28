@@ -574,6 +574,7 @@ excluded = [
 target = "src/lib.rs"
 reason = "needs meerkat-runtime, which depends on this crate"
 modules = [
+    "inproc::wake_route_tests",
     "plain_listener",
 ]
 tests = [

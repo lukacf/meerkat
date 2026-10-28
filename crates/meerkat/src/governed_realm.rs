@@ -51,6 +51,36 @@ pub(crate) fn effect_leaf_denies(refusal: meerkat_core::authorization::Operation
     )
 }
 
+/// Whether `error`, met at a governed effect leaf on a tool dispatch's own
+/// path, is a review settlement that is final for that dispatch: a review
+/// this entry cannot carry, a review already spent or a dispatch already
+/// ended, or a review that refused or was retired. Such a settlement is a
+/// denial, as on the prepared path. It is final for this dispatch only: a
+/// new call is reviewed anew. Only the review owner's own unavailability
+/// (contention, an unconfirmed store, unreadable material, a failed
+/// reviewer) leaves a later attempt a chance, and is not a denial; neither
+/// is any error that is not a review settlement. Every unavailable kind is
+/// named here, so a new kind is classified on purpose. The error is read as
+/// returned, like the refusal arms next to this check.
+pub(crate) fn review_settlement_denies(error: &meerkat_core::ToolError) -> bool {
+    use meerkat_core::ReviewUnavailableKind as Unavailable;
+    match error {
+        meerkat_core::ToolError::ReviewUnsatisfied { .. } => true,
+        meerkat_core::ToolError::ReviewUnavailable { kind } => match kind {
+            Unavailable::DeadlineExpired
+            | Unavailable::ReviewerMissing
+            | Unavailable::UnsupportedEntry
+            | Unavailable::DispatchEnded => true,
+            Unavailable::OwnerUnavailable
+            | Unavailable::ReviewerFailed
+            | Unavailable::StoreConflict
+            | Unavailable::StoreCommitUnknown
+            | Unavailable::ContextUnavailable => false,
+        },
+        _ => false,
+    }
+}
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -85,7 +115,15 @@ pub struct GovernedRealmBootstrap {
     pub invocation: ScopedInvocation,
     /// Current account, resource, sink and controller rules.
     pub operation_owner: Arc<dyn OperationPolicyOwner>,
-    /// Governed retained-work resume, when the host supports it.
+    /// Governed retained-work resume: the check that admits a continuation of
+    /// an earlier run (the approved notice of consent parked at that run's
+    /// close, a fork_off or council completion) as a resume of exactly that
+    /// run. Without it the realm admits no retained resume: such a
+    /// continuation stays pending (`UnsupportedScope`), or is refused once
+    /// its run's destination is superseded. Build it over the
+    /// same originals custody and invocation policy as above with
+    /// `ScopedRetainedResume`, as `ScopedGrantComposition::with_retained_resume`
+    /// does. [`RealmGovernance::Stock`] builds its own.
     pub retained_resume: Option<Arc<NativeRetainedResumeCheck>>,
     /// The restarted host's fresh publication, shared with its other owners.
     pub publication: LocalAuthorizationPublication,

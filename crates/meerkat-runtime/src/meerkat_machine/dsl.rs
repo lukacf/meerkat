@@ -3017,6 +3017,9 @@ pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
     LiveContextRowSource, LiveConversationStartCause, RunStartHoldReason, StopInputDisposition,
     UnregisterQueuedInputsDisposition,
 };
+pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
+    EmptyResumeRetirementVerdict, SessionResidencyOwner,
+};
 
 /// Bridging copy of the catalog-owned delegation result disposition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

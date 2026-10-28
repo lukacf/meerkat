@@ -583,7 +583,17 @@ export type ForkCacheTtl =
   | "one_hour"
   | "thirty_minutes"
   | "twenty_four_hours"
-  | "provider_default";
+  | "provider_default"
+  | "twelve_hours";
+
+/**
+ * A cache lifetime this SDK does not know, as the server sent it: the
+ * evidence vocabulary grows with provider cache lifetimes, and an unknown
+ * value is surfaced, not refused.
+ */
+export interface ForkCacheTtlUnknown {
+  readonly unknown: string;
+}
 
 /** Why a durable fork could not inherit provider cache state. */
 export type ForkCacheInheritanceUnavailableReason =
@@ -617,7 +627,7 @@ export interface ForkAuthoredCacheBreakpoint {
   readonly renderedPrefixSha256: string;
   readonly renderedPrefixBytes: number;
   readonly loweredRequestProvenance: ForkCacheLoweredRequestProvenance;
-  readonly ttl: ForkCacheTtl;
+  readonly ttl: ForkCacheTtl | ForkCacheTtlUnknown;
 }
 
 /** Verified provider-cache-compatible durable transcript fork point. */

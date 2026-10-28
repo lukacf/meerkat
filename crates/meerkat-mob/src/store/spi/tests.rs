@@ -546,6 +546,85 @@ async fn subscribers_receive_committed_events_in_cursor_order() {
     assert_eq!(cursors, vec![1, 2, 3]);
 }
 
+/// From every cursor, a poll and a member binding journal tail read of
+/// `storage` answer exactly what a scan of its whole log answers.
+async fn assert_cursor_reads_match_a_scan(storage: &crate::MobStorage) {
+    let log = storage.events.replay_all().await.expect("replay the log");
+    let last = log.last().map_or(0, |event| event.cursor);
+    for after in 0..=last + 1 {
+        for limit in [1, 4, 100] {
+            let polled = storage
+                .events
+                .poll(after, limit)
+                .await
+                .expect("poll")
+                .iter()
+                .map(|event| event.cursor)
+                .collect::<Vec<_>>();
+            let scanned = log
+                .iter()
+                .filter(|event| event.cursor > after)
+                .take(limit)
+                .map(|event| event.cursor)
+                .collect::<Vec<_>>();
+            assert_eq!(polled, scanned, "a poll after {after} with limit {limit}");
+        }
+    }
+    let journal = storage
+        .identity_member
+        .clone()
+        .expect("the host store storage has the identity member store");
+    let mob_id = MobId::from("mob");
+    let whole = journal
+        .read_member_binding_journal(&mob_id)
+        .await
+        .expect("read the whole journal");
+    for from_cursor in 0..=last + 1 {
+        let tail = journal
+            .read_member_binding_journal_from(&mob_id, from_cursor)
+            .await
+            .expect("read the journal tail");
+        let expected = whole
+            .events
+            .iter()
+            .filter(|event| event.cursor >= from_cursor)
+            .map(|event| event.cursor)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tail.events
+                .iter()
+                .map(|event| event.cursor)
+                .collect::<Vec<_>>(),
+            expected,
+            "the journal tail from {from_cursor}"
+        );
+        assert_eq!(tail.intent_rows, whole.intent_rows);
+    }
+}
+
+// Unrun until the candidate's validation.
+// The host store adapter's cursor reads find their first event by binary
+// search over the served log: a poll and a journal tail read answer what a
+// scan answers, on the storage that appended the log and on the storage a
+// reopen loads it into.
+#[tokio::test]
+async fn cursor_reads_answer_what_a_scan_answers_before_and_after_a_reopen() {
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let storage = process.stores.storage();
+    for _ in 0..9 {
+        storage
+            .events
+            .append(event(MobEventKind::MobCompleted, None))
+            .await
+            .expect("append");
+    }
+    assert_cursor_reads_match_a_scan(&storage).await;
+    drop(storage);
+    let reopened = restart_and_compare(&host, "mob", process).await;
+    assert_cursor_reads_match_a_scan(&reopened.stores.storage()).await;
+}
+
 // Unrun until the candidate's validation.
 #[tokio::test]
 async fn the_mob_families_are_claimed_once_per_realm() {

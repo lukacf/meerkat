@@ -169,7 +169,7 @@ fn meerkat_semantic_model_keeps_internal_session_transport_domain() {
 
     assert!(rendered.contains("SessionIdValues"));
     assert!(rendered.contains(
-        "PrepareBindingsInitializing(agent_runtime_id, fence_token, generation, runtime_epoch_id, arg_session_id) =="
+        "PrepareBindingsInitializing(agent_runtime_id, fence_token, generation, runtime_epoch_id, arg_session_id, arg_residency_owner) =="
     ));
     assert!(rendered.contains("MapIncrement(map, key, amount) == [x \\in DOMAIN map \\cup {key}"));
     assert!(

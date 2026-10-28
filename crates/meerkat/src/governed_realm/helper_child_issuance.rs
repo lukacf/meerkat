@@ -36,8 +36,14 @@ pub enum HelperChildIssuanceRefusal {
     /// Not permitted now: the setup operation's current decision, an
     /// originating source (cancelled, no longer retained, expired, or its
     /// grant excludes the operation), the independent parent grant or the
-    /// requested bounds refuse it, or the intended id names another grant.
-    /// No child was appended.
+    /// requested bounds refuse it, the intended id names another grant, or
+    /// the dispatch's review cannot cover it (a review its entry cannot
+    /// carry, one already spent, refused or retired, or a dispatch that
+    /// ended; for an entered step, a decision needing more review than the
+    /// dispatch entered). A refusal by the dispatch's review is final for
+    /// that dispatch only: a new call is reviewed anew. No child was
+    /// appended for this intent; for an entered step, earlier steps keep
+    /// their effects.
     Denied,
     /// The owners cannot say now (contention, a refusal to rebuild after an
     /// owner change, clock or custody). No child was appended.
@@ -53,8 +59,9 @@ pub enum HelperChildIssuanceRefusal {
 
 /// One helper child issuance: for a setup operation the caller holds as a
 /// prepared check with the trusted native composition that prepared it
-/// ([`Self::new`]), or for a governed tool dispatch's own operation
-/// ([`Self::from_dispatch`]).
+/// ([`Self::new`]), for a governed tool dispatch's own operation
+/// ([`Self::from_dispatch`]), or as a further step of a dispatch's entered
+/// operation ([`Self::from_entered`]).
 pub struct GovernedHelperChildIssuance {
     setup: Setup,
     intent: ChildGrantIntent,
@@ -66,6 +73,12 @@ enum Setup {
     /// reservation, with this dispatch's entered review custody.
     Dispatch {
         operation: meerkat_core::GovernedDispatchOperation,
+        further: FurtherOriginals,
+    },
+    /// A further step of a dispatch's entered operation: its own work owners
+    /// check and issue within the review it entered, spending nothing.
+    Entered {
+        operation: meerkat_core::EnteredDispatchOperation,
         further: FurtherOriginals,
     },
 }
@@ -144,6 +157,33 @@ impl GovernedHelperChildIssuance {
         })
     }
 
+    /// The issuance of `intent` as a further step of a governed tool
+    /// dispatch's entered operation
+    /// ([`meerkat_core::EnteredDispatchOperation`]): checked and issued by
+    /// that dispatch's own work owners under their one reservation, with
+    /// every original of the work and every one of `complete_contributors`
+    /// conjoined, and with the review the dispatch entered as the most the
+    /// current decision may require. Nothing is spent and no review runs.
+    /// Every call is decided afresh, so one witness serves every issuance of
+    /// the call; retrying an intent that was issued answers `Recovered`.
+    pub fn from_entered(
+        entered: &meerkat_core::EnteredDispatchOperation,
+        originals: Arc<dyn AuthenticatedOriginalSource>,
+        complete_contributors: Arc<[RetainedOriginal]>,
+        intent: ChildGrantIntent,
+    ) -> Self {
+        Self {
+            setup: Setup::Entered {
+                operation: entered.clone(),
+                further: FurtherOriginals {
+                    originals: complete_contributors,
+                    source: Arc::new(SourceOriginalBasis::new(originals)),
+                },
+            },
+            intent,
+        }
+    }
+
     /// The intent this issuance serves.
     pub fn intent(&self) -> &ChildGrantIntent {
         &self.intent
@@ -156,19 +196,36 @@ impl GovernedHelperChildIssuance {
     pub fn issue_or_recover(&self) -> Result<ChildGrantOutcome, HelperChildIssuanceRefusal> {
         let prepared = match &self.setup {
             Setup::Prepared(prepared) => prepared,
-            Setup::Dispatch { operation, further } => {
+            Setup::Entered { operation, further } => {
                 return match operation.issue_child_if_current_within(further, &self.intent) {
-                    // The work owner's exact per-call outcome. Once the call
-                    // ran, an outcome that is not the grant owner's typed
-                    // result cannot promise that nothing was appended.
-                    Ok(boxed) => boxed
-                        .downcast::<Result<ChildGrantOutcome, ChildGrantRefusal>>()
-                        .map_or(Err(HelperChildIssuanceRefusal::Uncertain), |outcome| {
-                            (*outcome).map_err(child_refusal)
-                        }),
+                    Ok(boxed) => work_owner_outcome(boxed),
+                    // A refused step (an ended dispatch, a source cancelled,
+                    // revoked or no longer retained, a decision needing more
+                    // review than was entered, an expired window, malformed
+                    // facts) appended nothing for this intent.
                     Err(meerkat_core::ToolError::AuthorizationRefused { refusal, .. })
                         if super::effect_leaf_denies(refusal) =>
                     {
+                        Err(HelperChildIssuanceRefusal::Denied)
+                    }
+                    // Contention, a rebuild request or owners that cannot
+                    // answer now.
+                    Err(_) => Err(HelperChildIssuanceRefusal::Unavailable),
+                };
+            }
+            Setup::Dispatch { operation, further } => {
+                return match operation.issue_child_if_current_within(further, &self.intent) {
+                    Ok(boxed) => work_owner_outcome(boxed),
+                    Err(meerkat_core::ToolError::AuthorizationRefused { refusal, .. })
+                        if super::effect_leaf_denies(refusal) =>
+                    {
+                        Err(HelperChildIssuanceRefusal::Denied)
+                    }
+                    // A review this dispatch cannot spend for the child (one
+                    // already spent, an ended dispatch, or a review this entry
+                    // cannot carry) is final for the dispatch, as on the
+                    // prepared path.
+                    Err(error) if super::review_settlement_denies(&error) => {
                         Err(HelperChildIssuanceRefusal::Denied)
                     }
                     Err(_) => Err(HelperChildIssuanceRefusal::Unavailable),
@@ -195,14 +252,30 @@ impl GovernedHelperChildIssuance {
     }
 
     /// The prepared path's conjunct ([`PreparedSetup::originating`]); a
-    /// dispatch is checked by its own work owners instead.
+    /// dispatch, or a step of its entered operation, is checked by its own
+    /// work owners instead.
     #[cfg(test)]
     pub(crate) fn originating(&self) -> Result<ChildGrantValidity, OperationAuthorizationError> {
         match &self.setup {
             Setup::Prepared(prepared) => prepared.originating(),
-            Setup::Dispatch { .. } => Err(OperationAuthorizationError::Unavailable),
+            Setup::Dispatch { .. } | Setup::Entered { .. } => {
+                Err(OperationAuthorizationError::Unavailable)
+            }
         }
     }
+}
+
+/// The work owner's exact per-call outcome. Once the call ran, an outcome
+/// that is not the grant owner's typed result cannot promise that nothing
+/// was appended.
+fn work_owner_outcome(
+    boxed: Box<dyn std::any::Any + Send>,
+) -> Result<ChildGrantOutcome, HelperChildIssuanceRefusal> {
+    boxed
+        .downcast::<Result<ChildGrantOutcome, ChildGrantRefusal>>()
+        .map_or(Err(HelperChildIssuanceRefusal::Uncertain), |outcome| {
+            (*outcome).map_err(child_refusal)
+        })
 }
 
 fn child_refusal(refusal: ChildGrantRefusal) -> HelperChildIssuanceRefusal {

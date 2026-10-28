@@ -312,6 +312,7 @@ fn install_ephemeral_peer_request_response_authority(
             generation: Some(mm_dsl::Generation(0)),
             runtime_epoch_id: None,
             session_id: mm_dsl::SessionId::from(session.to_string()),
+            residency_owner: mm_dsl::SessionResidencyOwner::Session,
         },
         "test::prepare_bindings",
     )

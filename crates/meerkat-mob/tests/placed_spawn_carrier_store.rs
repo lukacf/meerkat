@@ -161,12 +161,12 @@ fn member_endpoint(
         signing_key,
         address,
     )?;
-    let endpoint = MemberPeerEndpoint {
-        name: PeerName(descriptor.name.to_string()),
-        peer_id: PeerId(descriptor.peer_id.to_string()),
-        address: PeerAddress(descriptor.address.to_string()),
-        signing_key: PeerSigningKey(descriptor.pubkey),
-    };
+    let endpoint = MemberPeerEndpoint::new(
+        PeerName(descriptor.name.to_string()),
+        PeerId(descriptor.peer_id.to_string()),
+        PeerAddress(descriptor.address.to_string()),
+        PeerSigningKey(descriptor.pubkey),
+    );
     Ok((endpoint.clone(), endpoint))
 }
 

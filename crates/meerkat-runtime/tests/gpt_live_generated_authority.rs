@@ -8236,6 +8236,7 @@ fn a_resumed_session_earns_its_media_fault_reopen_again() {
             generation: Some(generation()),
             runtime_epoch_id: None,
             session_id: mm::SessionId(SESSION.to_string()),
+            residency_owner: mm::SessionResidencyOwner::Session,
         },
     )
     .expect("a fresh runtime binding");

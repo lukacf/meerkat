@@ -23,8 +23,14 @@
 //! The ledger is this process's own custody, not a registry: it is never
 //! persisted, so after a restart it holds nothing, and work that names an
 //! original admitted by an earlier process is refused locally instead of
-//! being presented as still held. A retained-work resume is not offered by
-//! the stock composition.
+//! being presented as still held. The stock composition's retained resume
+//! reads the same custody: a resume of a run whose originals this ledger
+//! holds as admitted can be admitted, one whose original is still a pending
+//! candidate is not ready yet, and one whose original it does not hold (an
+//! earlier process's, or a dropped candidate) is refused. A host whose
+//! delivery owner may hold such a resume announces each promotion or drop
+//! (`ContinuationHostBindings::source_custody_changed`), so the resume is
+//! asked again.
 
 use std::sync::{Arc, Mutex};
 

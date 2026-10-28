@@ -22,6 +22,14 @@
 //! every member it fences plus every member its caller parks without
 //! fencing; the commit's currentness verdict reads the fences only.
 //!
+//! A caller declares a wake or warm-reload step as one
+//! ([`MemberEffectClass::Wake`]). A Stop, a Complete and a Retire of its
+//! member do not wait for such a step: MobMachine closes the step's wake
+//! attempt when a Stop or a Complete commits and when the member's
+//! retirement starts, and the step's late commit fails that fence and rolls
+//! back. A started retirement's own steps, and a later wake attempt's
+//! restore, still run after it: one effect of a member at a time.
+//!
 //! What the lane deliberately does NOT own: what the effects mean. It never
 //! inspects the payload and never invents a compensation — the caller's
 //! commit object is the only authority over its own ledger.
@@ -73,10 +81,6 @@ impl<T> ActorCustody<T> {
 impl<K, V> ActorCustody<BTreeMap<K, V>> {
     pub(in crate::runtime) fn is_empty(&self) -> bool {
         self.read(BTreeMap::is_empty)
-    }
-
-    fn len(&self) -> usize {
-        self.read(BTreeMap::len)
     }
 }
 
@@ -309,6 +313,48 @@ pub(in crate::runtime) struct MemberEffectRequest {
     pub(in crate::runtime) unsettled_commit: Box<dyn MemberEffectCommit>,
 }
 
+/// What kind of member work a ticket carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runtime) enum MemberEffectClass {
+    /// Ordinary member work: every lifecycle verb and every control of its
+    /// members waits for it.
+    Member,
+    /// One step of a member's wake or warm reload. MobMachine closes the
+    /// member's open wake attempt when a Stop or a Complete commits and when
+    /// the member's retirement starts, and the step's late commit then fails
+    /// its attempt fence and rolls its provision back. So a Stop, a Complete
+    /// and a Retire of the member do not wait for the step; Destroy, Reset,
+    /// Shutdown and RetireAll still do, and so does every other control of
+    /// the member.
+    Wake,
+}
+
+/// Which owned tickets a lifecycle barrier waits for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runtime) enum MemberEffectBarrier {
+    /// Every ticket (Destroy, Reset, RetireAll, Shutdown).
+    All,
+    /// Every ticket except a wake or warm-reload step that is still the
+    /// lane's own (not retained): a Stop and a Complete, whose commit closes
+    /// every open wake attempt, and a Retire of the step's member.
+    BesideWakes,
+}
+
+impl MemberEffectBarrier {
+    /// The barrier of a global lifecycle intent's quiesce.
+    pub(in crate::runtime) fn of_intent(
+        intent: mob_dsl::PlacedCompletionLifecycleIntentKind,
+    ) -> Self {
+        match intent {
+            mob_dsl::PlacedCompletionLifecycleIntentKind::Stop
+            | mob_dsl::PlacedCompletionLifecycleIntentKind::Complete => Self::BesideWakes,
+            mob_dsl::PlacedCompletionLifecycleIntentKind::Destroy
+            | mob_dsl::PlacedCompletionLifecycleIntentKind::Reset
+            | mob_dsl::PlacedCompletionLifecycleIntentKind::RetireAll => Self::All,
+        }
+    }
+}
+
 /// A dispatch that is owned but has NOT started.
 ///
 /// Held while the reciprocal graph fence is up: no effect exists yet, so the
@@ -321,6 +367,7 @@ pub(in crate::runtime) struct QueuedMemberEffect {
     /// Carried unchanged to [`MemberEffectInflight::parked`]; an unstarted
     /// request parks nothing yet.
     parked: Vec<AgentIdentity>,
+    class: MemberEffectClass,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -354,6 +401,7 @@ pub(in crate::runtime) struct MemberEffectInflight {
     /// barrier reports its reason, and its retry object is resumed by
     /// `retry_retained_member_effects`.
     retention: Option<MemberEffectRetention>,
+    class: MemberEffectClass,
 }
 
 impl MemberEffectInflight {
@@ -364,6 +412,21 @@ impl MemberEffectInflight {
             .iter()
             .map(MemberFence::identity)
             .chain(&self.parked)
+    }
+
+    /// A wake or warm-reload step the lane still owns itself: its effect
+    /// is running, or its commit is settling it. A retained one is custody
+    /// like any other.
+    fn is_owned_wake_step(&self) -> bool {
+        self.class == MemberEffectClass::Wake && self.retention.is_none()
+    }
+
+    /// Whether `barrier` waits for this ticket.
+    fn holds(&self, barrier: MemberEffectBarrier) -> bool {
+        match barrier {
+            MemberEffectBarrier::All => true,
+            MemberEffectBarrier::BesideWakes => !self.is_owned_wake_step(),
+        }
     }
 }
 
@@ -428,9 +491,10 @@ impl MobActor {
             ticket,
             request,
             parked,
+            class,
         }) = self.member_effect_queued.owned().pop_front()
         {
-            self.start_member_effect(ticket, request, parked);
+            self.start_member_effect(ticket, request, parked, class);
             started += 1;
         }
         started += self.start_graph_gated_wiring_dispatches();
@@ -444,6 +508,15 @@ impl MobActor {
         self.dispatch_member_effect_parking(request, Vec::new())
     }
 
+    /// [`Self::dispatch_member_effect`] for one step of a member's wake or
+    /// warm reload ([`MemberEffectClass::Wake`]).
+    pub(in crate::runtime) fn dispatch_member_wake_effect(
+        &mut self,
+        request: MemberEffectRequest,
+    ) -> MemberEffectTicket {
+        self.dispatch_classed_member_effect(request, Vec::new(), MemberEffectClass::Wake)
+    }
+
     /// [`Self::dispatch_member_effect`] that also defers the
     /// lifecycle/membership controls of `parked` while the ticket is owned,
     /// without fencing them: their roster changes never make this effect's
@@ -453,6 +526,15 @@ impl MobActor {
         &mut self,
         request: MemberEffectRequest,
         parked: Vec<AgentIdentity>,
+    ) -> MemberEffectTicket {
+        self.dispatch_classed_member_effect(request, parked, MemberEffectClass::Member)
+    }
+
+    fn dispatch_classed_member_effect(
+        &mut self,
+        request: MemberEffectRequest,
+        parked: Vec<AgentIdentity>,
+        class: MemberEffectClass,
     ) -> MemberEffectTicket {
         let ticket = self.next_member_effect_ticket();
         if self.member_effect_shutdown || self.member_effect_start_is_gated() {
@@ -465,10 +547,11 @@ impl MobActor {
                     ticket,
                     request,
                     parked,
+                    class,
                 });
             return ticket;
         }
-        self.start_member_effect(ticket, request, parked)
+        self.start_member_effect(ticket, request, parked, class)
     }
 
     fn start_member_effect(
@@ -476,6 +559,7 @@ impl MobActor {
         ticket: MemberEffectTicket,
         request: MemberEffectRequest,
         parked: Vec<AgentIdentity>,
+        class: MemberEffectClass,
     ) -> MemberEffectTicket {
         let MemberEffectRequest {
             context,
@@ -492,6 +576,7 @@ impl MobActor {
                 unsettled_commit: Some(unsettled_commit),
                 running: true,
                 retention: None,
+                class,
             },
         );
         self.member_effect_tasks.spawn(async move {
@@ -501,6 +586,9 @@ impl MobActor {
                 commit: attempted.ok(),
             }
         });
+        if class == MemberEffectClass::Wake {
+            self.publish_member_wake_effects();
+        }
         ticket
     }
 
@@ -570,12 +658,25 @@ impl MobActor {
         &self,
         identity: &AgentIdentity,
     ) -> bool {
+        self.member_effect_defers_member(identity, MemberEffectBarrier::All)
+    }
+
+    /// [`Self::member_effect_pending_for_member`] over the tickets `barrier`
+    /// waits for.
+    fn member_effect_defers_member(
+        &self,
+        identity: &AgentIdentity,
+        barrier: MemberEffectBarrier,
+    ) -> bool {
         self.member_effect_inflight.read(|inflight| {
-            inflight.values().any(|inflight| {
-                inflight
-                    .deferred_members()
-                    .any(|deferred| deferred == identity)
-            })
+            inflight
+                .values()
+                .filter(|inflight| inflight.holds(barrier))
+                .any(|inflight| {
+                    inflight
+                        .deferred_members()
+                        .any(|deferred| deferred == identity)
+                })
         })
     }
 
@@ -589,9 +690,16 @@ impl MobActor {
             return false;
         }
         match command {
-            MobCommand::Retire { agent_identity, .. }
-            | MobCommand::Respawn { agent_identity, .. }
-            | MobCommand::ReloadMemberRegistration { agent_identity, .. } => {
+            // A Retire of a member being woken is admitted at once: its
+            // retirement start closes the member's wake attempt, and the
+            // retirement's own steps run after the wake's in-flight step
+            // returns (see `dispatch_retirement`).
+            MobCommand::Retire { agent_identity, .. } => {
+                self.member_effect_defers_member(agent_identity, MemberEffectBarrier::BesideWakes)
+            }
+            MobCommand::Respawn { agent_identity, .. }
+            | MobCommand::ReloadMemberRegistration { agent_identity, .. }
+            | MobCommand::ReleaseMember { agent_identity, .. } => {
                 self.member_effect_pending_for_member(agent_identity)
             }
             MobCommand::Wire { local, target, .. } | MobCommand::Unwire { local, target, .. } => {
@@ -624,6 +732,20 @@ impl MobActor {
             || !self.member_effect_queued.is_empty()
     }
 
+    /// Whether a running effect holds a global lifecycle verb behind
+    /// `barrier`: any running task for [`MemberEffectBarrier::All`]; a
+    /// running ticket other than a wake or warm-reload step for
+    /// [`MemberEffectBarrier::BesideWakes`].
+    pub(in crate::runtime) fn member_effects_running(&self, barrier: MemberEffectBarrier) -> bool {
+        !self.member_effect_tasks.is_empty()
+            && (barrier == MemberEffectBarrier::All
+                || self.member_effect_inflight.read(|inflight| {
+                    inflight
+                        .values()
+                        .any(|inflight| inflight.running && inflight.holds(barrier))
+                }))
+    }
+
     /// Settle owned detached effects before a global lifecycle fence.
     ///
     /// Completions are absorbed and COMMITTED as they arrive — never
@@ -631,11 +753,18 @@ impl MobActor {
     /// releases the signal a sibling stage is awaiting. Descendant stages
     /// dispatched by a commit are picked up by the same loop.
     ///
+    /// `barrier` names what the fence waits for. Under
+    /// [`MemberEffectBarrier::BesideWakes`] a running wake or warm-reload
+    /// step is left running (a completion of one that arrives meanwhile is
+    /// still committed as it arrives); the fence's own commit closes its
+    /// attempt, and its late commit fails that fence and rolls back.
+    ///
     /// Typed: `Err` means custody remains (retained by a commit, still
     /// running past the round budget, or unresolved), so a caller MUST NOT
     /// treat it as a completed barrier.
     pub(in crate::runtime) async fn drain_member_effects_for_lifecycle(
         &mut self,
+        barrier: MemberEffectBarrier,
     ) -> Result<(), MobError> {
         const MAX_LIFECYCLE_DRAIN_ROUNDS: u32 = 256;
         let mut rounds = 0;
@@ -644,7 +773,7 @@ impl MobActor {
                 "lifecycle fence reached before the graph gate released",
             )
             .await;
-            if self.member_effect_tasks.is_empty() {
+            if !self.member_effects_running(barrier) {
                 break;
             }
             if rounds >= MAX_LIFECYCLE_DRAIN_ROUNDS {
@@ -669,7 +798,7 @@ impl MobActor {
         // cleanup completes here, the lifecycle control proceeds honestly
         // instead of failing on custody that was recoverable.
         self.retry_retained_member_effects().await;
-        self.member_effect_custody_barrier()
+        self.member_effect_custody_barrier(barrier)
     }
 
     /// Teardown. Refuses new starts, then converges the same way.
@@ -693,7 +822,7 @@ impl MobActor {
         self.fail_orphaned_member_effects("actor teardown ended without an effect result")
             .await;
         self.record_retained_member_effect_custody_for_shutdown();
-        self.member_effect_custody_barrier()
+        self.member_effect_custody_barrier(MemberEffectBarrier::All)
     }
 
     /// Report each member whose effect custody survived teardown: every
@@ -782,9 +911,15 @@ impl MobActor {
         released
     }
 
-    /// Typed view of what the lane still owns.
-    fn member_effect_custody_barrier(&self) -> Result<(), MobError> {
-        if self.member_effect_inflight.is_empty() && self.member_effect_queued.is_empty() {
+    /// Typed view of what the lane still owns that `barrier` waits for.
+    fn member_effect_custody_barrier(&self, barrier: MemberEffectBarrier) -> Result<(), MobError> {
+        let held = self.member_effect_inflight.read(|tickets| {
+            tickets
+                .values()
+                .filter(|inflight| inflight.holds(barrier))
+                .count()
+        }) + self.member_effect_queued.len();
+        if held == 0 {
             return Ok(());
         }
         let retained = self.member_effect_inflight.read(|tickets| {
@@ -800,10 +935,7 @@ impl MobActor {
         });
         let Some(reason) = retained else {
             return Err(MobError::LifecycleOperationPending {
-                intent: format!(
-                    "member effect lane owns {} unsettled ticket(s)",
-                    self.member_effect_inflight.len() + self.member_effect_queued.len()
-                ),
+                intent: format!("member effect lane owns {held} unsettled ticket(s)"),
             });
         };
         Err(MobError::ExternalMemberCleanupUncertain { reason })
@@ -897,6 +1029,58 @@ impl MobActor {
                 }
             }
         }
+        self.publish_member_wake_effects();
+    }
+
+    /// Publish the members whose wake or warm-reload step the lane still
+    /// owns itself (see [`Self::member_wake_effects_settled`]). A step's
+    /// commit that dispatches the next step (a rollback, readiness) records
+    /// it before the step is released, so a member's set entry holds across
+    /// the whole chain.
+    fn publish_member_wake_effects(&self) {
+        let waking = self.member_effect_inflight.read(|inflight| {
+            inflight
+                .values()
+                .filter(|inflight| inflight.is_owned_wake_step())
+                .flat_map(MemberEffectInflight::deferred_members)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        });
+        self.member_wake_effects.send_if_modified(|published| {
+            if *published == waking {
+                return false;
+            }
+            *published = waking;
+            true
+        });
+    }
+
+    /// Whether the lane owns a wake or warm-reload step of `identity` now.
+    pub(in crate::runtime) fn member_wake_effects_in_flight(
+        &self,
+        identity: &AgentIdentity,
+    ) -> bool {
+        self.member_wake_effects.borrow().contains(identity)
+    }
+
+    /// A future that resolves once the lane owns no wake or warm-reload step
+    /// of `identity`, or `None` when it owns none now: one effect of a member
+    /// at a time. A started retirement's own steps wait on it, so a wake's
+    /// late commit fails its attempt fence and rolls its provision back
+    /// before the retirement acts on the member's session.
+    pub(in crate::runtime) fn member_wake_effects_settled(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Option<impl std::future::Future<Output = ()> + MemberEffectSend + 'static> {
+        if !self.member_wake_effects_in_flight(identity) {
+            return None;
+        }
+        let mut waking = self.member_wake_effects.subscribe();
+        let identity = identity.clone();
+        Some(async move {
+            // A closed channel means the actor is gone, and so is the step.
+            let _ = waking.wait_for(|waking| !waking.contains(&identity)).await;
+        })
     }
 
     /// Resolve custody whose exact task can no longer report.
@@ -956,6 +1140,7 @@ impl MobActor {
             ticket,
             request,
             parked,
+            class,
         } in queued
         {
             tracing::warn!(
@@ -995,6 +1180,7 @@ impl MobActor {
                         unsettled_commit: None,
                         running: false,
                         retention: Some(retention),
+                        class,
                     },
                 );
             }

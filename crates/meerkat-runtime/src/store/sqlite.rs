@@ -19,6 +19,9 @@ mod inner {
     use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
     use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
     use crate::runtime_state::RuntimeState;
+    use crate::store::recovery_obligation::{
+        BootFactsV1, catalog_entry_is_archived, lifecycle_is_archived, runtime_holds_recovery_work,
+    };
     use crate::store::{
         AuthOAuthFlowSnapshotUpdate, CommittedRecoveryBoundary, CommittedWholeBlobProvisionalTail,
         CommittedWholeBlobSnapshot, ContinuationAdmission, ContinuationAdmissionEntry,
@@ -11171,6 +11174,206 @@ ORDER BY runtime_id";
         Ok(())
     }
 
+    /// Every runtime whose rows hold recovery work, in runtime id order, read
+    /// by one statement over the existing tables and decided by the
+    /// predicate the host store adapter's open also asks
+    /// (`runtime_has_recovery_obligation`, asked in its parts).
+    ///
+    /// The candidates are the runtimes with a lifecycle row, an input-set
+    /// revision, a pending terminal owner, a provisional tail or an ops
+    /// lifecycle snapshot: a runtime holds work only through these. Every
+    /// runtime with input rows has an input-set revision: the triggers write
+    /// it with the runtime's first input row and nothing deletes it, so this
+    /// enumerates the runtimes with inputs without reading their rows. Each
+    /// candidate's boot facts come from indexed existence probes, the
+    /// nonterminal one through the predicate of the recovery index. An
+    /// archived runtime holds no recovery work, by the session owner's rule
+    /// (`runtime_is_archived`): a Retired or Destroyed lifecycle record, which
+    /// is how a retire records an archive, or the catalog entry's Archived
+    /// terminal. Only what the answer needs is decoded: the lifecycle record
+    /// first (small, and it decides a retired runtime); when neither it nor
+    /// the facts name work and the runtime has an ops lifecycle snapshot, its
+    /// catalog entry and then the snapshot (an archived runtime's snapshot is
+    /// never decoded); and the catalog entry of a runtime that holds work.
+    fn list_runtimes_with_recovery_work_in(
+        conn: &Connection,
+    ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
+        let query = format!(
+            r"
+            WITH candidates(runtime_id) AS (
+                SELECT runtime_id FROM runtime_states
+                UNION
+                SELECT runtime_id FROM runtime_input_set_revisions
+                UNION
+                SELECT runtime_id FROM runtime_pending_terminal_owners
+                UNION
+                SELECT runtime_id FROM runtime_whole_blob_provisional_tails
+                UNION
+                SELECT runtime_id FROM runtime_head_canonical_provisional_tails
+                UNION
+                SELECT runtime_id FROM runtime_ops_lifecycle
+            )
+            SELECT
+                candidates.runtime_id,
+                EXISTS (
+                    SELECT 1 FROM runtime_input_states
+                    WHERE runtime_input_states.runtime_id = candidates.runtime_id
+                      AND {RECOVERY_NONTERMINAL_INPUT_PREDICATE_SQL}
+                ),
+                EXISTS (
+                    SELECT 1 FROM runtime_pending_terminal_owners AS owners
+                    WHERE owners.runtime_id = candidates.runtime_id
+                ),
+                EXISTS (
+                    SELECT 1 FROM runtime_whole_blob_provisional_tails AS tails
+                    WHERE tails.runtime_id = candidates.runtime_id
+                )
+                OR EXISTS (
+                    SELECT 1 FROM runtime_head_canonical_provisional_tails AS tails
+                    WHERE tails.runtime_id = candidates.runtime_id
+                ),
+                EXISTS (
+                    SELECT 1 FROM runtime_input_states AS inputs
+                    WHERE inputs.runtime_id = candidates.runtime_id
+                ),
+                lifecycle.runtime_state_json,
+                catalog.entry_json,
+                ops.state_json
+            FROM candidates
+            LEFT JOIN runtime_states AS lifecycle
+                ON lifecycle.runtime_id = candidates.runtime_id
+            LEFT JOIN runtime_session_catalog AS catalog
+                ON catalog.runtime_id = candidates.runtime_id
+            LEFT JOIN runtime_ops_lifecycle AS ops
+                ON ops.runtime_id = candidates.runtime_id
+            ORDER BY candidates.runtime_id
+            "
+        );
+        let mut statement = conn
+            .prepare(&query)
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    BootFactsV1 {
+                        v: BootFactsV1::VERSION,
+                        nonterminal: row.get(1)?,
+                        pending_owners: row.get(2)?,
+                        tail: row.get(3)?,
+                        inputs: row.get(4)?,
+                    },
+                    row.get::<_, Option<JsonColumnBytes>>(5)?
+                        .map(JsonColumnBytes::into_bytes),
+                    row.get::<_, Option<JsonColumnBytes>>(6)?
+                        .map(JsonColumnBytes::into_bytes),
+                    row.get::<_, Option<JsonColumnBytes>>(7)?
+                        .map(JsonColumnBytes::into_bytes),
+                ))
+            })
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let mut runtimes = Vec::new();
+        for row in rows {
+            let (runtime_id, facts, lifecycle, catalog, ops) =
+                row.map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            // A Retired or Destroyed runtime is archived: it holds no
+            // recovery work whatever its other rows say, and nothing else of
+            // it is decoded. A retired runtime keeps its ops lifecycle
+            // snapshot, so without this every scan decoded the snapshot of
+            // every runtime ever retired.
+            if lifecycle_is_archived(lifecycle.as_deref()) {
+                continue;
+            }
+            // The ops lifecycle snapshot's work is part of the nonterminal
+            // fact, as the memory store folds it; it is decoded only when no
+            // other fact names work, and never for a runtime its catalog
+            // entry marks archived (an archived document holds no recovery
+            // work either). The answer is the same: an archived runtime is
+            // left out below whenever it holds work. A catalog entry that
+            // does not decode is not taken as archived here, so it fails the
+            // scan exactly where it did.
+            let holds_work = runtime_holds_recovery_work(&facts, lifecycle.as_deref())
+                || ops.as_deref().is_some_and(|encoded| {
+                    !catalog_bytes_mark_archived(catalog.as_deref())
+                        && ops_snapshot_holds_recovery_work(&runtime_id, encoded)
+                });
+            if !holds_work {
+                continue;
+            }
+            let catalog = catalog
+                .map(|encoded| {
+                    serde_json::from_slice::<crate::store::RuntimeSessionCatalogEntry>(&encoded)
+                })
+                .transpose()
+                .map_err(|error| {
+                    RuntimeStoreError::ReadFailed(format!(
+                        "runtime {runtime_id} catalog entry: {error}"
+                    ))
+                })?;
+            if !catalog_entry_is_archived(catalog.as_ref()) {
+                runtimes.push(LogicalRuntimeId(runtime_id));
+            }
+        }
+        Ok(runtimes)
+    }
+
+    /// Whether a stored catalog entry decodes and marks its runtime archived.
+    /// An absent or undecodable entry answers `false`: the scan then decides
+    /// as it would without the check, and reports an undecodable entry only
+    /// for a runtime that holds work.
+    fn catalog_bytes_mark_archived(encoded: Option<&[u8]>) -> bool {
+        encoded
+            .and_then(|encoded| {
+                serde_json::from_slice::<crate::store::RuntimeSessionCatalogEntry>(encoded).ok()
+            })
+            .is_some_and(|entry| catalog_entry_is_archived(Some(&entry)))
+    }
+
+    /// Whether a stored ops lifecycle snapshot holds recovery work
+    /// (`PersistedOpsSnapshot::holds_recovery_work`). A snapshot that does
+    /// not decode counts as work: recovery must look at it.
+    fn ops_snapshot_holds_recovery_work(runtime_id: &str, encoded: &[u8]) -> bool {
+        #[cfg(test)]
+        recovery_scan_ops_decodes::record(runtime_id);
+        match serde_json::from_slice::<crate::ops_lifecycle::PersistedOpsSnapshot>(encoded) {
+            Ok(snapshot) => snapshot.holds_recovery_work(),
+            Err(error) => {
+                tracing::warn!(
+                    runtime_id,
+                    %error,
+                    "the recovery scan read an undecodable ops lifecycle snapshot as recovery work"
+                );
+                true
+            }
+        }
+    }
+
+    /// Test record of the recovery scan's ops lifecycle snapshot decodes, by
+    /// runtime id, so tests over their own runtimes do not meet.
+    #[cfg(test)]
+    mod recovery_scan_ops_decodes {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock, PoisonError};
+
+        fn decodes() -> std::sync::MutexGuard<'static, HashMap<String, u64>> {
+            static DECODES: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+            DECODES
+                .get_or_init(Mutex::default)
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+        }
+
+        pub(super) fn record(runtime_id: &str) {
+            *decodes().entry(runtime_id.to_string()).or_insert(0) += 1;
+        }
+
+        /// How many times a recovery scan decoded `runtime_id`'s ops
+        /// lifecycle snapshot so far.
+        pub(super) fn count(runtime_id: &str) -> u64 {
+            decodes().get(runtime_id).copied().unwrap_or(0)
+        }
+    }
+
     enum SqliteRecoveryInputMutation {
         Upsert {
             replacement: StoredInputState,
@@ -16609,6 +16812,20 @@ ORDER BY runtime_id";
             Ok(records)
         }
 
+        /// One statement over the runtime tables on its own connection,
+        /// which loads no session body.
+        async fn list_runtimes_with_recovery_work(
+            &self,
+        ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
+            let path = self.path.clone();
+            spawn_blocking_holding_claim(move || {
+                let conn = open_runtime_connection(&path)?;
+                list_runtimes_with_recovery_work_in(&conn)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
         async fn list_runtime_delivery_records(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -20948,6 +21165,128 @@ ORDER BY runtime_id";
             let tempdir = tempfile::TempDir::new().unwrap();
             let store = SqliteRuntimeStore::new(tempdir.path().join("runtime.sqlite3")).unwrap();
             crate::store::assert_pending_terminal_owner_index_contract(&store).await;
+        }
+
+        /// The scan reads the durable rows: a reopened store answers the
+        /// same.
+        #[tokio::test]
+        async fn boot_obligation_scan_sqlite_store_lists_exactly_the_runtimes_with_recovery_work() {
+            use crate::store::recovery_obligation::scan_contract;
+
+            let tempdir = tempfile::TempDir::new().unwrap();
+            let path = tempdir.path().join("runtime.sqlite3");
+            let store = SqliteRuntimeStore::new(path.clone()).unwrap();
+            let fixture = scan_contract::seed(&store).await;
+            scan_contract::assert_lists_exactly(&store, &fixture).await;
+            drop(store);
+            let reopened = SqliteRuntimeStore::new(path).unwrap();
+            scan_contract::assert_lists_exactly(&reopened, &fixture).await;
+        }
+
+        /// A runtime retired as 0.9.x retires one (the machine retires it,
+        /// its unregister keeps the ops lifecycle snapshot, and its session
+        /// body is never rewritten) is archived by its lifecycle record, so
+        /// the scan never decodes that snapshot, even one that still owes a
+        /// completion: a realm with many retired sessions does not pay a
+        /// decode for each at every start. Neither is the snapshot of an
+        /// archived document decoded. A runtime that is not archived still
+        /// has its snapshot decoded, and both scans answer the contract.
+        #[tokio::test]
+        async fn boot_obligation_scan_sqlite_store_decodes_no_retired_runtimes_ops_snapshot() {
+            use crate::store::recovery_obligation::scan_contract;
+
+            let tempdir = tempfile::TempDir::new().unwrap();
+            let path = tempdir.path().join("runtime.sqlite3");
+            let store = Arc::new(SqliteRuntimeStore::new(path.clone()).unwrap());
+            let fixture = scan_contract::seed(store.as_ref()).await;
+
+            // The machine's own retire of a registered runtime, then its
+            // unregister: the lifecycle names Retired and the snapshot stays.
+            let machine = Arc::new(
+                crate::MeerkatMachine::persistent_without_blobs(
+                    Arc::clone(&store) as Arc<dyn RuntimeStore>
+                )
+                .expect("a persistent machine over the store"),
+            );
+            let session_id = meerkat_core::types::SessionId::new();
+            let machine_retired = LogicalRuntimeId::for_session(&session_id);
+            machine
+                .register_session(session_id.clone())
+                .await
+                .expect("register the session's runtime");
+            crate::traits::RuntimeControlPlane::retire(machine.as_ref(), &machine_retired)
+                .await
+                .expect("the machine retires the runtime");
+            machine
+                .unregister_session(&session_id)
+                .await
+                .expect("the retired runtime unregisters");
+            drop(machine);
+            assert_eq!(
+                crate::store::load_runtime_state(store.as_ref(), &machine_retired)
+                    .await
+                    .unwrap(),
+                Some(RuntimeState::Retired)
+            );
+            assert!(
+                store
+                    .load_ops_lifecycle(&machine_retired)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "the unregister of a retired runtime keeps its ops lifecycle snapshot"
+            );
+            // That kept snapshot still owes a background operation completion.
+            store
+                .persist_ops_lifecycle(
+                    &machine_retired,
+                    &scan_contract::completed_background_operation(None),
+                )
+                .await
+                .unwrap();
+
+            let skipped = [
+                machine_retired.0.clone(),
+                fixture.retired_owed_completion.0.clone(),
+                fixture.document_archived_owed_completion.0.clone(),
+            ];
+            let owed = fixture.owed_completion.0.clone();
+            // The owed runtime's id is fixed, so other tests in this process
+            // may decode it too: its count only grows.
+            let owed_before = super::recovery_scan_ops_decodes::count(&owed);
+
+            scan_contract::assert_lists_exactly(store.as_ref(), &fixture).await;
+            assert!(
+                !store
+                    .list_runtimes_with_recovery_work()
+                    .await
+                    .unwrap()
+                    .contains(&machine_retired),
+                "a retired runtime holds no recovery work, whatever its kept snapshot owes"
+            );
+            drop(store);
+            let reopened = SqliteRuntimeStore::new(path).unwrap();
+            scan_contract::assert_lists_exactly(&reopened, &fixture).await;
+            assert!(
+                !reopened
+                    .list_runtimes_with_recovery_work()
+                    .await
+                    .unwrap()
+                    .contains(&machine_retired),
+                "and so after a reopen"
+            );
+
+            for runtime in &skipped {
+                assert_eq!(
+                    super::recovery_scan_ops_decodes::count(runtime),
+                    0,
+                    "the scan decodes no ops lifecycle snapshot of archived runtime {runtime}"
+                );
+            }
+            assert!(
+                super::recovery_scan_ops_decodes::count(&owed) >= owed_before + 4,
+                "each scan decodes the snapshot of a runtime that is not archived"
+            );
         }
 
         #[tokio::test]

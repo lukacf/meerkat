@@ -707,6 +707,12 @@ impl RuntimeStore for FailingOpsLifecycleStore {
         self.inner.supports_compaction_projection_outbox()
     }
 
+    async fn list_runtimes_with_recovery_work(
+        &self,
+    ) -> Result<Vec<LogicalRuntimeId>, meerkat_runtime::RuntimeStoreError> {
+        self.inner.list_runtimes_with_recovery_work().await
+    }
+
     fn input_state_batch_cas_implementation_profile(
         &self,
     ) -> meerkat_runtime::store::InputStateBatchCasImplementationProfile {

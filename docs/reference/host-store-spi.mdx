@@ -1,6 +1,6 @@
 ---
 title: "Host Store SPI"
-description: "The storage interface a host implements to keep a Meerkat realm in its own database: operations, batches, limits, errors, the nine obligations, fence leases and the conformance chapter."
+description: "The storage interface a host implements to keep a Meerkat realm in its own database: operations, batches, limits, errors, the nine obligations, fence leases, what Core reads, retention and the conformance chapter."
 icon: "plug"
 ---
 
@@ -22,10 +22,10 @@ The store holds **scopes**. Each scope has:
 - a versioned head of opaque bytes;
 - ordered rows of opaque bytes.
 
-Core assigns every version and every commit id. It keeps the heads it has
-open in memory, and loads a scope only when it opens it: at start, on resume
-and on failover, never before a commit. The store never interprets a
-payload.
+Core assigns every version and every commit id. It lists every head when it
+opens a realm, keeps the heads in memory, and reads a scope's rows only when
+it opens that scope (see [What Core Reads](#what-core-reads)), never before a
+commit. The store never interprets a payload.
 
 Rows have stable indices. Appended rows take the next indices,
 `truncate_after` removes rows at the end, and `drop_before` removes rows at
@@ -204,7 +204,9 @@ updates or transactions.
    that tie are ordered by a fixed rule, such as the commit id.
 6. **Logical removal.** Truncate, drop and delete take effect for loads
    together with their batch. Physical cleanup may come later or never;
-   tombstones are fine.
+   tombstones are fine. An append-only store should still compact, or
+   its loads grow with history (see
+   [Mapping Onto A Database](#mapping-onto-a-database)).
 7. **Order.** Rows load in commit order.
 8. **Independence.** No realm-wide lock, pointer, sequence or transaction on
    the commit path, and scopes commit concurrently. The fence is acquired and
@@ -340,6 +342,123 @@ scopes of its own in the realm, through the same realm handle, names its
 families with those prefixes, so no family a later Core release adds can take
 one of its tags.
 
+## What Core Reads
+
+This section is informative too. A store must answer every operation
+whenever Core calls it; these are the reads Core makes. None of them reads
+superseded history (see [Retention](#retention)): they follow how many scopes
+the realm holds (archived sessions are never deleted) and its live state.
+Some live state grows with use and is not removed today: a runtime's
+delivery authority, kept in its head, grows with every delivery and, once
+over 32 KiB, is read as a chunk at every open, dormant runtimes included; a
+runtime's boundary receipts and delivery records grow the rows a load of it
+reads; and a mob's event log grows the mob's own scope.
+
+**At open.** After it acquires the fence and before its first commit, Core
+reads:
+
+- **Every head, once.** `list_heads` for each of the four scope kinds,
+  asking for 2048 heads per call (256 before 0.9.7) and at least one call
+  per kind, archived sessions and chunk scopes included. A store may answer
+  fewer heads per call with `HeadPage::next` set; Core reads on from there.
+- **Head entries kept as chunks.** A head entry over 32 KiB is kept in a
+  chunk scope: one `load_head` and its rows for each such entry of every
+  runtime, dormant or not, and of every realm record.
+- **The rows of runtimes with recovery work.** A runtime's session scope is
+  read only when the facts its head pins show work recovery must act on:
+  unsettled or queued inputs, input rows without a lifecycle record, a
+  background operation completion not yet delivered, a running detached job
+  wait, pending terminal owners, an open run's provisional tail, or a current
+  run (a lifecycle record Core cannot decode counts as one). Core reads its
+  visible rows from the first visible row, 16 rows per `read_rows` call, then
+  the chunks its rows and live entries refer to. An archived runtime is never
+  read at open: one whose session was archived, or whose runtime was retired
+  or destroyed (a retired mob member's, for example).
+
+No other row is read at open.
+
+Core reads up to 16 runtimes at once: their head entries kept as chunks, and
+the rows of those with recovery work. One runtime's reads run in order, its
+rows and then its chunks. An open of K runtimes with recovery work therefore
+waits about ceil(K / 16) times as long as the reads of one runtime, not K
+times. If any of those reads fails, the open fails and serves nothing.
+
+**When a mob's storage is opened** (its resume after a restart), Core reads
+the mob's own scopes whole: its event log, identity, flow runs and statuses.
+The lift of a mob stopped in the same process finds them in memory and reads
+none of them.
+
+**When a mob starts** (that resume, or the lift of a stopped mob), Core reads
+the sessions of the members the start wakes. A start wakes a member with
+recovery work, a pending delivery or an owed kickoff, a member on TCP or UDS
+member comms, one wired to a member placed in another process, an
+orchestrator the resume notifies, a member without a durable endpoint, and
+the members the host requires. Under the default restore policy
+(`MemberRestorePolicy::OnDemand`) every other member stays dormant: its
+session scope gets no `load_head` and no `read_rows`.
+`MemberRestorePolicy::OnDemandVerified` reads every dormant member's session
+rows once at every start, and `MemberRestorePolicy::Eager` wakes every
+member. A start wakes its members at most the mob's restore concurrency at a
+time (`MobBuilder::with_resume_restore_concurrency`, 16 by default), and its
+verified reads run at most that many at a time too. A member the lift of a
+stopped mob has not reached yet stays dormant until it does, or until a
+delivery wakes it first.
+
+**Later, on first use.** A dormant member's session is read when its first
+delivery wakes it. Any session not read yet is read the first time a call
+needs it, for example a read of its history. Seating a member on an existing
+session (`MobHandle::seat_dormant_members`) reads that session once, to check
+that it can be resumed; seating a member whose session does not exist yet
+reads nothing. A session read once stays in memory until it is archived, so
+it is not read again.
+
+**Rarely.** A start whose recovery scan fails wakes every member, and says so
+(`MobHandle::boot_set_basis`). A start that finds a woken member's session
+gone searches the realm's other sessions for its successor, reading each
+candidate once. A writer that stopped (a failed renew, or its self-fence
+window closed) and acquires the fence again lists every head once more, as
+at open, to check that no other writer committed meanwhile.
+
+**The first start after an upgrade to 0.9.7.** A runtime head that an
+earlier release wrote cannot show that no background operation completion
+is owed, so the first 0.9.7 start treats each such runtime that is not
+archived as holding work: it wakes its mob member once and reads its
+session. The runtime's next commit records its facts in full, and later
+starts read only what this section lists.
+
+**Listing pages from 0.9.7.** Core asks `list_heads` for 2048 heads per
+call, eight times as many as before, so one answer of typical runtime heads
+is several MiB. If your backend or transport caps an answer below that (a
+message or page size limit), answer the heads that fit with `HeadPage::next`
+set, and leave `next` empty only when no scope of the kind is left to list.
+A store that sets `next` only when it answered a full page of `limit` heads
+ends the listing early once its cap cuts a page short, and Core then opens
+without the scopes it was not given.
+
+For example, a realm of 5,000 sessions where only one holds work, whose
+pinned entries are all inline and whose other kinds hold at most 2048 scopes
+each, takes at open one `acquire_fence`, three `list_heads` calls for the
+sessions and one for each other kind, and the `read_rows` calls of that one
+session.
+
+## Retention
+
+When Core changes a row entry, it appends the entry again, whole, in a new
+row: a runtime's registry of background operations, for example, is
+rewritten each time an operation finishes. The rows holding superseded values
+stay visible until a re-base drops them. A scope is re-based on its first
+commit after the rows appended since its last re-base pass four times the
+bytes of its live entries or 256 KiB (4 MiB before 0.9.7), whichever is
+larger. The re-base is one batch: a reset row, every live entry, and
+`drop_before` at the first of those rows, so a crash leaves the old window or
+the new one. A scope's visible rows therefore stay within that bound plus its
+last commit's rows, and re-bases add at most about a third to the row bytes
+Core writes.
+
+Core re-bases only a scope it has opened. A dormant member's scope keeps its
+rows until the member is woken and commits again; Core does not read them
+in the meantime.
+
 ## Mapping Onto A Database
 
 Any database that meets the obligations works. Two common shapes:
@@ -374,7 +493,19 @@ on the database's clock, in a row of their own.
   appends a lease row.
 - **Clock.** Commit timestamps are the store's own, and ties break by commit
   id.
-- **Cleanup** is optional and stays off the commit path.
+- **Open from current heads.** Keep each scope's current head where
+  `list_heads` pages it directly (a table or an index of the latest
+  versions), and serve `read_rows` when it is called, for one scope at a
+  time. Core reads rows only as [What Core Reads](#what-core-reads) lists,
+  so a store never needs to load every row before it answers.
+- **Compaction.** Off the commit path, remove what no load can show anymore:
+  heads older than each scope's visible head, rows below each scope's first
+  visible row, deleted scopes (chunk scopes among them) and fenced-out
+  batches. Keep each scope's visible head with its version and commit id
+  (Core settles an unknown commit outcome by reading it), its visible rows,
+  and the fence's highest token and lease. Without compaction the log grows
+  with every commit, and so does any load that scans it, while the realm's
+  live state stays bounded ([Retention](#retention)).
 
 ## Conformance
 

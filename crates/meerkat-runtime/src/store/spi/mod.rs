@@ -32,14 +32,35 @@
 //! A boot lists every head once. The pinned entries of every runtime are
 //! imported, so listings, the delivery authority listing and the controller
 //! inventory see every runtime. A runtime's body is loaded at boot only
-//! when recovery must act on it: it has nonterminal inputs, pending terminal
-//! owners, a provisional tail (an open run cursor), a current run in its
-//! lifecycle, or input rows without a lifecycle. Archived runtimes are
-//! never loaded at boot. Every other body loads on the first call that
-//! names the runtime and stays resident until the runtime is archived.
+//! when recovery must act on it: it has nonterminal inputs or work its ops
+//! lifecycle snapshot owes (an undelivered background operation completion,
+//! a running detached job wait), pending terminal owners, a provisional
+//! tail (an open run cursor), a current run in its lifecycle, or input rows
+//! without a lifecycle. Archived runtimes are never loaded at boot. Every
+//! other body loads on the first call that names the runtime and stays
+//! resident until the runtime is archived.
 //! Resident memory is therefore bounded by the bodies of the runtimes
 //! opened since the process started and not archived since, plus every
-//! runtime's pinned head entries.
+//! runtime's pinned head entries. The store's obligation scan asks the same
+//! predicate as the boot and answers from memory, with no host read.
+//!
+//! The boot reads the runtimes up to 16 at once (the head entries a runtime
+//! keeps as chunks, and the bodies it loads at boot); one runtime's reads
+//! stay in order. It installs nothing until every read succeeded, then each
+//! runtime in key order, so a failed read fails the open with no runtime
+//! installed.
+//!
+//! # Retention
+//!
+//! A row entry that changes is appended again, whole, so a scope's rows
+//! hold superseded values until a journal checkpoint drops them (the host
+//! store reference calls it a re-base; it is not the run re-base of a
+//! WholeBlob run after a compaction): once the rows appended since the last
+//! checkpoint pass four times the scope's live bytes or
+//! [`realm::CHECKPOINT_MIN_BYTES`], whichever is larger, its next commit
+//! writes the live image and drops every earlier row in one batch. Only a
+//! loaded scope is checkpointed: a body that stays on the host keeps its
+//! rows until its next commit.
 //!
 //! # Limits of this adapter
 //!

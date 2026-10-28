@@ -653,7 +653,9 @@ pub struct OpenAiPromptCacheOptions {
     /// Automatic (`implicit`) placement or Meerkat-authored explicit placement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<OpenAiPromptCacheMode>,
-    /// Minimum cache lifetime. GPT-5.6 currently accepts only `30m`.
+    /// Minimum cache lifetime: `30m` (default) or `12h` on GPT-5.6 and later.
+    // The adaptive mobpack LayerDecision schema keeps this field's released
+    // 0.9.1 description (`meerkat_mob::adaptive::layer_decision_schema`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<OpenAiPromptCacheTtl>,
 }
@@ -3432,6 +3434,64 @@ mod tests {
         assert_eq!(
             json["provider_tag"]["prompt_cache_options"]["ttl"],
             serde_json::json!("30m")
+        );
+    }
+    /// An explicit `12h` prompt-cache TTL (a profile, config or turn override)
+    /// parses, wins over the `30m` build default the factory derives, survives
+    /// clearing those defaults again, and serializes back as `"12h"`. The
+    /// default stays `30m`: only an explicit choice selects `12h`.
+    #[test]
+    fn openai_twelve_hour_prompt_cache_ttl_wins_over_the_default_and_round_trips() {
+        let explicit: ProviderParamsOverride = serde_json::from_value(serde_json::json!({
+            "provider_tag": {
+                "provider": "open_ai",
+                "prompt_cache_options": { "ttl": "12h" }
+            }
+        }))
+        .expect("a 12h prompt-cache TTL parses");
+        let defaults = ProviderTag::OpenAi(OpenAiProviderTag {
+            prompt_cache_enabled: Some(true),
+            prompt_cache_key: Some("meerkat:profile:openai:gpt-6-astra".into()),
+            prompt_cache_options: Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Implicit),
+                ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+            }),
+            ..Default::default()
+        });
+        let carrier = ProviderParamsCarrier {
+            params: explicit,
+            tool_defaults: Some(defaults.clone()),
+        };
+        let effective = carrier.effective_params().expect("merge succeeds");
+        let Some(ProviderTag::OpenAi(ref tag)) = effective.provider_tag else {
+            panic!("openai tag expected");
+        };
+        assert_eq!(
+            tag.prompt_cache_options,
+            Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Implicit),
+                ttl: Some(OpenAiPromptCacheTtl::TwelveHours),
+            }),
+            "the explicit TTL wins; the default fills only the unset mode"
+        );
+        let json = serde_json::to_value(&effective).expect("serialize merged params");
+        assert_eq!(
+            json["provider_tag"]["prompt_cache_options"],
+            serde_json::json!({ "mode": "implicit", "ttl": "12h" })
+        );
+
+        let mut cleared = effective.provider_tag.expect("merged provider tag");
+        cleared.clear_matching_defaults(&defaults);
+        assert_eq!(
+            cleared,
+            ProviderTag::OpenAi(OpenAiProviderTag {
+                prompt_cache_options: Some(OpenAiPromptCacheOptions {
+                    mode: None,
+                    ttl: Some(OpenAiPromptCacheTtl::TwelveHours),
+                }),
+                ..Default::default()
+            }),
+            "a TTL that differs from the default is the caller's own knob"
         );
     }
     /// K2 invariant: the carrier's durable face is exactly the typed override

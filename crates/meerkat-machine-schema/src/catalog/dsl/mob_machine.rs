@@ -168,14 +168,16 @@ macro_rules! mob_catalog_machine_dsl {
             // terminal journal publication) and must never depend on the
             // intentionally retired remote runtime remaining reachable.
             remote_supervisor_revoked_ids: Set<AgentRuntimeId>,
-            // Machine-owned revival obligation: members whose live
-            // materialization was observed missing while a durable session
-            // snapshot still exists. Inserted by the revivable arm of
-            // ClassifyMemberLiveMaterialization; cleared by the
-            // ResolveMemberRevival* resolutions and by every lifecycle
-            // transition that replaces or clears the member's restore
-            // classification. The session-registry cache never owns this fact.
-            member_revival_pending: Set<AgentIdentity>,
+            // Machine-owned member residency: whether a seated, session-bound
+            // member is materialized in this process. Dormant: seated, not
+            // materialized (every recovered local member starts here). Waking:
+            // exactly one materialization attempt is open
+            // (member_wake_attempts). Live: materialized. Absent: not a
+            // session-bound member, Broken (member_restore_failures) or
+            // Retiring. The session-registry cache, the inproc registry and
+            // the provisioner never own this fact; they are observed only as
+            // raw inputs (observed_missing, the drift classification).
+            member_materialization: Map<AgentIdentity, Enum<MemberMaterializationPhase>>,
             explicit_resume_attempt: Option<ResumeAttemptId>,
             explicit_resume_cancel_requested: bool,
             explicit_resume_preparation_pending: bool,
@@ -522,6 +524,76 @@ macro_rules! mob_catalog_machine_dsl {
             // identity. Presence = resolved (single-shot, consumed with the
             // other spawn_profile_authority_* maps at membership commit).
             spawn_profile_authority_resolved_spec_digests: Map<AgentIdentity, String>,
+            // --- Member residency (Dormant / Waking / Live) ---
+            // The open materialization attempt of every Waking member, minted
+            // by the machine from member_wake_attempt_sequence. Late wake
+            // feedback names its attempt; a feedback for any other attempt is
+            // a typed StaleAttempt no-op.
+            member_wake_attempts: Map<AgentIdentity, u64>,
+            member_wake_attempt_sequence: u64,
+            // A Waking member whose runtime binding was requested
+            // (ResolveMemberRevivalBound); its Live resolution requires it.
+            member_wake_bound: Set<AgentIdentity>,
+            // The runtime registration epoch of a Waking or Live member,
+            // recorded by ObserveRuntimeReady from the epoch-carrying
+            // RuntimeBound route. A registration release is honoured only
+            // for this exact epoch, so a stale release after a newer wake
+            // is refused.
+            member_materialization_epoch: Map<AgentIdentity, Option<RuntimeEpochId>>,
+            // Counted fault path: a Live member found unmaterialized by
+            // a probe or a routing miss instead of through a release.
+            member_materialization_drift_count: u64,
+            // A member the boot plan woke for an obligation whose wake has not
+            // reached Live yet. A retryable wake keeps it, so the owner's
+            // timer wakes the member again (cause Boot). EndpointPending: the
+            // member has no durable endpoint yet (a legacy journal); the seal
+            // does not wait for its retry, and dormant_member_has_durable_endpoint
+            // makes exactly this typed exception until an endpoint is registered.
+            member_boot_obligation_owed: Map<AgentIdentity, Enum<MemberBootObligationCause>>,
+            // Seeded once at build (SeedMemberResidency), never journaled.
+            member_restore_policy: Enum<MemberRestorePolicyKind>,
+            composition_authority: Enum<CompositionAuthorityKind>,
+            // Identities whose host preparation (a first-boot row) has not
+            // been carried out: their wakes are refused, retryable.
+            member_host_preparation_pending: Set<AgentIdentity>,
+            // Set once the boot plan settled; dormant_member_has_durable_endpoint and
+            // wiring_edges_connect_seated_members hold from here on.
+            boot_plan_sealed: bool,
+            // Rotation intent (reset, delete): the new session and endpoint
+            // the retiring incarnation's terminal seats Dormant.
+            member_rotation_session_ids: Map<AgentIdentity, SessionId>,
+            member_rotation_peer_endpoints: Map<AgentIdentity, MemberPeerEndpoint>,
+            // Retiring runtimes that hold no runtime registration in this
+            // process (the member was Dormant or Waking when its retirement
+            // started, or the retirement was recovered at build, where no
+            // retiring member is ever woken). Their retirement routes no
+            // runtime retire; the session archive alone terminates them.
+            runtime_retire_archive_only: Set<AgentRuntimeId>,
+            // Owed trust repairs: a wiring edge whose trust realization failed
+            // (at a wake's topology step or at a repair) while its members
+            // close Live regardless. A successful realization of the edge
+            // clears it, and so do the edge going and either end leaving
+            // (retired or unseated). The owner retries each with backoff
+            // (OwedEdgeRepairsRecorded).
+            owed_edge_repairs: Set<WiringEdge>,
+            // The same for an external peer edge of a local member.
+            owed_external_edge_repairs: Set<ExternalPeerEdge>,
+            // Seats whose session does not exist yet: a fresh launch's seat
+            // and a rotation's next incarnation build nothing, and the first
+            // wake creates the session through the spawn provision path, with
+            // the host's registration (ResolveMemberRevivalSessionCreated).
+            // That step clears it durably (PersistMemberSeatSessionBorn), and
+            // so does the member leaving or the mob's reset or destroy. A
+            // session missing for any other member is never created afresh.
+            member_seat_session_unborn: Set<AgentIdentity>,
+            // Sessions a seat or a rotation named for an unborn seat that no
+            // build has created yet (no session-created step followed). The
+            // record outlives the member: a retire before the first wake keeps
+            // it, so a later seat naming that session seats it unborn and its
+            // first wake creates it, where a session that was created and is
+            // gone is lost. The session-created step and the born replay row
+            // drop it, as do the mob's reset and destroy.
+            unborn_seat_sessions: Set<SessionId>,
         }
 
         init(Running) {
@@ -630,7 +702,7 @@ macro_rules! mob_catalog_machine_dsl {
             runtime_retire_pending_sessions = EmptyMap,
             remote_runtime_retired_ids = EmptySet,
             remote_supervisor_revoked_ids = EmptySet,
-            member_revival_pending = EmptySet,
+            member_materialization = EmptyMap,
             explicit_resume_attempt = None,
             explicit_resume_cancel_requested = false,
             explicit_resume_preparation_pending = false,
@@ -808,6 +880,23 @@ macro_rules! mob_catalog_machine_dsl {
             operator_grant_scopes = EmptyMap,
             operator_grant_expiries = EmptyMap,
             spawn_profile_authority_resolved_spec_digests = EmptyMap,
+            member_wake_attempts = EmptyMap,
+            member_wake_attempt_sequence = 0,
+            member_wake_bound = EmptySet,
+            member_materialization_epoch = EmptyMap,
+            member_materialization_drift_count = 0,
+            member_boot_obligation_owed = EmptyMap,
+            member_restore_policy = MemberRestorePolicyKind::OnDemand,
+            composition_authority = CompositionAuthorityKind::Authoritative,
+            member_host_preparation_pending = EmptySet,
+            boot_plan_sealed = false,
+            member_rotation_session_ids = EmptyMap,
+            member_rotation_peer_endpoints = EmptyMap,
+            runtime_retire_archive_only = EmptySet,
+            owed_edge_repairs = EmptySet,
+            owed_external_edge_repairs = EmptySet,
+            member_seat_session_unborn = EmptySet,
+            unborn_seat_sessions = EmptySet,
         }
 
         terminal [Destroyed]
@@ -1364,7 +1453,7 @@ macro_rules! mob_catalog_machine_dsl {
             // Generated composition refusal closure. Each input is bound by
             // `meerkat_mob_seam` to one concrete routed effect kind; the shell
             // supplies only the consumer's stable code + display detail.
-            ResolveRuntimeBindingRefusal { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId, refusal_code: String, reason: String },
+            ResolveRuntimeBindingRefusal { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId, refusal_code: String, reason: String, attempt: Option<u64> },
             ResolveRuntimeIngressRefusal { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId, work_id: WorkId, origin: Enum<WorkOrigin>, refusal_code: String, reason: String },
             ResolveRuntimeRetireRefusal { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId, refusal_code: String, reason: String },
             RetryRuntimeRetire { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
@@ -1697,6 +1786,55 @@ macro_rules! mob_catalog_machine_dsl {
             // `update {}`; the actor applies it in the same command as the
             // step it guards.
             RetireAtScope { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId },
+            // --- Member residency (Dormant / Waking / Live) ---
+            // One-time build seed: the restore policy, the composition's
+            // authority (a candidate composition acts nowhere) and the
+            // identities whose host preparation is still pending. Never
+            // journaled; the builder seeds it on create and on resume.
+            SeedMemberResidency { policy: Enum<MemberRestorePolicyKind>, composition_authority: Enum<CompositionAuthorityKind>, host_pending: Set<AgentIdentity> },
+            // The total wake verdict for one member. Causes are deliveries and
+            // the operator; a read is never a cause. `observed_missing` is the
+            // raw routing observation that a Live member's materialization is
+            // gone; `sender_waking` is the raw observation that a peer sender
+            // is itself Waking (a build-time send).
+            WakeMember { agent_identity: AgentIdentity, cause: Enum<MemberWakeCause>, observed_missing: bool, input_class: Enum<PeerInputClass>, sender_waking: bool },
+            // The boot verdict for one Dormant member, on both start paths.
+            // The shell supplies only the facts the machine cannot hold: the
+            // runtime obligation scan's verdict, the host-required mark and
+            // the orchestrator-notify mark; the policy, composition authority,
+            // host-pending mark, kickoff obligation, endpoint presence and
+            // transport kind are machine state.
+            PlanBootMaterialization { agent_identity: AgentIdentity, obligation: Enum<MemberRecoveryObligationKind>, host_required: bool, orchestrator_notified: bool },
+            // Closes the boot plan once the boot set settled: from here every
+            // Dormant or Waking member has a durable endpoint and every
+            // wiring edge joins seated members.
+            SealBootMaterializationPlan,
+            // The machine verdict for one peer notice: Lifecycle notices
+            // to or from a member that is not Live are suppressed, a kickoff
+            // notice to such a member is deferred to its wake, the rest are
+            // delivered. Both phases are read from machine state.
+            ClassifyPeerNotice { recipient: AgentIdentity, sender: AgentIdentity, notice_class: Enum<PeerInputClass> },
+            // A seat: membership without materialization (import and new
+            // roster identities). Walks the spawn admission ladder
+            // (BeginSpawnExec + AuthorizeSpawnProfile) and commits Dormant.
+            CommitDormantSeat { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, runtime_mode: Enum<SpawnPolicyRuntimeMode>, bridge_session_id: SessionId, member_peer_endpoint: Option<MemberPeerEndpoint>, session_archived: bool, kickoff_owed: bool, session_unborn: bool, fresh_launch: bool },
+            // The host carried out an identity's pending preparation on an
+            // identity already seated on that session.
+            ResolveMemberHostPreparation { agent_identity: AgentIdentity },
+            // A rotation (reset, delete): the exact Retiring incarnation will
+            // be re-seated Dormant on a NEW session in its terminal step. A
+            // network-comms member has no endpoint before its first wake
+            // (None): it is re-seated owed EndpointPending.
+            BeginMemberRotation { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, session_archived: bool },
+            // The rotation's archive terminal: retires the old incarnation and
+            // seats the next one Dormant in one transition (no non-member
+            // window). Its two journal rows are appended in one batch before
+            // the commit.
+            CommitMemberRotation { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>, disposal: Enum<MemberSessionDisposal>, next_agent_runtime_id: AgentRuntimeId, next_fence_token: FenceToken, next_generation: Generation, runtime_mode: Enum<SpawnPolicyRuntimeMode>, external_addressable: bool, kickoff_owed: bool, kickoff_objective_id: String },
+            // The release verdict for one member: the shell's release_member
+            // answers through it, never from a shell phase read. A pure
+            // verdict in every lifecycle phase.
+            ClassifyMemberRelease { agent_identity: AgentIdentity },
         }
 
         surface_only [
@@ -1713,7 +1851,7 @@ macro_rules! mob_catalog_machine_dsl {
         ]
 
         signal MobMachineSignal {
-            ObserveRuntimeReady { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
+            ObserveRuntimeReady { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, runtime_epoch_id: Option<RuntimeEpochId> },
             RetireMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: Option<SessionId> },
             AdmitDestroyMemberRetire { mob_id: MobId, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId> },
             ObserveRuntimeRetired { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
@@ -1766,9 +1904,9 @@ macro_rules! mob_catalog_machine_dsl {
             RecoverCommittedPlacedSpawn { spawn_id: PlacedSpawnId, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, generation: Generation, fence_token: FenceToken, host_id: HostId, host_binding_generation: u64, member_session_id: SessionId, member_peer_endpoint: MemberPeerEndpoint, profile_name: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, external_addressable: bool, provision_operation_id: String, operation_owner_session_id: SessionId },
             RecoverPlacedCarrierCleanup { obligation: PlacedCarrierCleanupObligation },
             ClassifyMemberLiveMaterialization { agent_identity: AgentIdentity, observation: Enum<MemberLiveMaterializationObservationKind>, reason: String },
-            ResolveMemberRevivalSucceeded { agent_identity: AgentIdentity },
-            ResolveRecreatedMemberSessionSucceeded { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, bridge_session_id: SessionId },
-            ResolveMemberRevivalFailed { agent_identity: AgentIdentity, reason: String },
+            ResolveMemberRevivalSucceeded { agent_identity: AgentIdentity, attempt: u64 },
+            ResolveRecreatedMemberSessionSucceeded { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, bridge_session_id: SessionId, attempt: u64 },
+            ResolveMemberRevivalFailed { agent_identity: AgentIdentity, reason: String, attempt: u64 },
             AdmitDestroyCleanup,
             AdmitDestroyStorageFinalizing,
             MarkCompleted,
@@ -1797,11 +1935,40 @@ macro_rules! mob_catalog_machine_dsl {
             // The member's host refused the registration its revival
             // prepared. As ResolveMemberRevivalFailed, plus the shell's
             // stable code naming the refusing hook call.
-            ResolveMemberRevivalHostRefused { agent_identity: AgentIdentity, refusal_code: String, reason: String },
+            ResolveMemberRevivalHostRefused { agent_identity: AgentIdentity, refusal_code: String, reason: String, attempt: u64 },
             // The member's host refused the registration its boot restore
             // prepared. As RecoverMemberRestoreFailure, plus the shell's
             // stable code naming the refusing hook call.
             RecoverMemberRestoreHostRefused { agent_identity: AgentIdentity, refusal_code: String, reason: String },
+            // --- Member residency: attempt-fenced wake feedback ---
+            // Every feedback names the attempt it resolves. A feedback for an
+            // attempt that is not the member's open one, in any lifecycle
+            // phase, is a typed StaleAttempt no-op.
+            // The provision registered the runtime: request its binding; the
+            // member stays Waking (step 1 of a local wake).
+            ResolveMemberRevivalBound { agent_identity: AgentIdentity, attempt: u64 },
+            // A retryable wake failure: Waking -> Dormant, not Broken.
+            ResolveMemberRevivalRetryable { agent_identity: AgentIdentity, attempt: u64, kind: Enum<MemberWakeRetryableKind> },
+            // A shell path that ends a wake without a resolution.
+            AbandonMemberWake { agent_identity: AgentIdentity, attempt: u64, kind: Enum<MemberWakeAbandonKind>, reason: String },
+            // A runtime registration was released while the member stays
+            // seated: the route's fields; the identity is resolved
+            // through identity_to_runtime. Total, stale-tolerant.
+            ReleaseMemberMaterialization { agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_epoch_id: Option<RuntimeEpochId>, cause: Enum<MemberMaterializationLossCause> },
+            // The outcome of realizing one edge's trust (a wake's topology
+            // step, a respawn's topology restore, an owed repair): a realized
+            // edge owes no repair; an unrealized one is owed while it is wired
+            // between seated members that are not retiring.
+            ResolveWiringEdgeRealization { edge: WiringEdge, realized: bool },
+            ResolveExternalEdgeRealization { edge: ExternalPeerEdge, realized: bool },
+            // An unborn seat's wake created its session through the spawn
+            // provision path, with the host's registration (or adopted the
+            // session such a create left), and registered the runtime: request
+            // its binding, in place of ResolveMemberRevivalBound.
+            ResolveMemberRevivalSessionCreated { agent_identity: AgentIdentity, attempt: u64 },
+            // Replay of a seat's session from its journal rows: unborn from
+            // the seat's row, born from the row of its session's creation.
+            RecoverMemberSeatSession { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, unborn: bool },
         }
 
         effect MobMachineEffect {
@@ -1811,7 +1978,7 @@ macro_rules! mob_catalog_machine_dsl {
             HoldMemberRunStarts,
             ReleaseMemberRunStarts,
             DefinitionEpochAdvanced { previous_epoch: u64, epoch: u64 },
-            RequestRuntimeBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, session_id: SessionId },
+            RequestRuntimeBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, session_id: SessionId, attempt: Option<u64> },
             SpawnProfileAuthorized { agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: bool, resolved_spec_digest: Option<String> },
             RequestRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, session_id: SessionId, work_id: WorkId, origin: Enum<WorkOrigin>, content_attribution: Enum<WorkContentAttribution> },
             RequestPeerRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, work_id: WorkId, origin: Enum<WorkOrigin>, content_attribution: Enum<WorkContentAttribution> },
@@ -1932,7 +2099,7 @@ macro_rules! mob_catalog_machine_dsl {
             SpawnPolicyResolutionRecorded { agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<Enum<SpawnPolicyRuntimeMode>> },
             OwnerBridgeSessionBound { bridge_session_id: SessionId, destroy_on_owner_archive: bool, implicit_delegation_mob: bool },
             RespawnTopologyRestoreResolved { agent_identity: AgentIdentity, result: Enum<RespawnTopologyRestoreResultKind>, failed_peer_ids: Seq<RespawnTopologyPeerId> },
-            MemberLiveMaterializationClassified { agent_identity: AgentIdentity, observation: Enum<MemberLiveMaterializationObservationKind>, verdict: Enum<MemberRevivalVerdictKind>, reason: String },
+            MemberLiveMaterializationClassified { agent_identity: AgentIdentity, observation: Enum<MemberLiveMaterializationObservationKind>, verdict: Enum<MemberRevivalVerdictKind>, reason: String, attempt: Option<u64> },
             SpawnManyFailureClassified { observation: Enum<MobSpawnManyFailureObservationKind>, cause: Enum<MobSpawnManyFailureCauseKind> },
             MemberWaitClassified { agent_identity: AgentIdentity, result: Enum<MemberWaitClassificationKind> },
             // Machine-owned flow topology edge admission verdict. The shell
@@ -2149,6 +2316,54 @@ macro_rules! mob_catalog_machine_dsl {
             ExplicitResumeMemberOutcomeClassified { attempt: ResumeAttemptId, agent_identity: AgentIdentity, binding: ResumeMemberBinding, disposition: Enum<ResumeMemberOutcomeDisposition> },
             ExplicitResumeFinished { attempt: ResumeAttemptId, cancelled: bool },
             RetireAtScopeResolved { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, verdict: Enum<RetireAtScopeVerdictKind>, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken>, current_session_id: Option<SessionId> },
+            // --- Member residency (Dormant / Waking / Live) ---
+            // The handoff obligation for one materialization attempt: the
+            // provisioner runs the cold recipe and resolves the attempt with
+            // the attempt-fenced feedback (Bound, Succeeded, Failed,
+            // HostRefused, Retryable or Abandon).
+            MaterializeMember { agent_identity: AgentIdentity, cause: Enum<MemberWakeCause>, attempt: u64 },
+            // The read-only boot verdict owed for one Dormant member under
+            // OnDemandVerified (no materialization).
+            VerifyMember { agent_identity: AgentIdentity },
+            BootMaterializationPlanned { agent_identity: AgentIdentity, verdict: Enum<BootMaterializationKind>, attempt: Option<u64> },
+            MemberWakeClassified { agent_identity: AgentIdentity, cause: Enum<MemberWakeCause>, verdict: Enum<MemberWakeVerdictKind>, refusal: Option<Enum<MemberWakeRefusalKind>>, attempt: Option<u64>, session_id: Option<SessionId> },
+            MemberWakeFeedbackResolved { agent_identity: AgentIdentity, attempt: u64, verdict: Enum<MemberWakeFeedbackVerdict> },
+            // Every Waking member was moved to Dormant by a mob-wide stop,
+            // completion or destroy admission: every open attempt is closed.
+            MemberWakesAbandoned { cause: Enum<MemberWakeAbandonCause> },
+            // The destroy admission beats every in-flight rotation. The
+            // next sessions they recorded are never bound; the shell archives
+            // each (empty) session. An empty map asks for nothing.
+            RotationSessionsAbandoned { rotations: Map<AgentIdentity, SessionId> },
+            // Mob-wide peer ingress closure for every Live member at a Stop, and
+            // its reopening at Resume.
+            CloseMemberPeerIngress { reason: Enum<MemberWakeRefusalKind> },
+            ReopenMemberPeerIngress,
+            // Wake-route projection triggers. The realizer reads the
+            // route's source truth (membership, endpoint, session binding)
+            // from machine state.
+            PublishWakeRoute { agent_identity: AgentIdentity },
+            RetractWakeRoute { agent_identity: AgentIdentity },
+            RebuildWakeRoutes,
+            PeerNoticeClassified { recipient: AgentIdentity, sender: AgentIdentity, notice_class: Enum<PeerInputClass>, disposition: Enum<PeerNoticeDisposition> },
+            MemberMaterializationReleased { agent_runtime_id: Option<AgentRuntimeId>, cause: Enum<MemberMaterializationLossCause>, outcome: Enum<MemberMaterializationReleaseOutcome> },
+            MemberReleaseClassified { agent_identity: AgentIdentity, verdict: Enum<MemberReleaseVerdict> },
+            // A refused binding request that belongs to no open wake of the
+            // member (an earlier attempt's, a spawn-era one while a wake is
+            // open, or one for a session the member no longer binds): the
+            // refusal changes nothing, and the shell consumes the refused
+            // route without recording the member Broken.
+            RuntimeBindingRefusalStale { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId, attempt: Option<u64> },
+            // A step that may have recorded owed wakes without opening an
+            // attempt (several members at once): the owner arms its retry
+            // timer for every owed Dormant member.
+            OwedMemberWakesRecorded,
+            // An edge's trust repair is owed: the owner arms its repair timer
+            // for every owed edge.
+            OwedEdgeRepairsRecorded,
+            // An unborn seat's session was created: the owner journals it, so
+            // a replay never creates that session afresh.
+            PersistMemberSeatSessionBorn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -2684,6 +2899,222 @@ macro_rules! mob_catalog_machine_dsl {
             }}}}}}
         }
 
+        // The wake refusal for one member, over MEMBER facts only: no
+        // lifecycle phase is passed; every lifecycle phase has its own
+        // WakeMember arm. None means not refused: the member's phase then
+        // decides Authorized (Dormant), Joined (Waking) or AlreadyLive (Live).
+        // A Live member that the router did not observe missing is
+        // AlreadyLive before any gate, so a delivery to a live member is never
+        // refused by a wake gate.
+        helper member_wake_refusal(
+            member_present: bool,
+            session_bound: bool,
+            placed: bool,
+            broken: bool,
+            retiring: bool,
+            mob_admitting: bool,
+            composition_authoritative: bool,
+            origin_open: bool,
+            host_pending: bool,
+            input_class: Enum<PeerInputClass>,
+            sender_waking: bool,
+            observed_missing: bool,
+            phase: Option<Enum<MemberMaterializationPhase>>
+        ) -> Option<Enum<MemberWakeRefusalKind>> {
+            if member_present == false {
+                Some(MemberWakeRefusalKind::NotAMember)
+            } else {
+            if placed == true {
+                Some(MemberWakeRefusalKind::HostOwned)
+            } else {
+            if broken == true {
+                Some(MemberWakeRefusalKind::Broken)
+            } else {
+            if retiring == true {
+                Some(MemberWakeRefusalKind::Retiring)
+            } else {
+            if session_bound == false {
+                Some(MemberWakeRefusalKind::NotAMember)
+            } else {
+            if phase == Some(MemberMaterializationPhase::Live) && observed_missing == false {
+                None
+            } else {
+            if mob_admitting == false {
+                Some(MemberWakeRefusalKind::MobNotRunning)
+            } else {
+            if composition_authoritative == false {
+                Some(MemberWakeRefusalKind::NonAuthoritativeComposition)
+            } else {
+            if origin_open == false {
+                Some(MemberWakeRefusalKind::LifecycleOriginFenced)
+            } else {
+            if host_pending == true {
+                Some(MemberWakeRefusalKind::HostPreparationPending)
+            } else {
+            if input_class == PeerInputClass::Lifecycle {
+                Some(MemberWakeRefusalKind::SuppressedLifecycleNotice)
+            } else {
+            if sender_waking == true {
+                Some(MemberWakeRefusalKind::SenderWaking)
+            } else {
+            if phase == None {
+                Some(MemberWakeRefusalKind::NotAMember)
+            } else {
+                None
+            }}}}}}}}}}}}}
+        }
+
+        // The boot verdict for one Dormant local member. A candidate
+        // composition, a pending host preparation and a
+        // lifecycle cleanup that owns the mob (no new work origin) keep every
+        // member Dormant, obligated ones included; otherwise a member
+        // wakes for the Eager policy, a recovery obligation (Unobserved counts:
+        // fail closed), an owed kickoff, a network transport (Tcp or Uds), an
+        // orchestrator notification, a missing durable endpoint or the host's
+        // explicit set. The rest stay Dormant, verified first under
+        // OnDemandVerified unless the seat's session is unborn (there is no
+        // durable session to verify yet).
+        helper member_boot_materialization(
+            policy: Enum<MemberRestorePolicyKind>,
+            composition_authoritative: bool,
+            host_pending: bool,
+            origin_open: bool,
+            obligation: Enum<MemberRecoveryObligationKind>,
+            kickoff_pending: bool,
+            network_transport: bool,
+            orchestrator_notified: bool,
+            has_durable_endpoint: bool,
+            host_required: bool,
+            session_unborn: bool
+        ) -> Enum<BootMaterializationKind> {
+            if composition_authoritative == false {
+                BootMaterializationKind::StayDormant
+            } else {
+            if host_pending == true {
+                BootMaterializationKind::StayDormant
+            } else {
+            if origin_open == false {
+                BootMaterializationKind::StayDormant
+            } else {
+            if policy == MemberRestorePolicyKind::Eager {
+                BootMaterializationKind::Wake
+            } else {
+            if obligation != MemberRecoveryObligationKind::None {
+                BootMaterializationKind::Wake
+            } else {
+            if kickoff_pending == true {
+                BootMaterializationKind::Wake
+            } else {
+            if network_transport == true {
+                BootMaterializationKind::Wake
+            } else {
+            if orchestrator_notified == true {
+                BootMaterializationKind::Wake
+            } else {
+            if has_durable_endpoint == false {
+                BootMaterializationKind::Wake
+            } else {
+            if host_required == true {
+                BootMaterializationKind::Wake
+            } else {
+            if policy == MemberRestorePolicyKind::OnDemandVerified && session_unborn == false {
+                BootMaterializationKind::VerifyThenDormant
+            } else {
+                BootMaterializationKind::StayDormant
+            }}}}}}}}}}}
+        }
+
+        // The machine verdict for one peer notice, in both directions.
+        // A Lifecycle notice to or from a member that is not Live is
+        // suppressed: it is silent control-plane at a live recipient, and the
+        // recipient's wake-time topology carries its content. Everything else
+        // (model-facing content, kickoff status notices included) is
+        // delivered, waking a dormant recipient through its wake route.
+        helper peer_notice_disposition(
+            recipient_phase: Option<Enum<MemberMaterializationPhase>>,
+            sender_phase: Option<Enum<MemberMaterializationPhase>>,
+            notice_class: Enum<PeerInputClass>
+        ) -> Enum<PeerNoticeDisposition> {
+            if notice_class == PeerInputClass::Lifecycle {
+                if recipient_phase == Some(MemberMaterializationPhase::Dormant) {
+                    PeerNoticeDisposition::Suppressed
+                } else {
+                if recipient_phase == Some(MemberMaterializationPhase::Waking) {
+                    PeerNoticeDisposition::Suppressed
+                } else {
+                if sender_phase == Some(MemberMaterializationPhase::Dormant) {
+                    PeerNoticeDisposition::Suppressed
+                } else {
+                if sender_phase == Some(MemberMaterializationPhase::Waking) {
+                    PeerNoticeDisposition::Suppressed
+                } else {
+                    PeerNoticeDisposition::Deliver
+                }}}}
+            } else {
+                PeerNoticeDisposition::Deliver
+            }
+        }
+
+        // The member facts a registration release needs, shared by the
+        // Released arm and the release verdict so the two cannot drift: a
+        // Live local member whose registration's epoch is recorded (the
+        // routed binding landed), which after the seal has a durable
+        // endpoint, and which no wiring edge joins to a placed member. A
+        // placed peer, in another process, cannot wake a member through an
+        // inproc route, so a member wired to one stays Live (the boot plan
+        // and the wiring wake it for the same reason) until that edge goes.
+        helper member_registration_releasable(
+            residency: Option<Enum<MemberMaterializationPhase>>,
+            placed: bool,
+            sealed: bool,
+            has_endpoint: bool,
+            epoch_recorded: bool,
+            wired_to_placed: bool
+        ) -> bool {
+            residency == Some(MemberMaterializationPhase::Live)
+                && placed == false
+                && (sealed == false || has_endpoint == true)
+                && epoch_recorded == true
+                && wired_to_placed == false
+        }
+
+        // The release verdict for one member. An identity that is not seated
+        // is not a member; a placed member's member host owns its
+        // materialization; a local Live member releases its registration
+        // when the Released arm would honour that release, is pinned Live
+        // while a wiring edge joins it to a placed member, and is not yet
+        // releasable otherwise; a Waking member has a wake in flight;
+        // anything else (Dormant, or no phase: Broken, retiring, unbound)
+        // has nothing materialized.
+        helper member_release_verdict(
+            seated: bool,
+            placed: bool,
+            residency: Option<Enum<MemberMaterializationPhase>>,
+            releasable: bool,
+            wired_to_placed: bool
+        ) -> Enum<MemberReleaseVerdict> {
+            if seated == false {
+                MemberReleaseVerdict::NotAMember
+            } else {
+            if placed == true {
+                MemberReleaseVerdict::HostOwned
+            } else {
+            if residency == Some(MemberMaterializationPhase::Live) && releasable == true {
+                MemberReleaseVerdict::Release
+            } else {
+            if residency == Some(MemberMaterializationPhase::Live) && wired_to_placed == true {
+                MemberReleaseVerdict::PinnedByPlacedPeer
+            } else {
+            if residency == Some(MemberMaterializationPhase::Live) {
+                MemberReleaseVerdict::NotYetReleasable
+            } else {
+            if residency == Some(MemberMaterializationPhase::Waking) {
+                MemberReleaseVerdict::WakeInFlight
+            } else {
+                MemberReleaseVerdict::NothingMaterialized
+            }}}}}}
+        }
+
         disposition DefinitionEpochAdvanced => local seam SurfaceResultAlignment,
         disposition RequestRuntimeBinding => routed [MeerkatMachine] seam NoOwnerRealization,
         disposition SpawnProfileAuthorized => local seam NoOwnerRealization,
@@ -2849,6 +3280,29 @@ macro_rules! mob_catalog_machine_dsl {
         disposition GrantRecorded => local seam SurfaceResultAlignment,
         disposition GrantRevoked => local seam SurfaceResultAlignment,
         disposition RetireAtScopeResolved => local seam SurfaceResultAlignment,
+        // Member residency. The materialization attempt is realized by the
+        // provisioner (the cold recipe) and closed by the attempt-fenced
+        // resolution signals; the wake-route effects drive the inproc
+        // projection; the ingress effects are realized over every Live member.
+        disposition MaterializeMember => local seam OwnerRealizationOnly,
+        disposition VerifyMember => local seam OwnerRealizationOnly,
+        disposition BootMaterializationPlanned => local seam SurfaceResultAlignment,
+        disposition MemberWakeClassified => local seam SurfaceResultAlignment,
+        disposition MemberWakeFeedbackResolved => local seam SurfaceResultAlignment,
+        disposition MemberWakesAbandoned => local seam OwnerRealizationOnly,
+        disposition RotationSessionsAbandoned => local seam OwnerRealizationOnly,
+        disposition CloseMemberPeerIngress => external seam OwnerRealizationOnly,
+        disposition ReopenMemberPeerIngress => external seam OwnerRealizationOnly,
+        disposition PublishWakeRoute => local seam OwnerRealizationOnly,
+        disposition RetractWakeRoute => local seam OwnerRealizationOnly,
+        disposition RebuildWakeRoutes => local seam OwnerRealizationOnly,
+        disposition PeerNoticeClassified => local seam SurfaceResultAlignment,
+        disposition MemberMaterializationReleased => local seam SurfaceResultAlignment,
+        disposition MemberReleaseClassified => local seam SurfaceResultAlignment,
+        disposition RuntimeBindingRefusalStale => local seam SurfaceResultAlignment,
+        disposition OwedMemberWakesRecorded => local seam OwnerRealizationOnly,
+        disposition OwedEdgeRepairsRecorded => local seam OwnerRealizationOnly,
+        disposition PersistMemberSeatSessionBorn => local seam OwnerRealizationOnly,
 
         // =====================================================================
         // Invariants
@@ -3612,6 +4066,230 @@ macro_rules! mob_catalog_machine_dsl {
                     || self.run_step_status.get_cloned(run_id).get("value").get_cloned(step_id) == Some(Some(StepRunStatus::Skipped))
                     || self.run_step_status.get_cloned(run_id).get("value").get_cloned(step_id) == Some(Some(StepRunStatus::Canceled)))
             )
+        }
+
+        // =====================================================================
+        // Member residency invariants (Dormant / Waking / Live)
+        // =====================================================================
+
+        // A residency phase exists only for a seated, session-bound member.
+        invariant materialization_domain_is_session_bound_membership {
+            for_all(id in self.member_materialization.keys(),
+                self.identity_to_runtime.contains_key(id)
+                && self.member_session_bindings.contains_key(id))
+        }
+
+        // Every roster member is either live or wakeable: a seated,
+        // session-bound, local member that is neither Broken nor Retiring has
+        // a phase.
+        invariant local_session_bound_member_is_live_or_wakeable {
+            for_all(id in self.identity_to_runtime.keys(),
+                self.member_session_bindings.contains_key(id) == false
+                || self.member_placement.contains_key(id) == true
+                || self.member_restore_failures.contains_key(id) == true
+                || self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(id).get("value")) == Some(MobMemberState::Retiring)
+                || self.member_materialization.contains_key(id) == true)
+        }
+
+        // A placed member's liveness is host-owned; it is never Dormant.
+        invariant dormant_is_local {
+            for_all(id in self.member_materialization.keys(),
+                self.member_materialization.get_cloned(id) != Some(MemberMaterializationPhase::Dormant)
+                || self.member_placement.contains_key(id) == false)
+        }
+
+        // A Broken member has no phase (nor any wake bookkeeping).
+        invariant broken_member_has_no_phase {
+            for_all(id in self.member_restore_failures.keys(),
+                self.member_materialization.contains_key(id) == false)
+        }
+
+        // Once the boot plan is sealed, every Dormant or Waking member has
+        // a durable endpoint, so it is peer-wakeable.
+        invariant dormant_member_has_durable_endpoint {
+            self.boot_plan_sealed == false
+            || for_all(id in self.member_materialization.keys(),
+                self.member_materialization.get_cloned(id) == Some(MemberMaterializationPhase::Live)
+                || self.member_peer_endpoints.contains_key(id) == true
+                || self.member_boot_obligation_owed.get_cloned(id) == Some(MemberBootObligationCause::EndpointPending))
+        }
+
+        // The exception to dormant_member_has_durable_endpoint is exact: a
+        // member owed EndpointPending has no durable endpoint (registering one
+        // downgrades the cause), so it has no wake route either.
+        invariant endpoint_pending_member_has_no_endpoint {
+            for_all(id in self.member_boot_obligation_owed.keys(),
+                self.member_boot_obligation_owed.get_cloned(id) != Some(MemberBootObligationCause::EndpointPending)
+                || self.member_peer_endpoints.contains_key(id) == false)
+        }
+
+        // A Dormant member requests no runtime binding; only a wake's
+        // Bound step (or a spawn commit, Live) opens the binding ladder.
+        invariant dormant_member_requests_no_runtime_binding {
+            for_all(id in self.member_materialization.keys(),
+                self.member_materialization.get_cloned(id) != Some(MemberMaterializationPhase::Dormant)
+                || self.member_startup_binding_requested.contains(self.identity_to_runtime.get_cloned(id).get("value")) == false)
+        }
+
+        // Once the boot plan is sealed (replay may carry an edge to an
+        // identity that leaves later in the stream), every wiring edge joins
+        // two seated members or a member held by a respawn's preserved
+        // topology, until the mob's destroy is admitted (the destroy archives
+        // members before it drops the graph).
+        invariant wiring_edges_connect_seated_members {
+            self.boot_plan_sealed == false
+            || self.destroy_admitted == true
+            || for_all(edge in self.wiring_edges,
+                (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge))
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_a(edge)))
+                && (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge))
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_b(edge))))
+        }
+
+        // A Live local member whose runtime binding was confirmed
+        // (member_startup_runtime_ready) records the binding's epoch; a
+        // release is honoured only for that exact epoch.
+        invariant live_member_records_its_epoch {
+            for_all(id in self.member_materialization.keys(),
+                self.member_materialization.get_cloned(id) != Some(MemberMaterializationPhase::Live)
+                || self.member_placement.contains_key(id) == true
+                || self.member_startup_runtime_ready.contains(self.identity_to_runtime.get_cloned(id).get("value")) == false
+                || self.member_materialization_epoch.contains_key(id) == true)
+        }
+
+        // A Waking member has exactly one open attempt.
+        invariant waking_is_one_attempt {
+            for_all(id in self.member_materialization.keys(),
+                self.member_materialization.get_cloned(id) != Some(MemberMaterializationPhase::Waking)
+                || self.member_wake_attempts.contains_key(id) == true)
+        }
+
+        // A Retiring incarnation is never Waking (a retirement start
+        // closes any open attempt).
+        invariant retiring_incarnation_never_waking {
+            for_all(id in self.member_materialization.keys(),
+                self.member_materialization.get_cloned(id) != Some(MemberMaterializationPhase::Waking)
+                || self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(id).get("value")) != Some(MobMemberState::Retiring))
+        }
+
+        // A candidate (NonAuthoritative) composition never wakes a member.
+        invariant candidate_composition_never_wakes {
+            self.composition_authority == CompositionAuthorityKind::Authoritative
+            || self.member_wake_attempts == EmptyMap
+        }
+
+        // Every open attempt is one the machine minted, so feedback for a
+        // later attempt cannot be forged ahead of the mint.
+        invariant waking_has_an_open_attempt {
+            for_all(id in self.member_wake_attempts.keys(),
+                self.member_wake_attempts.get_copied(id).get("value") > 0
+                && self.member_wake_attempts.get_copied(id).get("value") <= self.member_wake_attempt_sequence)
+        }
+
+        // The wake bookkeeping follows the phase. Attempts and
+        // binding marks exist only for Waking members, an epoch only for a
+        // member with a phase, a boot obligation only for a Dormant or Waking
+        // member. Every phase removal clears them all.
+        invariant attempt_and_epoch_follow_the_phase {
+            for_all(id in self.member_wake_attempts.keys(),
+                self.member_materialization.get_cloned(id) == Some(MemberMaterializationPhase::Waking))
+            && for_all(id in self.member_wake_bound,
+                self.member_materialization.get_cloned(id) == Some(MemberMaterializationPhase::Waking))
+            && for_all(id in self.member_materialization_epoch.keys(),
+                self.member_materialization.contains_key(id) == true)
+            && for_all(id in self.member_boot_obligation_owed.keys(),
+                self.member_materialization.get_cloned(id) == Some(MemberMaterializationPhase::Dormant)
+                || self.member_materialization.get_cloned(id) == Some(MemberMaterializationPhase::Waking))
+        }
+
+        // A mob that is not Running holds no open wake attempt: Stop,
+        // Complete and the destroy admission close every Waking member.
+        invariant only_a_running_mob_wakes {
+            self.lifecycle_phase == Phase::Running
+            || self.member_wake_attempts == EmptyMap
+        }
+
+        // A rotation intent names a Retiring, local, seated incarnation and
+        // carries its next session (and its endpoint, when the member's comms
+        // keys exist before its first wake).
+        invariant rotation_intent_is_a_retiring_member {
+            for_all(id in self.member_rotation_session_ids.keys(),
+                self.identity_to_runtime.contains_key(id)
+                && self.member_placement.contains_key(id) == false
+                && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(id).get("value")) == Some(MobMemberState::Retiring))
+            && for_all(id in self.member_rotation_peer_endpoints.keys(),
+                self.member_rotation_session_ids.contains_key(id))
+        }
+
+        // An archive-only retirement is a Retiring runtime; its
+        // retirement routes no runtime retire.
+        invariant archive_only_retirement_is_retiring {
+            for_all(rid in self.runtime_retire_archive_only,
+                self.member_state_markers.get_cloned(rid) == Some(MobMemberState::Retiring))
+        }
+
+        // An unborn seat is a seated member: every unseat clears it.
+        invariant seat_session_unborn_is_seated {
+            for_all(id in self.member_seat_session_unborn,
+                self.identity_to_runtime.contains_key(id))
+        }
+
+        // An unborn seat's session is never bound and the member is never
+        // Live: only the session-created step binds it (a fresh create, or
+        // the adoption of the session an interrupted create left), and that
+        // step clears it.
+        invariant seat_session_unborn_is_never_bound {
+            for_all(id in self.member_seat_session_unborn,
+                self.member_wake_bound.contains(id) == false
+                && self.member_materialization.get_cloned(id) != Some(MemberMaterializationPhase::Live))
+        }
+
+        // An unborn seat's bound session is recorded as one no build has
+        // created, so the record survives the member.
+        invariant unborn_seat_session_is_recorded {
+            for_all(id in self.member_seat_session_unborn,
+                self.member_session_bindings.contains_key(id) == false
+                || self.unborn_seat_sessions.contains(self.member_session_bindings.get_cloned(id).get("value")))
+        }
+
+        // A spawn-profile authority is the pending grant of the operation that
+        // consumes it: a spawn or a seat of an identity that is not seated, or
+        // the rotation of a member under its rotation intent. A seated member
+        // holds a grant only under its rotation intent. (An identity that is
+        // not seated can keep a grant past an aborted spawn or an abandoned
+        // rotation; every operation that consumes one authorizes in the same
+        // step.)
+        invariant spawn_profile_authority_is_a_pending_grant {
+            for_all(id in self.spawn_profile_authority_profile_names.keys(),
+                self.identity_to_runtime.contains_key(id) == false
+                || self.member_rotation_session_ids.contains_key(id) == true)
+        }
+
+        // An owed edge repair is a wired edge between seated members, and an
+        // owed external repair is a wired external edge of a seated member:
+        // the edge going, or an end being unseated, clears it.
+        invariant owed_edge_repairs_join_seated_members {
+            for_all(edge in self.owed_edge_repairs,
+                self.wiring_edges.contains(edge)
+                && self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge))
+                && self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)))
+            && for_all(edge in self.owed_external_edge_repairs,
+                self.external_peer_edges.contains(edge)
+                && self.identity_to_runtime.contains_key(mob_machine_external_peer_edge_local(edge)))
+        }
+
+        // The destroy beats every member lifecycle. A destroyed mob holds
+        // no residency, rotation intent, pending host preparation or
+        // archive-only retirement, so nothing waits on a rotation or a host
+        // carry-out after it.
+        invariant destroyed_mob_holds_no_member_lifecycle {
+            self.lifecycle_phase != Phase::Destroyed
+            || (self.member_materialization == EmptyMap
+                && self.member_wake_attempts == EmptyMap
+                && self.member_rotation_session_ids == EmptyMap
+                && self.member_rotation_peer_endpoints == EmptyMap
+                && self.member_host_preparation_pending == EmptySet
+                && self.runtime_retire_archive_only == EmptySet)
         }
 
         // =====================================================================
@@ -6171,7 +6849,14 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_session_bindings.insert(agent_identity, bridge_session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                // A committed spawn is materialized: the new incarnation is Live,
+                // with no wake attempt, binding mark, epoch or boot obligation of
+                // a predecessor (the epoch arrives with its RuntimeBound).
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Live);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_kickoff_pending.remove(agent_identity);
                 self.member_kickoff_starting.remove(agent_identity);
                 self.member_kickoff_callback_pending.remove(agent_identity);
@@ -6214,7 +6899,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_health_class.remove(agent_identity);
             }
             to Running
-            emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: Some(generation), session_id: bridge_session_id.get("value") }
+            emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: Some(generation), session_id: bridge_session_id.get("value"), attempt: None }
             emit AppendLifecycleJournal {
                 kind: MobLifecycleJournalKind::MemberSpawned,
                 agent_identity: Some(agent_identity),
@@ -6225,6 +6910,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: None, new_session_id: bridge_session_id }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
+            emit PublishWakeRoute { agent_identity: agent_identity }
         }
 
         transition CommitSpawnMembershipFreshPeerOnly {
@@ -6264,7 +6950,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_session_bindings.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_kickoff_pending.remove(agent_identity);
                 self.member_kickoff_starting.remove(agent_identity);
                 self.member_kickoff_callback_pending.remove(agent_identity);
@@ -6404,7 +7094,14 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_endpoints.insert(agent_identity, member_peer_endpoint.get("value"));
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                // A committed spawn is materialized: the new incarnation is Live,
+                // with no wake attempt, binding mark, epoch or boot obligation of
+                // a predecessor (the epoch arrives with its RuntimeBound).
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Live);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_kickoff_pending.remove(agent_identity);
                 self.member_kickoff_starting.remove(agent_identity);
                 self.member_kickoff_callback_pending.remove(agent_identity);
@@ -7173,6 +7870,24 @@ macro_rules! mob_catalog_machine_dsl {
                 self.pending_placed_spawn_provision_operation_ids.insert(agent_identity, placed_provision_operation_id.get("value"));
                 self.pending_placed_spawn_operation_owner_session_ids.insert(agent_identity, placed_operation_owner_session_id.get("value"));
                 self.member_materialization_failures.remove(agent_identity);
+                // A held identity (a respawn's preserved topology) placed now:
+                // every Dormant local member its kept edges join is wired to
+                // a placed member, which cannot wake it through an inproc
+                // route. Each is owed a wake (PlacedPeerWired) that the
+                // owner's retry timer realizes; an owed member keeps its cause.
+                for member_id in self.member_materialization.keys() {
+                    if self.member_materialization.get_cloned(member_id) == Some(MemberMaterializationPhase::Dormant)
+                        && self.member_placement.contains_key(member_id) == false
+                        && self.member_boot_obligation_owed.contains_key(member_id) == false
+                        && mob_machine_wiring_contains_pair(self.wiring_edges, member_id, agent_identity)
+                    {
+                        if self.member_peer_endpoints.contains_key(member_id) == true {
+                            self.member_boot_obligation_owed.insert(member_id, MemberBootObligationCause::PlacedPeerWired);
+                        } else {
+                            self.member_boot_obligation_owed.insert(member_id, MemberBootObligationCause::EndpointPending);
+                        }
+                    }
+                }
             }
             to Running
             emit PersistPendingPlacedSpawn {
@@ -7199,6 +7914,7 @@ macro_rules! mob_catalog_machine_dsl {
                 provision_operation_id: placed_provision_operation_id.get("value"),
                 operation_owner_session_id: placed_operation_owner_session_id.get("value")
             }
+            emit OwedMemberWakesRecorded
         }
 
         // §6.1 materialization failure/retry recorder: the ladder rung stays
@@ -7376,11 +8092,21 @@ macro_rules! mob_catalog_machine_dsl {
             to Destroyed
         }
 
+        // The grant of a spawn-profile authority, recorded for the operation
+        // that consumes it: a spawn or a seat of an identity that is not
+        // seated (CommitSpawnMembership, CommitDormantSeat), or the rotation
+        // of a member under its rotation intent (CommitMemberRotation;
+        // BeginMemberRotation records the intent first). A seated member's
+        // own profile check grants nothing (AuthorizeSpawnProfileSeatedRunning).
         transition AuthorizeSpawnProfileRunning {
             on input AuthorizeSpawnProfile { agent_identity, profile_name, model, profile_material_digest, tool_config_digest, skills_digest, provider_params_digest, output_schema_digest, external_addressable, resolved_spec_digest }
             guard { self.lifecycle_phase == Phase::Running }
             guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "coordinator_bound" { self.coordinator_bound == true }
+            guard "grant_for_a_spawn_seat_or_rotation" {
+                self.identity_to_runtime.contains_key(agent_identity) == false
+                || self.member_rotation_session_ids.contains_key(agent_identity) == true
+            }
             update {
                 self.spawn_profile_authority_profile_names.insert(agent_identity, profile_name);
                 self.spawn_profile_authority_models.insert(agent_identity, model);
@@ -7539,6 +8265,17 @@ macro_rules! mob_catalog_machine_dsl {
                     ) == false)
             }
             update {
+                // A replayed seat holds no grant: one recorded before it was
+                // not for this incarnation.
+                self.spawn_profile_authority_profile_names.remove(agent_identity);
+                self.spawn_profile_authority_models.remove(agent_identity);
+                self.spawn_profile_authority_material_digests.remove(agent_identity);
+                self.spawn_profile_authority_tool_config_digests.remove(agent_identity);
+                self.spawn_profile_authority_skills_digests.remove(agent_identity);
+                self.spawn_profile_authority_provider_params_digests.remove(agent_identity);
+                self.spawn_profile_authority_output_schema_digests.remove(agent_identity);
+                self.spawn_profile_authority_resolved_spec_digests.remove(agent_identity);
+                self.spawn_profile_authority_external_addressable.remove(agent_identity);
                 self.live_runtime_ids.insert(agent_runtime_id);
                 if external_addressable {
                     self.externally_addressable_runtime_ids.insert(agent_runtime_id);
@@ -7564,7 +8301,14 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Active);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                // A committed spawn is materialized: the new incarnation is Live,
+                // with no wake attempt, binding mark, epoch or boot obligation of
+                // a predecessor (the epoch arrives with its RuntimeBound).
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Live);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.topology_epoch += 1;
                 // A new incarnation starts without an execution-health
@@ -7660,6 +8404,17 @@ macro_rules! mob_catalog_machine_dsl {
                 && generation >= mob_machine_next_respawn_generation(self.identity_runtime_generations, agent_identity).get("value")
             }
             update {
+                // A replayed seat holds no grant: one recorded before it was
+                // not for this incarnation.
+                self.spawn_profile_authority_profile_names.remove(agent_identity);
+                self.spawn_profile_authority_models.remove(agent_identity);
+                self.spawn_profile_authority_material_digests.remove(agent_identity);
+                self.spawn_profile_authority_tool_config_digests.remove(agent_identity);
+                self.spawn_profile_authority_skills_digests.remove(agent_identity);
+                self.spawn_profile_authority_provider_params_digests.remove(agent_identity);
+                self.spawn_profile_authority_output_schema_digests.remove(agent_identity);
+                self.spawn_profile_authority_resolved_spec_digests.remove(agent_identity);
+                self.spawn_profile_authority_external_addressable.remove(agent_identity);
                 self.live_runtime_ids.insert(agent_runtime_id);
                 if external_addressable {
                     self.externally_addressable_runtime_ids.insert(agent_runtime_id);
@@ -7677,7 +8432,6 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
                 self.member_kickoff_pending.remove(agent_identity);
                 self.member_kickoff_starting.remove(agent_identity);
                 self.member_kickoff_callback_pending.remove(agent_identity);
@@ -7720,9 +8474,6 @@ macro_rules! mob_catalog_machine_dsl {
                 }
                 self.member_profile_names.insert(agent_identity, profile_name);
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
-                self.member_restore_failures.remove(agent_identity);
-                self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
             }
             to Running
         }
@@ -7734,13 +8485,31 @@ macro_rules! mob_catalog_machine_dsl {
             guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
             guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
             guard "replacing_absent" { replacing == None }
+            // After the seal a seated Dormant member always has a durable
+            // endpoint, so a first binding then needs one.
+            guard "endpoint_present_after_seal" {
+                self.boot_plan_sealed == false
+                || self.member_peer_endpoints.contains_key(agent_identity) == true
+            }
             update {
                 self.member_session_bindings.insert(agent_identity, bridge_session_id);
                 self.topology_epoch += 1;
+                // The ONE seating arm. A recovered local member's first
+                // binding seats it Dormant (a fresh process has no
+                // materialization), only when it has no phase, is not Broken
+                // and is not Retiring. Every other Recover arm keeps the phase.
+                if self.member_materialization.contains_key(agent_identity) == false
+                    && self.member_placement.contains_key(agent_identity) == false
+                    && self.member_restore_failures.contains_key(agent_identity) == false
+                    && self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring)
+                {
+                    self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Dormant);
+                }
             }
             to Running
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: None, new_session_id: Some(bridge_session_id) }
             emit SessionProvisionOperationOwnerAuthorized { agent_identity: agent_identity, session_id: bridge_session_id }
+            emit PublishWakeRoute { agent_identity: agent_identity }
         }
 
         transition RecoverMemberSessionBindingReplacingRunning {
@@ -7759,6 +8528,7 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(replacing.get("value")), new_session_id: Some(bridge_session_id) }
             emit SessionProvisionOperationOwnerAuthorized { agent_identity: agent_identity, session_id: bridge_session_id }
+            emit PublishWakeRoute { agent_identity: agent_identity }
         }
 
         transition RecoverMemberSessionBindingAlreadyCurrentRunning {
@@ -7802,9 +8572,14 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(peer_endpoint));
                 self.member_peer_endpoints.insert(agent_identity, peer_endpoint);
+                // A registered endpoint ends the EndpointPending exception.
+                if self.member_boot_obligation_owed.get_cloned(agent_identity) == Some(MemberBootObligationCause::EndpointPending) {
+                    self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::Obligation);
+                }
             }
             to Running
             emit MemberPeerRegistered { agent_identity: agent_identity, peer_id: mob_machine_member_peer_endpoint_peer_id(peer_endpoint) }
+            emit PublishWakeRoute { agent_identity: agent_identity }
         }
 
         transition RecoverSpawnedMemberPeerEndpointAlreadyCurrentRunning {
@@ -7856,9 +8631,14 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(peer_endpoint));
                 self.member_peer_endpoints.insert(agent_identity, peer_endpoint);
+                // A registered endpoint ends the EndpointPending exception.
+                if self.member_boot_obligation_owed.get_cloned(agent_identity) == Some(MemberBootObligationCause::EndpointPending) {
+                    self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::Obligation);
+                }
             }
             to Running
             emit MemberPeerRegistered { agent_identity: agent_identity, peer_id: mob_machine_member_peer_endpoint_peer_id(peer_endpoint) }
+            emit PublishWakeRoute { agent_identity: agent_identity }
         }
 
         transition RecoverMemberPeerEndpointAlreadyCurrentRunning {
@@ -7921,6 +8701,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit MemberPeerRegistered { agent_identity: agent_identity, peer_id: mob_machine_member_peer_endpoint_peer_id(peer_endpoint) }
+            emit PublishWakeRoute { agent_identity: agent_identity }
         }
 
         transition RecoverRosterMemberResetRunning {
@@ -7954,13 +8735,33 @@ macro_rules! mob_catalog_machine_dsl {
                     self.resolved_placed_kickoff_outcomes,
                     agent_identity)
             }
+            // A roster reset is replay: every recovered member is Dormant and
+            // the boot plan is not sealed yet. The next incarnation keeps the
+            // phase (no Recover arm overwrites a phase).
+            guard "replay_not_sealed" { self.boot_plan_sealed == false }
+            guard "member_not_materialized" {
+                self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Live)
+                && self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Waking)
+            }
             update {
+                // A replayed seat holds no grant: one recorded before it was
+                // not for this incarnation.
+                self.spawn_profile_authority_profile_names.remove(agent_identity);
+                self.spawn_profile_authority_models.remove(agent_identity);
+                self.spawn_profile_authority_material_digests.remove(agent_identity);
+                self.spawn_profile_authority_tool_config_digests.remove(agent_identity);
+                self.spawn_profile_authority_skills_digests.remove(agent_identity);
+                self.spawn_profile_authority_provider_params_digests.remove(agent_identity);
+                self.spawn_profile_authority_output_schema_digests.remove(agent_identity);
+                self.spawn_profile_authority_resolved_spec_digests.remove(agent_identity);
+                self.spawn_profile_authority_external_addressable.remove(agent_identity);
                 self.live_runtime_ids.remove(previous_agent_runtime_id);
                 self.runtime_fence_tokens.remove(previous_agent_runtime_id);
                 self.member_startup_binding_requested.remove(previous_agent_runtime_id);
                 self.member_startup_runtime_ready.remove(previous_agent_runtime_id);
                 self.member_startup_ready.remove(previous_agent_runtime_id);
                 self.member_state_markers.remove(previous_agent_runtime_id);
+                self.runtime_retire_archive_only.remove(previous_agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(previous_agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(previous_agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(previous_agent_runtime_id);
@@ -7975,6 +8776,8 @@ macro_rules! mob_catalog_machine_dsl {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                // The reset incarnation's session state comes from its own rows.
+                self.member_seat_session_unborn.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
                 self.abandoned_respawn_topology.remove(agent_identity);
                 self.identity_runtime_generations.insert(agent_identity, generation);
@@ -7982,10 +8785,23 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_prior_peer_endpoints.remove(agent_identity);
+                // The replaced incarnation's Broken record is dropped, so a
+                // bound local member is seated Dormant again; a Dormant
+                // member stays Dormant. The new runtime opens no binding
+                // ladder and has no epoch yet.
+                if self.member_restore_failures.contains_key(agent_identity)
+                    && self.member_session_bindings.contains_key(agent_identity)
+                    && self.member_placement.contains_key(agent_identity) == false
+                {
+                    self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Dormant);
+                }
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.member_materialization_epoch.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
                 self.member_kickoff_pending.remove(agent_identity);
                 self.member_kickoff_starting.remove(agent_identity);
                 self.member_kickoff_callback_pending.remove(agent_identity);
@@ -8015,8 +8831,10 @@ macro_rules! mob_catalog_machine_dsl {
 
         // A retirement-start journal is a durable in-flight obligation, not a
         // completed roster removal. Replay keeps the member live-but-Retiring
-        // and restores the exact session correlation needed for a routed
-        // retire retry. The three arms mirror the releasing, preserving, and
+        // and restores the exact session correlation its archive needs. No
+        // retiring member is woken after a restart, so a recovered local
+        // retirement is archive-only: it routes no runtime retire. The
+        // three arms mirror the releasing, preserving, and
         // peer-only admission shapes without emitting live side effects during
         // recovery.
         transition RecoverRosterMemberRetirementStartedReleasing {
@@ -8032,11 +8850,16 @@ macro_rules! mob_catalog_machine_dsl {
             guard "retiring_peer_endpoint_consistent" { retiring_peer_endpoint == None || self.member_peer_endpoints.contains_key(agent_identity) == false || self.member_peer_endpoints.get_cloned(agent_identity) == retiring_peer_endpoint }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_archive_only.insert(agent_runtime_id);
                 self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.member_session_bindings.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_kickoff_pending.remove(agent_identity);
                 self.member_kickoff_starting.remove(agent_identity);
                 self.member_kickoff_callback_pending.remove(agent_identity);
@@ -8109,6 +8932,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "retiring_peer_endpoint_consistent" { retiring_peer_endpoint == None || self.member_peer_endpoints.contains_key(agent_identity) == false || self.member_peer_endpoints.get_cloned(agent_identity) == retiring_peer_endpoint }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_archive_only.insert(agent_runtime_id);
                 // Trust eligibility just changed: a Retiring member may not be
                 // re-wired or re-overlaid. Advance the canonical topology
                 // epoch so every generated trust permission minted against
@@ -8117,7 +8941,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 if retiring_peer_endpoint != None {
                     self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(retiring_peer_endpoint.get("value")));
                     self.member_peer_endpoints.insert(agent_identity, retiring_peer_endpoint.get("value"));
@@ -8157,7 +8985,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 if retiring_peer_endpoint != None {
                     self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(retiring_peer_endpoint.get("value")));
                     self.member_peer_endpoints.insert(agent_identity, retiring_peer_endpoint.get("value"));
@@ -8196,7 +9028,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 if retiring_peer_endpoint != None {
                     self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(retiring_peer_endpoint.get("value")));
                     self.member_peer_endpoints.insert(agent_identity, retiring_peer_endpoint.get("value"));
@@ -8303,6 +9139,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.abandoned_respawn_topology.insert(agent_identity, generation);
                 self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
                 self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                 self.topology_epoch += 1;
             }
@@ -8440,6 +9278,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.spawn_exec_phase.remove(agent_identity);
                 }
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
@@ -8452,13 +9291,20 @@ macro_rules! mob_catalog_machine_dsl {
                 // side effect again after terminal completion.
                 self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.external_member_rebind_capability.remove(agent_identity);
                 self.members_to_retire.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
@@ -8475,6 +9321,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.pending_respawn_topology.remove(agent_identity);
                     self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
                     self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                    self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                    self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                     self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                     self.topology_epoch += 1;
                 }
@@ -8493,6 +9341,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "placement_matches" { self.member_placement.get_cloned(agent_identity) == host_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 // Trust eligibility just changed: a Retiring member may not be
                 // re-wired or re-overlaid. Advance the canonical topology
                 // epoch so every generated trust permission minted against
@@ -8538,6 +9391,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.spawn_exec_phase.remove(agent_identity);
                 }
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
@@ -8545,13 +9399,20 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.external_member_rebind_capability.remove(agent_identity);
                 self.members_to_retire.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
@@ -8568,6 +9429,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.pending_respawn_topology.remove(agent_identity);
                     self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
                     self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                    self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                    self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                     self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                     self.topology_epoch += 1;
                 }
@@ -8593,6 +9456,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
@@ -8624,6 +9488,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
             }
             to Running
         }
@@ -8889,7 +9754,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition ObserveRuntimeReady {
-            on signal ObserveRuntimeReady { agent_runtime_id, fence_token }
+            on signal ObserveRuntimeReady { agent_runtime_id, fence_token, runtime_epoch_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
@@ -8897,6 +9762,22 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_binding_requested.remove(agent_runtime_id);
                 self.member_startup_runtime_ready.insert(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
+                // The routed RuntimeBound carries the registration's
+                // epoch; the member bound to this runtime records it, so a
+                // later release is honoured only for exactly this
+                // registration. A release needs a Live member, and a wake's
+                // own bind overwrites the record (an idempotent re-bind of a
+                // kept registration keeps it), so a late bind observed while
+                // the member is Dormant never matches a later release; it
+                // keeps live_member_records_its_epoch (the runtime is ready, so the
+                // epoch is known).
+                for member_id in self.identity_to_runtime.keys() {
+                    if self.identity_to_runtime.get_cloned(member_id) == Some(agent_runtime_id)
+                        && self.member_materialization.contains_key(member_id) == true
+                    {
+                        self.member_materialization_epoch.insert(member_id, runtime_epoch_id);
+                    }
+                }
             }
             to Running
         }
@@ -9054,7 +9935,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "target_not_retiring" { self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(obligation.agent_identity).get("value")) != Some(MobMemberState::Retiring) }
             guard "target_autonomous" { self.member_runtime_modes.get_cloned(obligation.agent_identity) == Some(SpawnPolicyRuntimeMode::AutonomousHost) }
             guard "target_spawn_settled" { self.spawn_exec_phase.contains_key(obligation.agent_identity) == false }
-            guard "target_not_reviving" { self.member_revival_pending.contains(obligation.agent_identity) == false }
+            guard "target_not_reviving" { self.member_wake_attempts.contains_key(obligation.agent_identity) == false }
             guard "target_materialization_healthy" { self.member_materialization_failures.contains_key(obligation.agent_identity) == false }
             guard "target_carrier_cleanup_absent" {
                 mob_machine_placed_cleanup_absent_for_identity(
@@ -10343,6 +11224,8 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "session_present" { session_id != None }
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "member_not_dormant" { self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Dormant) }
+            guard "member_not_waking" { self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Waking) }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 // Trust eligibility just changed: a Retiring member may not be
@@ -10353,7 +11236,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
             }
             to Running
@@ -10366,6 +11253,60 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: session_id
             }
             emit RequestRuntimeRetire { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, session_id: session_id.get("value") }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
+        }
+
+        // The retirement of a member with no runtime registration in this
+        // process (Dormant, or Waking: its open attempt closes here, and
+        // the in-flight provision rolls back on StaleAttempt). It mirrors
+        // RetireMember but routes no runtime retire: the runtime is recorded
+        // archive-only and the session archive alone terminates the member.
+        transition RetireMemberArchiveOnly {
+            on signal RetireMember { agent_identity, agent_runtime_id, fence_token, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "placement_absent" { self.member_placement.contains_key(agent_identity) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "retirement_session_absent" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == false }
+            guard "retire_refusal_absent" {
+                self.runtime_retire_refusal_codes.contains_key(agent_runtime_id) == false
+                && self.runtime_retire_refusal_reasons.contains_key(agent_runtime_id) == false
+            }
+            guard "session_present" { session_id != None }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "member_dormant_or_waking" {
+                self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Dormant)
+                || self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Waking)
+            }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_archive_only.insert(agent_runtime_id);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.spawn_exec_phase.remove(agent_identity);
+            }
+            to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetirementStartedPreservingBinding,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(self.identity_runtime_generations.get_copied(agent_identity).get("value")),
+                session_id: session_id
+            }
             emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
@@ -10392,7 +11333,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
             }
             to Running
@@ -10439,7 +11384,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
             }
             to Running
@@ -10474,7 +11423,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
             }
             to Running
@@ -10490,14 +11443,24 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition ResolveRuntimeBindingRefusalRunning {
-            on input ResolveRuntimeBindingRefusal { agent_identity, agent_runtime_id, session_id, refusal_code, reason }
+            on input ResolveRuntimeBindingRefusal { agent_identity, agent_runtime_id, session_id, refusal_code, reason, attempt }
             guard { self.lifecycle_phase == Phase::Running }
+            // The attempt fence: a refused binding request applies only to
+            // the wake it belongs to: a wake's request while that attempt is
+            // open, the spawn's (no attempt) only while no wake is open. Any
+            // other refusal is the Stale twin's.
+            guard "refusal_attempt_current" { self.member_wake_attempts.get_copied(agent_identity) == attempt }
             guard "placement_absent" { self.member_placement.contains_key(agent_identity) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == Some(session_id) }
             update {
                 self.member_restore_failures.insert(agent_identity, reason);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 // Trust eligibility just changed: a broken member may not be
                 // re-wired or re-overlaid. Advance the canonical topology
                 // epoch so every generated trust permission minted against
@@ -10578,6 +11541,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
             guard "retirement_pending" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == true }
+            guard "runtime_retire_routable" { self.runtime_retire_archive_only.contains(agent_runtime_id) == false }
             update {}
             to Running
             emit RequestRuntimeRetire {
@@ -10593,6 +11557,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
             guard "retirement_pending" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == true }
+            guard "runtime_retire_routable" { self.runtime_retire_archive_only.contains(agent_runtime_id) == false }
             update {}
             to Stopped
             emit RequestRuntimeRetire {
@@ -10710,8 +11675,15 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "session_present" { session_id != None }
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "member_not_dormant" { self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Dormant) }
+            guard "member_not_waking" { self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Waking) }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 // Trust eligibility just changed: a Retiring member may not be
                 // re-wired or re-overlaid. Advance the canonical topology
                 // epoch so every generated trust permission minted against
@@ -10734,6 +11706,63 @@ macro_rules! mob_catalog_machine_dsl {
             emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
+        // The retirement of a member with no runtime registration in this
+        // process (Dormant, or Waking: its open attempt closes here, and
+        // the in-flight provision rolls back on StaleAttempt). It mirrors
+        // AdmitDestroyMemberRetireLiveRunning but routes no runtime retire: the
+        // runtime is recorded archive-only and the session archive alone
+        // terminates the member.
+        transition AdmitDestroyMemberRetireArchiveOnlyRunning {
+            on signal AdmitDestroyMemberRetire { mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "placement_absent" { self.member_placement.contains_key(agent_identity) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "session_ingress_detach_absent" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "retirement_session_absent" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == false }
+            guard "retire_refusal_absent" {
+                self.runtime_retire_refusal_codes.contains_key(agent_runtime_id) == false
+                && self.runtime_retire_refusal_reasons.contains_key(agent_runtime_id) == false
+            }
+            guard "session_present" { session_id != None }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "member_dormant_or_waking" {
+                self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Dormant)
+                || self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Waking)
+            }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_archive_only.insert(agent_runtime_id);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
+                self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
+            }
+            to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetirementStartedPreservingBinding,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: session_id
+            }
+            emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
+        }
+
         transition AdmitDestroyMemberRetireLiveStopped {
             on signal AdmitDestroyMemberRetire { mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
@@ -10752,8 +11781,15 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "session_present" { session_id != None }
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "member_not_dormant" { self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Dormant) }
+            guard "member_not_waking" { self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Waking) }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 // Trust eligibility just changed: a Retiring member may not be
                 // re-wired or re-overlaid. Advance the canonical topology
                 // epoch so every generated trust permission minted against
@@ -10772,6 +11808,63 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: session_id
             }
             emit RequestRuntimeRetire { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, session_id: session_id.get("value") }
+            emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
+        }
+
+        // The retirement of a member with no runtime registration in this
+        // process (Dormant, or Waking: its open attempt closes here, and
+        // the in-flight provision rolls back on StaleAttempt). It mirrors
+        // AdmitDestroyMemberRetireLiveStopped but routes no runtime retire: the
+        // runtime is recorded archive-only and the session archive alone
+        // terminates the member.
+        transition AdmitDestroyMemberRetireArchiveOnlyStopped {
+            on signal AdmitDestroyMemberRetire { mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "placement_absent" { self.member_placement.contains_key(agent_identity) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "session_ingress_detach_absent" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "retirement_session_absent" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == false }
+            guard "retire_refusal_absent" {
+                self.runtime_retire_refusal_codes.contains_key(agent_runtime_id) == false
+                && self.runtime_retire_refusal_reasons.contains_key(agent_runtime_id) == false
+            }
+            guard "session_present" { session_id != None }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "member_dormant_or_waking" {
+                self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Dormant)
+                || self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Waking)
+            }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_archive_only.insert(agent_runtime_id);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
+                self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
+            }
+            to Stopped
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetirementStartedPreservingBinding,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: session_id
+            }
             emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
             emit RequestKickoffQuiesce { member_id: agent_identity }
         }
@@ -10804,7 +11897,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal {
@@ -10848,7 +11945,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
             }
             to Stopped
             emit AppendLifecycleJournal {
@@ -10896,7 +11997,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal {
@@ -10934,7 +12039,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
             }
             to Stopped
             emit AppendLifecycleJournal {
@@ -10968,6 +12077,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_absent" { self.member_session_bindings.get_cloned(agent_identity) == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 // Trust eligibility just changed: a Retiring member may not be
                 // re-wired or re-overlaid. Advance the canonical topology
                 // epoch so every generated trust permission minted against
@@ -11006,6 +12120,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_absent" { self.member_session_bindings.get_cloned(agent_identity) == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 // Trust eligibility just changed: a Retiring member may not be
                 // re-wired or re-overlaid. Advance the canonical topology
                 // epoch so every generated trust permission minted against
@@ -11264,12 +12383,21 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
@@ -11283,6 +12411,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.pending_respawn_topology.remove(agent_identity);
                     self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
                     self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                    self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                    self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                     self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                     self.topology_epoch += 1;
                 }
@@ -11297,11 +12427,29 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: None
             }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+            emit RetractWakeRoute { agent_identity: agent_identity }
         }
 
         transition ObserveMemberRetirementArchivedLive {
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology }
             guard { self.lifecycle_phase == Phase::Running }
+            // A rotating identity's terminal is CommitMemberRotation. A
+            // rotation lost in a crash is re-driven by the host, which marks
+            // the identity host-pending at build: its plain terminal waits for
+            // the host's carry-out (BeginMemberRotation or
+            // ResolveMemberHostPreparation), so a re-driven rotation never
+            // leaves a non-member window.
+            // Once the mob's destroy is admitted the destroy beats both: this
+            // terminal archives the identity and drops its intent, with no
+            // host-pending wait.
+            guard "rotation_settled_or_destroying" {
+                self.member_rotation_session_ids.contains_key(agent_identity) == false
+                || self.destroy_admitted == true
+            }
+            guard "host_preparation_settled_or_destroying" {
+                self.member_host_preparation_pending.contains(agent_identity) == false
+                || self.destroy_admitted == true
+            }
             guard "topology_not_preserved" { preserve_machine_topology == false || self.abandoned_respawn_topology.get_copied(agent_identity) == Some(generation) }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
@@ -11338,24 +12486,34 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
                 self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
                 self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                 self.topology_epoch += 1;
             }
@@ -11363,11 +12521,29 @@ macro_rules! mob_catalog_machine_dsl {
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
             emit WiringGraphChanged { epoch: self.topology_epoch }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+            emit RetractWakeRoute { agent_identity: agent_identity }
         }
 
         transition ObserveMemberRetirementArchivedLivePreservingTopology {
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology }
             guard { self.lifecycle_phase == Phase::Running }
+            // A rotating identity's terminal is CommitMemberRotation. A
+            // rotation lost in a crash is re-driven by the host, which marks
+            // the identity host-pending at build: its plain terminal waits for
+            // the host's carry-out (BeginMemberRotation or
+            // ResolveMemberHostPreparation), so a re-driven rotation never
+            // leaves a non-member window.
+            // Once the mob's destroy is admitted the destroy beats both: this
+            // terminal archives the identity and drops its intent, with no
+            // host-pending wait.
+            guard "rotation_settled_or_destroying" {
+                self.member_rotation_session_ids.contains_key(agent_identity) == false
+                || self.destroy_admitted == true
+            }
+            guard "host_preparation_settled_or_destroying" {
+                self.member_host_preparation_pending.contains(agent_identity) == false
+                || self.destroy_admitted == true
+            }
             guard "topology_preserved" { preserve_machine_topology == true && self.abandoned_respawn_topology.get_copied(agent_identity) != Some(generation) }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
@@ -11400,19 +12576,31 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
+                // The member leaves: its owed edge repairs go (the kept
+                // graph is re-realized by a successor or dropped by the destroy).
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 if self.pending_respawn_topology.contains(agent_identity) == false {
@@ -11423,11 +12611,29 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+            emit RetractWakeRoute { agent_identity: agent_identity }
         }
 
         transition ObserveMemberRetirementArchivedLiveStopped {
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology }
             guard { self.lifecycle_phase == Phase::Stopped }
+            // A rotating identity's terminal is CommitMemberRotation. A
+            // rotation lost in a crash is re-driven by the host, which marks
+            // the identity host-pending at build: its plain terminal waits for
+            // the host's carry-out (BeginMemberRotation or
+            // ResolveMemberHostPreparation), so a re-driven rotation never
+            // leaves a non-member window.
+            // Once the mob's destroy is admitted the destroy beats both: this
+            // terminal archives the identity and drops its intent, with no
+            // host-pending wait.
+            guard "rotation_settled_or_destroying" {
+                self.member_rotation_session_ids.contains_key(agent_identity) == false
+                || self.destroy_admitted == true
+            }
+            guard "host_preparation_settled_or_destroying" {
+                self.member_host_preparation_pending.contains(agent_identity) == false
+                || self.destroy_admitted == true
+            }
             guard "topology_not_preserved" { preserve_machine_topology == false || self.abandoned_respawn_topology.get_copied(agent_identity) == Some(generation) }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
@@ -11460,24 +12666,34 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
                 self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
                 self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                 self.topology_epoch += 1;
             }
@@ -11485,11 +12701,29 @@ macro_rules! mob_catalog_machine_dsl {
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
             emit WiringGraphChanged { epoch: self.topology_epoch }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+            emit RetractWakeRoute { agent_identity: agent_identity }
         }
 
         transition ObserveMemberRetirementArchivedRetired {
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology }
             guard { self.lifecycle_phase == Phase::Running }
+            // A rotating identity's terminal is CommitMemberRotation. A
+            // rotation lost in a crash is re-driven by the host, which marks
+            // the identity host-pending at build: its plain terminal waits for
+            // the host's carry-out (BeginMemberRotation or
+            // ResolveMemberHostPreparation), so a re-driven rotation never
+            // leaves a non-member window.
+            // Once the mob's destroy is admitted the destroy beats both: this
+            // terminal archives the identity and drops its intent, with no
+            // host-pending wait.
+            guard "rotation_settled_or_destroying" {
+                self.member_rotation_session_ids.contains_key(agent_identity) == false
+                || self.destroy_admitted == true
+            }
+            guard "host_preparation_settled_or_destroying" {
+                self.member_host_preparation_pending.contains(agent_identity) == false
+                || self.destroy_admitted == true
+            }
             guard "topology_not_preserved" { preserve_machine_topology == false || self.abandoned_respawn_topology.get_copied(agent_identity) == Some(generation) }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
@@ -11515,12 +12749,14 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
@@ -11528,23 +12764,49 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
                 self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
                 self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
             emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit RetractWakeRoute { agent_identity: agent_identity }
         }
 
         transition ObserveMemberRetirementArchivedRetiredPreservingTopology {
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology }
             guard { self.lifecycle_phase == Phase::Running }
+            // A rotating identity's terminal is CommitMemberRotation. A
+            // rotation lost in a crash is re-driven by the host, which marks
+            // the identity host-pending at build: its plain terminal waits for
+            // the host's carry-out (BeginMemberRotation or
+            // ResolveMemberHostPreparation), so a re-driven rotation never
+            // leaves a non-member window.
+            // Once the mob's destroy is admitted the destroy beats both: this
+            // terminal archives the identity and drops its intent, with no
+            // host-pending wait.
+            guard "rotation_settled_or_destroying" {
+                self.member_rotation_session_ids.contains_key(agent_identity) == false
+                || self.destroy_admitted == true
+            }
+            guard "host_preparation_settled_or_destroying" {
+                self.member_host_preparation_pending.contains(agent_identity) == false
+                || self.destroy_admitted == true
+            }
             guard "topology_preserved" { preserve_machine_topology == true && self.abandoned_respawn_topology.get_copied(agent_identity) != Some(generation) }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
@@ -11570,12 +12832,18 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
+                // The member leaves: its owed edge repairs go (the kept
+                // graph is re-realized by a successor or dropped by the destroy).
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
@@ -11583,7 +12851,13 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 if self.pending_respawn_topology.contains(agent_identity) == false {
@@ -11593,11 +12867,29 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
+            emit RetractWakeRoute { agent_identity: agent_identity }
         }
 
         transition ObserveMemberRetirementArchivedRetiredStopped {
             on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, preserve_machine_topology }
             guard { self.lifecycle_phase == Phase::Stopped }
+            // A rotating identity's terminal is CommitMemberRotation. A
+            // rotation lost in a crash is re-driven by the host, which marks
+            // the identity host-pending at build: its plain terminal waits for
+            // the host's carry-out (BeginMemberRotation or
+            // ResolveMemberHostPreparation), so a re-driven rotation never
+            // leaves a non-member window.
+            // Once the mob's destroy is admitted the destroy beats both: this
+            // terminal archives the identity and drops its intent, with no
+            // host-pending wait.
+            guard "rotation_settled_or_destroying" {
+                self.member_rotation_session_ids.contains_key(agent_identity) == false
+                || self.destroy_admitted == true
+            }
+            guard "host_preparation_settled_or_destroying" {
+                self.member_host_preparation_pending.contains(agent_identity) == false
+                || self.destroy_admitted == true
+            }
             guard "topology_not_preserved" { preserve_machine_topology == false || self.abandoned_respawn_topology.get_copied(agent_identity) == Some(generation) }
             guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
@@ -11623,12 +12915,14 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
@@ -11636,18 +12930,27 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
                 self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
                 self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                 self.topology_epoch += 1;
             }
             to Stopped
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
             emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit RetractWakeRoute { agent_identity: agent_identity }
         }
 
         transition ObserveMemberRetirementArchivedPlacedLive {
@@ -11693,19 +12996,27 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 if preserve_machine_topology && self.abandoned_respawn_topology.get_copied(agent_identity) != Some(generation) {
@@ -11717,6 +13028,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.pending_respawn_topology.remove(agent_identity);
                     self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
                     self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                    self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                    self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                     self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                     self.topology_epoch += 1;
                 }
@@ -11743,6 +13056,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             emit WiringGraphChanged { epoch: self.topology_epoch }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+            emit RetractWakeRoute { agent_identity: agent_identity }
         }
 
         transition ObserveMemberRetirementArchivedPlacedRetired {
@@ -11781,12 +13095,14 @@ macro_rules! mob_catalog_machine_dsl {
                     PlacedSpawnCarrierExpectedPhase::Committed
                 ));
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
@@ -11794,7 +13110,13 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 if preserve_machine_topology && self.abandoned_respawn_topology.get_copied(agent_identity) != Some(generation) {
@@ -11806,6 +13128,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.pending_respawn_topology.remove(agent_identity);
                     self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
                     self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                    self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                    self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                     self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                     self.topology_epoch += 1;
                 }
@@ -11831,6 +13155,7 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: session_id
             }
             emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit RetractWakeRoute { agent_identity: agent_identity }
         }
 
         transition ObserveMemberRetirementArchivedStaleRuntime {
@@ -11844,6 +13169,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_present" { session_id != None }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
@@ -11865,6 +13191,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_present" { session_id != None }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
@@ -11968,12 +13295,18 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
+                // The member leaves: its owed edge repairs go (the kept
+                // graph is re-realized by a successor or dropped by the destroy).
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
@@ -11981,7 +13314,13 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 // §19.L4 teardown completeness: destroy-retirement clears the
                 // placement and materialization-failure facts too.
                 self.member_placement.remove(agent_identity);
@@ -11999,6 +13338,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: session_id, new_session_id: None }
+            emit RetractWakeRoute { agent_identity: agent_identity }
         }
 
         transition ObserveDestroyMemberRetirementArchivedLiveStopped {
@@ -12032,12 +13372,18 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
+                // The member leaves: its owed edge repairs go (the kept
+                // graph is re-realized by a successor or dropped by the destroy).
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
@@ -12045,7 +13391,13 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 // §19.L4 teardown completeness: destroy-retirement clears the
                 // placement and materialization-failure facts too.
                 self.member_placement.remove(agent_identity);
@@ -12063,6 +13415,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: session_id, new_session_id: None }
+            emit RetractWakeRoute { agent_identity: agent_identity }
         }
 
         transition ObserveDestroyMemberRetirementArchivedRetiredRunning {
@@ -12090,12 +13443,18 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
+                // The member leaves: its owed edge repairs go (the kept
+                // graph is re-realized by a successor or dropped by the destroy).
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
@@ -12103,7 +13462,13 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 // §19.L4 teardown completeness: destroy-retirement clears the
                 // placement and materialization-failure facts too.
                 self.member_placement.remove(agent_identity);
@@ -12120,6 +13485,7 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: session_id
             }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: session_id, new_session_id: None }
+            emit RetractWakeRoute { agent_identity: agent_identity }
         }
 
         transition ObserveDestroyMemberRetirementArchivedRetiredStopped {
@@ -12147,12 +13513,18 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
+                // The member leaves: its owed edge repairs go (the kept
+                // graph is re-realized by a successor or dropped by the destroy).
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
@@ -12160,7 +13532,13 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 // §19.L4 teardown completeness: destroy-retirement clears the
                 // placement and materialization-failure facts too.
                 self.member_placement.remove(agent_identity);
@@ -12177,6 +13555,7 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: session_id
             }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: session_id, new_session_id: None }
+            emit RetractWakeRoute { agent_identity: agent_identity }
         }
 
         transition ObserveDestroyMemberRetirementArchivedPlacedLive {
@@ -12220,12 +13599,18 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
+                // The member leaves: its owed edge repairs go (the kept
+                // graph is re-realized by a successor or dropped by the destroy).
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
@@ -12233,7 +13618,13 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.topology_epoch += 1;
@@ -12260,6 +13651,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: session_id, new_session_id: None }
+            emit RetractWakeRoute { agent_identity: agent_identity }
         }
 
         transition ObserveDestroyMemberRetirementArchivedPlacedRetired {
@@ -12297,12 +13689,18 @@ macro_rules! mob_catalog_machine_dsl {
                     PlacedSpawnCarrierExpectedPhase::Committed
                 ));
                 self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
                 self.remote_runtime_retired_ids.remove(agent_runtime_id);
                 self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
+                // The member leaves: its owed edge repairs go (the kept
+                // graph is re-realized by a successor or dropped by the destroy).
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
@@ -12310,7 +13708,13 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.topology_epoch += 1;
@@ -12336,6 +13740,7 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: session_id
             }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: session_id, new_session_id: None }
+            emit RetractWakeRoute { agent_identity: agent_identity }
         }
 
         transition ObserveDestroyMemberRetirementArchivedAlreadyClearedRunning {
@@ -12419,6 +13824,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.member_restore_failures.insert(agent_identity, reason);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 // Trust eligibility just changed: a broken member may not be
                 // re-wired or re-overlaid. Advance the canonical topology
                 // epoch so every generated trust permission minted against
@@ -12449,19 +13859,42 @@ macro_rules! mob_catalog_machine_dsl {
             guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
             guard "session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
-            guard "not_broken" { self.member_restore_failures.contains_key(agent_identity) == false }
-            guard "revival_not_pending" { self.member_revival_pending.contains(agent_identity) == false }
+            // The drift arm: the machine believed the member Live and a probe
+            // or a routing miss observed its materialization gone. It is a
+            // counted fault path, never the release mechanism.
+            guard "member_live" { self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Live) }
             guard "no_explicit_resume_work" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            // After the seal every Waking member has a durable endpoint.
+            guard "endpoint_present_after_seal" {
+                self.boot_plan_sealed == false
+                || self.member_peer_endpoints.contains_key(agent_identity) == true
+            }
             guard "durable_snapshot_present" { observation == MemberLiveMaterializationObservationKind::DurableSnapshotPresent }
             update {
-                self.member_revival_pending.insert(agent_identity);
+                self.member_wake_attempt_sequence += 1;
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Waking);
+                self.member_wake_attempts.insert(agent_identity, self.member_wake_attempt_sequence);
+                self.member_wake_bound.remove(agent_identity);
+                // The binding ladder goes: the wake binds anew. The
+                // registration's epoch stays, as an explicit resume keeps it:
+                // a wake that registers anew overwrites it with the new
+                // registration's (the routed binding), and a wake that finds
+                // the registration kept (a false miss, whose bind is an exact
+                // repeat and routes no new binding) keeps it, so the member
+                // is releasable again once the wake closes Live.
+                self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_materialization_drift_count += 1;
             }
             to Running
             emit MemberLiveMaterializationClassified {
                 agent_identity: agent_identity,
                 observation: observation,
                 verdict: MemberRevivalVerdictKind::ReviveAuthorized,
-                reason: reason
+                reason: reason,
+                attempt: Some(self.member_wake_attempt_sequence)
             }
         }
 
@@ -12470,12 +13903,15 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
             guard "session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
-            guard "not_broken" { self.member_restore_failures.contains_key(agent_identity) == false }
-            guard "revival_not_pending" { self.member_revival_pending.contains(agent_identity) == false }
+            guard "member_live" { self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Live) }
             guard "no_explicit_resume_work" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
             guard "durable_snapshot_missing" { observation == MemberLiveMaterializationObservationKind::DurableSnapshotMissing }
             update {
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_restore_failures.insert(agent_identity, reason);
                 // Trust eligibility just changed: a broken member may not be
                 // re-wired or re-overlaid. Advance the canonical topology
@@ -12489,65 +13925,57 @@ macro_rules! mob_catalog_machine_dsl {
                 agent_identity: agent_identity,
                 observation: observation,
                 verdict: MemberRevivalVerdictKind::BrokenRecorded,
-                reason: reason
+                reason: reason,
+                attempt: None
             }
         }
 
-        // Revival resolution re-establishes the runtime binding for a LOCAL
-        // member. A successful revival re-materialized the member's live
-        // session, but nothing on that path re-establishes the consumer's
-        // PLACEMENT tuple: revival prepares LOCAL session resources, which
-        // register the entry without committing a placement, and the
-        // consumer's re-admission arms clear the placement triple by
-        // construction. A revived member with no placement is registered but
-        // unplaced, so every routed work request is refused on the placement
-        // guards - live, and unable to take work. This arm is the one emit
-        // site that closes that gap, sourced from the machine's own membership
-        // maps rather than from a shell probe.
-        //
-        // The effect deliberately carries no runtime epoch: the epoch is a
-        // consumer-owned fact about a consumer-owned session entry, resolved
-        // on that side, and MobMachine must never learn or forward it. An
-        // identical tuple is an idempotent no-op on the consumer, an absent
-        // one binds, and a different one is a contained typed rejection.
-        //
-        // Presence is guarded rather than defaulted: a map accessor yields the
-        // field default for an absent key, so an unguarded emit would route an
-        // empty session id or a zero fence token. A revival that cannot name
-        // the exact tuple matches NO arm and is refused, instead of resolving
-        // the obligation and leaving the member permanently unbindable.
+        // Wake resolution, step 2 of a local wake: the attempt's
+        // runtime binding was requested (ResolveMemberRevivalBound, which
+        // emits RequestRuntimeBinding, so the consumer binds the member's
+        // PLACEMENT tuple before its drain admits any work) and its readiness
+        // and topology settled, so the attempt closes Live. Every resolution
+        // names its attempt; feedback for any other attempt is a typed
+        // StaleAttempt no-op (the Stale arms below the residency section).
         transition ResolveMemberRevivalSucceededRunningLocal {
-            on signal ResolveMemberRevivalSucceeded { agent_identity }
+            on signal ResolveMemberRevivalSucceeded { agent_identity, attempt }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "revival_pending" { self.member_revival_pending.contains(agent_identity) == true }
+            guard "attempt_open" { self.member_wake_attempts.get_copied(agent_identity) == Some(attempt) }
             guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
-            guard "runtime_binding_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
-            guard "fence_binding_present" { self.identity_runtime_fence_tokens.contains_key(agent_identity) == true }
-            guard "generation_binding_present" { self.identity_runtime_generations.contains_key(agent_identity) == true }
-            guard "session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "binding_requested" { self.member_wake_bound.contains(agent_identity) == true }
+            // A member owing EndpointPending closes Live only once its
+            // endpoint is registered (its wake registers it before this
+            // step), so a Live member is reachable. A member owing no
+            // endpoint cause is not held Waking for one.
+            guard "owed_endpoint_registered" {
+                self.member_peer_endpoints.contains_key(agent_identity) == true
+                || self.member_boot_obligation_owed.get_cloned(agent_identity) != Some(MemberBootObligationCause::EndpointPending)
+            }
             update {
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Live);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
             }
             to Running
-            emit RequestRuntimeBinding {
-                agent_identity: agent_identity,
-                agent_runtime_id: self.identity_to_runtime.get_cloned(agent_identity).get("value"),
-                fence_token: self.identity_runtime_fence_tokens.get_copied(agent_identity).get("value"),
-                generation: self.identity_runtime_generations.get_copied(agent_identity),
-                session_id: self.member_session_bindings.get_cloned(agent_identity).get("value")
-            }
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::Applied }
         }
 
-        // An explicitly nonpersistent service recreates a missing actor with a
-        // fresh session. Successful provisioning is an observation, not durable
-        // snapshot revival. Only this exact current local incarnation may ask
-        // the consumer to bind its already-prepared resources. No new serving
-        // or membership fact is inferred from the receipt.
+        // An explicitly nonpersistent service recreated a missing actor with a
+        // fresh session during a wake. Successful provisioning is an
+        // observation, not durable snapshot revival: like the Bound step, only
+        // the exact current local incarnation's open attempt may ask the
+        // consumer to bind its already-prepared resources, and the attempt
+        // stays open until ResolveMemberRevivalSucceeded closes it Live.
         transition ResolveRecreatedMemberSessionSucceededRunningLocal {
-            on signal ResolveRecreatedMemberSessionSucceeded { agent_identity, agent_runtime_id, fence_token, generation, bridge_session_id }
+            on signal ResolveRecreatedMemberSessionSucceeded { agent_identity, agent_runtime_id, fence_token, generation, bridge_session_id, attempt }
             guard { self.lifecycle_phase == Phase::Running }
             guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
+            guard "attempt_open" { self.member_wake_attempts.get_copied(agent_identity) == Some(attempt) }
             guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
+            // A never-created session is never restored: an unborn seat binds
+            // only through ResolveMemberRevivalSessionCreated.
+            guard "seat_session_born" { self.member_seat_session_unborn.contains(agent_identity) == false }
             guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) == true }
             guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
@@ -12556,44 +13984,58 @@ macro_rules! mob_catalog_machine_dsl {
             guard "runtime_fence_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == Some(bridge_session_id) }
-            guard "not_broken" { self.member_restore_failures.contains_key(agent_identity) == false }
-            guard "revival_not_pending" { self.member_revival_pending.contains(agent_identity) == false }
-            guard "no_explicit_resume_work" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
-            update {}
+            update {
+                if self.member_startup_runtime_ready.contains(agent_runtime_id) == false
+                    && self.member_startup_ready.contains(agent_runtime_id) == false
+                {
+                    self.member_startup_binding_requested.insert(agent_runtime_id);
+                }
+                self.member_wake_bound.insert(agent_identity);
+            }
             to Running
             emit RequestRuntimeBinding {
                 agent_identity: agent_identity,
                 agent_runtime_id: self.identity_to_runtime.get_cloned(agent_identity).get("value"),
                 fence_token: self.identity_runtime_fence_tokens.get_copied(agent_identity).get("value"),
                 generation: self.identity_runtime_generations.get_copied(agent_identity),
-                session_id: self.member_session_bindings.get_cloned(agent_identity).get("value")
+                session_id: self.member_session_bindings.get_cloned(agent_identity).get("value"),
+                attempt: Some(attempt)
             }
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::Applied }
         }
 
         // A placed member's runtime binding belongs to its member host, which
         // binds it explicitly - the same reason CommitSpawnMembershipRemote
-        // emits no RequestRuntimeBinding. Revival on this lane resolves the
-        // obligation and stays out of the tuple.
+        // emits no RequestRuntimeBinding. A placed wake has no Bound step:
+        // its attempt closes Live and stays out of the tuple.
         transition ResolveMemberRevivalSucceededRunningPlaced {
-            on signal ResolveMemberRevivalSucceeded { agent_identity }
+            on signal ResolveMemberRevivalSucceeded { agent_identity, attempt }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "revival_pending" { self.member_revival_pending.contains(agent_identity) == true }
+            guard "attempt_open" { self.member_wake_attempts.get_copied(agent_identity) == Some(attempt) }
             guard "member_is_placed" { self.member_placement.contains_key(agent_identity) == true }
             guard "placed_carrier_binding_active" {
                 mob_machine_placed_carrier_binding_active(self.member_placement, self.current_placed_spawn_host_binding_generations, self.host_bind_phase, self.host_binding_generations, agent_identity)
             }
             update {
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Live);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
             }
             to Running
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::Applied }
         }
 
         transition ResolveMemberRevivalFailedRunning {
-            on signal ResolveMemberRevivalFailed { agent_identity, reason }
+            on signal ResolveMemberRevivalFailed { agent_identity, reason, attempt }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "revival_pending" { self.member_revival_pending.contains(agent_identity) == true }
+            guard "attempt_open" { self.member_wake_attempts.get_copied(agent_identity) == Some(attempt) }
             update {
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_restore_failures.insert(agent_identity, reason);
                 // Trust eligibility just changed: a broken member may not be
                 // re-wired or re-overlaid. Advance the canonical topology
@@ -12603,6 +14045,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_restore_failure_codes.remove(agent_identity);
             }
             to Running
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::Applied }
         }
 
         transition AdmitDestroyCleanup {
@@ -12620,6 +14063,20 @@ macro_rules! mob_catalog_machine_dsl {
             guard "placed_completion_destroy_intent" { self.placed_completion_lifecycle_intent == Some(PlacedCompletionLifecycleIntentKind::Destroy) }
             update {
                 self.destroy_admitted = true;
+                // Every open wake attempt closes here. Each Waking member
+                // returns to Dormant (its boot obligation, if any, is kept), its
+                // binding ladder and epoch go, and MemberWakesAbandoned tells the
+                // shell to answer every waiter and roll back every in-flight
+                // provision, whose commit now fails its attempt fence.
+                for member_id in self.member_wake_attempts.keys() {
+                    self.member_materialization.insert(member_id, MemberMaterializationPhase::Dormant);
+                    self.member_materialization_epoch.remove(member_id);
+                    self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                    self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                    self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                }
+                self.member_wake_attempts = EmptyMap;
+                self.member_wake_bound = EmptySet;
             }
             to Running
             emit AppendLifecycleJournal {
@@ -12637,6 +14094,8 @@ macro_rules! mob_catalog_machine_dsl {
             // `CancelPendingSpawn` before the `Destroy` transition (guarded on
             // the drained pending-spawn table) can commit.
             emit RequestPendingSpawnQuiesceForDestroy
+            emit RotationSessionsAbandoned { rotations: self.member_rotation_session_ids }
+            emit MemberWakesAbandoned { cause: MemberWakeAbandonCause::MobDestroying }
         }
 
         transition AdmitDestroyStorageFinalizing {
@@ -12664,9 +14123,23 @@ macro_rules! mob_catalog_machine_dsl {
             guard "placed_completion_pending_drained" { self.pending_placed_completion_outcomes == EmptySet }
             guard "placed_completion_cancel_requested_drained" { self.cancel_requested_placed_completion_outcomes == EmptySet }
             guard "placed_completion_resolved_drained" { self.resolved_placed_completion_outcomes == EmptySet }
-            update {}
+            update {
+                // Every open wake attempt closes when the mob leaves
+                // Running (see StopRunning).
+                for member_id in self.member_wake_attempts.keys() {
+                    self.member_materialization.insert(member_id, MemberMaterializationPhase::Dormant);
+                    self.member_materialization_epoch.remove(member_id);
+                    self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                    self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                    self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                }
+                self.member_wake_attempts = EmptyMap;
+                self.member_wake_bound = EmptySet;
+            }
             to Completed
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Completed }
+            emit MemberWakesAbandoned { cause: MemberWakeAbandonCause::MobCompleting }
+            emit CloseMemberPeerIngress { reason: MemberWakeRefusalKind::MobNotRunning }
         }
 
         transition DestroyMob {
@@ -12723,6 +14196,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.pending_respawn_topology = EmptySet;
                 self.abandoned_respawn_topology = EmptyMap;
                 self.external_peer_edges = EmptySet;
+                self.owed_edge_repairs = EmptySet;
+                self.owed_external_edge_repairs = EmptySet;
+                self.member_seat_session_unborn = EmptySet;
+                self.unborn_seat_sessions = EmptySet;
                 self.external_peer_edges_by_key = EmptyMap;
                 self.identity_to_runtime = EmptyMap;
                 self.identity_runtime_generations = EmptyMap;
@@ -12738,6 +14215,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready = EmptySet;
                 self.member_startup_ready = EmptySet;
                 self.member_state_markers = EmptyMap;
+                self.runtime_retire_archive_only = EmptySet;
                 self.member_restore_failures = EmptyMap;
                 self.member_restore_failure_codes = EmptyMap;
                 self.runtime_retire_refusal_codes = EmptyMap;
@@ -12745,7 +14223,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions = EmptyMap;
                 self.remote_runtime_retired_ids = EmptySet;
                 self.remote_supervisor_revoked_ids = EmptySet;
-                self.member_revival_pending = EmptySet;
+                self.member_materialization = EmptyMap;
+                self.member_wake_attempts = EmptyMap;
+                self.member_wake_bound = EmptySet;
+                self.member_materialization_epoch = EmptyMap;
+                self.member_boot_obligation_owed = EmptyMap;
+                self.member_rotation_session_ids = EmptyMap;
+                self.member_rotation_peer_endpoints = EmptyMap;
+                // Nothing waits on a host carry-out after the destroy.
+                self.member_host_preparation_pending = EmptySet;
                 // Spawn-exec phase ladder: total teardown — clear the whole phase
                 // map so no in-flight spawn-exec survives into Destroyed (every
                 // late CommitSpawnActivation/AbortSpawnExec becomes a Settled no-op).
@@ -12756,6 +14242,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Destroyed
             emit RequestRuntimeDestroy { session_id: session_id }
+            emit RebuildWakeRoutes
         }
 
         // A member runtime destroyed (a host destroying one runtime through the
@@ -13041,6 +14528,20 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.coordinator_bound = false;
                 self.active_run_count = 0;
+                // Every open wake attempt closes here. Each Waking member
+                // returns to Dormant (its boot obligation, if any, is kept), its
+                // binding ladder and epoch go, and MemberWakesAbandoned tells the
+                // shell to answer every waiter and roll back every in-flight
+                // provision, whose commit now fails its attempt fence.
+                for member_id in self.member_wake_attempts.keys() {
+                    self.member_materialization.insert(member_id, MemberMaterializationPhase::Dormant);
+                    self.member_materialization_epoch.remove(member_id);
+                    self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                    self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                    self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                }
+                self.member_wake_attempts = EmptyMap;
+                self.member_wake_bound = EmptySet;
             }
             to Stopped
             emit AppendLifecycleJournal {
@@ -13052,6 +14553,9 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: None
             }
             emit EmitRunLifecycleNotice
+            emit MemberWakesAbandoned { cause: MemberWakeAbandonCause::MobStopping }
+            // A stopped mob gives one outcome to peers, Live or Dormant.
+            emit CloseMemberPeerIngress { reason: MemberWakeRefusalKind::MobNotRunning }
         }
 
         transition ResumeStopped {
@@ -13081,6 +14585,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             emit EmitRunLifecycleNotice
             emit ReleaseMemberRunStarts
+            emit ReopenMemberPeerIngress
         }
 
         transition CompleteRunning {
@@ -13102,6 +14607,20 @@ macro_rules! mob_catalog_machine_dsl {
             guard "placed_completion_resolved_drained" { self.resolved_placed_completion_outcomes == EmptySet }
             update {
                 self.active_run_count = 0;
+                // Every open wake attempt closes here. Each Waking member
+                // returns to Dormant (its boot obligation, if any, is kept), its
+                // binding ladder and epoch go, and MemberWakesAbandoned tells the
+                // shell to answer every waiter and roll back every in-flight
+                // provision, whose commit now fails its attempt fence.
+                for member_id in self.member_wake_attempts.keys() {
+                    self.member_materialization.insert(member_id, MemberMaterializationPhase::Dormant);
+                    self.member_materialization_epoch.remove(member_id);
+                    self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                    self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                    self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                }
+                self.member_wake_attempts = EmptyMap;
+                self.member_wake_bound = EmptySet;
             }
             to Completed
             emit AppendLifecycleJournal {
@@ -13113,6 +14632,8 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: None
             }
             emit EmitRunLifecycleNotice
+            emit MemberWakesAbandoned { cause: MemberWakeAbandonCause::MobCompleting }
+            emit CloseMemberPeerIngress { reason: MemberWakeRefusalKind::MobNotRunning }
         }
 
         transition ResetToRunning {
@@ -13154,6 +14675,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.pending_respawn_topology = EmptySet;
                 self.abandoned_respawn_topology = EmptyMap;
                 self.external_peer_edges = EmptySet;
+                self.owed_edge_repairs = EmptySet;
+                self.owed_external_edge_repairs = EmptySet;
+                self.member_seat_session_unborn = EmptySet;
+                self.unborn_seat_sessions = EmptySet;
                 self.external_peer_edges_by_key = EmptyMap;
                 self.topology_epoch += 1;
             }
@@ -13194,6 +14719,58 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "edge_not_already_wired" { self.wiring_edges.contains(edge) == false }
+            // A wiring edge joins seated members (or a member held by a
+            // respawn's preserved topology); pending edges exist nowhere.
+            guard "edge_endpoints_seated_or_held" {
+                (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge)) == true
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_a(edge)) == true)
+                && (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)) == true
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_b(edge)) == true)
+            }
+            // A Dormant local end that the edge joins to a placed member is
+            // woken by the PlacedPeerWake arms (after the residency arms).
+            guard "first_end_owes_no_placed_peer_wake" {
+                self.member_placement.contains_key(mob_machine_wiring_edge_b(edge)) == false
+                || self.member_placement.contains_key(mob_machine_wiring_edge_a(edge)) == true
+                || self.member_materialization.get_cloned(mob_machine_wiring_edge_a(edge)) != Some(MemberMaterializationPhase::Dormant)
+                || member_wake_refusal(
+                    self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.member_session_bindings.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.member_placement.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.member_restore_failures.contains_key(mob_machine_wiring_edge_a(edge)),
+                    exists(rid in self.member_state_markers.keys(),
+                        self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_a(edge)) == Some(rid)
+                        && self.member_state_markers.get_cloned(rid) == Some(MobMemberState::Retiring)),
+                    self.destroy_admitted == false,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.placed_completion_lifecycle_quiescing == false,
+                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_a(edge)),
+                    PeerInputClass::Content,
+                    false,
+                    false,
+                    self.member_materialization.get_cloned(mob_machine_wiring_edge_a(edge))) != None
+            }
+            guard "second_end_owes_no_placed_peer_wake" {
+                self.member_placement.contains_key(mob_machine_wiring_edge_a(edge)) == false
+                || self.member_placement.contains_key(mob_machine_wiring_edge_b(edge)) == true
+                || self.member_materialization.get_cloned(mob_machine_wiring_edge_b(edge)) != Some(MemberMaterializationPhase::Dormant)
+                || member_wake_refusal(
+                    self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)),
+                    self.member_session_bindings.contains_key(mob_machine_wiring_edge_b(edge)),
+                    self.member_placement.contains_key(mob_machine_wiring_edge_b(edge)),
+                    self.member_restore_failures.contains_key(mob_machine_wiring_edge_b(edge)),
+                    exists(rid in self.member_state_markers.keys(),
+                        self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_b(edge)) == Some(rid)
+                        && self.member_state_markers.get_cloned(rid) == Some(MobMemberState::Retiring)),
+                    self.destroy_admitted == false,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.placed_completion_lifecycle_quiescing == false,
+                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_b(edge)),
+                    PeerInputClass::Content,
+                    false,
+                    false,
+                    self.member_materialization.get_cloned(mob_machine_wiring_edge_b(edge))) != None
+            }
             update {
                 self.wiring_edges.insert(edge);
                 self.topology_epoch += 1;
@@ -13209,10 +14786,62 @@ macro_rules! mob_catalog_machine_dsl {
             guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "edge_not_already_wired" { self.wiring_edges.contains(edge) == false }
             guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            // A wiring edge joins seated members (or a member held by a
+            // respawn's preserved topology); pending edges exist nowhere.
+            guard "edge_endpoints_seated_or_held" {
+                (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge)) == true
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_a(edge)) == true)
+                && (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)) == true
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_b(edge)) == true)
+            }
             guard "a_member_peer_registered" { self.member_peer_ids.contains_key(a_identity) == true }
             guard "b_member_peer_registered" { self.member_peer_ids.contains_key(b_identity) == true }
             guard "a_member_endpoint_registered" { self.member_peer_endpoints.contains_key(a_identity) == true }
             guard "b_member_endpoint_registered" { self.member_peer_endpoints.contains_key(b_identity) == true }
+            // A Dormant local end that the edge joins to a placed member is
+            // woken by the PlacedPeerWake arms (after the residency arms).
+            guard "first_end_owes_no_placed_peer_wake" {
+                self.member_placement.contains_key(mob_machine_wiring_edge_b(edge)) == false
+                || self.member_placement.contains_key(mob_machine_wiring_edge_a(edge)) == true
+                || self.member_materialization.get_cloned(mob_machine_wiring_edge_a(edge)) != Some(MemberMaterializationPhase::Dormant)
+                || member_wake_refusal(
+                    self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.member_session_bindings.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.member_placement.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.member_restore_failures.contains_key(mob_machine_wiring_edge_a(edge)),
+                    exists(rid in self.member_state_markers.keys(),
+                        self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_a(edge)) == Some(rid)
+                        && self.member_state_markers.get_cloned(rid) == Some(MobMemberState::Retiring)),
+                    self.destroy_admitted == false,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.placed_completion_lifecycle_quiescing == false,
+                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_a(edge)),
+                    PeerInputClass::Content,
+                    false,
+                    false,
+                    self.member_materialization.get_cloned(mob_machine_wiring_edge_a(edge))) != None
+            }
+            guard "second_end_owes_no_placed_peer_wake" {
+                self.member_placement.contains_key(mob_machine_wiring_edge_a(edge)) == false
+                || self.member_placement.contains_key(mob_machine_wiring_edge_b(edge)) == true
+                || self.member_materialization.get_cloned(mob_machine_wiring_edge_b(edge)) != Some(MemberMaterializationPhase::Dormant)
+                || member_wake_refusal(
+                    self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)),
+                    self.member_session_bindings.contains_key(mob_machine_wiring_edge_b(edge)),
+                    self.member_placement.contains_key(mob_machine_wiring_edge_b(edge)),
+                    self.member_restore_failures.contains_key(mob_machine_wiring_edge_b(edge)),
+                    exists(rid in self.member_state_markers.keys(),
+                        self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_b(edge)) == Some(rid)
+                        && self.member_state_markers.get_cloned(rid) == Some(MobMemberState::Retiring)),
+                    self.destroy_admitted == false,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.placed_completion_lifecycle_quiescing == false,
+                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_b(edge)),
+                    PeerInputClass::Content,
+                    false,
+                    false,
+                    self.member_materialization.get_cloned(mob_machine_wiring_edge_b(edge))) != None
+            }
             update {
                 self.wiring_edges.insert(edge);
                 self.topology_epoch += 1;
@@ -13253,6 +14882,16 @@ macro_rules! mob_catalog_machine_dsl {
             on signal RecoverRosterWiring { edge }
             guard { self.lifecycle_phase == Phase::Running }
             guard "edge_not_already_recovered" { self.wiring_edges.contains(edge) == false }
+            // Replay may carry an edge to an identity that leaves later in the
+            // stream (pruned by ConvergeRecoveredRosterTopology); after the
+            // seal an edge joins seated or held members only.
+            guard "edge_endpoints_seated_or_held_after_seal" {
+                self.boot_plan_sealed == false
+                || ((self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge)) == true
+                        || self.pending_respawn_topology.contains(mob_machine_wiring_edge_a(edge)) == true)
+                    && (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)) == true
+                        || self.pending_respawn_topology.contains(mob_machine_wiring_edge_b(edge)) == true))
+            }
             update {
                 self.wiring_edges.insert(edge);
                 self.topology_epoch += 1;
@@ -13274,6 +14913,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "edge_recovered" { self.wiring_edges.contains(edge) == true }
             update {
                 self.wiring_edges.remove(edge);
+                self.owed_edge_repairs.remove(edge);
                 self.topology_epoch += 1;
             }
             to Running
@@ -13303,6 +14943,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {
                 self.wiring_edges.remove(edge);
+                self.owed_edge_repairs.remove(edge);
                 if self.identity_to_runtime.contains_key(a_identity) == false {
                     self.pending_respawn_topology.remove(a_identity);
                 }
@@ -13361,6 +15002,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "edge_currently_wired" { self.wiring_edges.contains(edge) == true }
             update {
                 self.wiring_edges.remove(edge);
+                self.owed_edge_repairs.remove(edge);
                 self.topology_epoch += 1;
             }
             to Running
@@ -13388,6 +15030,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
             update {
                 self.wiring_edges.remove(edge);
+                self.owed_edge_repairs.remove(edge);
                 self.topology_epoch += 1;
             }
             to Running
@@ -13418,12 +15061,49 @@ macro_rules! mob_catalog_machine_dsl {
             guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
             guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            // A wiring edge joins seated members (or a member held by a
+            // respawn's preserved topology); pending edges exist nowhere.
+            guard "edge_endpoints_seated_or_held" {
+                (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge)) == true
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_a(edge)) == true)
+                && (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)) == true
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_b(edge)) == true)
+            }
             update {
                 self.wiring_edges.insert(edge);
                 self.topology_epoch += 1;
+                // A placed retiring member's restored edge joins its peer to
+                // a placed member again: a Dormant local peer (released while
+                // the edge was gone) is owed a wake (PlacedPeerWired) that the
+                // owner's retry timer realizes; an owed peer keeps its cause.
+                if self.member_placement.contains_key(agent_identity) == true
+                    && mob_machine_wiring_edge_a(edge) != agent_identity
+                    && self.member_materialization.get_cloned(mob_machine_wiring_edge_a(edge)) == Some(MemberMaterializationPhase::Dormant)
+                    && self.member_placement.contains_key(mob_machine_wiring_edge_a(edge)) == false
+                    && self.member_boot_obligation_owed.contains_key(mob_machine_wiring_edge_a(edge)) == false
+                {
+                    if self.member_peer_endpoints.contains_key(mob_machine_wiring_edge_a(edge)) == true {
+                        self.member_boot_obligation_owed.insert(mob_machine_wiring_edge_a(edge), MemberBootObligationCause::PlacedPeerWired);
+                    } else {
+                        self.member_boot_obligation_owed.insert(mob_machine_wiring_edge_a(edge), MemberBootObligationCause::EndpointPending);
+                    }
+                }
+                if self.member_placement.contains_key(agent_identity) == true
+                    && mob_machine_wiring_edge_b(edge) != agent_identity
+                    && self.member_materialization.get_cloned(mob_machine_wiring_edge_b(edge)) == Some(MemberMaterializationPhase::Dormant)
+                    && self.member_placement.contains_key(mob_machine_wiring_edge_b(edge)) == false
+                    && self.member_boot_obligation_owed.contains_key(mob_machine_wiring_edge_b(edge)) == false
+                {
+                    if self.member_peer_endpoints.contains_key(mob_machine_wiring_edge_b(edge)) == true {
+                        self.member_boot_obligation_owed.insert(mob_machine_wiring_edge_b(edge), MemberBootObligationCause::PlacedPeerWired);
+                    } else {
+                        self.member_boot_obligation_owed.insert(mob_machine_wiring_edge_b(edge), MemberBootObligationCause::EndpointPending);
+                    }
+                }
             }
             to Running
             emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit OwedMemberWakesRecorded
         }
 
         transition WireExternalPeerRunning {
@@ -13434,6 +15114,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "external_peer_key_not_already_wired" { self.external_peer_edges_by_key.contains_key(key) == false }
             guard "external_peer_edge_not_already_wired" { self.external_peer_edges.contains(edge) == false }
             guard "local_member_peer_registered" { self.member_peer_ids.contains_key(mob_machine_external_peer_edge_local(edge)) == true }
+            guard "local_member_not_dormant" { self.member_materialization.get_cloned(mob_machine_external_peer_edge_local(edge)) != Some(MemberMaterializationPhase::Dormant) }
             update {
                 self.external_peer_edges.insert(edge);
                 self.external_peer_edges_by_key.insert(key, edge);
@@ -13450,6 +15131,28 @@ macro_rules! mob_catalog_machine_dsl {
             emit EmitExternalPeerWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
         }
 
+        // A Dormant local member holds no comms runtime. Its edge
+        // commits with no trust obligation; its wake realizes the trust from
+        // external_peer_edges. A Waking or Live member takes the arm above.
+        transition WireExternalPeerDormantRunning {
+            on input WireExternalPeer { key, edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
+            guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
+            guard "external_peer_key_not_already_wired" { self.external_peer_edges_by_key.contains_key(key) == false }
+            guard "external_peer_edge_not_already_wired" { self.external_peer_edges.contains(edge) == false }
+            guard "local_member_peer_registered" { self.member_peer_ids.contains_key(mob_machine_external_peer_edge_local(edge)) == true }
+            guard "local_member_dormant" { self.member_materialization.get_cloned(mob_machine_external_peer_edge_local(edge)) == Some(MemberMaterializationPhase::Dormant) }
+            update {
+                self.external_peer_edges.insert(edge);
+                self.external_peer_edges_by_key.insert(key, edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit EmitExternalPeerWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
+        }
+
         transition WireExternalPeerAlreadyWired {
             on input WireExternalPeer { key, edge }
             guard { self.lifecycle_phase == Phase::Running }
@@ -13457,6 +15160,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "external_peer_key_already_wired" { self.external_peer_edges_by_key.get_cloned(key) == Some(edge) }
             guard "external_peer_edge_already_wired" { self.external_peer_edges.contains(edge) == true }
             guard "local_member_peer_registered" { self.member_peer_ids.contains_key(mob_machine_external_peer_edge_local(edge)) == true }
+            guard "local_member_not_dormant" { self.member_materialization.get_cloned(mob_machine_external_peer_edge_local(edge)) != Some(MemberMaterializationPhase::Dormant) }
             update {}
             to Running
             emit ExternalPeerTrustRepairRequested {
@@ -13465,6 +15169,21 @@ macro_rules! mob_catalog_machine_dsl {
                 peer_id: mob_machine_external_peer_edge_peer_id(edge),
                 epoch: self.topology_epoch
             }
+        }
+
+        // A Dormant local member holds no comms runtime, so its wired
+        // edge needs no trust repair: its wake realizes the trust from
+        // external_peer_edges. A Waking or Live member takes the arm above.
+        transition WireExternalPeerAlreadyWiredDormant {
+            on input WireExternalPeer { key, edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
+            guard "external_peer_key_already_wired" { self.external_peer_edges_by_key.get_cloned(key) == Some(edge) }
+            guard "external_peer_edge_already_wired" { self.external_peer_edges.contains(edge) == true }
+            guard "local_member_peer_registered" { self.member_peer_ids.contains_key(mob_machine_external_peer_edge_local(edge)) == true }
+            guard "local_member_dormant" { self.member_materialization.get_cloned(mob_machine_external_peer_edge_local(edge)) == Some(MemberMaterializationPhase::Dormant) }
+            update {}
+            to Running
         }
 
         transition RegisterMemberPeerRunning {
@@ -13504,9 +15223,14 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(peer_endpoint));
                 self.member_peer_endpoints.insert(agent_identity, peer_endpoint);
+                // A registered endpoint ends the EndpointPending exception.
+                if self.member_boot_obligation_owed.get_cloned(agent_identity) == Some(MemberBootObligationCause::EndpointPending) {
+                    self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::Obligation);
+                }
             }
             to Running
             emit MemberPeerRegistered { agent_identity: agent_identity, peer_id: mob_machine_member_peer_endpoint_peer_id(peer_endpoint) }
+            emit PublishWakeRoute { agent_identity: agent_identity }
         }
 
         transition RegisterMemberPeerAlreadyCurrentRunning {
@@ -13846,6 +15570,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "external_peer_recovered" { self.external_peer_edges_by_key.contains_key(key) == true }
             update {
                 self.external_peer_edges.remove(self.external_peer_edges_by_key.get_cloned(key).get("value"));
+                self.owed_external_edge_repairs.remove(self.external_peer_edges_by_key.get_cloned(key).get("value"));
                 self.external_peer_edges_by_key.remove(key);
                 self.topology_epoch += 1;
             }
@@ -13867,8 +15592,10 @@ macro_rules! mob_catalog_machine_dsl {
             guard "external_peer_key_currently_wired" { self.external_peer_edges_by_key.get_cloned(key) == Some(edge) }
             guard "external_peer_edge_currently_wired" { self.external_peer_edges.contains(edge) == true }
             guard "local_member_peer_registered" { self.member_peer_ids.contains_key(mob_machine_external_peer_edge_local(edge)) == true }
+            guard "local_member_not_dormant" { self.member_materialization.get_cloned(mob_machine_external_peer_edge_local(edge)) != Some(MemberMaterializationPhase::Dormant) }
             update {
                 self.external_peer_edges.remove(edge);
+                self.owed_external_edge_repairs.remove(edge);
                 self.external_peer_edges_by_key.remove(key);
                 self.topology_epoch += 1;
             }
@@ -13880,6 +15607,28 @@ macro_rules! mob_catalog_machine_dsl {
                 peer_id: mob_machine_external_peer_edge_peer_id(edge),
                 epoch: self.topology_epoch
             }
+            emit EmitExternalPeerWiringLifecycleNotice { kind: WiringLifecycleKind::Unwired, edge: edge }
+        }
+
+        // A Dormant local member holds no comms runtime, so its edge is
+        // removed with no trust obligation: its next wake realizes the
+        // topology without it. A Waking or Live member takes the arm above.
+        transition UnwireExternalPeerDormantRunning {
+            on input UnwireExternalPeer { key, edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
+            guard "external_peer_key_currently_wired" { self.external_peer_edges_by_key.get_cloned(key) == Some(edge) }
+            guard "external_peer_edge_currently_wired" { self.external_peer_edges.contains(edge) == true }
+            guard "local_member_peer_registered" { self.member_peer_ids.contains_key(mob_machine_external_peer_edge_local(edge)) == true }
+            guard "local_member_dormant" { self.member_materialization.get_cloned(mob_machine_external_peer_edge_local(edge)) == Some(MemberMaterializationPhase::Dormant) }
+            update {
+                self.external_peer_edges.remove(edge);
+                self.owed_external_edge_repairs.remove(edge);
+                self.external_peer_edges_by_key.remove(key);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
             emit EmitExternalPeerWiringLifecycleNotice { kind: WiringLifecycleKind::Unwired, edge: edge }
         }
 
@@ -13905,8 +15654,10 @@ macro_rules! mob_catalog_machine_dsl {
             guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
             guard "local_member_peer_registered" { self.member_peer_ids.contains_key(agent_identity) == true }
+            guard "retiring_runtime_registered" { self.runtime_retire_archive_only.contains(agent_runtime_id) == false }
             update {
                 self.external_peer_edges.remove(edge);
+                self.owed_external_edge_repairs.remove(edge);
                 self.external_peer_edges_by_key.remove(key);
                 self.topology_epoch += 1;
             }
@@ -13932,6 +15683,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
             guard "local_member_peer_registered" { self.member_peer_ids.contains_key(agent_identity) == true }
+            guard "retiring_runtime_registered" { self.runtime_retire_archive_only.contains(agent_runtime_id) == false }
             update {
                 self.external_peer_edges.insert(edge);
                 self.external_peer_edges_by_key.insert(key, edge);
@@ -13969,6 +15721,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "retiring_peer_id_retained" { self.member_peer_ids.get_cloned(agent_identity) == Some(mob_machine_member_peer_endpoint_peer_id(self.member_peer_endpoints.get_cloned(agent_identity).get("value"))) }
             update {
                 self.external_peer_edges.remove(edge);
+                self.owed_external_edge_repairs.remove(edge);
                 self.external_peer_edges_by_key.remove(key);
                 self.topology_epoch += 1;
             }
@@ -14891,7 +16644,7 @@ macro_rules! mob_catalog_machine_dsl {
             // placement/incarnation + settled materialization facts below are
             // their readiness authority.
             guard "target_not_retiring" { self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(obligation.agent_identity).get("value")) != Some(MobMemberState::Retiring) }
-            guard "target_not_reviving" { self.member_revival_pending.contains(obligation.agent_identity) == false }
+            guard "target_not_reviving" { self.member_wake_attempts.contains_key(obligation.agent_identity) == false }
             guard "target_spawn_settled" { self.spawn_exec_phase.contains_key(obligation.agent_identity) == false }
             guard "target_materialization_healthy" { self.member_materialization_failures.contains_key(obligation.agent_identity) == false }
             guard "custody_quota_and_correlation_available" {
@@ -15537,8 +17290,22 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.pending_placed_kickoff_outcomes != EmptySet
                 || self.resolved_placed_kickoff_outcomes != EmptySet
             }
-            update { self.active_run_count = 0; }
+            update {
+                self.active_run_count = 0;
+                // Every open wake attempt closes when the mob leaves
+                // Running (see StopRunning).
+                for member_id in self.member_wake_attempts.keys() {
+                    self.member_materialization.insert(member_id, MemberMaterializationPhase::Dormant);
+                    self.member_materialization_epoch.remove(member_id);
+                    self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                    self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                    self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                }
+                self.member_wake_attempts = EmptyMap;
+                self.member_wake_bound = EmptySet;
+            }
             to Completed
+            emit MemberWakesAbandoned { cause: MemberWakeAbandonCause::MobCompleting }
         }
 
         transition RecordPlacedCompletionObligationFresh {
@@ -15565,7 +17332,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "target_runtime_present" { self.identity_to_runtime.contains_key(obligation.agent_identity) == true }
             guard "target_runtime_live" { self.live_runtime_ids.contains(self.identity_to_runtime.get_cloned(obligation.agent_identity).get("value")) == true }
             guard "target_not_retiring" { self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(obligation.agent_identity).get("value")) != Some(MobMemberState::Retiring) }
-            guard "target_not_reviving" { self.member_revival_pending.contains(obligation.agent_identity) == false }
+            guard "target_not_reviving" { self.member_wake_attempts.contains_key(obligation.agent_identity) == false }
             guard "target_spawn_settled" { self.spawn_exec_phase.contains_key(obligation.agent_identity) == false }
             guard "target_materialization_healthy" { self.member_materialization_failures.contains_key(obligation.agent_identity) == false }
             guard "current_generation" { self.identity_runtime_generations.get_cloned(obligation.agent_identity) == Some(obligation.generation) }
@@ -17012,6 +18779,17 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_run_starts_held = true;
                 self.coordinator_bound = false;
                 self.active_run_count = 0;
+                // Every open wake attempt closes when the mob leaves
+                // Running (see StopRunning).
+                for member_id in self.member_wake_attempts.keys() {
+                    self.member_materialization.insert(member_id, MemberMaterializationPhase::Dormant);
+                    self.member_materialization_epoch.remove(member_id);
+                    self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                    self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                    self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(member_id).get("value"));
+                }
+                self.member_wake_attempts = EmptyMap;
+                self.member_wake_bound = EmptySet;
             }
             to Stopped
             emit EmitRunLifecycleNotice
@@ -17020,6 +18798,8 @@ macro_rules! mob_catalog_machine_dsl {
             // start a run after the interrupt. With this, every path into
             // Stopped holds member run starts and only Resume releases them.
             emit HoldMemberRunStarts
+            emit MemberWakesAbandoned { cause: MemberWakeAbandonCause::MobStopping }
+            emit CloseMemberPeerIngress { reason: MemberWakeRefusalKind::MobNotRunning }
         }
 
         transition ShutdownStopped {
@@ -18878,13 +20658,20 @@ macro_rules! mob_catalog_machine_dsl {
             guard "releasing_present" { releasing != None }
             guard "releasing_matches_current" { self.member_session_bindings.get_cloned(agent_identity) == Some(releasing.get("value")) }
             guard "session_matches_releasing" { session_id == releasing }
+            guard "member_not_dormant" { self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Dormant) }
+            guard "member_not_waking" { self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Waking) }
+            guard "runtime_retire_routable" { self.runtime_retire_archive_only.contains(agent_runtime_id) == false }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.member_session_bindings.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
             }
@@ -18901,6 +20688,60 @@ macro_rules! mob_catalog_machine_dsl {
             emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(releasing.get("value")), new_session_id: None }
             // 0.7.2 L5: member retire opens the kickoff-waiter drain
+            // obligation; archival is guarded on its closure.
+            emit RequestKickoffQuiesce { member_id: agent_identity }
+        }
+
+        // The retirement of a member with no runtime registration in this
+        // process (Dormant, or Waking: its open attempt closes here, and
+        // the in-flight provision rolls back on StaleAttempt), or a re-drive of
+        // an archive-only retirement. It mirrors RetireRunningReleasing but
+        // routes no runtime retire: the runtime is recorded archive-only and
+        // the session archive alone terminates the member.
+        transition RetireRunningReleasingArchiveOnly {
+            on input Retire { mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "placement_absent" { self.member_placement.contains_key(agent_identity) == false }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "releasing_present" { releasing != None }
+            guard "releasing_matches_current" { self.member_session_bindings.get_cloned(agent_identity) == Some(releasing.get("value")) }
+            guard "session_matches_releasing" { session_id == releasing }
+            guard "retire_archive_only" {
+                self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Dormant)
+                || self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Waking)
+                || self.runtime_retire_archive_only.contains(agent_runtime_id) == true
+            }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_archive_only.insert(agent_runtime_id);
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
+                self.member_session_bindings.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetirementStartedReleasing,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: session_id
+            }
+            emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(releasing.get("value")), new_session_id: None }
+            // A member retire opens the kickoff-waiter drain
             // obligation; archival is guarded on its closure.
             emit RequestKickoffQuiesce { member_id: agent_identity }
         }
@@ -18933,7 +20774,11 @@ macro_rules! mob_catalog_machine_dsl {
                 // incarnation authority and remains present for the same
                 // reason; archive-confirmed terminalization clears both.
                 self.member_restore_failures.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -18972,7 +20817,11 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.member_restore_failures.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -18998,6 +20847,9 @@ macro_rules! mob_catalog_machine_dsl {
             guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
             guard "releasing_absent" { releasing == None }
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "member_not_dormant" { self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Dormant) }
+            guard "member_not_waking" { self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Waking) }
+            guard "runtime_retire_routable" { self.runtime_retire_archive_only.contains(agent_runtime_id) == false }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 // Trust eligibility just changed: a Retiring member may not be
@@ -19008,7 +20860,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal {
@@ -19020,6 +20876,57 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: session_id
             }
             emit RequestRuntimeRetire { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, session_id: session_id.get("value") }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
+        }
+
+        // The retirement of a member with no runtime registration in this
+        // process (Dormant, or Waking: its open attempt closes here, and
+        // the in-flight provision rolls back on StaleAttempt), or a re-drive of
+        // an archive-only retirement. It mirrors RetireRunningPreservingBinding
+        // but routes no runtime retire: the runtime is recorded archive-only
+        // and the session archive alone terminates the member.
+        transition RetireRunningPreservingBindingArchiveOnly {
+            on input Retire { mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "placement_absent" { self.member_placement.contains_key(agent_identity) == false }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "releasing_absent" { releasing == None }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "retire_archive_only" {
+                self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Dormant)
+                || self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Waking)
+                || self.runtime_retire_archive_only.contains(agent_runtime_id) == true
+            }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_archive_only.insert(agent_runtime_id);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+            }
+            to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetirementStartedPreservingBinding,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: session_id
+            }
             emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
@@ -19044,7 +20951,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal {
@@ -19070,13 +20981,20 @@ macro_rules! mob_catalog_machine_dsl {
             guard "releasing_present" { releasing != None }
             guard "releasing_matches_current" { self.member_session_bindings.get_cloned(agent_identity) == Some(releasing.get("value")) }
             guard "session_matches_releasing" { session_id == releasing }
+            guard "member_not_dormant" { self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Dormant) }
+            guard "member_not_waking" { self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Waking) }
+            guard "runtime_retire_routable" { self.runtime_retire_archive_only.contains(agent_runtime_id) == false }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.member_session_bindings.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
             }
@@ -19090,6 +21008,58 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: session_id
             }
             emit RequestRuntimeRetire { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, session_id: session_id.get("value") }
+            emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(releasing.get("value")), new_session_id: None }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
+        }
+
+        // The retirement of a member with no runtime registration in this
+        // process (Dormant, or Waking: its open attempt closes here, and
+        // the in-flight provision rolls back on StaleAttempt), or a re-drive of
+        // an archive-only retirement. It mirrors RetireStoppedReleasing but
+        // routes no runtime retire: the runtime is recorded archive-only and
+        // the session archive alone terminates the member.
+        transition RetireStoppedReleasingArchiveOnly {
+            on input Retire { mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "placement_absent" { self.member_placement.contains_key(agent_identity) == false }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "releasing_present" { releasing != None }
+            guard "releasing_matches_current" { self.member_session_bindings.get_cloned(agent_identity) == Some(releasing.get("value")) }
+            guard "session_matches_releasing" { session_id == releasing }
+            guard "retire_archive_only" {
+                self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Dormant)
+                || self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Waking)
+                || self.runtime_retire_archive_only.contains(agent_runtime_id) == true
+            }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_archive_only.insert(agent_runtime_id);
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
+                self.member_session_bindings.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
+                self.topology_epoch += 1;
+            }
+            to Stopped
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetirementStartedReleasing,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: session_id
+            }
             emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(releasing.get("value")), new_session_id: None }
             emit RequestKickoffQuiesce { member_id: agent_identity }
@@ -19174,7 +21144,11 @@ macro_rules! mob_catalog_machine_dsl {
                 // Same proof ordering as the Running sibling: host release
                 // and custody disposal precede session/endpoint removal.
                 self.member_restore_failures.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Stopped
@@ -19213,7 +21187,11 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.member_restore_failures.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Stopped
@@ -19239,6 +21217,9 @@ macro_rules! mob_catalog_machine_dsl {
             guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
             guard "releasing_absent" { releasing == None }
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "member_not_dormant" { self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Dormant) }
+            guard "member_not_waking" { self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Waking) }
+            guard "runtime_retire_routable" { self.runtime_retire_archive_only.contains(agent_runtime_id) == false }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 // Trust eligibility just changed: a Retiring member may not be
@@ -19249,7 +21230,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
             }
             to Stopped
             emit AppendLifecycleJournal {
@@ -19261,6 +21246,57 @@ macro_rules! mob_catalog_machine_dsl {
                 session_id: session_id
             }
             emit RequestRuntimeRetire { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, session_id: session_id.get("value") }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
+        }
+
+        // The retirement of a member with no runtime registration in this
+        // process (Dormant, or Waking: its open attempt closes here, and
+        // the in-flight provision rolls back on StaleAttempt), or a re-drive of
+        // an archive-only retirement. It mirrors RetireStoppedPreservingBinding
+        // but routes no runtime retire: the runtime is recorded archive-only
+        // and the session archive alone terminates the member.
+        transition RetireStoppedPreservingBindingArchiveOnly {
+            on input Retire { mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "placement_absent" { self.member_placement.contains_key(agent_identity) == false }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "prior_session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "releasing_absent" { releasing == None }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "retire_archive_only" {
+                self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Dormant)
+                || self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Waking)
+                || self.runtime_retire_archive_only.contains(agent_runtime_id) == true
+            }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_archive_only.insert(agent_runtime_id);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+            }
+            to Stopped
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetirementStartedPreservingBinding,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: session_id
+            }
             emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
@@ -19285,7 +21321,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
             }
             to Stopped
             emit AppendLifecycleJournal {
@@ -19480,6 +21520,15 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.lifecycle_phase == Phase::Stopped
                 || self.lifecycle_phase == Phase::Completed
             }
+            // A rotation in flight at a destroy is abandoned at the
+            // destroy's admission, whose RotationSessionsAbandoned names each
+            // rotation's next session for the shell to archive (no rotation
+            // begins after it). The destroy that drops the intents therefore
+            // follows the admission whenever one exists.
+            guard "rotations_abandoned_at_admission" {
+                self.member_rotation_session_ids == EmptyMap
+                || self.destroy_admitted == true
+            }
             guard "session_ingress_detaches_closed" { self.pending_session_ingress_detach_runtime_ids == EmptySet }
             guard "placed_completion_quiesce_started" { self.placed_completion_lifecycle_quiescing == true }
             guard "placed_completion_destroy_intent" { self.placed_completion_lifecycle_intent == Some(PlacedCompletionLifecycleIntentKind::Destroy) }
@@ -19525,6 +21574,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.pending_respawn_topology = EmptySet;
                 self.abandoned_respawn_topology = EmptyMap;
                 self.external_peer_edges = EmptySet;
+                self.owed_edge_repairs = EmptySet;
+                self.owed_external_edge_repairs = EmptySet;
+                self.member_seat_session_unborn = EmptySet;
+                self.unborn_seat_sessions = EmptySet;
                 self.external_peer_edges_by_key = EmptyMap;
                 self.identity_to_runtime = EmptyMap;
                 self.identity_runtime_generations = EmptyMap;
@@ -19536,6 +21589,18 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids = EmptyMap;
                 self.member_peer_endpoints = EmptyMap;
                 self.member_prior_peer_endpoints = EmptyMap;
+                // The destroy drops every member, so every residency
+                // phase, attempt, epoch and obligation goes with them.
+                self.member_materialization = EmptyMap;
+                self.member_wake_attempts = EmptyMap;
+                self.member_wake_bound = EmptySet;
+                self.member_materialization_epoch = EmptyMap;
+                self.member_boot_obligation_owed = EmptyMap;
+                self.member_rotation_session_ids = EmptyMap;
+                self.member_rotation_peer_endpoints = EmptyMap;
+                // Nothing waits on a host carry-out after the destroy.
+                self.member_host_preparation_pending = EmptySet;
+                self.runtime_retire_archive_only = EmptySet;
                 self.runtime_retire_refusal_codes = EmptyMap;
                 self.runtime_retire_refusal_reasons = EmptyMap;
                 self.runtime_retire_pending_sessions = EmptyMap;
@@ -19544,6 +21609,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.coordinator_bound = false;
             }
             to Destroyed
+            emit RebuildWakeRoutes
         }
 
         // =====================================================================
@@ -20102,7 +22168,25 @@ macro_rules! mob_catalog_machine_dsl {
             guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
             guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
             guard "current_session" { self.member_session_bindings.get_cloned(agent_identity) == Some(binding.session_id) }
-            update { self.explicit_resume_member_work.insert(agent_identity, binding); }
+            // The explicit resume reserves a Dormant member by opening its
+            // wake attempt, so a peer or host wake during the resume Joins it
+            // and one session is never materialized twice. The resume's own
+            // rebuild realizes the attempt (no MaterializeMember effect).
+            guard "member_dormant" { self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Dormant) }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            update {
+                self.explicit_resume_member_work.insert(agent_identity, binding);
+                self.member_wake_attempt_sequence += 1;
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Waking);
+                self.member_wake_attempts.insert(agent_identity, self.member_wake_attempt_sequence);
+                self.member_wake_bound.remove(agent_identity);
+                // A Dormant member has no live registration: the wake starts
+                // with no epoch and no startup binding ladder.
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_startup_binding_requested.remove(binding.agent_runtime_id);
+                self.member_startup_runtime_ready.remove(binding.agent_runtime_id);
+                self.member_startup_ready.remove(binding.agent_runtime_id);
+            }
             to Running
         }
 
@@ -20117,16 +22201,19 @@ macro_rules! mob_catalog_machine_dsl {
             guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
             guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
             guard "current_session" { self.member_session_bindings.get_cloned(agent_identity) == Some(binding.session_id) }
-            guard "not_broken" { self.member_restore_failures.contains_key(agent_identity) == false }
-            guard "revival_not_pending" { self.member_revival_pending.contains(agent_identity) == false }
+            // The resume reserved the member (it is Waking under an open
+            // attempt, its own or a joined one); a present durable snapshot
+            // keeps that attempt.
+            guard "member_waking" { self.member_wake_attempts.contains_key(agent_identity) == true }
             guard "durable_snapshot_present" { observation == MemberLiveMaterializationObservationKind::DurableSnapshotPresent }
-            update { self.member_revival_pending.insert(agent_identity); }
+            update {}
             to Running
             emit MemberLiveMaterializationClassified {
                 agent_identity: agent_identity,
                 observation: observation,
                 verdict: MemberRevivalVerdictKind::ReviveAuthorized,
-                reason: reason
+                reason: reason,
+                attempt: self.member_wake_attempts.get_copied(agent_identity)
             }
         }
 
@@ -20140,10 +22227,15 @@ macro_rules! mob_catalog_machine_dsl {
             guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
             guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
             guard "current_session" { self.member_session_bindings.get_cloned(agent_identity) == Some(binding.session_id) }
-            guard "not_broken" { self.member_restore_failures.contains_key(agent_identity) == false }
-            guard "revival_not_pending" { self.member_revival_pending.contains(agent_identity) == false }
+            guard "member_waking" { self.member_wake_attempts.contains_key(agent_identity) == true }
             guard "durable_snapshot_missing" { observation == MemberLiveMaterializationObservationKind::DurableSnapshotMissing }
             update {
+                // A Broken setter removes the phase and every wake record.
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_restore_failures.insert(agent_identity, reason);
                 // Trust eligibility just changed: a broken member may not be
                 // re-wired or re-overlaid. Advance the canonical topology
@@ -20157,7 +22249,8 @@ macro_rules! mob_catalog_machine_dsl {
                 agent_identity: agent_identity,
                 observation: observation,
                 verdict: MemberRevivalVerdictKind::BrokenRecorded,
-                reason: reason
+                reason: reason,
+                attempt: None
             }
         }
 
@@ -20211,9 +22304,12 @@ macro_rules! mob_catalog_machine_dsl {
             guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
             guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
             guard "current_session" { self.member_session_bindings.get_cloned(agent_identity) == Some(binding.session_id) }
+            // The resume settles from its attempt's outcome: the attempt was
+            // resolved (Live, Broken) or abandoned (Dormant) first, so the
+            // settle never leaves a Waking member without an owner.
+            guard "attempt_closed" { self.member_wake_attempts.contains_key(agent_identity) == false }
             update {
                 self.explicit_resume_member_work.remove(agent_identity);
-                self.member_revival_pending.remove(agent_identity);
             }
             to Running
         }
@@ -20227,6 +22323,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.get_cloned(agent_identity) != Some(binding.agent_runtime_id)
                 || self.identity_runtime_fence_tokens.get_copied(agent_identity) != Some(binding.fence_token)
                 || self.member_session_bindings.get_cloned(agent_identity) != Some(binding.session_id)
+            }
+            // A replaced incarnation's attempt was closed by its retirement
+            // (any open attempt is the successor's own wake); when only the
+            // session changed, the resume's attempt is still this member's and
+            // the settle waits for its outcome, as the exact arm does.
+            guard "attempt_closed_or_incarnation_replaced" {
+                self.member_wake_attempts.contains_key(agent_identity) == false
+                || self.identity_to_runtime.get_cloned(agent_identity) != Some(binding.agent_runtime_id)
+                || self.identity_runtime_fence_tokens.get_copied(agent_identity) != Some(binding.fence_token)
             }
             update { self.explicit_resume_member_work.remove(agent_identity); }
             to Running
@@ -20431,6 +22536,7 @@ macro_rules! mob_catalog_machine_dsl {
             // `CancelPendingSpawn` before the `Destroy` transition (guarded on
             // the drained pending-spawn table) can commit.
             emit RequestPendingSpawnQuiesceForDestroy
+            emit RotationSessionsAbandoned { rotations: self.member_rotation_session_ids }
         }
 
         transition AdmitDestroyCleanupCompleted {
@@ -20465,6 +22571,7 @@ macro_rules! mob_catalog_machine_dsl {
             // `CancelPendingSpawn` before the `Destroy` transition (guarded on
             // the drained pending-spawn table) can commit.
             emit RequestPendingSpawnQuiesceForDestroy
+            emit RotationSessionsAbandoned { rotations: self.member_rotation_session_ids }
         }
 
         transition AuthorizeFlowFrameReducerCommandAdmitNextReadyNodeStopped {
@@ -22419,11 +24526,15 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition ResolveMemberRevivalHostRefusedRunning {
-            on signal ResolveMemberRevivalHostRefused { agent_identity, refusal_code, reason }
+            on signal ResolveMemberRevivalHostRefused { agent_identity, refusal_code, reason, attempt }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "revival_pending" { self.member_revival_pending.contains(agent_identity) == true }
+            guard "attempt_open" { self.member_wake_attempts.get_copied(agent_identity) == Some(attempt) }
             update {
-                self.member_revival_pending.remove(agent_identity);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 self.member_restore_failures.insert(agent_identity, reason);
                 // Trust eligibility just changed: a broken member may not be
                 // re-wired or re-overlaid. Advance the canonical topology
@@ -22435,6 +24546,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_restore_failure_codes.insert(agent_identity, refusal_code);
             }
             to Running
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::Applied }
         }
 
         transition RecoverMemberRestoreHostRefusedRunning {
@@ -22442,6 +24554,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.member_restore_failures.insert(agent_identity, reason);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 // Trust eligibility just changed: a broken member may not be
                 // re-wired or re-overlaid. Advance the canonical topology
                 // epoch so every generated trust permission minted against
@@ -22633,6 +24750,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
                 // Trust eligibility just changed: a Retiring member may not be
                 // re-wired or re-overlaid. Advance the canonical topology
                 // epoch so every generated trust permission minted against
@@ -22652,6 +24774,2265 @@ macro_rules! mob_catalog_machine_dsl {
             }
             emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
             emit RequestKickoffQuiesce { member_id: agent_identity }
+        }
+
+        // =====================================================================
+        // Member residency (Dormant / Waking / Live). Appended after every
+        // published transition, so no published TransitionId discriminant
+        // moves.
+        // =====================================================================
+
+        // The build seed: restore policy, composition authority and the host's
+        // pending preparations. Seeded before the boot plan seals, never while
+        // a wake attempt is open, never journaled.
+        transition SeedMemberResidency {
+            per_phase [Running, Stopped, Completed]
+            on input SeedMemberResidency { policy, composition_authority, host_pending }
+            guard "boot_plan_not_sealed" { self.boot_plan_sealed == false }
+            guard "no_open_wake_attempt" { self.member_wake_attempts == EmptyMap }
+            update {
+                self.member_restore_policy = policy;
+                self.composition_authority = composition_authority;
+                self.member_host_preparation_pending = host_pending;
+            }
+            to Running
+        }
+
+        // WakeMember: one arm per member phase in Running, decided by the
+        // generated member_wake_refusal over member facts only, and one
+        // refusal per other lifecycle phase. A read is never a cause.
+        transition WakeMemberAuthorizedRunning {
+            on input WakeMember { agent_identity, cause, observed_missing, input_class, sender_waking }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "wake_not_refused" {
+                member_wake_refusal(
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.member_session_bindings.contains_key(agent_identity),
+                    self.member_placement.contains_key(agent_identity),
+                    self.member_restore_failures.contains_key(agent_identity),
+                    exists(rid in self.member_state_markers.keys(),
+                        self.identity_to_runtime.get_cloned(agent_identity) == Some(rid)
+                        && self.member_state_markers.get_cloned(rid) == Some(MobMemberState::Retiring)),
+                    self.destroy_admitted == false,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.placed_completion_lifecycle_quiescing == false,
+                    self.member_host_preparation_pending.contains(agent_identity),
+                    input_class,
+                    sender_waking,
+                    observed_missing,
+                    self.member_materialization.get_cloned(agent_identity)) == None
+            }
+            guard "member_dormant" { self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Dormant) }
+            update {
+                self.member_wake_attempt_sequence += 1;
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Waking);
+                self.member_wake_attempts.insert(agent_identity, self.member_wake_attempt_sequence);
+                self.member_wake_bound.remove(agent_identity);
+                // A Dormant member has no live registration: the wake starts
+                // with no epoch and no startup binding ladder (a late bind
+                // observed while Dormant never carries into the wake).
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+            }
+            to Running
+            emit MemberWakeClassified {
+                agent_identity: agent_identity,
+                cause: cause,
+                verdict: MemberWakeVerdictKind::Authorized,
+                refusal: None,
+                attempt: Some(self.member_wake_attempt_sequence),
+                session_id: self.member_session_bindings.get_cloned(agent_identity)
+            }
+            // The handoff obligation: exactly one materialization attempt,
+            // realized by the cold recipe and closed by the attempt-fenced
+            // resolutions.
+            emit MaterializeMember {
+                agent_identity: agent_identity,
+                cause: cause,
+                attempt: self.member_wake_attempt_sequence
+            }
+        }
+
+        transition WakeMemberJoinedRunning {
+            on input WakeMember { agent_identity, cause, observed_missing, input_class, sender_waking }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "wake_not_refused" {
+                member_wake_refusal(
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.member_session_bindings.contains_key(agent_identity),
+                    self.member_placement.contains_key(agent_identity),
+                    self.member_restore_failures.contains_key(agent_identity),
+                    exists(rid in self.member_state_markers.keys(),
+                        self.identity_to_runtime.get_cloned(agent_identity) == Some(rid)
+                        && self.member_state_markers.get_cloned(rid) == Some(MobMemberState::Retiring)),
+                    self.destroy_admitted == false,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.placed_completion_lifecycle_quiescing == false,
+                    self.member_host_preparation_pending.contains(agent_identity),
+                    input_class,
+                    sender_waking,
+                    observed_missing,
+                    self.member_materialization.get_cloned(agent_identity)) == None
+            }
+            guard "member_waking" { self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Waking) }
+            update {}
+            to Running
+            emit MemberWakeClassified {
+                agent_identity: agent_identity,
+                cause: cause,
+                verdict: MemberWakeVerdictKind::Joined,
+                refusal: None,
+                attempt: self.member_wake_attempts.get_copied(agent_identity),
+                session_id: self.member_session_bindings.get_cloned(agent_identity)
+            }
+        }
+
+        transition WakeMemberAlreadyLiveRunning {
+            on input WakeMember { agent_identity, cause, observed_missing, input_class, sender_waking }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "wake_not_refused" {
+                member_wake_refusal(
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.member_session_bindings.contains_key(agent_identity),
+                    self.member_placement.contains_key(agent_identity),
+                    self.member_restore_failures.contains_key(agent_identity),
+                    exists(rid in self.member_state_markers.keys(),
+                        self.identity_to_runtime.get_cloned(agent_identity) == Some(rid)
+                        && self.member_state_markers.get_cloned(rid) == Some(MobMemberState::Retiring)),
+                    self.destroy_admitted == false,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.placed_completion_lifecycle_quiescing == false,
+                    self.member_host_preparation_pending.contains(agent_identity),
+                    input_class,
+                    sender_waking,
+                    observed_missing,
+                    self.member_materialization.get_cloned(agent_identity)) == None
+            }
+            guard "member_live" { self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Live) }
+            update {}
+            to Running
+            // With observed_missing the shell then applies the drift arm
+            // (ClassifyMemberLiveMaterialization), which opens the attempt.
+            emit MemberWakeClassified {
+                agent_identity: agent_identity,
+                cause: cause,
+                verdict: MemberWakeVerdictKind::AlreadyLive,
+                refusal: None,
+                attempt: None,
+                session_id: self.member_session_bindings.get_cloned(agent_identity)
+            }
+        }
+
+        transition WakeMemberRefusedRunning {
+            on input WakeMember { agent_identity, cause, observed_missing, input_class, sender_waking }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "wake_refused" {
+                member_wake_refusal(
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.member_session_bindings.contains_key(agent_identity),
+                    self.member_placement.contains_key(agent_identity),
+                    self.member_restore_failures.contains_key(agent_identity),
+                    exists(rid in self.member_state_markers.keys(),
+                        self.identity_to_runtime.get_cloned(agent_identity) == Some(rid)
+                        && self.member_state_markers.get_cloned(rid) == Some(MobMemberState::Retiring)),
+                    self.destroy_admitted == false,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.placed_completion_lifecycle_quiescing == false,
+                    self.member_host_preparation_pending.contains(agent_identity),
+                    input_class,
+                    sender_waking,
+                    observed_missing,
+                    self.member_materialization.get_cloned(agent_identity)) != None
+            }
+            update {}
+            to Running
+            emit MemberWakeClassified {
+                agent_identity: agent_identity,
+                cause: cause,
+                verdict: MemberWakeVerdictKind::Refused,
+                refusal: member_wake_refusal(
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.member_session_bindings.contains_key(agent_identity),
+                    self.member_placement.contains_key(agent_identity),
+                    self.member_restore_failures.contains_key(agent_identity),
+                    exists(rid in self.member_state_markers.keys(),
+                        self.identity_to_runtime.get_cloned(agent_identity) == Some(rid)
+                        && self.member_state_markers.get_cloned(rid) == Some(MobMemberState::Retiring)),
+                    self.destroy_admitted == false,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.placed_completion_lifecycle_quiescing == false,
+                    self.member_host_preparation_pending.contains(agent_identity),
+                    input_class,
+                    sender_waking,
+                    observed_missing,
+                    self.member_materialization.get_cloned(agent_identity)),
+                attempt: None,
+                session_id: self.member_session_bindings.get_cloned(agent_identity)
+            }
+        }
+
+        // A mob that is not Running materializes nothing: one typed answer for
+        // every member.
+        transition WakeMemberRefused {
+            per_phase [Stopped, Completed, Destroyed]
+            on input WakeMember { agent_identity, cause, observed_missing, input_class, sender_waking }
+            update {}
+            to Stopped
+            emit MemberWakeClassified {
+                agent_identity: agent_identity,
+                cause: cause,
+                verdict: MemberWakeVerdictKind::Refused,
+                refusal: Some(MemberWakeRefusalKind::MobNotRunning),
+                attempt: None,
+                session_id: self.member_session_bindings.get_cloned(agent_identity)
+            }
+        }
+
+        // PlanBootMaterialization: the boot verdict for one Dormant member, on
+        // both start paths, from the generated member_boot_materialization.
+        // A member is network-reachable (the helper's network_transport) when
+        // its endpoint's transport is Tcp or Uds, or when a wiring edge joins
+        // it to a placed member: a peer in another process cannot use an
+        // inproc wake route either way. That edge is looked up per placed
+        // member, so a mob with no placed member reads none of its edges for
+        // a plan, however many it holds.
+        transition PlanBootMaterializationWake {
+            on input PlanBootMaterialization { agent_identity, obligation, host_required, orchestrator_notified }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "member_dormant" { self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Dormant) }
+            guard "boot_verdict_wake" {
+                member_boot_materialization(
+                    self.member_restore_policy,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.member_host_preparation_pending.contains(agent_identity),
+                    self.placed_completion_lifecycle_quiescing == false,
+                    obligation,
+                    self.member_kickoff_pending.contains(agent_identity) || self.member_kickoff_starting.contains(agent_identity),
+                    (self.member_peer_endpoints.contains_key(agent_identity) == true
+                        && self.member_peer_endpoints.get_cloned(agent_identity).get("value").transport != PeerTransportKind::Inproc)
+                    || exists(placed_id in self.member_placement.keys(),
+                        mob_machine_wiring_contains_pair(self.wiring_edges, agent_identity, placed_id)),
+                    orchestrator_notified,
+                    self.member_peer_endpoints.contains_key(agent_identity),
+                    host_required,
+                    self.member_seat_session_unborn.contains(agent_identity)) == BootMaterializationKind::Wake
+            }
+            update {
+                self.member_wake_attempt_sequence += 1;
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Waking);
+                self.member_wake_attempts.insert(agent_identity, self.member_wake_attempt_sequence);
+                self.member_wake_bound.remove(agent_identity);
+                // A Dormant member has no live registration: the wake starts
+                // with no epoch and no startup binding ladder (a late bind
+                // observed while Dormant never carries into the wake).
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                // The obligation stays owed until the wake reaches Live: a
+                // retryable wake keeps it, so the owner's timer wakes the
+                // member again. A member with no durable endpoint is owed
+                // EndpointPending, the seal's one typed exception.
+                if self.member_peer_endpoints.contains_key(agent_identity) == true {
+                    self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::Obligation);
+                } else {
+                    self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
+                }
+            }
+            to Running
+            emit MaterializeMember {
+                agent_identity: agent_identity,
+                cause: MemberWakeCause::Boot,
+                attempt: self.member_wake_attempt_sequence
+            }
+            emit BootMaterializationPlanned {
+                agent_identity: agent_identity,
+                verdict: BootMaterializationKind::Wake,
+                attempt: Some(self.member_wake_attempt_sequence)
+            }
+        }
+
+        transition PlanBootMaterializationVerify {
+            on input PlanBootMaterialization { agent_identity, obligation, host_required, orchestrator_notified }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "member_dormant" { self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Dormant) }
+            guard "boot_verdict_verify" {
+                member_boot_materialization(
+                    self.member_restore_policy,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.member_host_preparation_pending.contains(agent_identity),
+                    self.placed_completion_lifecycle_quiescing == false,
+                    obligation,
+                    self.member_kickoff_pending.contains(agent_identity) || self.member_kickoff_starting.contains(agent_identity),
+                    (self.member_peer_endpoints.contains_key(agent_identity) == true
+                        && self.member_peer_endpoints.get_cloned(agent_identity).get("value").transport != PeerTransportKind::Inproc)
+                    || exists(placed_id in self.member_placement.keys(),
+                        mob_machine_wiring_contains_pair(self.wiring_edges, agent_identity, placed_id)),
+                    orchestrator_notified,
+                    self.member_peer_endpoints.contains_key(agent_identity),
+                    host_required,
+                    self.member_seat_session_unborn.contains(agent_identity)) == BootMaterializationKind::VerifyThenDormant
+            }
+            update {}
+            to Running
+            emit VerifyMember { agent_identity: agent_identity }
+            emit BootMaterializationPlanned {
+                agent_identity: agent_identity,
+                verdict: BootMaterializationKind::VerifyThenDormant,
+                attempt: None
+            }
+        }
+
+        transition PlanBootMaterializationStayDormant {
+            on input PlanBootMaterialization { agent_identity, obligation, host_required, orchestrator_notified }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "member_dormant" { self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Dormant) }
+            guard "boot_verdict_stay_dormant" {
+                member_boot_materialization(
+                    self.member_restore_policy,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.member_host_preparation_pending.contains(agent_identity),
+                    self.placed_completion_lifecycle_quiescing == false,
+                    obligation,
+                    self.member_kickoff_pending.contains(agent_identity) || self.member_kickoff_starting.contains(agent_identity),
+                    (self.member_peer_endpoints.contains_key(agent_identity) == true
+                        && self.member_peer_endpoints.get_cloned(agent_identity).get("value").transport != PeerTransportKind::Inproc)
+                    || exists(placed_id in self.member_placement.keys(),
+                        mob_machine_wiring_contains_pair(self.wiring_edges, agent_identity, placed_id)),
+                    orchestrator_notified,
+                    self.member_peer_endpoints.contains_key(agent_identity),
+                    host_required,
+                    self.member_seat_session_unborn.contains(agent_identity)) == BootMaterializationKind::StayDormant
+            }
+            update {
+                // A member left Dormant with no durable endpoint (a candidate
+                // composition, a pending host preparation or a lifecycle
+                // cleanup holds it) is owed EndpointPending, the seal's typed
+                // exception: the seal never refuses it, and its first
+                // wake registers the endpoint.
+                if self.member_peer_endpoints.contains_key(agent_identity) == false {
+                    self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
+                }
+            }
+            to Running
+            emit BootMaterializationPlanned {
+                agent_identity: agent_identity,
+                verdict: BootMaterializationKind::StayDormant,
+                attempt: None
+            }
+        }
+
+        // The seal: once the boot set settled, every Dormant or Waking member
+        // has a durable endpoint (or is owed EndpointPending) and every wiring
+        // edge joins seated or held members. Re-sealing is idempotent.
+        transition SealBootMaterializationPlan {
+            on input SealBootMaterializationPlan
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "unmaterialized_members_have_endpoints" {
+                !exists(id in self.member_materialization.keys(),
+                    self.member_materialization.get_cloned(id) != Some(MemberMaterializationPhase::Live)
+                    && self.member_peer_endpoints.contains_key(id) == false
+                    && self.member_boot_obligation_owed.get_cloned(id) != Some(MemberBootObligationCause::EndpointPending))
+            }
+            guard "edges_join_seated_or_held_members" {
+                for_all(edge in self.wiring_edges,
+                    (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge)) == true
+                        || self.pending_respawn_topology.contains(mob_machine_wiring_edge_a(edge)) == true)
+                    && (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)) == true
+                        || self.pending_respawn_topology.contains(mob_machine_wiring_edge_b(edge)) == true))
+            }
+            update {
+                self.boot_plan_sealed = true;
+            }
+            to Running
+            emit RebuildWakeRoutes
+        }
+
+        // The disposition of one peer notice, read from both members'
+        // phases. The shell realizes exactly the disposition.
+        transition ClassifyPeerNotice {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyPeerNotice { recipient, sender, notice_class }
+            update {}
+            to Running
+            emit PeerNoticeClassified {
+                recipient: recipient,
+                sender: sender,
+                notice_class: notice_class,
+                disposition: peer_notice_disposition(
+                    self.member_materialization.get_cloned(recipient),
+                    self.member_materialization.get_cloned(sender),
+                    notice_class)
+            }
+        }
+
+        // A seat: membership without materialization. The spawn admission
+        // ladder opened it (BeginSpawnExec + AuthorizeSpawnProfile); the
+        // commit writes the CommitSpawnMembershipFresh membership facts, the
+        // durable endpoint (under the peer-id guards) and Dormant, requests no runtime
+        // binding and closes the ladder. Its MemberSpawned row is journaled
+        // before the commit (append_batch). A network-comms member's keys
+        // exist only once it materializes, so its seat carries no endpoint:
+        // it is seated owed EndpointPending (the seal's typed exception), its boot
+        // verdict wakes it, and the wake registers the real endpoint.
+        transition CommitDormantSeatRunning {
+            on input CommitDormantSeat { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, runtime_mode, bridge_session_id, member_peer_endpoint, session_archived, kickoff_owed, session_unborn, fresh_launch }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            // A seat owes no kickoff; a spec that owes one spawns
+            // embodied. The caller states whether the spec owes one.
+            guard "seat_owes_no_kickoff" { kickoff_owed == false }
+            guard "spawn_exec_opened" { self.spawn_exec_phase.get_cloned(agent_identity) == Some(SpawnExecPhase::Opened) }
+            guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "current_binding_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            guard "generation_is_next" { Some(generation) == mob_machine_next_minted_generation(self.identity_runtime_generations, self.identity_generation_highwater, agent_identity) }
+            guard "member_not_placed" { self.member_placement.contains_key(agent_identity) == false }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
+            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
+            // Never bind an archived session.
+            guard "session_not_archived" { session_archived == false }
+            // A session no build has created is seated unborn whatever the
+            // store shows (the first wake adopts one an interrupted create
+            // left): the record, not the store, tells it from a lost session.
+            guard "never_born_session_seats_unborn" { session_unborn == true || self.unborn_seat_sessions.contains(bridge_session_id) == false }
+            // An unborn seat names the session minted for a fresh launch or one
+            // no build has created. A lost session (created, then gone) is
+            // never seated unborn, so it is never created afresh.
+            guard "unborn_seat_session_is_new_or_never_born" { session_unborn == false || fresh_launch == true || self.unborn_seat_sessions.contains(bridge_session_id) == true }
+            // RegisterMemberPeerRunning's peer-registration guards, for a
+            // seat that carries its endpoint.
+            guard "peer_id_available_for_identity" {
+                member_peer_endpoint == None
+                || mob_machine_member_peer_id_available_for_identity(
+                    self.member_peer_endpoints,
+                    self.member_prior_peer_endpoints,
+                    agent_identity,
+                    member_peer_endpoint.get("value"))
+            }
+            guard "member_peer_id_is_not_host" {
+                member_peer_endpoint == None
+                || for_all(host in self.mob_hosts,
+                    mob_machine_host_id_matches_peer_id(
+                        host,
+                        mob_machine_member_peer_endpoint_peer_id(member_peer_endpoint.get("value"))
+                    ) == false)
+            }
+            guard "member_peer_not_registered" { self.member_peer_ids.contains_key(agent_identity) == false }
+            guard "member_endpoint_not_registered" { self.member_peer_endpoints.contains_key(agent_identity) == false }
+            update {
+                self.live_runtime_ids.insert(agent_runtime_id);
+                if external_addressable {
+                    self.externally_addressable_runtime_ids.insert(agent_runtime_id);
+                } else {
+                    self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                }
+                self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
+                self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                self.pending_respawn_topology.remove(agent_identity);
+                self.abandoned_respawn_topology.remove(agent_identity);
+                self.identity_runtime_generations.insert(agent_identity, generation);
+                self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
+                self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
+                self.member_runtime_modes.insert(agent_identity, runtime_mode);
+                // A seat requests no runtime binding: only a wake's Bound
+                // step opens the binding ladder.
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.member_session_bindings.insert(agent_identity, bridge_session_id);
+                // A fresh launch's seat builds nothing: its session is unborn
+                // until the first wake creates it, and so is a seat naming a
+                // session no build has created. A seat over an existing
+                // session (a resume) states it born.
+                if session_unborn == true {
+                    self.member_seat_session_unborn.insert(agent_identity);
+                    self.unborn_seat_sessions.insert(bridge_session_id);
+                } else {
+                    self.member_seat_session_unborn.remove(agent_identity);
+                }
+                self.member_prior_peer_endpoints.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Dormant);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                if member_peer_endpoint != None {
+                    self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(member_peer_endpoint.get("value")));
+                    self.member_peer_endpoints.insert(agent_identity, member_peer_endpoint.get("value"));
+                    self.member_boot_obligation_owed.remove(agent_identity);
+                } else {
+                    self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
+                }
+                // The host's carry-out of this identity is this seat.
+                self.member_host_preparation_pending.remove(agent_identity);
+                // A seat clears kickoff residue, as the fresh spawn commit does,
+                // and owes no kickoff: a spec that owes one is spawned embodied
+                // through the ordinary spawn path, never seated.
+                self.member_kickoff_pending.remove(agent_identity);
+                self.member_kickoff_starting.remove(agent_identity);
+                self.member_kickoff_callback_pending.remove(agent_identity);
+                self.member_kickoff_started.remove(agent_identity);
+                self.member_kickoff_failed.remove(agent_identity);
+                self.member_kickoff_cancelled.remove(agent_identity);
+                self.member_kickoff_error.remove(agent_identity);
+                self.member_kickoff_input_ids.remove(agent_identity);
+                self.retained_placed_kickoff_obligations.remove(agent_identity);
+                self.member_placed_kickoff_outcome_kinds.remove(agent_identity);
+                self.member_placed_kickoff_outcome_errors.remove(agent_identity);
+                self.member_placed_kickoff_closure_kinds.remove(agent_identity);
+                self.member_placement.remove(agent_identity);
+                self.member_materialization_failures.remove(agent_identity);
+                self.spawn_profile_authority_profile_names.remove(agent_identity);
+                self.spawn_profile_authority_models.remove(agent_identity);
+                self.spawn_profile_authority_material_digests.remove(agent_identity);
+                self.spawn_profile_authority_tool_config_digests.remove(agent_identity);
+                self.spawn_profile_authority_skills_digests.remove(agent_identity);
+                self.spawn_profile_authority_provider_params_digests.remove(agent_identity);
+                self.spawn_profile_authority_output_schema_digests.remove(agent_identity);
+                self.spawn_profile_authority_resolved_spec_digests.remove(agent_identity);
+                self.spawn_profile_authority_external_addressable.remove(agent_identity);
+                self.topology_epoch += 1;
+                // The seat closes the spawn ladder it walked.
+                self.spawn_exec_phase.remove(agent_identity);
+                self.member_run_open.remove(agent_identity);
+                self.member_in_flight_work.remove(agent_identity);
+                self.member_progress_tokens.remove(agent_identity);
+                self.member_last_observed_at_ms.remove(agent_identity);
+                self.member_last_progress_at_ms.remove(agent_identity);
+                self.member_last_progress_event.remove(agent_identity);
+                self.member_health_class.remove(agent_identity);
+            }
+            to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberSpawned,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: Some(fence_token),
+                generation: Some(generation),
+                session_id: Some(bridge_session_id)
+            }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: None, new_session_id: Some(bridge_session_id) }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
+            // The route is rebuilt from machine state: an EndpointPending seat
+            // has no endpoint, so it publishes no route until its wake
+            // registers one.
+            emit PublishWakeRoute { agent_identity: agent_identity }
+        }
+
+        // The host carried out an identity's pending preparation without a
+        // seat (the identity is already seated on that session). Total: an
+        // identity that is not pending is a no-op.
+        transition ResolveMemberHostPreparation {
+            per_phase [Running, Stopped, Completed]
+            on input ResolveMemberHostPreparation { agent_identity }
+            update {
+                self.member_host_preparation_pending.remove(agent_identity);
+            }
+            to Running
+        }
+
+        // A rotation (reset, delete) of the exact Retiring incarnation: its
+        // archive terminal is CommitMemberRotation, which seats the next
+        // incarnation Dormant on the recorded NEW session and endpoint.
+        // Running only: the shell applies Retire, AuthorizeSpawnProfile
+        // (Running-only) and this intent in ONE prepared step, so a Stopped
+        // mob refuses the rotation before its retirement starts. A Stop that
+        // lands mid-rotation keeps the intent and the authority, and the
+        // terminal's Stopped twins finish it.
+        transition BeginMemberRotation {
+            per_phase [Running]
+            on input BeginMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            // The destroy beats the rotation. Once it is admitted the
+            // identity's retirement ends through the destroy, which drops the
+            // intent; no rotation begins or re-seats a member under it.
+            guard "destroy_not_admitted" { self.destroy_admitted == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "fence_token_matches_history" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "member_not_placed" { self.member_placement.contains_key(agent_identity) == false }
+            guard "rotation_not_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == false }
+            guard "new_session" { self.member_session_bindings.get_cloned(agent_identity) != Some(session_id) }
+            guard "session_not_archived" { session_archived == false }
+            guard "peer_id_available_for_identity" {
+                peer_endpoint == None
+                || mob_machine_member_peer_id_available_for_identity(
+                    self.member_peer_endpoints,
+                    self.member_prior_peer_endpoints,
+                    agent_identity,
+                    peer_endpoint.get("value"))
+            }
+            guard "member_peer_id_is_not_host" {
+                peer_endpoint == None
+                || for_all(host in self.mob_hosts,
+                    mob_machine_host_id_matches_peer_id(
+                        host,
+                        mob_machine_member_peer_endpoint_peer_id(peer_endpoint.get("value"))
+                    ) == false)
+            }
+            update {
+                self.member_rotation_session_ids.insert(agent_identity, session_id);
+                if peer_endpoint != None {
+                    self.member_rotation_peer_endpoints.insert(agent_identity, peer_endpoint.get("value"));
+                } else {
+                    self.member_rotation_peer_endpoints.remove(agent_identity);
+                }
+            }
+            to Running
+        }
+
+        // The rotation's archive terminal: the exact Retiring incarnation
+        // is archived and the next one is seated Dormant at the next
+        // generation on the recorded NEW session in ONE transition, so the
+        // identity is never a non-member. Its MemberRetired and MemberSpawned
+        // rows are appended in one batch before the commit. Live: the retiring
+        // runtime is still registered; Retired: its runtime retirement was
+        // already observed.
+        transition CommitMemberRotationLive {
+            per_phase [Running, Stopped]
+            on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id }
+            guard "rotation_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == true }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            // The re-seat owes no kickoff here; a rotation whose spec owes
+            // one takes the Kickoff twin below. The caller states which.
+            guard "rotation_owes_no_kickoff" { kickoff_owed == false }
+            // The destroy beats the rotation. Once it is admitted the
+            // identity's retirement ends through the destroy, which drops the
+            // intent; no rotation begins or re-seats a member under it.
+            guard "destroy_not_admitted" { self.destroy_admitted == false }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "placed_carrier_absent" { self.current_placed_spawn_ids.contains_key(agent_identity) == false }
+            guard "member_not_placed" { self.member_placement.contains_key(agent_identity) == false }
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            guard "session_present" { session_id != None }
+            guard "session_binding_matches_or_cleared" {
+                self.member_session_bindings.get_cloned(agent_identity) == None
+                || self.member_session_bindings.get_cloned(agent_identity) == session_id
+            }
+            guard "kickoff_quiesced" {
+                !self.member_kickoff_pending.contains(agent_identity)
+                && !self.member_kickoff_starting.contains(agent_identity)
+                && !self.member_kickoff_callback_pending.contains(agent_identity)
+                && mob_machine_placed_kickoff_custody_absent_for_identity(
+                    self.pending_placed_kickoff_outcomes,
+                    self.resolved_placed_kickoff_outcomes,
+                    agent_identity)
+            }
+            // The next incarnation's seat guards (peer ids, and the spawn mint).
+            guard "generation_is_next" { Some(next_generation) == mob_machine_next_minted_generation(self.identity_runtime_generations, self.identity_generation_highwater, agent_identity) }
+            guard "next_runtime_fresh" {
+                self.live_runtime_ids.contains(next_agent_runtime_id) == false
+                && next_agent_runtime_id != agent_runtime_id
+            }
+            guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
+            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
+            guard "peer_id_available_for_identity" {
+                self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
+                || mob_machine_member_peer_id_available_for_identity(
+                    self.member_peer_endpoints,
+                    self.member_prior_peer_endpoints,
+                    agent_identity,
+                    self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value"))
+            }
+            guard "member_peer_id_is_not_host" {
+                self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
+                || for_all(host in self.mob_hosts,
+                    mob_machine_host_id_matches_peer_id(
+                        host,
+                        mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value"))
+                    ) == false)
+            }
+            update {
+                // The retiring incarnation's archive, as the plain terminal.
+                self.live_runtime_ids.remove(agent_runtime_id);
+                self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
+                self.spawn_exec_phase.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_placement.remove(agent_identity);
+                self.member_materialization_failures.remove(agent_identity);
+                self.pending_respawn_topology.remove(agent_identity);
+                self.abandoned_respawn_topology.remove(agent_identity);
+                self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
+                self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
+                self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
+                // The next incarnation, seated Dormant on the recorded NEW
+                // session and endpoint in the same step: no non-member window.
+                self.live_runtime_ids.insert(next_agent_runtime_id);
+                if external_addressable {
+                    self.externally_addressable_runtime_ids.insert(next_agent_runtime_id);
+                } else {
+                    self.externally_addressable_runtime_ids.remove(next_agent_runtime_id);
+                }
+                self.runtime_fence_tokens.insert(next_agent_runtime_id, next_fence_token);
+                self.identity_to_runtime.insert(agent_identity, next_agent_runtime_id);
+                // The next incarnation's session is created by its first wake.
+                self.member_seat_session_unborn.insert(agent_identity);
+                self.unborn_seat_sessions.insert(self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
+                self.identity_runtime_generations.insert(agent_identity, next_generation);
+                self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
+                self.member_runtime_modes.insert(agent_identity, runtime_mode);
+                self.member_startup_binding_requested.remove(next_agent_runtime_id);
+                self.member_startup_runtime_ready.remove(next_agent_runtime_id);
+                self.member_startup_ready.remove(next_agent_runtime_id);
+                self.member_session_bindings.insert(agent_identity, self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
+                // The recorded endpoint, or (network comms) none until the
+                // next incarnation's first wake registers it.
+                if self.member_rotation_peer_endpoints.contains_key(agent_identity) == true {
+                    self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value")));
+                    self.member_peer_endpoints.insert(agent_identity, self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value"));
+                    self.member_boot_obligation_owed.remove(agent_identity);
+                } else {
+                    self.member_peer_ids.remove(agent_identity);
+                    self.member_peer_endpoints.remove(agent_identity);
+                    self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
+                }
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Dormant);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_host_preparation_pending.remove(agent_identity);
+                self.member_kickoff_pending.remove(agent_identity);
+                self.member_kickoff_starting.remove(agent_identity);
+                self.member_kickoff_callback_pending.remove(agent_identity);
+                self.member_kickoff_started.remove(agent_identity);
+                self.member_kickoff_failed.remove(agent_identity);
+                self.member_kickoff_cancelled.remove(agent_identity);
+                self.member_kickoff_error.remove(agent_identity);
+                self.member_kickoff_input_ids.remove(agent_identity);
+                self.retained_placed_kickoff_obligations.remove(agent_identity);
+                self.member_placed_kickoff_outcome_kinds.remove(agent_identity);
+                self.member_placed_kickoff_outcome_errors.remove(agent_identity);
+                self.member_placed_kickoff_closure_kinds.remove(agent_identity);
+                self.spawn_profile_authority_profile_names.remove(agent_identity);
+                self.spawn_profile_authority_models.remove(agent_identity);
+                self.spawn_profile_authority_material_digests.remove(agent_identity);
+                self.spawn_profile_authority_tool_config_digests.remove(agent_identity);
+                self.spawn_profile_authority_skills_digests.remove(agent_identity);
+                self.spawn_profile_authority_provider_params_digests.remove(agent_identity);
+                self.spawn_profile_authority_output_schema_digests.remove(agent_identity);
+                self.spawn_profile_authority_resolved_spec_digests.remove(agent_identity);
+                self.spawn_profile_authority_external_addressable.remove(agent_identity);
+                self.member_run_open.remove(agent_identity);
+                self.member_in_flight_work.remove(agent_identity);
+                self.member_progress_tokens.remove(agent_identity);
+                self.member_last_observed_at_ms.remove(agent_identity);
+                self.member_last_progress_at_ms.remove(agent_identity);
+                self.member_last_progress_event.remove(agent_identity);
+                self.member_health_class.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberSpawned,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(next_agent_runtime_id),
+                fence_token: Some(next_fence_token),
+                generation: Some(next_generation),
+                session_id: self.member_session_bindings.get_cloned(agent_identity)
+            }
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: session_id, new_session_id: self.member_session_bindings.get_cloned(agent_identity) }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
+            emit PublishWakeRoute { agent_identity: agent_identity }
+        }
+
+        transition CommitMemberRotationRetired {
+            per_phase [Running, Stopped]
+            on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id }
+            guard "rotation_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == true }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            // The re-seat owes no kickoff here; a rotation whose spec owes
+            // one takes the Kickoff twin below. The caller states which.
+            guard "rotation_owes_no_kickoff" { kickoff_owed == false }
+            // The destroy beats the rotation. Once it is admitted the
+            // identity's retirement ends through the destroy, which drops the
+            // intent; no rotation begins or re-seats a member under it.
+            guard "destroy_not_admitted" { self.destroy_admitted == false }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "placed_carrier_absent" { self.current_placed_spawn_ids.contains_key(agent_identity) == false }
+            guard "member_not_placed" { self.member_placement.contains_key(agent_identity) == false }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            guard "fence_token_matches_history" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            guard "session_present" { session_id != None }
+            guard "session_binding_matches_or_cleared" {
+                self.member_session_bindings.get_cloned(agent_identity) == None
+                || self.member_session_bindings.get_cloned(agent_identity) == session_id
+            }
+            guard "kickoff_quiesced" {
+                !self.member_kickoff_pending.contains(agent_identity)
+                && !self.member_kickoff_starting.contains(agent_identity)
+                && !self.member_kickoff_callback_pending.contains(agent_identity)
+                && mob_machine_placed_kickoff_custody_absent_for_identity(
+                    self.pending_placed_kickoff_outcomes,
+                    self.resolved_placed_kickoff_outcomes,
+                    agent_identity)
+            }
+            // The next incarnation's seat guards (peer ids, and the spawn mint).
+            guard "generation_is_next" { Some(next_generation) == mob_machine_next_minted_generation(self.identity_runtime_generations, self.identity_generation_highwater, agent_identity) }
+            guard "next_runtime_fresh" {
+                self.live_runtime_ids.contains(next_agent_runtime_id) == false
+                && next_agent_runtime_id != agent_runtime_id
+            }
+            guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
+            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
+            guard "peer_id_available_for_identity" {
+                self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
+                || mob_machine_member_peer_id_available_for_identity(
+                    self.member_peer_endpoints,
+                    self.member_prior_peer_endpoints,
+                    agent_identity,
+                    self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value"))
+            }
+            guard "member_peer_id_is_not_host" {
+                self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
+                || for_all(host in self.mob_hosts,
+                    mob_machine_host_id_matches_peer_id(
+                        host,
+                        mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value"))
+                    ) == false)
+            }
+            update {
+                // The retiring incarnation's archive, as the plain terminal.
+                self.live_runtime_ids.remove(agent_runtime_id);
+                self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
+                self.spawn_exec_phase.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_placement.remove(agent_identity);
+                self.member_materialization_failures.remove(agent_identity);
+                self.pending_respawn_topology.remove(agent_identity);
+                self.abandoned_respawn_topology.remove(agent_identity);
+                self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
+                self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
+                self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
+                // The next incarnation, seated Dormant on the recorded NEW
+                // session and endpoint in the same step: no non-member window.
+                self.live_runtime_ids.insert(next_agent_runtime_id);
+                if external_addressable {
+                    self.externally_addressable_runtime_ids.insert(next_agent_runtime_id);
+                } else {
+                    self.externally_addressable_runtime_ids.remove(next_agent_runtime_id);
+                }
+                self.runtime_fence_tokens.insert(next_agent_runtime_id, next_fence_token);
+                self.identity_to_runtime.insert(agent_identity, next_agent_runtime_id);
+                // The next incarnation's session is created by its first wake.
+                self.member_seat_session_unborn.insert(agent_identity);
+                self.unborn_seat_sessions.insert(self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
+                self.identity_runtime_generations.insert(agent_identity, next_generation);
+                self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
+                self.member_runtime_modes.insert(agent_identity, runtime_mode);
+                self.member_startup_binding_requested.remove(next_agent_runtime_id);
+                self.member_startup_runtime_ready.remove(next_agent_runtime_id);
+                self.member_startup_ready.remove(next_agent_runtime_id);
+                self.member_session_bindings.insert(agent_identity, self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
+                // The recorded endpoint, or (network comms) none until the
+                // next incarnation's first wake registers it.
+                if self.member_rotation_peer_endpoints.contains_key(agent_identity) == true {
+                    self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value")));
+                    self.member_peer_endpoints.insert(agent_identity, self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value"));
+                    self.member_boot_obligation_owed.remove(agent_identity);
+                } else {
+                    self.member_peer_ids.remove(agent_identity);
+                    self.member_peer_endpoints.remove(agent_identity);
+                    self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
+                }
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Dormant);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_host_preparation_pending.remove(agent_identity);
+                self.member_kickoff_pending.remove(agent_identity);
+                self.member_kickoff_starting.remove(agent_identity);
+                self.member_kickoff_callback_pending.remove(agent_identity);
+                self.member_kickoff_started.remove(agent_identity);
+                self.member_kickoff_failed.remove(agent_identity);
+                self.member_kickoff_cancelled.remove(agent_identity);
+                self.member_kickoff_error.remove(agent_identity);
+                self.member_kickoff_input_ids.remove(agent_identity);
+                self.retained_placed_kickoff_obligations.remove(agent_identity);
+                self.member_placed_kickoff_outcome_kinds.remove(agent_identity);
+                self.member_placed_kickoff_outcome_errors.remove(agent_identity);
+                self.member_placed_kickoff_closure_kinds.remove(agent_identity);
+                self.spawn_profile_authority_profile_names.remove(agent_identity);
+                self.spawn_profile_authority_models.remove(agent_identity);
+                self.spawn_profile_authority_material_digests.remove(agent_identity);
+                self.spawn_profile_authority_tool_config_digests.remove(agent_identity);
+                self.spawn_profile_authority_skills_digests.remove(agent_identity);
+                self.spawn_profile_authority_provider_params_digests.remove(agent_identity);
+                self.spawn_profile_authority_output_schema_digests.remove(agent_identity);
+                self.spawn_profile_authority_resolved_spec_digests.remove(agent_identity);
+                self.spawn_profile_authority_external_addressable.remove(agent_identity);
+                self.member_run_open.remove(agent_identity);
+                self.member_in_flight_work.remove(agent_identity);
+                self.member_progress_tokens.remove(agent_identity);
+                self.member_last_observed_at_ms.remove(agent_identity);
+                self.member_last_progress_at_ms.remove(agent_identity);
+                self.member_last_progress_event.remove(agent_identity);
+                self.member_health_class.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberSpawned,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(next_agent_runtime_id),
+                fence_token: Some(next_fence_token),
+                generation: Some(next_generation),
+                session_id: self.member_session_bindings.get_cloned(agent_identity)
+            }
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: session_id, new_session_id: self.member_session_bindings.get_cloned(agent_identity) }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
+            emit PublishWakeRoute { agent_identity: agent_identity }
+        }
+
+        // Wake resolution, step 1 of a local wake: the provision
+        // registered the runtime; request its binding so the consumer binds
+        // the member's PLACEMENT tuple before the drain admits. The attempt
+        // stays open. The startup binding ladder opens only when the runtime
+        // has none yet (an idempotent re-bind of a kept session emits no
+        // RuntimeBound).
+        transition ResolveMemberRevivalBoundRunning {
+            on signal ResolveMemberRevivalBound { agent_identity, attempt }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "attempt_open" { self.member_wake_attempts.get_copied(agent_identity) == Some(attempt) }
+            guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
+            guard "runtime_binding_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "fence_binding_present" { self.identity_runtime_fence_tokens.contains_key(agent_identity) == true }
+            guard "generation_binding_present" { self.identity_runtime_generations.contains_key(agent_identity) == true }
+            guard "session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            // A never-created session is never restored: an unborn seat binds
+            // only through ResolveMemberRevivalSessionCreated.
+            guard "seat_session_born" { self.member_seat_session_unborn.contains(agent_identity) == false }
+            update {
+                if self.member_startup_runtime_ready.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false
+                    && self.member_startup_ready.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false
+                {
+                    self.member_startup_binding_requested.insert(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                }
+                self.member_wake_bound.insert(agent_identity);
+            }
+            to Running
+            emit RequestRuntimeBinding {
+                agent_identity: agent_identity,
+                agent_runtime_id: self.identity_to_runtime.get_cloned(agent_identity).get("value"),
+                fence_token: self.identity_runtime_fence_tokens.get_copied(agent_identity).get("value"),
+                generation: self.identity_runtime_generations.get_copied(agent_identity),
+                session_id: self.member_session_bindings.get_cloned(agent_identity).get("value"),
+                attempt: Some(attempt)
+            }
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::Applied }
+        }
+
+        // A retryable wake failure (an unavailable durable resume gate, a held
+        // hosting claim, the wake bound expiring, a retryable build
+        // preparation refusal): Waking -> Dormant, not Broken. A boot
+        // obligation stays owed, so the owner's timer wakes the member again.
+        transition ResolveMemberRevivalRetryableRunning {
+            on signal ResolveMemberRevivalRetryable { agent_identity, attempt, kind }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "attempt_open" { self.member_wake_attempts.get_copied(agent_identity) == Some(attempt) }
+            update {
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Dormant);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                // A Dormant member requests no runtime binding: the
+                // rolled-back provision's binding ladder goes with it.
+                self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+            }
+            to Running
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::Applied }
+        }
+
+        // A shell path that ends a wake without a resolution: NotCurrent,
+        // ReloadRefused and Unsettled return the member to Dormant; a
+        // readiness or topology failure after the provision records Broken.
+        transition AbandonMemberWakeDormantRunning {
+            on signal AbandonMemberWake { agent_identity, attempt, kind, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "attempt_open" { self.member_wake_attempts.get_copied(agent_identity) == Some(attempt) }
+            guard "abandon_to_dormant" {
+                kind != MemberWakeAbandonKind::ReadinessFailed
+                && kind != MemberWakeAbandonKind::TopologyFailed
+            }
+            update {
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Dormant);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                // A Dormant member requests no runtime binding: the
+                // rolled-back provision's binding ladder goes with it.
+                self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+            }
+            to Running
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::Applied }
+        }
+
+        transition AbandonMemberWakeBrokenRunning {
+            on signal AbandonMemberWake { agent_identity, attempt, kind, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "attempt_open" { self.member_wake_attempts.get_copied(agent_identity) == Some(attempt) }
+            guard "abandon_to_broken" {
+                kind == MemberWakeAbandonKind::ReadinessFailed
+                || kind == MemberWakeAbandonKind::TopologyFailed
+            }
+            update {
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_restore_failures.insert(agent_identity, reason);
+                // Trust eligibility just changed: a broken member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
+                self.member_restore_failure_codes.remove(agent_identity);
+            }
+            to Running
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::Applied }
+        }
+
+        // Late or stale wake feedback is a total, typed machine verdict.
+        // In every lifecycle phase, feedback for an attempt that is not the
+        // member's open attempt (closed by a resolution, a Stop, a Complete,
+        // a destroy admission, a retirement or an unseat; or never minted)
+        // changes nothing and answers StaleAttempt: the shell rolls its
+        // provision back and never fail-stops the mob for it.
+        transition ResolveMemberRevivalBoundStale {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveMemberRevivalBound { agent_identity, attempt }
+            guard "attempt_not_open" { self.member_wake_attempts.get_copied(agent_identity) != Some(attempt) }
+            update {}
+            to Running
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::StaleAttempt }
+        }
+
+        transition ResolveMemberRevivalSucceededStale {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveMemberRevivalSucceeded { agent_identity, attempt }
+            guard "attempt_not_open" { self.member_wake_attempts.get_copied(agent_identity) != Some(attempt) }
+            update {}
+            to Running
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::StaleAttempt }
+        }
+
+        transition ResolveMemberRevivalFailedStale {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveMemberRevivalFailed { agent_identity, reason, attempt }
+            guard "attempt_not_open" { self.member_wake_attempts.get_copied(agent_identity) != Some(attempt) }
+            update {}
+            to Running
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::StaleAttempt }
+        }
+
+        transition ResolveMemberRevivalHostRefusedStale {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveMemberRevivalHostRefused { agent_identity, refusal_code, reason, attempt }
+            guard "attempt_not_open" { self.member_wake_attempts.get_copied(agent_identity) != Some(attempt) }
+            update {}
+            to Running
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::StaleAttempt }
+        }
+
+        transition ResolveMemberRevivalRetryableStale {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveMemberRevivalRetryable { agent_identity, attempt, kind }
+            guard "attempt_not_open" { self.member_wake_attempts.get_copied(agent_identity) != Some(attempt) }
+            update {}
+            to Running
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::StaleAttempt }
+        }
+
+        transition AbandonMemberWakeStale {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal AbandonMemberWake { agent_identity, attempt, kind, reason }
+            guard "attempt_not_open" { self.member_wake_attempts.get_copied(agent_identity) != Some(attempt) }
+            update {}
+            to Running
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::StaleAttempt }
+        }
+
+        transition ResolveRecreatedMemberSessionSucceededStale {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveRecreatedMemberSessionSucceeded { agent_identity, agent_runtime_id, fence_token, generation, bridge_session_id, attempt }
+            guard "attempt_not_open" { self.member_wake_attempts.get_copied(agent_identity) != Some(attempt) }
+            update {}
+            to Running
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::StaleAttempt }
+        }
+
+        // A runtime registration was released while its member stays seated
+        // (the composition route from MeerkatMachine's RuntimeRegistrationReleased,
+        // or the mob-owned discard seam). Only the exact registration of a Live,
+        // local member (with a durable endpoint once the boot plan is sealed,
+        // and no wiring edge to a placed member) is released: Live -> Dormant, its
+        // epoch and binding ladder cleared. The member facts come from
+        // member_registration_releasable, which the release verdict shares.
+        // Anything else (an older epoch after a newer wake, a Waking member, a
+        // member pinned Live by a placed peer, a wake's own claim rollback, a
+        // non-member) is a normal, accepted Stale no-op that never demotes a wake.
+        transition ReleaseMemberMaterializationReleased {
+            per_phase [Running, Stopped, Completed]
+            on signal ReleaseMemberMaterialization { agent_runtime_id, fence_token, runtime_epoch_id, cause }
+            guard "exact_live_registration" {
+                exists(member_id in self.identity_to_runtime.keys(),
+                    self.identity_to_runtime.get_cloned(member_id) == agent_runtime_id
+                    && self.identity_runtime_fence_tokens.get_copied(member_id) == fence_token
+                    && self.member_materialization_epoch.get_cloned(member_id) == Some(runtime_epoch_id)
+                    && member_registration_releasable(
+                        self.member_materialization.get_cloned(member_id),
+                        self.member_placement.contains_key(member_id),
+                        self.boot_plan_sealed,
+                        self.member_peer_endpoints.contains_key(member_id),
+                        self.member_materialization_epoch.contains_key(member_id),
+                        exists(placed_id in self.member_placement.keys(),
+                            mob_machine_wiring_contains_pair(self.wiring_edges, member_id, placed_id))))
+            }
+            update {
+                // The guard admitted this registration's member, its pin
+                // included (a registration is one member's): the fold names
+                // that member by the registration.
+                for member_id in self.identity_to_runtime.keys() {
+                    if self.identity_to_runtime.get_cloned(member_id) == agent_runtime_id
+                        && self.identity_runtime_fence_tokens.get_copied(member_id) == fence_token
+                        && self.member_materialization_epoch.get_cloned(member_id) == Some(runtime_epoch_id)
+                        && member_registration_releasable(
+                            self.member_materialization.get_cloned(member_id),
+                            self.member_placement.contains_key(member_id),
+                            self.boot_plan_sealed,
+                            self.member_peer_endpoints.contains_key(member_id),
+                            self.member_materialization_epoch.contains_key(member_id),
+                            false)
+                    {
+                        self.member_materialization.insert(member_id, MemberMaterializationPhase::Dormant);
+                        self.member_materialization_epoch.remove(member_id);
+                    }
+                }
+                self.member_startup_binding_requested.remove(agent_runtime_id.get("value"));
+                self.member_startup_runtime_ready.remove(agent_runtime_id.get("value"));
+                self.member_startup_ready.remove(agent_runtime_id.get("value"));
+            }
+            to Running
+            emit MemberMaterializationReleased { agent_runtime_id: agent_runtime_id, cause: cause, outcome: MemberMaterializationReleaseOutcome::Released }
+        }
+
+        transition ReleaseMemberMaterializationStale {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ReleaseMemberMaterialization { agent_runtime_id, fence_token, runtime_epoch_id, cause }
+            guard "no_exact_live_registration" {
+                !exists(member_id in self.identity_to_runtime.keys(),
+                    self.identity_to_runtime.get_cloned(member_id) == agent_runtime_id
+                    && self.identity_runtime_fence_tokens.get_copied(member_id) == fence_token
+                    && self.member_materialization_epoch.get_cloned(member_id) == Some(runtime_epoch_id)
+                    && member_registration_releasable(
+                        self.member_materialization.get_cloned(member_id),
+                        self.member_placement.contains_key(member_id),
+                        self.boot_plan_sealed,
+                        self.member_peer_endpoints.contains_key(member_id),
+                        self.member_materialization_epoch.contains_key(member_id),
+                        exists(placed_id in self.member_placement.keys(),
+                            mob_machine_wiring_contains_pair(self.wiring_edges, member_id, placed_id))))
+            }
+            update {}
+            to Running
+            emit MemberMaterializationReleased { agent_runtime_id: agent_runtime_id, cause: cause, outcome: MemberMaterializationReleaseOutcome::Stale }
+        }
+
+        // OnDemandVerified: the read-only boot verdict found the
+        // Dormant member's durable session absent with no successor: the
+        // machine's missing-snapshot verdict records it Broken without
+        // materializing it.
+        transition ClassifyMemberLiveMaterializationTerminalDormant {
+            on signal ClassifyMemberLiveMaterialization { agent_identity, observation, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            guard "member_dormant" { self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Dormant) }
+            guard "no_explicit_resume_work" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            guard "durable_snapshot_missing" { observation == MemberLiveMaterializationObservationKind::DurableSnapshotMissing }
+            // An unborn seat has no durable session yet: its first wake
+            // creates one, so its absence is no restore failure.
+            guard "seat_session_born" { self.member_seat_session_unborn.contains(agent_identity) == false }
+            update {
+                self.member_materialization.remove(agent_identity);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_boot_obligation_owed.remove(agent_identity);
+                self.member_restore_failures.insert(agent_identity, reason);
+                // Trust eligibility just changed: a broken member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
+                self.member_restore_failure_codes.remove(agent_identity);
+            }
+            to Running
+            emit MemberLiveMaterializationClassified {
+                agent_identity: agent_identity,
+                observation: observation,
+                verdict: MemberRevivalVerdictKind::BrokenRecorded,
+                reason: reason,
+                attempt: None
+            }
+        }
+
+        // An explicit resume reserves a Live member (an in-process stop
+        // and resume) by opening a wake attempt over it, keeping its epoch and
+        // binding ladder (a kept session re-binds idempotently). The resume's
+        // own rebuild realizes the attempt (no MaterializeMember).
+        transition AuthorizeExplicitResumeMemberLiveRunning {
+            on input AuthorizeExplicitResumeMember { attempt, agent_identity, binding }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "resume_not_cancelled" { self.explicit_resume_cancel_requested == false }
+            guard "preparation_settled" { self.explicit_resume_preparation_pending == false }
+            guard "readiness_not_started" {
+                self.explicit_resume_readiness_pending == false
+                && self.explicit_resume_readiness_settled == false
+            }
+            guard "member_work_not_pending" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            guard "current_definition" { self.definition_epoch == binding.definition_epoch }
+            guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
+            guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
+            guard "current_session" { self.member_session_bindings.get_cloned(agent_identity) == Some(binding.session_id) }
+            guard "member_live" { self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Live) }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "endpoint_present_after_seal" {
+                self.boot_plan_sealed == false
+                || self.member_peer_endpoints.contains_key(agent_identity) == true
+            }
+            update {
+                self.explicit_resume_member_work.insert(agent_identity, binding);
+                self.member_wake_attempt_sequence += 1;
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Waking);
+                self.member_wake_attempts.insert(agent_identity, self.member_wake_attempt_sequence);
+                self.member_wake_bound.remove(agent_identity);
+            }
+            to Running
+        }
+
+        // A member already Waking (a boot-plan, peer or host wake in
+        // flight) is not rebuilt: the explicit resume Joins its open attempt
+        // and settles from its outcome. Its readiness is its own wake's, never
+        // this resume's, so a join may follow a readiness the resume already
+        // settled: the lift of a stopped mob runs its readiness before the
+        // durable Resume, and its member plan opens the wakes it joins only
+        // after it. A join comes before the topology stage, which needs every
+        // joined member settled, and never while a readiness is in flight.
+        transition AuthorizeExplicitResumeMemberJoinRunning {
+            on input AuthorizeExplicitResumeMember { attempt, agent_identity, binding }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "resume_not_cancelled" { self.explicit_resume_cancel_requested == false }
+            guard "preparation_settled" { self.explicit_resume_preparation_pending == false }
+            guard "readiness_not_pending" { self.explicit_resume_readiness_pending == false }
+            guard "topology_not_started" {
+                self.explicit_resume_topology_pending == false
+                && self.explicit_resume_topology_settled == false
+            }
+            guard "member_work_not_pending" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            guard "current_definition" { self.definition_epoch == binding.definition_epoch }
+            guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
+            guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
+            guard "current_session" { self.member_session_bindings.get_cloned(agent_identity) == Some(binding.session_id) }
+            guard "member_waking" { self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Waking) }
+            update { self.explicit_resume_member_work.insert(agent_identity, binding); }
+            to Running
+        }
+
+        // The release verdict for one member (the shell's release_member
+        // answers through it, never from a shell phase read). A pure verdict
+        // in every lifecycle phase; the Live -> Dormant demotion itself stays
+        // the registration release route, fenced by the epoch.
+        transition ClassifyMemberRelease {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyMemberRelease { agent_identity }
+            update {}
+            to Running
+            emit MemberReleaseClassified {
+                agent_identity: agent_identity,
+                verdict: member_release_verdict(
+                    self.identity_to_runtime.contains_key(agent_identity),
+                    self.member_placement.contains_key(agent_identity),
+                    self.member_materialization.get_cloned(agent_identity),
+                    member_registration_releasable(
+                        self.member_materialization.get_cloned(agent_identity),
+                        self.member_placement.contains_key(agent_identity),
+                        self.boot_plan_sealed,
+                        self.member_peer_endpoints.contains_key(agent_identity),
+                        self.member_materialization_epoch.contains_key(agent_identity),
+                        exists(placed_id in self.member_placement.keys(),
+                            mob_machine_wiring_contains_pair(self.wiring_edges, agent_identity, placed_id))),
+                    exists(placed_id in self.member_placement.keys(),
+                        mob_machine_wiring_contains_pair(self.wiring_edges, agent_identity, placed_id)))
+            }
+        }
+
+        // The rotation terminal of a spec that owes a kickoff: as
+        // its kickoff-free twin, and the next incarnation is seated with the
+        // kickoff recorded pending.
+        transition CommitMemberRotationLiveKickoff {
+            per_phase [Running, Stopped]
+            on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id }
+            guard "rotation_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == true }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            // A rotation whose spec owes a kickoff re-seats the
+            // next incarnation with the kickoff recorded pending, so it is
+            // never lost across the rotation (a fresh seat still refuses one).
+            guard "rotation_owes_kickoff" { kickoff_owed == true }
+            // The destroy beats the rotation. Once it is admitted the
+            // identity's retirement ends through the destroy, which drops the
+            // intent; no rotation begins or re-seats a member under it.
+            guard "destroy_not_admitted" { self.destroy_admitted == false }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "placed_carrier_absent" { self.current_placed_spawn_ids.contains_key(agent_identity) == false }
+            guard "member_not_placed" { self.member_placement.contains_key(agent_identity) == false }
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            guard "session_present" { session_id != None }
+            guard "session_binding_matches_or_cleared" {
+                self.member_session_bindings.get_cloned(agent_identity) == None
+                || self.member_session_bindings.get_cloned(agent_identity) == session_id
+            }
+            guard "kickoff_quiesced" {
+                !self.member_kickoff_pending.contains(agent_identity)
+                && !self.member_kickoff_starting.contains(agent_identity)
+                && !self.member_kickoff_callback_pending.contains(agent_identity)
+                && mob_machine_placed_kickoff_custody_absent_for_identity(
+                    self.pending_placed_kickoff_outcomes,
+                    self.resolved_placed_kickoff_outcomes,
+                    agent_identity)
+            }
+            // The next incarnation's seat guards (peer ids, and the spawn mint).
+            guard "generation_is_next" { Some(next_generation) == mob_machine_next_minted_generation(self.identity_runtime_generations, self.identity_generation_highwater, agent_identity) }
+            guard "next_runtime_fresh" {
+                self.live_runtime_ids.contains(next_agent_runtime_id) == false
+                && next_agent_runtime_id != agent_runtime_id
+            }
+            guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
+            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
+            guard "peer_id_available_for_identity" {
+                self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
+                || mob_machine_member_peer_id_available_for_identity(
+                    self.member_peer_endpoints,
+                    self.member_prior_peer_endpoints,
+                    agent_identity,
+                    self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value"))
+            }
+            guard "member_peer_id_is_not_host" {
+                self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
+                || for_all(host in self.mob_hosts,
+                    mob_machine_host_id_matches_peer_id(
+                        host,
+                        mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value"))
+                    ) == false)
+            }
+            update {
+                // The retiring incarnation's archive, as the plain terminal.
+                self.live_runtime_ids.remove(agent_runtime_id);
+                self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
+                self.spawn_exec_phase.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_placement.remove(agent_identity);
+                self.member_materialization_failures.remove(agent_identity);
+                self.pending_respawn_topology.remove(agent_identity);
+                self.abandoned_respawn_topology.remove(agent_identity);
+                self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
+                self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
+                self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
+                // The next incarnation, seated Dormant on the recorded NEW
+                // session and endpoint in the same step: no non-member window.
+                self.live_runtime_ids.insert(next_agent_runtime_id);
+                if external_addressable {
+                    self.externally_addressable_runtime_ids.insert(next_agent_runtime_id);
+                } else {
+                    self.externally_addressable_runtime_ids.remove(next_agent_runtime_id);
+                }
+                self.runtime_fence_tokens.insert(next_agent_runtime_id, next_fence_token);
+                self.identity_to_runtime.insert(agent_identity, next_agent_runtime_id);
+                // The next incarnation's session is created by its first wake.
+                self.member_seat_session_unborn.insert(agent_identity);
+                self.unborn_seat_sessions.insert(self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
+                self.identity_runtime_generations.insert(agent_identity, next_generation);
+                self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
+                self.member_runtime_modes.insert(agent_identity, runtime_mode);
+                self.member_startup_binding_requested.remove(next_agent_runtime_id);
+                self.member_startup_runtime_ready.remove(next_agent_runtime_id);
+                self.member_startup_ready.remove(next_agent_runtime_id);
+                self.member_session_bindings.insert(agent_identity, self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
+                // The recorded endpoint, or (network comms) none until the
+                // next incarnation's first wake registers it.
+                if self.member_rotation_peer_endpoints.contains_key(agent_identity) == true {
+                    self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value")));
+                    self.member_peer_endpoints.insert(agent_identity, self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value"));
+                    self.member_boot_obligation_owed.remove(agent_identity);
+                } else {
+                    self.member_peer_ids.remove(agent_identity);
+                    self.member_peer_endpoints.remove(agent_identity);
+                    self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
+                }
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Dormant);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_host_preparation_pending.remove(agent_identity);
+                // The owed kickoff, recorded pending on the next incarnation
+                // in the same step (KickoffClear + KickoffMarkPending): its
+                // boot verdict wakes it, and the kickoff runs once on the new
+                // session.
+                self.member_kickoff_pending.insert(agent_identity);
+                self.member_kickoff_starting.remove(agent_identity);
+                self.member_kickoff_callback_pending.remove(agent_identity);
+                self.member_kickoff_started.remove(agent_identity);
+                self.member_kickoff_failed.remove(agent_identity);
+                self.member_kickoff_cancelled.remove(agent_identity);
+                self.member_kickoff_error.remove(agent_identity);
+                self.member_kickoff_input_ids.remove(agent_identity);
+                self.retained_placed_kickoff_obligations.remove(agent_identity);
+                self.member_placed_kickoff_outcome_kinds.remove(agent_identity);
+                self.member_placed_kickoff_outcome_errors.remove(agent_identity);
+                self.member_placed_kickoff_closure_kinds.remove(agent_identity);
+                self.member_kickoff_objective_ids.insert(agent_identity, kickoff_objective_id);
+                if !self.objective_owner_ids.contains_key(kickoff_objective_id) {
+                    self.objective_owner_ids.insert(kickoff_objective_id, agent_identity);
+                }
+                self.spawn_profile_authority_profile_names.remove(agent_identity);
+                self.spawn_profile_authority_models.remove(agent_identity);
+                self.spawn_profile_authority_material_digests.remove(agent_identity);
+                self.spawn_profile_authority_tool_config_digests.remove(agent_identity);
+                self.spawn_profile_authority_skills_digests.remove(agent_identity);
+                self.spawn_profile_authority_provider_params_digests.remove(agent_identity);
+                self.spawn_profile_authority_output_schema_digests.remove(agent_identity);
+                self.spawn_profile_authority_resolved_spec_digests.remove(agent_identity);
+                self.spawn_profile_authority_external_addressable.remove(agent_identity);
+                self.member_run_open.remove(agent_identity);
+                self.member_in_flight_work.remove(agent_identity);
+                self.member_progress_tokens.remove(agent_identity);
+                self.member_last_observed_at_ms.remove(agent_identity);
+                self.member_last_progress_at_ms.remove(agent_identity);
+                self.member_last_progress_event.remove(agent_identity);
+                self.member_health_class.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberSpawned,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(next_agent_runtime_id),
+                fence_token: Some(next_fence_token),
+                generation: Some(next_generation),
+                session_id: self.member_session_bindings.get_cloned(agent_identity)
+            }
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: session_id, new_session_id: self.member_session_bindings.get_cloned(agent_identity) }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
+            emit PublishWakeRoute { agent_identity: agent_identity }
+            emit PersistKickoffUpdate { member_id: agent_identity, phase: KickoffPhase::Pending }
+            emit EmitKickoffLifecycleNotice { member_id: agent_identity, intent: KickoffIntent::Pending }
+        }
+
+        transition CommitMemberRotationRetiredKickoff {
+            per_phase [Running, Stopped]
+            on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id }
+            guard "rotation_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == true }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            // A rotation whose spec owes a kickoff re-seats the
+            // next incarnation with the kickoff recorded pending, so it is
+            // never lost across the rotation (a fresh seat still refuses one).
+            guard "rotation_owes_kickoff" { kickoff_owed == true }
+            // The destroy beats the rotation. Once it is admitted the
+            // identity's retirement ends through the destroy, which drops the
+            // intent; no rotation begins or re-seats a member under it.
+            guard "destroy_not_admitted" { self.destroy_admitted == false }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "placed_carrier_absent" { self.current_placed_spawn_ids.contains_key(agent_identity) == false }
+            guard "member_not_placed" { self.member_placement.contains_key(agent_identity) == false }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            guard "fence_token_matches_history" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            guard "session_present" { session_id != None }
+            guard "session_binding_matches_or_cleared" {
+                self.member_session_bindings.get_cloned(agent_identity) == None
+                || self.member_session_bindings.get_cloned(agent_identity) == session_id
+            }
+            guard "kickoff_quiesced" {
+                !self.member_kickoff_pending.contains(agent_identity)
+                && !self.member_kickoff_starting.contains(agent_identity)
+                && !self.member_kickoff_callback_pending.contains(agent_identity)
+                && mob_machine_placed_kickoff_custody_absent_for_identity(
+                    self.pending_placed_kickoff_outcomes,
+                    self.resolved_placed_kickoff_outcomes,
+                    agent_identity)
+            }
+            // The next incarnation's seat guards (peer ids, and the spawn mint).
+            guard "generation_is_next" { Some(next_generation) == mob_machine_next_minted_generation(self.identity_runtime_generations, self.identity_generation_highwater, agent_identity) }
+            guard "next_runtime_fresh" {
+                self.live_runtime_ids.contains(next_agent_runtime_id) == false
+                && next_agent_runtime_id != agent_runtime_id
+            }
+            guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
+            guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
+            guard "peer_id_available_for_identity" {
+                self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
+                || mob_machine_member_peer_id_available_for_identity(
+                    self.member_peer_endpoints,
+                    self.member_prior_peer_endpoints,
+                    agent_identity,
+                    self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value"))
+            }
+            guard "member_peer_id_is_not_host" {
+                self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
+                || for_all(host in self.mob_hosts,
+                    mob_machine_host_id_matches_peer_id(
+                        host,
+                        mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value"))
+                    ) == false)
+            }
+            update {
+                // The retiring incarnation's archive, as the plain terminal.
+                self.live_runtime_ids.remove(agent_runtime_id);
+                self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.member_state_markers.remove(agent_runtime_id);
+                self.runtime_retire_archive_only.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
+                self.spawn_exec_phase.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_placement.remove(agent_identity);
+                self.member_materialization_failures.remove(agent_identity);
+                self.pending_respawn_topology.remove(agent_identity);
+                self.abandoned_respawn_topology.remove(agent_identity);
+                self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
+                self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
+                self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
+                // The next incarnation, seated Dormant on the recorded NEW
+                // session and endpoint in the same step: no non-member window.
+                self.live_runtime_ids.insert(next_agent_runtime_id);
+                if external_addressable {
+                    self.externally_addressable_runtime_ids.insert(next_agent_runtime_id);
+                } else {
+                    self.externally_addressable_runtime_ids.remove(next_agent_runtime_id);
+                }
+                self.runtime_fence_tokens.insert(next_agent_runtime_id, next_fence_token);
+                self.identity_to_runtime.insert(agent_identity, next_agent_runtime_id);
+                // The next incarnation's session is created by its first wake.
+                self.member_seat_session_unborn.insert(agent_identity);
+                self.unborn_seat_sessions.insert(self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
+                self.identity_runtime_generations.insert(agent_identity, next_generation);
+                self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
+                self.member_runtime_modes.insert(agent_identity, runtime_mode);
+                self.member_startup_binding_requested.remove(next_agent_runtime_id);
+                self.member_startup_runtime_ready.remove(next_agent_runtime_id);
+                self.member_startup_ready.remove(next_agent_runtime_id);
+                self.member_session_bindings.insert(agent_identity, self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
+                // The recorded endpoint, or (network comms) none until the
+                // next incarnation's first wake registers it.
+                if self.member_rotation_peer_endpoints.contains_key(agent_identity) == true {
+                    self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value")));
+                    self.member_peer_endpoints.insert(agent_identity, self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value"));
+                    self.member_boot_obligation_owed.remove(agent_identity);
+                } else {
+                    self.member_peer_ids.remove(agent_identity);
+                    self.member_peer_endpoints.remove(agent_identity);
+                    self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
+                }
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Dormant);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                self.member_host_preparation_pending.remove(agent_identity);
+                // The owed kickoff, recorded pending on the next incarnation
+                // in the same step (KickoffClear + KickoffMarkPending): its
+                // boot verdict wakes it, and the kickoff runs once on the new
+                // session.
+                self.member_kickoff_pending.insert(agent_identity);
+                self.member_kickoff_starting.remove(agent_identity);
+                self.member_kickoff_callback_pending.remove(agent_identity);
+                self.member_kickoff_started.remove(agent_identity);
+                self.member_kickoff_failed.remove(agent_identity);
+                self.member_kickoff_cancelled.remove(agent_identity);
+                self.member_kickoff_error.remove(agent_identity);
+                self.member_kickoff_input_ids.remove(agent_identity);
+                self.retained_placed_kickoff_obligations.remove(agent_identity);
+                self.member_placed_kickoff_outcome_kinds.remove(agent_identity);
+                self.member_placed_kickoff_outcome_errors.remove(agent_identity);
+                self.member_placed_kickoff_closure_kinds.remove(agent_identity);
+                self.member_kickoff_objective_ids.insert(agent_identity, kickoff_objective_id);
+                if !self.objective_owner_ids.contains_key(kickoff_objective_id) {
+                    self.objective_owner_ids.insert(kickoff_objective_id, agent_identity);
+                }
+                self.spawn_profile_authority_profile_names.remove(agent_identity);
+                self.spawn_profile_authority_models.remove(agent_identity);
+                self.spawn_profile_authority_material_digests.remove(agent_identity);
+                self.spawn_profile_authority_tool_config_digests.remove(agent_identity);
+                self.spawn_profile_authority_skills_digests.remove(agent_identity);
+                self.spawn_profile_authority_provider_params_digests.remove(agent_identity);
+                self.spawn_profile_authority_output_schema_digests.remove(agent_identity);
+                self.spawn_profile_authority_resolved_spec_digests.remove(agent_identity);
+                self.spawn_profile_authority_external_addressable.remove(agent_identity);
+                self.member_run_open.remove(agent_identity);
+                self.member_in_flight_work.remove(agent_identity);
+                self.member_progress_tokens.remove(agent_identity);
+                self.member_last_observed_at_ms.remove(agent_identity);
+                self.member_last_progress_at_ms.remove(agent_identity);
+                self.member_last_progress_event.remove(agent_identity);
+                self.member_health_class.remove(agent_identity);
+                self.member_rotation_session_ids.remove(agent_identity);
+                self.member_rotation_peer_endpoints.remove(agent_identity);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberSpawned,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(next_agent_runtime_id),
+                fence_token: Some(next_fence_token),
+                generation: Some(next_generation),
+                session_id: self.member_session_bindings.get_cloned(agent_identity)
+            }
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: session_id, new_session_id: self.member_session_bindings.get_cloned(agent_identity) }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
+            emit PublishWakeRoute { agent_identity: agent_identity }
+            emit PersistKickoffUpdate { member_id: agent_identity, phase: KickoffPhase::Pending }
+            emit EmitKickoffLifecycleNotice { member_id: agent_identity, intent: KickoffIntent::Pending }
+        }
+
+        // A refused binding request that belongs to no open wake of the
+        // member (an earlier attempt's, the spawn's while a wake is open, or
+        // one for a session the member no longer binds): a typed no-op in
+        // every lifecycle phase, so a late refusal never ends a newer wake.
+        transition ResolveRuntimeBindingRefusalStale {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveRuntimeBindingRefusal { agent_identity, agent_runtime_id, session_id, refusal_code, reason, attempt }
+            guard "refusal_stale" {
+                self.member_wake_attempts.get_copied(agent_identity) != attempt
+                || self.member_session_bindings.get_cloned(agent_identity) != Some(session_id)
+            }
+            update {}
+            to Running
+            emit RuntimeBindingRefusalStale {
+                agent_identity: agent_identity,
+                agent_runtime_id: agent_runtime_id,
+                session_id: session_id,
+                attempt: attempt
+            }
+        }
+
+        // At wiring, an edge that joins a Dormant local member to a placed
+        // member wakes the Dormant end (one arm per end and wiring input), so
+        // the member is not left Dormant behind an inproc wake route that the
+        // placed peer, in another process, cannot use. The member's own wake
+        // gate (member_wake_refusal, as for a delivery) admits the wake. A
+        // refused one is the plain arm's: a candidate composition or a
+        // pending host preparation leaves the member to its boot plan, and a
+        // retiring member or an admitted destroy ends it. The edge is wired
+        // exactly as by the plain arms.
+        transition WireMembersPlacedPeerWakeFirstEnd {
+            on input WireMembers { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
+            guard "edge_not_already_wired" { self.wiring_edges.contains(edge) == false }
+            guard "edge_endpoints_seated_or_held" {
+                (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge)) == true
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_a(edge)) == true)
+                && (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)) == true
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_b(edge)) == true)
+            }
+            guard "first_end_local" { self.member_placement.contains_key(mob_machine_wiring_edge_a(edge)) == false }
+            guard "second_end_placed" { self.member_placement.contains_key(mob_machine_wiring_edge_b(edge)) == true }
+            guard "first_end_dormant" { self.member_materialization.get_cloned(mob_machine_wiring_edge_a(edge)) == Some(MemberMaterializationPhase::Dormant) }
+            guard "first_end_wake_admitted" {
+                member_wake_refusal(
+                    self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.member_session_bindings.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.member_placement.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.member_restore_failures.contains_key(mob_machine_wiring_edge_a(edge)),
+                    exists(rid in self.member_state_markers.keys(),
+                        self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_a(edge)) == Some(rid)
+                        && self.member_state_markers.get_cloned(rid) == Some(MobMemberState::Retiring)),
+                    self.destroy_admitted == false,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.placed_completion_lifecycle_quiescing == false,
+                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_a(edge)),
+                    PeerInputClass::Content,
+                    false,
+                    false,
+                    self.member_materialization.get_cloned(mob_machine_wiring_edge_a(edge))) == None
+            }
+            update {
+                self.wiring_edges.insert(edge);
+                self.topology_epoch += 1;
+                self.member_wake_attempt_sequence += 1;
+                self.member_materialization.insert(mob_machine_wiring_edge_a(edge), MemberMaterializationPhase::Waking);
+                self.member_wake_attempts.insert(mob_machine_wiring_edge_a(edge), self.member_wake_attempt_sequence);
+                self.member_wake_bound.remove(mob_machine_wiring_edge_a(edge));
+                // A Dormant member has no live registration: the wake starts
+                // with no epoch and no startup binding ladder.
+                self.member_materialization_epoch.remove(mob_machine_wiring_edge_a(edge));
+                self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_a(edge)).get("value"));
+                self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_a(edge)).get("value"));
+                self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_a(edge)).get("value"));
+                // Owed until Live (PlacedPeerWired), as a boot wake is: a
+                // retryable failure leaves the member Dormant and owed, so
+                // the owner wakes it again. A member with no durable endpoint
+                // owes EndpointPending.
+                if self.member_peer_endpoints.contains_key(mob_machine_wiring_edge_a(edge)) == true {
+                    self.member_boot_obligation_owed.insert(mob_machine_wiring_edge_a(edge), MemberBootObligationCause::PlacedPeerWired);
+                } else {
+                    self.member_boot_obligation_owed.insert(mob_machine_wiring_edge_a(edge), MemberBootObligationCause::EndpointPending);
+                }
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
+            // The handoff obligation: one materialization attempt, realized
+            // like any wake's and closed by the attempt-fenced resolutions.
+            emit MaterializeMember {
+                agent_identity: mob_machine_wiring_edge_a(edge),
+                cause: MemberWakeCause::PlacedPeerWired,
+                attempt: self.member_wake_attempt_sequence
+            }
+        }
+
+        transition WireMembersPlacedPeerWakeSecondEnd {
+            on input WireMembers { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
+            guard "edge_not_already_wired" { self.wiring_edges.contains(edge) == false }
+            guard "edge_endpoints_seated_or_held" {
+                (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge)) == true
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_a(edge)) == true)
+                && (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)) == true
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_b(edge)) == true)
+            }
+            guard "second_end_local" { self.member_placement.contains_key(mob_machine_wiring_edge_b(edge)) == false }
+            guard "first_end_placed" { self.member_placement.contains_key(mob_machine_wiring_edge_a(edge)) == true }
+            guard "second_end_dormant" { self.member_materialization.get_cloned(mob_machine_wiring_edge_b(edge)) == Some(MemberMaterializationPhase::Dormant) }
+            guard "second_end_wake_admitted" {
+                member_wake_refusal(
+                    self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)),
+                    self.member_session_bindings.contains_key(mob_machine_wiring_edge_b(edge)),
+                    self.member_placement.contains_key(mob_machine_wiring_edge_b(edge)),
+                    self.member_restore_failures.contains_key(mob_machine_wiring_edge_b(edge)),
+                    exists(rid in self.member_state_markers.keys(),
+                        self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_b(edge)) == Some(rid)
+                        && self.member_state_markers.get_cloned(rid) == Some(MobMemberState::Retiring)),
+                    self.destroy_admitted == false,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.placed_completion_lifecycle_quiescing == false,
+                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_b(edge)),
+                    PeerInputClass::Content,
+                    false,
+                    false,
+                    self.member_materialization.get_cloned(mob_machine_wiring_edge_b(edge))) == None
+            }
+            update {
+                self.wiring_edges.insert(edge);
+                self.topology_epoch += 1;
+                self.member_wake_attempt_sequence += 1;
+                self.member_materialization.insert(mob_machine_wiring_edge_b(edge), MemberMaterializationPhase::Waking);
+                self.member_wake_attempts.insert(mob_machine_wiring_edge_b(edge), self.member_wake_attempt_sequence);
+                self.member_wake_bound.remove(mob_machine_wiring_edge_b(edge));
+                // A Dormant member has no live registration: the wake starts
+                // with no epoch and no startup binding ladder.
+                self.member_materialization_epoch.remove(mob_machine_wiring_edge_b(edge));
+                self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_b(edge)).get("value"));
+                self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_b(edge)).get("value"));
+                self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_b(edge)).get("value"));
+                // Owed until Live (PlacedPeerWired), as a boot wake is: a
+                // retryable failure leaves the member Dormant and owed, so
+                // the owner wakes it again. A member with no durable endpoint
+                // owes EndpointPending.
+                if self.member_peer_endpoints.contains_key(mob_machine_wiring_edge_b(edge)) == true {
+                    self.member_boot_obligation_owed.insert(mob_machine_wiring_edge_b(edge), MemberBootObligationCause::PlacedPeerWired);
+                } else {
+                    self.member_boot_obligation_owed.insert(mob_machine_wiring_edge_b(edge), MemberBootObligationCause::EndpointPending);
+                }
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
+            // The handoff obligation: one materialization attempt, realized
+            // like any wake's and closed by the attempt-fenced resolutions.
+            emit MaterializeMember {
+                agent_identity: mob_machine_wiring_edge_b(edge),
+                cause: MemberWakeCause::PlacedPeerWired,
+                attempt: self.member_wake_attempt_sequence
+            }
+        }
+
+        transition WireMembersWithTrustPlacedPeerWakeFirstEnd {
+            on input WireMembersWithTrust { edge, a_identity, b_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
+            guard "edge_not_already_wired" { self.wiring_edges.contains(edge) == false }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "a_member_peer_registered" { self.member_peer_ids.contains_key(a_identity) == true }
+            guard "b_member_peer_registered" { self.member_peer_ids.contains_key(b_identity) == true }
+            guard "a_member_endpoint_registered" { self.member_peer_endpoints.contains_key(a_identity) == true }
+            guard "b_member_endpoint_registered" { self.member_peer_endpoints.contains_key(b_identity) == true }
+            guard "edge_endpoints_seated_or_held" {
+                (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge)) == true
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_a(edge)) == true)
+                && (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)) == true
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_b(edge)) == true)
+            }
+            guard "first_end_local" { self.member_placement.contains_key(mob_machine_wiring_edge_a(edge)) == false }
+            guard "second_end_placed" { self.member_placement.contains_key(mob_machine_wiring_edge_b(edge)) == true }
+            guard "first_end_dormant" { self.member_materialization.get_cloned(mob_machine_wiring_edge_a(edge)) == Some(MemberMaterializationPhase::Dormant) }
+            guard "first_end_wake_admitted" {
+                member_wake_refusal(
+                    self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.member_session_bindings.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.member_placement.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.member_restore_failures.contains_key(mob_machine_wiring_edge_a(edge)),
+                    exists(rid in self.member_state_markers.keys(),
+                        self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_a(edge)) == Some(rid)
+                        && self.member_state_markers.get_cloned(rid) == Some(MobMemberState::Retiring)),
+                    self.destroy_admitted == false,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.placed_completion_lifecycle_quiescing == false,
+                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_a(edge)),
+                    PeerInputClass::Content,
+                    false,
+                    false,
+                    self.member_materialization.get_cloned(mob_machine_wiring_edge_a(edge))) == None
+            }
+            update {
+                self.wiring_edges.insert(edge);
+                self.topology_epoch += 1;
+                self.member_wake_attempt_sequence += 1;
+                self.member_materialization.insert(mob_machine_wiring_edge_a(edge), MemberMaterializationPhase::Waking);
+                self.member_wake_attempts.insert(mob_machine_wiring_edge_a(edge), self.member_wake_attempt_sequence);
+                self.member_wake_bound.remove(mob_machine_wiring_edge_a(edge));
+                // A Dormant member has no live registration: the wake starts
+                // with no epoch and no startup binding ladder.
+                self.member_materialization_epoch.remove(mob_machine_wiring_edge_a(edge));
+                self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_a(edge)).get("value"));
+                self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_a(edge)).get("value"));
+                self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_a(edge)).get("value"));
+                // Owed until Live (PlacedPeerWired), as a boot wake is: a
+                // retryable failure leaves the member Dormant and owed, so
+                // the owner wakes it again. A member with no durable endpoint
+                // owes EndpointPending.
+                if self.member_peer_endpoints.contains_key(mob_machine_wiring_edge_a(edge)) == true {
+                    self.member_boot_obligation_owed.insert(mob_machine_wiring_edge_a(edge), MemberBootObligationCause::PlacedPeerWired);
+                } else {
+                    self.member_boot_obligation_owed.insert(mob_machine_wiring_edge_a(edge), MemberBootObligationCause::EndpointPending);
+                }
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit MemberTrustWiringRequested {
+                edge: edge,
+                a_peer_id: self.member_peer_ids.get_cloned(a_identity).get("value"),
+                b_peer_id: self.member_peer_ids.get_cloned(b_identity).get("value"),
+                a_endpoint: self.member_peer_endpoints.get_cloned(a_identity).get("value"),
+                b_endpoint: self.member_peer_endpoints.get_cloned(b_identity).get("value"),
+                epoch: self.topology_epoch
+            }
+            emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
+            // The handoff obligation: one materialization attempt, realized
+            // like any wake's and closed by the attempt-fenced resolutions.
+            emit MaterializeMember {
+                agent_identity: mob_machine_wiring_edge_a(edge),
+                cause: MemberWakeCause::PlacedPeerWired,
+                attempt: self.member_wake_attempt_sequence
+            }
+        }
+
+        transition WireMembersWithTrustPlacedPeerWakeSecondEnd {
+            on input WireMembersWithTrust { edge, a_identity, b_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
+            guard "edge_not_already_wired" { self.wiring_edges.contains(edge) == false }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "a_member_peer_registered" { self.member_peer_ids.contains_key(a_identity) == true }
+            guard "b_member_peer_registered" { self.member_peer_ids.contains_key(b_identity) == true }
+            guard "a_member_endpoint_registered" { self.member_peer_endpoints.contains_key(a_identity) == true }
+            guard "b_member_endpoint_registered" { self.member_peer_endpoints.contains_key(b_identity) == true }
+            guard "edge_endpoints_seated_or_held" {
+                (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge)) == true
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_a(edge)) == true)
+                && (self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)) == true
+                    || self.pending_respawn_topology.contains(mob_machine_wiring_edge_b(edge)) == true)
+            }
+            guard "second_end_local" { self.member_placement.contains_key(mob_machine_wiring_edge_b(edge)) == false }
+            guard "first_end_placed" { self.member_placement.contains_key(mob_machine_wiring_edge_a(edge)) == true }
+            guard "second_end_dormant" { self.member_materialization.get_cloned(mob_machine_wiring_edge_b(edge)) == Some(MemberMaterializationPhase::Dormant) }
+            guard "second_end_wake_admitted" {
+                member_wake_refusal(
+                    self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)),
+                    self.member_session_bindings.contains_key(mob_machine_wiring_edge_b(edge)),
+                    self.member_placement.contains_key(mob_machine_wiring_edge_b(edge)),
+                    self.member_restore_failures.contains_key(mob_machine_wiring_edge_b(edge)),
+                    exists(rid in self.member_state_markers.keys(),
+                        self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_b(edge)) == Some(rid)
+                        && self.member_state_markers.get_cloned(rid) == Some(MobMemberState::Retiring)),
+                    self.destroy_admitted == false,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.placed_completion_lifecycle_quiescing == false,
+                    self.member_host_preparation_pending.contains(mob_machine_wiring_edge_b(edge)),
+                    PeerInputClass::Content,
+                    false,
+                    false,
+                    self.member_materialization.get_cloned(mob_machine_wiring_edge_b(edge))) == None
+            }
+            update {
+                self.wiring_edges.insert(edge);
+                self.topology_epoch += 1;
+                self.member_wake_attempt_sequence += 1;
+                self.member_materialization.insert(mob_machine_wiring_edge_b(edge), MemberMaterializationPhase::Waking);
+                self.member_wake_attempts.insert(mob_machine_wiring_edge_b(edge), self.member_wake_attempt_sequence);
+                self.member_wake_bound.remove(mob_machine_wiring_edge_b(edge));
+                // A Dormant member has no live registration: the wake starts
+                // with no epoch and no startup binding ladder.
+                self.member_materialization_epoch.remove(mob_machine_wiring_edge_b(edge));
+                self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_b(edge)).get("value"));
+                self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_b(edge)).get("value"));
+                self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_b(edge)).get("value"));
+                // Owed until Live (PlacedPeerWired), as a boot wake is: a
+                // retryable failure leaves the member Dormant and owed, so
+                // the owner wakes it again. A member with no durable endpoint
+                // owes EndpointPending.
+                if self.member_peer_endpoints.contains_key(mob_machine_wiring_edge_b(edge)) == true {
+                    self.member_boot_obligation_owed.insert(mob_machine_wiring_edge_b(edge), MemberBootObligationCause::PlacedPeerWired);
+                } else {
+                    self.member_boot_obligation_owed.insert(mob_machine_wiring_edge_b(edge), MemberBootObligationCause::EndpointPending);
+                }
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit MemberTrustWiringRequested {
+                edge: edge,
+                a_peer_id: self.member_peer_ids.get_cloned(a_identity).get("value"),
+                b_peer_id: self.member_peer_ids.get_cloned(b_identity).get("value"),
+                a_endpoint: self.member_peer_endpoints.get_cloned(a_identity).get("value"),
+                b_endpoint: self.member_peer_endpoints.get_cloned(b_identity).get("value"),
+                epoch: self.topology_epoch
+            }
+            emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
+            // The handoff obligation: one materialization attempt, realized
+            // like any wake's and closed by the attempt-fenced resolutions.
+            emit MaterializeMember {
+                agent_identity: mob_machine_wiring_edge_b(edge),
+                cause: MemberWakeCause::PlacedPeerWired,
+                attempt: self.member_wake_attempt_sequence
+            }
+        }
+
+        // Edge trust repairs. Each realization outcome of one edge's trust
+        // (a wake's topology step, a respawn's topology restore, an owed
+        // repair) is applied once: a realized edge owes no repair; an
+        // unrealized edge is owed a repair while it is wired between seated
+        // members that are not retiring, and the owner retries it with
+        // backoff; anything else is a no-op. A typed answer in every
+        // lifecycle phase, so a late outcome never fails.
+        transition ResolveWiringEdgeRealizationRealized {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveWiringEdgeRealization { edge, realized }
+            guard "realized" { realized == true }
+            update {
+                self.owed_edge_repairs.remove(edge);
+            }
+            to Running
+        }
+
+        transition ResolveWiringEdgeRealizationOwed {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveWiringEdgeRealization { edge, realized }
+            guard "unrealized" { realized == false }
+            guard "edge_wired" { self.wiring_edges.contains(edge) == true }
+            guard "ends_seated" {
+                self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge)) == true
+                && self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)) == true
+            }
+            guard "ends_not_retiring" {
+                self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_a(edge)).get("value")) != Some(MobMemberState::Retiring)
+                && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_b(edge)).get("value")) != Some(MobMemberState::Retiring)
+            }
+            update {
+                self.owed_edge_repairs.insert(edge);
+            }
+            to Running
+            emit OwedEdgeRepairsRecorded
+        }
+
+        transition ResolveWiringEdgeRealizationStale {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveWiringEdgeRealization { edge, realized }
+            guard "unrealized" { realized == false }
+            guard "edge_not_repairable" {
+                self.wiring_edges.contains(edge) == false
+                || self.identity_to_runtime.contains_key(mob_machine_wiring_edge_a(edge)) == false
+                || self.identity_to_runtime.contains_key(mob_machine_wiring_edge_b(edge)) == false
+                || self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_a(edge)).get("value")) == Some(MobMemberState::Retiring)
+                || self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(mob_machine_wiring_edge_b(edge)).get("value")) == Some(MobMemberState::Retiring)
+            }
+            update {}
+            to Running
+        }
+
+        transition ResolveExternalEdgeRealizationRealized {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveExternalEdgeRealization { edge, realized }
+            guard "realized" { realized == true }
+            update {
+                self.owed_external_edge_repairs.remove(edge);
+            }
+            to Running
+        }
+
+        transition ResolveExternalEdgeRealizationOwed {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveExternalEdgeRealization { edge, realized }
+            guard "unrealized" { realized == false }
+            guard "edge_wired" { self.external_peer_edges.contains(edge) == true }
+            guard "local_seated" { self.identity_to_runtime.contains_key(mob_machine_external_peer_edge_local(edge)) == true }
+            guard "local_not_retiring" { self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(mob_machine_external_peer_edge_local(edge)).get("value")) != Some(MobMemberState::Retiring) }
+            update {
+                self.owed_external_edge_repairs.insert(edge);
+            }
+            to Running
+            emit OwedEdgeRepairsRecorded
+        }
+
+        transition ResolveExternalEdgeRealizationStale {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveExternalEdgeRealization { edge, realized }
+            guard "unrealized" { realized == false }
+            guard "edge_not_repairable" {
+                self.external_peer_edges.contains(edge) == false
+                || self.identity_to_runtime.contains_key(mob_machine_external_peer_edge_local(edge)) == false
+                || self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(mob_machine_external_peer_edge_local(edge)).get("value")) == Some(MobMemberState::Retiring)
+            }
+            update {}
+            to Running
+        }
+
+        // An unborn seat's wake created its session through the spawn
+        // provision path, with the host's registration, or adopted the
+        // session such a create left before a crash: the member's session is
+        // born. As the Bound step, it requests the runtime binding and keeps
+        // the attempt open; it also clears the fact and asks the owner to
+        // journal the birth, so a later wake restores that session and never
+        // creates it again.
+        transition ResolveMemberRevivalSessionCreatedRunning {
+            on signal ResolveMemberRevivalSessionCreated { agent_identity, attempt }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "attempt_open" { self.member_wake_attempts.get_copied(agent_identity) == Some(attempt) }
+            guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
+            guard "runtime_binding_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "fence_binding_present" { self.identity_runtime_fence_tokens.contains_key(agent_identity) == true }
+            guard "generation_binding_present" { self.identity_runtime_generations.contains_key(agent_identity) == true }
+            guard "session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            // Only an unborn seat's session is created afresh: any other
+            // member's missing session takes the successor search, else Broken.
+            guard "seat_session_unborn" { self.member_seat_session_unborn.contains(agent_identity) == true }
+            update {
+                if self.member_startup_runtime_ready.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false
+                    && self.member_startup_ready.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false
+                {
+                    self.member_startup_binding_requested.insert(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                }
+                self.member_wake_bound.insert(agent_identity);
+                self.member_seat_session_unborn.remove(agent_identity);
+                self.unborn_seat_sessions.remove(self.member_session_bindings.get_cloned(agent_identity).get("value"));
+            }
+            to Running
+            emit RequestRuntimeBinding {
+                agent_identity: agent_identity,
+                agent_runtime_id: self.identity_to_runtime.get_cloned(agent_identity).get("value"),
+                fence_token: self.identity_runtime_fence_tokens.get_copied(agent_identity).get("value"),
+                generation: self.identity_runtime_generations.get_copied(agent_identity),
+                session_id: self.member_session_bindings.get_cloned(agent_identity).get("value"),
+                attempt: Some(attempt)
+            }
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::Applied }
+            emit PersistMemberSeatSessionBorn {
+                agent_identity: agent_identity,
+                agent_runtime_id: self.identity_to_runtime.get_cloned(agent_identity).get("value"),
+                session_id: self.member_session_bindings.get_cloned(agent_identity).get("value")
+            }
+        }
+
+        transition ResolveMemberRevivalSessionCreatedStale {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveMemberRevivalSessionCreated { agent_identity, attempt }
+            guard "attempt_not_open" { self.member_wake_attempts.get_copied(agent_identity) != Some(attempt) }
+            update {}
+            to Running
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::StaleAttempt }
+        }
+
+        // Replay of a seat's session state: the seat's row marks it unborn,
+        // the row of its session's creation marks it born. Replay only (the
+        // boot plan is not sealed yet), for the identity seated on that
+        // runtime, which replay leaves Dormant.
+        transition RecoverMemberSeatSessionUnbornRunning {
+            on signal RecoverMemberSeatSession { agent_identity, agent_runtime_id, unborn }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "seat_session_unborn_row" { unborn == true }
+            guard "replay_not_sealed" { self.boot_plan_sealed == false }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            // A seat is local: a placed member's session is its host's.
+            guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
+            guard "member_not_materialized" {
+                self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Live)
+                && self.member_materialization.get_cloned(agent_identity) != Some(MemberMaterializationPhase::Waking)
+            }
+            update {
+                self.member_seat_session_unborn.insert(agent_identity);
+                self.unborn_seat_sessions.insert(self.member_session_bindings.get_cloned(agent_identity).get("value"));
+            }
+            to Running
+        }
+
+        transition RecoverMemberSeatSessionBornRunning {
+            on signal RecoverMemberSeatSession { agent_identity, agent_runtime_id, unborn }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "seat_session_born_row" { unborn == false }
+            guard "replay_not_sealed" { self.boot_plan_sealed == false }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
+            update {
+                self.member_seat_session_unborn.remove(agent_identity);
+                self.unborn_seat_sessions.remove(self.member_session_bindings.get_cloned(agent_identity).get("value"));
+            }
+            to Running
+        }
+
+        // A seated member's own profile check (its wake's restore, a warm
+        // revival, an explicit resume's rebuild) authorizes the material the
+        // member is built with and records no grant: nothing of a seated
+        // member outside a rotation consumes one, so a grant recorded here
+        // would outlive the check and stand in for a later rotation's role.
+        transition AuthorizeSpawnProfileSeatedRunning {
+            on input AuthorizeSpawnProfile { agent_identity, profile_name, model, profile_material_digest, tool_config_digest, skills_digest, provider_params_digest, output_schema_digest, external_addressable, resolved_spec_digest }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
+            guard "coordinator_bound" { self.coordinator_bound == true }
+            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "no_rotation_intent" { self.member_rotation_session_ids.contains_key(agent_identity) == false }
+            update {}
+            to Running
+            emit SpawnProfileAuthorized {
+                agent_identity: agent_identity,
+                profile_name: profile_name,
+                model: model,
+                profile_material_digest: profile_material_digest,
+                tool_config_digest: tool_config_digest,
+                skills_digest: skills_digest,
+                provider_params_digest: provider_params_digest,
+                output_schema_digest: output_schema_digest,
+                external_addressable: external_addressable,
+                resolved_spec_digest: resolved_spec_digest
+            }
         }
     }
         }
@@ -23136,6 +27517,9 @@ macro_rules! mob_catalog_machine_dsl {
                 peer_id: endpoint.peer_id.clone(),
                 address: endpoint.address.clone(),
                 signing_key: endpoint.signing_key.clone(),
+                // Derived from the address, as every member endpoint is; the
+                // string form serves both instantiations' PeerAddress twins.
+                transport: PeerTransportKind::from_address_str(endpoint.address.0.as_str()),
             }
         }
 
@@ -24858,6 +29242,272 @@ pub enum MemberRevivalVerdictKind {
     BrokenRecorded,
 }
 
+/// Member residency in this process. Dormant: seated, not materialized.
+/// Waking: exactly one materialization attempt is open. Live: materialized.
+/// No consumer surface reports the phase itself. A host reads one fact of
+/// it, whether a member is seated and not materialized (Dormant or Waking),
+/// through `MobHandle::member_unmaterialized`, from the state the actor last
+/// published: the answer can be stale by the time the host acts on it, and
+/// the read is never a write path. Only this machine's transitions move the
+/// phase (a delivery or an operator wake, a release, a retirement).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberMaterializationPhase {
+    #[default]
+    Dormant,
+    Waking,
+    Live,
+}
+
+/// Why a member is being woken. Deliveries and the operator wake a member; a
+/// read never does, so there is deliberately no read cause. PlacedPeerWired:
+/// a wiring edge joined the Dormant member to a placed member, which cannot
+/// wake it through an inproc route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberWakeCause {
+    #[default]
+    Boot,
+    HostDelivery,
+    PeerDelivery,
+    Operator,
+    PlacedPeerWired,
+}
+
+/// The machine's wake verdict for one member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberWakeVerdictKind {
+    #[default]
+    Authorized,
+    Joined,
+    AlreadyLive,
+    Refused,
+}
+
+/// Typed reason a wake is refused. `HostPreparationPending`,
+/// `ResumeGateUnavailable` and `SenderWaking` are retryable;
+/// `SuppressedLifecycleNotice` is a successful disposition of a lifecycle
+/// notice, never a public send error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberWakeRefusalKind {
+    #[default]
+    Broken,
+    Retiring,
+    NotAMember,
+    HostOwned,
+    MobNotRunning,
+    LifecycleOriginFenced,
+    NonAuthoritativeComposition,
+    HostPreparationPending,
+    ResumeGateUnavailable,
+    SuppressedLifecycleNotice,
+    SenderWaking,
+}
+
+/// Why a wake attempt ended retryable (Waking back to Dormant, not Broken).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberWakeRetryableKind {
+    #[default]
+    ResumeGateUnavailable,
+    HostingClaimHeld,
+    WakeTimedOut,
+    BuildPreparationRefused,
+}
+
+/// A shell path that ends a wake attempt without a resolution. The first three
+/// return the member to Dormant; a readiness or topology failure after the
+/// provision records it Broken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberWakeAbandonKind {
+    #[default]
+    NotCurrent,
+    ReloadRefused,
+    Unsettled,
+    ReadinessFailed,
+    TopologyFailed,
+}
+
+/// Why every open wake attempt was closed at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberWakeAbandonCause {
+    #[default]
+    MobStopping,
+    MobCompleting,
+    MobDestroying,
+}
+
+/// The machine's verdict on attempt-fenced wake feedback: applied to the open
+/// attempt, or a no-op for a stale or closed one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberWakeFeedbackVerdict {
+    #[default]
+    Applied,
+    StaleAttempt,
+}
+
+/// Why a member's live materialization was lost (diagnostics only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberMaterializationLossCause {
+    #[default]
+    RegistrationReleased,
+    ExecutorRetired,
+    ActorDiscarded,
+    DurabilityReload,
+    ReconfigureRollback,
+    ObservedMissing,
+}
+
+/// Outcome of a registration release: the exact live registration was
+/// released, or the release was stale and changed nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberMaterializationReleaseOutcome {
+    #[default]
+    Released,
+    Stale,
+}
+
+/// Whether this process's mob composition is authoritative. A candidate
+/// (NonAuthoritative) composition never wakes, seats or plans a wake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum CompositionAuthorityKind {
+    #[default]
+    Authoritative,
+    NonAuthoritative,
+}
+
+/// The runtime obligation scan's verdict for one member at boot.
+/// `Unobserved` (the store cannot answer) counts as an obligation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberRecoveryObligationKind {
+    #[default]
+    None,
+    RuntimeWork,
+    PendingDelivery,
+    Unobserved,
+}
+
+/// The boot verdict for one Dormant member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum BootMaterializationKind {
+    #[default]
+    Wake,
+    StayDormant,
+    VerifyThenDormant,
+}
+
+/// Which members a boot restores. Absent configuration means `OnDemand`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberRestorePolicyKind {
+    #[default]
+    OnDemand,
+    OnDemandVerified,
+    Eager,
+}
+
+/// The class of a peer input, classified at the sender's router from the
+/// envelope's message kind. Lifecycle notices never wake a member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerInputClass {
+    #[default]
+    Content,
+    Lifecycle,
+}
+
+/// The machine's disposition of one peer notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerNoticeDisposition {
+    #[default]
+    Deliver,
+    Suppressed,
+}
+
+/// The transport of a member's peer endpoint, derived from its parsed address
+/// (never set by hand). A network (Tcp or Uds) member is woken at boot: a peer
+/// in another process cannot reach an inproc wake route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerTransportKind {
+    #[default]
+    Inproc,
+    Tcp,
+    Uds,
+}
+
+impl PeerTransportKind {
+    /// The transport of a peer address string. An address that does not parse
+    /// counts as a network transport, so the boot plan wakes the member
+    /// (fail toward reachability).
+    pub fn from_peer_address(address: &PeerAddress) -> Self {
+        Self::from_address_str(address.0.as_str())
+    }
+
+    /// The transport of a peer address in its string form (see
+    /// [`Self::from_peer_address`]).
+    pub fn from_address_str(address: &str) -> Self {
+        match meerkat_core::comms::PeerAddress::parse(address) {
+            Ok(parsed) => Self::from_transport(parsed.transport()),
+            Err(_) => Self::Tcp,
+        }
+    }
+
+    /// The machine twin of a typed core transport.
+    pub const fn from_transport(transport: meerkat_core::comms::PeerTransport) -> Self {
+        match transport {
+            meerkat_core::comms::PeerTransport::Inproc => Self::Inproc,
+            meerkat_core::comms::PeerTransport::Tcp => Self::Tcp,
+            meerkat_core::comms::PeerTransport::Uds => Self::Uds,
+            // The core transport is non-exhaustive: a transport this twin
+            // does not know yet counts as a network transport (fail toward
+            // reachability, as an unparseable address does).
+            _ => Self::Tcp,
+        }
+    }
+}
+
+/// Why a boot obligation is still owed. `EndpointPending`: the member has no
+/// durable endpoint yet (a legacy journal), the boot plan's one typed
+/// exception to "every Dormant member is peer-wakeable". `PlacedPeerWired`: a
+/// wiring edge joins the member to a placed member, which cannot wake it
+/// through an inproc route (the owner wakes it with that cause).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberBootObligationCause {
+    #[default]
+    Obligation,
+    EndpointPending,
+    PlacedPeerWired,
+}
+
+/// The machine's release verdict for one member: the shell's release path
+/// answers through it, never from a shell phase read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberReleaseVerdict {
+    /// A local, seated, Live member whose release the machine permits. The
+    /// shell closes its registration, and the close publishes the release
+    /// that demotes it to Dormant, except on a session service that keeps
+    /// no durable sessions: there the member's session exists only while it
+    /// is materialized, so the shell closes nothing and the member stays
+    /// Live.
+    #[default]
+    Release,
+    /// Dormant, or no phase (Broken, retiring, unbound): nothing to release.
+    NothingMaterialized,
+    /// Waking: a wake is in flight.
+    WakeInFlight,
+    /// A placed member: its member host owns its materialization.
+    HostOwned,
+    /// The identity is not seated.
+    NotAMember,
+    /// A Live member whose registration release would not be honoured yet:
+    /// its registration's epoch is not recorded (the routed binding has not
+    /// landed), or after the seal it has no durable endpoint.
+    NotYetReleasable,
+    /// A Live member that a wiring edge joins to a placed member: the placed
+    /// peer, in another process, cannot wake it through an inproc route, so
+    /// it stays Live and nothing is released until that edge is unwired.
+    PinnedByPlacedPeer,
+}
+
+/// A runtime registration epoch, as the composition route carries it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct RuntimeEpochId(pub String);
+
 /// Typed shell observation for a per-row `mob/spawn_many` failure.
 /// MobMachine maps this observation to the public failure cause before any
 /// surface can serialize the row.
@@ -25533,11 +30183,50 @@ impl WiringEdge {
     serde::Serialize,
     serde::Deserialize,
 )]
+#[serde(from = "MemberPeerEndpointWire")]
 pub struct MemberPeerEndpoint {
     pub name: PeerName,
     pub peer_id: PeerId,
     pub address: PeerAddress,
     pub signing_key: PeerSigningKey,
+    /// Derived from `address`: set only by the constructors below and by
+    /// deserialization, never stored, so the persisted shape is unchanged.
+    #[serde(skip_serializing)]
+    pub transport: PeerTransportKind,
+}
+
+/// The stored shape of a member endpoint (no transport field).
+#[derive(serde::Deserialize)]
+struct MemberPeerEndpointWire {
+    name: PeerName,
+    peer_id: PeerId,
+    address: PeerAddress,
+    signing_key: PeerSigningKey,
+}
+
+impl From<MemberPeerEndpointWire> for MemberPeerEndpoint {
+    fn from(wire: MemberPeerEndpointWire) -> Self {
+        Self::new(wire.name, wire.peer_id, wire.address, wire.signing_key)
+    }
+}
+
+impl MemberPeerEndpoint {
+    /// An endpoint whose transport is derived from its address.
+    pub fn new(
+        name: PeerName,
+        peer_id: PeerId,
+        address: PeerAddress,
+        signing_key: PeerSigningKey,
+    ) -> Self {
+        let transport = PeerTransportKind::from_peer_address(&address);
+        Self {
+            name,
+            peer_id,
+            address,
+            signing_key,
+            transport,
+        }
+    }
 }
 
 impl From<&meerkat_core::comms::TrustedPeerDescriptor> for MemberPeerEndpoint {
@@ -25547,6 +30236,7 @@ impl From<&meerkat_core::comms::TrustedPeerDescriptor> for MemberPeerEndpoint {
             peer_id: PeerId(spec.peer_id.to_string()),
             address: PeerAddress(spec.address.to_string()),
             signing_key: PeerSigningKey(spec.pubkey),
+            transport: PeerTransportKind::from_transport(spec.address.transport()),
         }
     }
 }

@@ -21,6 +21,19 @@
 //!   without a source change (an unannounced write) waits for the next of
 //!   those; the store watch never finds it.
 //!
+//! A governed runtime admits a notice only through its composition's
+//! retained-resume owner (`NativeGrantWorkConfiguration::retained_resume`),
+//! as a resume of the work of the run that admitted the consent. The stock
+//! composition (`RealmGovernance::Stock`) installs one; a custom composition
+//! supplies its own, for example with
+//! `ScopedGrantComposition::with_retained_resume`. Without one the notice's
+//! admission is never ready (`UnsupportedScope`) and the notice stays owed,
+//! unless its run's destination is superseded (below).
+//! A resume whose run's destination its session has since superseded (as a
+//! later prompt of a stock session supersedes it) is refused for good before
+//! any owner is asked, so the notice records `Failed` and approved parked
+//! consent is withdrawn.
+//!
 //! The same rounds watch the issuing owner's parked consent whose approved
 //! notice was admitted as an input of one of this domain's sessions: when
 //! the runtime reports that input abandoned, superseded or coalesced (read

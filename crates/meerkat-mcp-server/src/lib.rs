@@ -978,9 +978,27 @@ impl ToolCallError {
     }
 }
 
+/// A refused session-owner wake (or a refused standalone attach of a mob
+/// member's session), in its typed wire form.
+fn session_owner_wake_tool_error(error: SessionError) -> ToolCallError {
+    let wire = meerkat_contracts::WireError::from(error);
+    ToolCallError::new(wire.code.jsonrpc_code(), wire.message, wire.details)
+}
+
+/// A mob member's session that no mob in this process owns: refused, typed.
+fn mob_member_session_tool_error(
+    session_id: &meerkat::SessionId,
+    binding: &meerkat_core::MobMemberBinding,
+) -> ToolCallError {
+    session_owner_wake_tool_error(SessionError::Unsupported(format!(
+        "session {session_id} belongs to member '{}' of mob '{}': deliver to the member through its mob, which wakes it",
+        binding.member, binding.mob_id
+    )))
+}
+
 /// A failed session preparation as a tool error. A session another runtime
 /// owner hosts keeps its typed wire form (session busy, with
-/// `kind = "session_served_elsewhere"`; #1813), as does one whose hosting
+/// `kind = "session_served_elsewhere"`), as does one whose hosting
 /// claim is unavailable (runtime unavailable, with
 /// `kind = "session_hosting_unavailable"`), and one whose durable tail is
 /// withheld from resume (`SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY` and the
@@ -4175,6 +4193,15 @@ async fn handle_meerkat_comms_send(
 ) -> Result<Value, ToolCallError> {
     let session_id = meerkat::SessionId::parse(input.session_id())
         .map_err(|err| ToolCallError::invalid_params(invalid_session_id_message(err)))?;
+    // Comms sent as a dormant mob member: its owner wakes it first.
+    if state.service.comms_runtime(&session_id).await.is_none()
+        && let Some(Err(error)) =
+            meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+                .wake(&session_id)
+                .await
+    {
+        return Err(session_owner_wake_tool_error(error));
+    }
     if state.service.comms_runtime(&session_id).await.is_none() {
         return Err(ToolCallError::new(
             -32603,
@@ -4307,6 +4334,17 @@ fn normalize_mcp_comms_send_error(
                 *envelope_id,
             ))
         }
+        // A seated member that was not woken: typed, not delivered, never
+        // "not found".
+        meerkat_core::comms::SendError::PeerWakeRefused {
+            peer,
+            envelope_id,
+            refusal,
+        } => typed_mcp_comms_send_error(&meerkat_contracts::CommsSendErrorData::peer_wake_refused(
+            peer_name.unwrap_or(peer.as_str()),
+            *envelope_id,
+            refusal,
+        )),
         // Not a failed send: the envelope may already be delivered, and a
         // caller told "failed" retries, which can duplicate the delivery.
         meerkat_core::comms::SendError::AmbiguousDelivery {
@@ -4817,6 +4855,14 @@ async fn handle_meerkat_resume(
         }
     }
 
+    // A dormant mob member's session is woken by its owner (a mob this
+    // process hosts) before this surface would attach the session itself.
+    if let Some(Err(error)) = meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+        .wake(&session_id)
+        .await
+    {
+        return Err(session_owner_wake_tool_error(error));
+    }
     // Resume is an attach: resolve a crash-window provisional tail first.
     let claim = state
         .service
@@ -4842,6 +4888,16 @@ async fn handle_meerkat_resume(
                 None,
             )
         })?;
+    // A mob member's session that no mob in this process owns is its mob's to
+    // materialize: a standalone resume would build the member outside its
+    // mob, bypassing its wake. Refused typed; deliver through the mob.
+    if let Some(binding) = session
+        .session_metadata()
+        .and_then(|metadata| metadata.mob_member_binding)
+        && !meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global().owned(&session_id)
+    {
+        return Err(mob_member_session_tool_error(&session_id, &binding));
+    }
     if state
         .service
         .session_archived_by_authority(&session_id, &session)
@@ -7093,9 +7149,28 @@ mod tests {
         assert_eq!(request.owner.member, None);
     }
 
+    /// The owner of a mob member's session in this process, as a mob that
+    /// holds the member registers it: its wake answers that the member is
+    /// ready, and the surface's operation proceeds. Scripted: it
+    /// materializes nothing, so the resume builds the session itself.
+    #[cfg(unix)]
+    struct HoldingSessionOwner;
+
+    #[cfg(unix)]
+    impl meerkat_core::session_owner_wake::SessionOwnerWaker for HoldingSessionOwner {
+        fn wake_session_owner(
+            &self,
+            _session_id: &meerkat::SessionId,
+        ) -> meerkat_core::session_owner_wake::SessionOwnerWakeFuture {
+            Box::pin(async { Ok(meerkat_core::session_owner_wake::SessionOwnerWakeOutcome::Ready) })
+        }
+    }
+
     /// A resume whose session has no live router rebuilds it with the host's
     /// attempt guards, scoped to the resumed session's mob member (as its
-    /// factory-built routers are).
+    /// factory-built routers are). The member's session is owned in this
+    /// process (a mob holds the member): a standalone resume of a member's
+    /// session that no mob here owns is refused instead (the row below).
     #[cfg(unix)]
     #[tokio::test]
     async fn resume_rebuilds_its_router_with_the_guards_and_the_member_scope() {
@@ -7113,6 +7188,10 @@ mod tests {
         .await;
         state.mcp_attempt_guards = Some(guards);
         let parsed = meerkat::SessionId::parse(&session_id).expect("valid session id");
+        let owner: Arc<dyn meerkat_core::session_owner_wake::SessionOwnerWaker> =
+            Arc::new(HoldingSessionOwner);
+        let owners = meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global();
+        owners.publish(parsed.clone(), Arc::downgrade(&owner));
         let result = Box::pin(handle_meerkat_resume(
             &state,
             bounded_resume_input(session_id, vec![]),
@@ -7140,6 +7219,50 @@ mod tests {
             request.owner.member,
             Some(member),
             "a resumed mob member's guard is scoped to its member"
+        );
+        assert!(owners.retract(&parsed, &Arc::downgrade(&owner)));
+    }
+
+    /// A standalone resume of a mob member's session that no mob in this
+    /// process owns is refused, typed: the member is its mob's to
+    /// materialize, through its wake. Nothing of it is built here.
+    #[tokio::test]
+    async fn resume_of_a_member_session_no_mob_here_owns_is_refused_typed() {
+        let member = meerkat_core::MobMemberBinding {
+            mob_id: "mob".into(),
+            role: "worker".into(),
+            member: "worker-1".into(),
+        };
+        let (state, session_id) = state_with_persisted_session_for(
+            Arc::new(TestClient::for_provider(Provider::Anthropic)),
+            Some(member),
+        )
+        .await;
+        let parsed = meerkat::SessionId::parse(&session_id).expect("valid session id");
+        let refused = Box::pin(handle_meerkat_resume(
+            &state,
+            bounded_resume_input(session_id, vec![]),
+            None,
+            None,
+        ))
+        .await
+        .expect_err("a member's session no mob here owns is refused");
+        assert!(
+            refused
+                .message
+                .contains("belongs to member 'worker-1' of mob 'mob'")
+                && refused
+                    .message
+                    .contains("deliver to the member through its mob"),
+            "{refused:?}"
+        );
+        assert!(
+            state
+                .runtime_ingress_context()
+                .logical_router(&parsed)
+                .await
+                .is_none(),
+            "nothing of the member is built outside its mob"
         );
     }
 

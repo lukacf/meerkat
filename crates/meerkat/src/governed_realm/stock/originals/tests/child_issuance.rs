@@ -1105,3 +1105,779 @@ async fn a_rebuild_refusal_at_the_dispatch_effect_leaf_is_unavailable() {
         Ok(ChildGrantOutcome::Issued { .. })
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Entered governed operations: further steps of a dispatch's entered
+// operation (`EnteredDispatchOperation`) through the native owners, and the
+// dispatch-path classification of review settlements.
+// ---------------------------------------------------------------------------
+
+/// The records owner at a review tier the host sets after preparation: 0 is
+/// [`Records`] (R1), 1 raises it to R2 and 2 to R3.
+struct TierSet(std::sync::atomic::AtomicU8);
+impl TierSet {
+    fn at(tier: u8) -> Arc<Self> {
+        Arc::new(Self(std::sync::atomic::AtomicU8::new(tier)))
+    }
+    fn set(&self, tier: u8) {
+        self.0.store(tier, Ordering::SeqCst);
+    }
+}
+impl OperationPolicyOwner for TierSet {
+    fn authorize_operation(
+        &self,
+        association: &InputAuthorityAssociation,
+        binding: &PreparedAuthorizationBinding,
+        purpose: LocalPolicyPurpose,
+        now_ms: u64,
+    ) -> Result<LocalPolicyAllowance, meerkat_core::OperationAuthorizationError> {
+        use meerkat_core::authorization::OperationReviewTier;
+        let mut allowance = Records.authorize_operation(association, binding, purpose, now_ms)?;
+        allowance.review_tier = match self.0.load(Ordering::SeqCst) {
+            0 => OperationReviewTier::R1,
+            1 => OperationReviewTier::R2,
+            _ => OperationReviewTier::R3,
+        };
+        Ok(allowance)
+    }
+}
+
+fn retained_originals(names: &[&str]) -> Arc<[RetainedOriginal]> {
+    names
+        .iter()
+        .map(|name| retained_original(name))
+        .collect::<Vec<_>>()
+        .into()
+}
+
+/// A governed tool dispatch in `work`: its own prepared tool operation and
+/// the dispatch context carrying it, as the fenced dispatch attaches them.
+/// No review composition is attached outside a fenced dispatch, so the
+/// context carries no review entry: an entry it makes is unreviewed (R1),
+/// and an R2 or R3 decision cannot enter here.
+struct Dispatch {
+    prepared: PreparedOperationCheck,
+    context: meerkat_core::ToolDispatchContext,
+}
+
+impl Dispatch {
+    fn new(work: &meerkat_core::WorkAuthorizationContext) -> Self {
+        use meerkat_core::authorization::{ToolAuthorizationFacts, ToolAuthorizationTarget};
+        let plan = meerkat_core::ToolExecutionContract::default()
+            .resolve_default(
+                meerkat_core::ToolDeadlineChain::new(vec![
+                    meerkat_core::ToolDeadlineContributor::finite(
+                        meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                        std::time::Duration::from_secs(1),
+                    ),
+                ])
+                .expect("deadlines"),
+            )
+            .expect("plan");
+        let arguments: Arc<serde_json::value::RawValue> = Arc::from(
+            serde_json::value::RawValue::from_string("{}".to_string()).expect("arguments"),
+        );
+        let prepared = PreparedOperationCheck::prepare(
+            work.clone(),
+            PreparedAuthorizationBinding::new(OperationAuthorizationFacts {
+                operation_id: meerkat_core::OperationId::new(),
+                execution_scope: work.execution_scope().clone(),
+                run_id: None,
+                context_revision: None,
+                operation: AuthorizationOperation::Tool(ToolAuthorizationFacts {
+                    call_id: Arc::from("setup-call"),
+                    name: "setup".into(),
+                    arguments,
+                    target: ToolAuthorizationTarget::Dispatcher(Arc::new(plan)),
+                }),
+            }),
+        )
+        .expect("the dispatch's operation is prepared");
+        let context = meerkat_core::ToolDispatchContext::default()
+            .with_work_authorization(Some(work.clone()))
+            .__test_with_prepared_authorization(prepared.clone());
+        Self { prepared, context }
+    }
+
+    /// The dispatch's own call, borrowed from the binding it was prepared
+    /// with.
+    fn call(&self) -> meerkat_core::ToolCallView<'_> {
+        match &self.prepared.binding().facts().operation {
+            AuthorizationOperation::Tool(tool) => Some(tool.call()),
+            _ => None,
+        }
+        .expect("a tool operation")
+    }
+
+    /// The dispatch's single consuming entry, made while it is current.
+    fn enter(&self) -> meerkat_core::EnteredDispatchOperation {
+        self.context
+            .enter_governed_operation(self.call())
+            .expect("the unreviewed dispatch enters")
+    }
+}
+
+fn entered_issuance(
+    f: &Fixture,
+    entered: &meerkat_core::EnteredDispatchOperation,
+    retained: &[&str],
+    name: &str,
+) -> GovernedHelperChildIssuance {
+    GovernedHelperChildIssuance::from_entered(
+        entered,
+        f.ledger.clone(),
+        retained_originals(retained),
+        f.intent(name),
+    )
+}
+
+/// An entered step's core answer is an operation denial with no
+/// not-dispatched certificate (the call's effect may already have begun),
+/// never a review settlement.
+fn assert_step_denial(result: Result<(), meerkat_core::ToolError>, label: &str) {
+    match result {
+        Err(meerkat_core::ToolError::AuthorizationRefused { refusal, .. }) => {
+            assert_eq!(
+                refusal.kind(),
+                meerkat_core::OperationRefusalKind::Denied,
+                "{label}: a denial"
+            );
+            assert_eq!(
+                refusal.dispatch(),
+                meerkat_core::RefusalDispatch::Unknown,
+                "{label}: no not-dispatched certificate once the call entered"
+            );
+        }
+        other => panic!("{label}: an entered step answers an operation denial, not {other:?}"),
+    }
+}
+
+/// Every step of `entered` is refused for that step only: the fence commits
+/// nothing and the child issuance appends nothing, both `Denied`, and the
+/// core step answers an operation denial (see [`assert_step_denial`]) for a
+/// run, which never runs its operation, and for an issuance.
+async fn assert_entered_steps_denied(
+    f: &Fixture,
+    entered: &meerkat_core::EnteredDispatchOperation,
+    retained: &[&str],
+    label: &str,
+) {
+    use meerkat_authorization::work::FurtherOriginals;
+    use meerkat_runtime::meerkat_machine::SourceOriginalBasis;
+
+    let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
+    let key = WorkAdmissionKey::new(format!("helper-{label}")).expect("key");
+    let fence = GovernedHelperAdmissionFence::from_entered(
+        entered,
+        f.ledger.clone(),
+        retained_originals(retained),
+        "default",
+        WorkNamespace::default(),
+        service
+            .admission_identity(key.clone(), setup_request())
+            .expect("identity"),
+    );
+    assert!(
+        service
+            .create_idempotent_with_fence(key, setup_request(), fence.clone())
+            .await
+            .is_err(),
+        "{label}: the fence refuses"
+    );
+    assert_eq!(
+        fence.refusal(),
+        Some(HelperAdmissionRefusal::Denied),
+        "{label}: fence"
+    );
+    assert!(
+        service
+            .list(meerkat_workgraph::WorkItemFilter {
+                include_terminal: true,
+                ..Default::default()
+            })
+            .await
+            .expect("list")
+            .is_empty(),
+        "{label}: nothing committed"
+    );
+
+    let child = format!("child-{label}");
+    assert_eq!(
+        entered_issuance(f, entered, retained, &child).issue_or_recover(),
+        Err(HelperChildIssuanceRefusal::Denied),
+        "{label}: issuance"
+    );
+    assert_eq!(f.issued(&child), None, "{label}: nothing appended");
+
+    let further = FurtherOriginals {
+        originals: retained_originals(retained),
+        source: Arc::new(SourceOriginalBasis::new(f.ledger.clone())),
+    };
+    let mut ran = false;
+    let run = entered.run_if_current_within(&further, &mut || ran = true);
+    assert_step_denial(run, label);
+    assert!(!ran, "{label}: the step's operation never ran");
+    assert_step_denial(
+        entered
+            .issue_child_if_current_within(&further, &f.intent(&child))
+            .map(drop),
+        label,
+    );
+    assert_eq!(
+        f.issued(&child),
+        None,
+        "{label}: nothing appended by the step"
+    );
+}
+
+/// One entered witness serves the helper fence and every child issuance of
+/// its call: the fence commits the helper item, two intents are issued, and
+/// a retried intent is recovered, each decided afresh by the dispatch's own
+/// work owners. An unreviewed dispatch enters at R1 and spends nothing, so
+/// it can enter again.
+#[tokio::test]
+async fn one_entered_witness_serves_the_fence_and_every_child_issuance() {
+    use meerkat_core::authorization::OperationReviewTier;
+
+    let f = Fixture::new();
+    f.source("s", ExecutionRestrictions::unrestricted());
+    let dispatch = Dispatch::new(&f.context);
+    let entered = dispatch.enter();
+    assert_eq!(entered.entered_tier(), OperationReviewTier::R1);
+
+    let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
+    let key = WorkAdmissionKey::new("helper-entered").expect("key");
+    let fence = GovernedHelperAdmissionFence::from_entered(
+        &entered,
+        f.ledger.clone(),
+        retained_originals(&["s"]),
+        "default",
+        WorkNamespace::default(),
+        service
+            .admission_identity(key.clone(), setup_request())
+            .expect("identity"),
+    );
+    assert!(matches!(
+        service
+            .create_idempotent_with_fence(key, setup_request(), fence.clone())
+            .await,
+        Ok(WorkAdmissionOutcome::Created(_))
+    ));
+    assert_eq!(fence.refusal(), None, "the step was admitted");
+
+    let first = entered_issuance(&f, &entered, &["s"], "c1")
+        .issue_or_recover()
+        .expect("c1 issued");
+    let ChildGrantOutcome::Issued { lineage } = first.clone() else {
+        panic!("c1 is issued: {first:?}")
+    };
+    assert!(matches!(
+        entered_issuance(&f, &entered, &["s"], "c2").issue_or_recover(),
+        Ok(ChildGrantOutcome::Issued { .. })
+    ));
+    assert!(f.issued("c2").is_some());
+    assert_eq!(
+        entered_issuance(&f, &entered, &["s"], "c1").issue_or_recover(),
+        Ok(ChildGrantOutcome::Recovered {
+            lineage: lineage.clone()
+        }),
+        "a retried intent is recovered"
+    );
+    assert!(f.resolves(&lineage, "helper"), "c1 is the helper's lineage");
+    assert!(
+        dispatch
+            .context
+            .enter_governed_operation(dispatch.call())
+            .is_ok(),
+        "an unreviewed entry spends nothing and can enter again"
+    );
+}
+
+/// The native work owner runs a further step of an entered effect under its
+/// own exclusion only while the complete current decision needs no more
+/// review than the dispatch entered: an R2 decision runs and issues for an
+/// R2 entry while the plain path, R1-only, refuses it; a decision raised to
+/// R3 refuses an R2 entry before the step runs or anything is appended, and
+/// an R3 entry covers it; every further original stays a conjunct.
+#[test]
+fn an_entered_step_runs_only_within_the_entered_tier_under_the_owners_exclusion() {
+    use meerkat_authorization::grants::ChildGrantRefusal;
+    use meerkat_authorization::work::FurtherOriginals;
+    use meerkat_core::authorization::OperationReviewTier;
+    use meerkat_runtime::meerkat_machine::SourceOriginalBasis;
+
+    let tier = TierSet::at(0);
+    let f = Fixture::new_with(tier.clone());
+    f.source("s", ExecutionRestrictions::unrestricted());
+    let further = FurtherOriginals {
+        originals: retained_originals(&["s"]),
+        source: Arc::new(SourceOriginalBasis::new(f.ledger.clone())),
+    };
+    let entered_run = |entered_tier| {
+        let mut ran = false;
+        let result = f.context.authorization().run_entered_if_current_within(
+            f.setup.binding(),
+            f.setup.validity().as_ref(),
+            &further,
+            &mut || ran = true,
+            entered_tier,
+        );
+        (result, ran)
+    };
+    let plain_run = || {
+        let mut ran = false;
+        let result = f.context.authorization().run_if_current_within(
+            f.setup.binding(),
+            f.setup.validity().as_ref(),
+            &further,
+            &mut || ran = true,
+        );
+        (result, ran)
+    };
+    let issue = |name: &str, entered_tier| {
+        f.context.authorization().issue_child_if_current_within(
+            f.setup.binding(),
+            f.setup.validity().as_ref(),
+            &further,
+            &f.intent(name),
+            entered_tier,
+        )
+    };
+    let denied = |result: &Result<(), meerkat_core::OperationAuthorizationError>| {
+        matches!(
+            result,
+            Err(meerkat_core::OperationAuthorizationError::Refused(refusal))
+                if refusal.kind() == meerkat_core::OperationRefusalKind::Denied
+        )
+    };
+
+    // The owners now require R2, the review the dispatch entered.
+    tier.set(1);
+    assert_eq!(
+        entered_run(OperationReviewTier::R2),
+        (Ok(()), true),
+        "an R2 decision runs for an R2 entry"
+    );
+    let (plain, ran) = plain_run();
+    assert!(
+        denied(&plain) && !ran,
+        "the plain path stays R1-only: no review runs there"
+    );
+    let issued = issue("within-tier", OperationReviewTier::R2).expect("issued for an R2 entry");
+    assert!(matches!(
+        *issued
+            .downcast::<Result<ChildGrantOutcome, ChildGrantRefusal>>()
+            .expect("the grant owner's typed outcome"),
+        Ok(ChildGrantOutcome::Issued { .. })
+    ));
+
+    // Raised to R3: more review than was entered.
+    tier.set(2);
+    let (over, ran) = entered_run(OperationReviewTier::R2);
+    assert!(
+        denied(&over) && !ran,
+        "an R3 decision refuses an R2 entry before the step runs"
+    );
+    assert!(matches!(
+        issue("over-tier", OperationReviewTier::R2),
+        Err(meerkat_core::OperationAuthorizationError::Refused(_))
+    ));
+    assert!(f.issued("over-tier").is_none(), "nothing was issued");
+    assert_eq!(
+        entered_run(OperationReviewTier::R3),
+        (Ok(()), true),
+        "an R3 entry covers an R3 decision"
+    );
+
+    // Every further original stays a conjunct of the step.
+    tier.set(1);
+    f.ledger
+        .cancel_operations(&namespace("s"), &work("s"), evidence("cancel"))
+        .expect("the further original is withdrawn");
+    let (withdrawn, ran) = entered_run(OperationReviewTier::R2);
+    assert!(
+        denied(&withdrawn) && !ran,
+        "a withdrawn further original refuses the step"
+    );
+}
+
+/// A step stays inside the window of the decision the dispatch entered: the
+/// owners' fresh decision now runs to 10_000, but a step entered under a
+/// decision usable until 300 runs at 200 and refuses at 300, for a run and
+/// for a child issuance; the same step under the fresh window still runs, so
+/// only the entered window refused it.
+#[test]
+fn an_entered_step_stays_inside_the_entered_window_when_the_owners_renew() {
+    use meerkat_authorization::work::FurtherOriginals;
+    use meerkat_core::authorization::{OperationReviewTier, OperationValidity};
+    use meerkat_runtime::meerkat_machine::SourceOriginalBasis;
+
+    let f = Fixture::new();
+    f.source("s", ExecutionRestrictions::unrestricted());
+    let further = FurtherOriginals {
+        originals: retained_originals(&["s"]),
+        source: Arc::new(SourceOriginalBasis::new(f.ledger.clone())),
+    };
+    let fresh = f.setup.validity().expect("the setup decision is bounded");
+    assert!(fresh.expires_at_ms > 300, "the owners' window runs longer");
+    let entered = OperationValidity {
+        not_before_ms: fresh.not_before_ms,
+        expires_at_ms: 300,
+        deadline: fresh.deadline,
+    };
+    let run = |validity: &OperationValidity| {
+        let mut ran = false;
+        let result = f.context.authorization().run_entered_if_current_within(
+            f.setup.binding(),
+            Some(validity),
+            &further,
+            &mut || ran = true,
+            OperationReviewTier::R2,
+        );
+        (result, ran)
+    };
+
+    f.clock.wall.store(200, Ordering::SeqCst);
+    assert_eq!(run(&entered), (Ok(()), true), "inside the entered window");
+    f.clock.wall.store(300, Ordering::SeqCst);
+    let (late, ran) = run(&entered);
+    assert!(
+        matches!(
+            late,
+            Err(meerkat_core::OperationAuthorizationError::Refused(refusal))
+                if refusal.kind() == meerkat_core::OperationRefusalKind::Denied
+        ) && !ran,
+        "the fresh decision's longer window does not extend the entered step"
+    );
+    assert!(
+        matches!(
+            f.context.authorization().issue_child_if_current_within(
+                f.setup.binding(),
+                Some(&entered),
+                &further,
+                &f.intent("late-child"),
+                OperationReviewTier::R2,
+            ),
+            Err(meerkat_core::OperationAuthorizationError::Refused(_))
+        ),
+        "no child past the entered window"
+    );
+    assert!(f.issued("late-child").is_none(), "nothing was issued");
+    assert_eq!(
+        run(&fresh),
+        (Ok(()), true),
+        "the same step under the fresh window runs"
+    );
+}
+
+/// A further original's grant revoked after the entry refuses every later
+/// step, as a denial for that step.
+#[tokio::test]
+async fn an_entered_step_is_denied_once_a_further_grant_is_revoked() {
+    let f = Fixture::new();
+    f.source("s", ExecutionRestrictions::unrestricted());
+    let dispatch = Dispatch::new(&f.context);
+    let entered = dispatch.enter();
+    assert!(
+        matches!(
+            entered_issuance(&f, &entered, &["s"], "before").issue_or_recover(),
+            Ok(ChildGrantOutcome::Issued { .. })
+        ),
+        "current before the revocation"
+    );
+    let lineage = f
+        .grants
+        .issued_reference(&id("s"))
+        .expect("lookup")
+        .expect("the further original's grant");
+    f.grants
+        .revoke(&f.root, &lineage, &mut NoController)
+        .expect("the further original's grant is revoked");
+    assert_entered_steps_denied(&f, &entered, &["s"], "revoked").await;
+}
+
+/// A contributing original cancelled after the entry refuses every later
+/// step, as a denial for that step.
+#[tokio::test]
+async fn an_entered_step_is_denied_once_a_contributing_original_is_cancelled() {
+    let f = Fixture::new();
+    f.source("s", ExecutionRestrictions::unrestricted());
+    let dispatch = Dispatch::new(&f.context);
+    let entered = dispatch.enter();
+    assert!(
+        matches!(
+            entered_issuance(&f, &entered, &["s"], "before").issue_or_recover(),
+            Ok(ChildGrantOutcome::Issued { .. })
+        ),
+        "current before the cancellation"
+    );
+    f.ledger
+        .cancel_operations(&namespace("s"), &work("s"), evidence("withdrawn"))
+        .expect("the contributing original is cancelled");
+    assert_entered_steps_denied(&f, &entered, &["s"], "cancelled").await;
+}
+
+/// The decision's window passing after the entry refuses every later step,
+/// as a denial for that step: a batch member's admitted ceiling ends the
+/// decision at 500.
+#[tokio::test]
+async fn an_entered_step_is_denied_once_its_decision_window_passes() {
+    let f = Fixture::new();
+    f.source("s", ExecutionRestrictions::unrestricted());
+    ledger_admit(&f, "b");
+    let bounded = f
+        .policy
+        .work_context(
+            Arc::from([
+                f.child.clone(),
+                Fixture::bounded(&association_of(&original("b"), &namespace("b")), 500),
+            ]),
+            scope(),
+        )
+        .expect("work context");
+    let dispatch = Dispatch::new(&bounded);
+    let entered = dispatch.enter();
+    assert!(
+        matches!(
+            entered_issuance(&f, &entered, &["s"], "before").issue_or_recover(),
+            Ok(ChildGrantOutcome::Issued { .. })
+        ),
+        "current inside the window"
+    );
+    f.clock.wall.store(500, Ordering::SeqCst);
+    assert_entered_steps_denied(&f, &entered, &["s"], "expired").await;
+}
+
+/// A decision that needs more review than the dispatch entered refuses every
+/// later step as a denial for that step, never as a review settlement: the
+/// owners raise the decision to R2 after an unreviewed (R1) entry.
+#[tokio::test]
+async fn an_entered_step_is_denied_once_its_decision_needs_more_review() {
+    use meerkat_core::authorization::OperationReviewTier;
+
+    let tier = TierSet::at(0);
+    let f = Fixture::new_with(tier.clone());
+    f.source("s", ExecutionRestrictions::unrestricted());
+    let dispatch = Dispatch::new(&f.context);
+    let entered = dispatch.enter();
+    assert_eq!(entered.entered_tier(), OperationReviewTier::R1);
+    assert!(
+        matches!(
+            entered_issuance(&f, &entered, &["s"], "before").issue_or_recover(),
+            Ok(ChildGrantOutcome::Issued { .. })
+        ),
+        "current at R1"
+    );
+    tier.set(1);
+    assert_entered_steps_denied(&f, &entered, &["s"], "raised").await;
+}
+
+/// A refused step speaks only for itself: after c1 was issued through the
+/// witness, a cancelled contributing original refuses c2 (`Denied`, nothing
+/// appended, an operation denial with no not-dispatched certificate in
+/// core), while c1's record is kept and its lineage still resolves.
+#[tokio::test]
+async fn a_refused_entered_step_leaves_the_earlier_steps_in_place() {
+    use meerkat_authorization::work::FurtherOriginals;
+    use meerkat_runtime::meerkat_machine::SourceOriginalBasis;
+
+    let f = Fixture::new();
+    f.source("s", ExecutionRestrictions::unrestricted());
+    let dispatch = Dispatch::new(&f.context);
+    let entered = dispatch.enter();
+    let first = entered_issuance(&f, &entered, &["s"], "c1")
+        .issue_or_recover()
+        .expect("c1 issued");
+    let ChildGrantOutcome::Issued { lineage } = first.clone() else {
+        panic!("c1 is issued: {first:?}")
+    };
+    f.ledger
+        .cancel_operations(&namespace("s"), &work("s"), evidence("withdrawn"))
+        .expect("the contributing original is cancelled");
+
+    assert_eq!(
+        entered_issuance(&f, &entered, &["s"], "c2").issue_or_recover(),
+        Err(HelperChildIssuanceRefusal::Denied),
+        "c2 is refused for its own step"
+    );
+    assert_eq!(f.issued("c2"), None, "nothing appended for c2");
+    let further = FurtherOriginals {
+        originals: retained_originals(&["s"]),
+        source: Arc::new(SourceOriginalBasis::new(f.ledger.clone())),
+    };
+    assert_step_denial(
+        entered
+            .issue_child_if_current_within(&further, &f.intent("c2"))
+            .map(drop),
+        "c2",
+    );
+    assert_eq!(
+        f.issued("c1").as_ref(),
+        lineage.last(),
+        "c1's record is kept, not deleted or reissued"
+    );
+    assert!(
+        f.resolves(&lineage, "helper"),
+        "and c1 still resolves for the helper"
+    );
+}
+
+/// An unreviewed dispatch context (no admitted review) cannot enter a
+/// decision that requires review: minting a witness for an R2 or R3
+/// decision is the entry's review settlement, so nothing entered and no
+/// witness exists.
+#[test]
+fn an_unreviewed_dispatch_mints_no_witness_for_a_reviewed_decision() {
+    for raised in [1_u8, 2] {
+        let f = Fixture::new_with(TierSet::at(raised));
+        let dispatch = Dispatch::new(&f.context);
+        let minted = dispatch.context.enter_governed_operation(dispatch.call());
+        match (raised, minted) {
+            (
+                1,
+                Err(meerkat_core::ToolError::ReviewUnavailable {
+                    kind: meerkat_core::ReviewUnavailableKind::UnsupportedEntry,
+                }),
+            )
+            | (
+                2,
+                Err(meerkat_core::ToolError::ReviewUnsatisfied {
+                    kind: meerkat_core::ReviewUnsatisfiedKind::HumanConsentRequired,
+                    ..
+                }),
+            ) => {}
+            (raised, other) => {
+                panic!("an R{} decision does not enter here: {other:?}", raised + 1)
+            }
+        }
+    }
+}
+
+/// The dispatch-path review classification: every unsatisfied review and
+/// every unavailability final for the dispatch (deadline, missing reviewer,
+/// unsupported entry, ended dispatch) is a denial; the review owner's own
+/// unavailability (contention, a conflicting or unconfirmed store, a failed
+/// reviewer, unreadable review material) and any error that is not a review
+/// settlement are not.
+#[test]
+fn a_dispatch_review_settlement_is_a_denial_unless_its_owner_cannot_answer() {
+    use crate::governed_realm::review_settlement_denies;
+    use meerkat_core::authorization::{OperationRefusalKind, OperationRefused};
+    use meerkat_core::{
+        ReviewUnavailableKind as Unavailable, ReviewUnsatisfiedKind as Unsatisfied,
+    };
+
+    for kind in [
+        Unsatisfied::Denied,
+        Unsatisfied::Escalated,
+        Unsatisfied::ContextChanged,
+        Unsatisfied::HumanConsentRequired,
+        Unsatisfied::AlreadyConsumed,
+    ] {
+        assert!(
+            review_settlement_denies(&meerkat_core::ToolError::ReviewUnsatisfied {
+                kind,
+                approval_id: None,
+            }),
+            "{kind:?} is final for the dispatch"
+        );
+    }
+    for kind in [
+        Unavailable::DeadlineExpired,
+        Unavailable::ReviewerMissing,
+        Unavailable::UnsupportedEntry,
+        Unavailable::DispatchEnded,
+    ] {
+        assert!(
+            review_settlement_denies(&meerkat_core::ToolError::ReviewUnavailable { kind }),
+            "{kind:?} is final for the dispatch"
+        );
+    }
+    for kind in [
+        Unavailable::OwnerUnavailable,
+        Unavailable::ReviewerFailed,
+        Unavailable::StoreConflict,
+        Unavailable::StoreCommitUnknown,
+        Unavailable::ContextUnavailable,
+    ] {
+        assert!(
+            !review_settlement_denies(&meerkat_core::ToolError::ReviewUnavailable { kind }),
+            "{kind:?}: the review owner cannot answer now, a later attempt may succeed"
+        );
+    }
+    assert!(!review_settlement_denies(
+        &meerkat_core::ToolError::OperationAuthorizationUnavailable
+    ));
+    assert!(
+        !review_settlement_denies(&meerkat_core::ToolError::AuthorizationRefused {
+            refusal: OperationRefused::new(OperationRefusalKind::ReprepareRequired),
+        }),
+        "an operation refusal is not a review settlement"
+    );
+}
+
+/// The plain dispatch paths run no review under the graph lock, and a
+/// decision that needs one is final for the dispatch: an R2 or R3 decision
+/// refuses the dispatch-path fence and the dispatch-path child issuance as
+/// `Denied` (a review this entry cannot carry), with nothing committed and
+/// nothing appended.
+#[tokio::test]
+async fn a_reviewed_decision_on_the_plain_dispatch_paths_is_denied() {
+    for raised in [1_u8, 2] {
+        let f = Fixture::new_with(TierSet::at(raised));
+        f.source("s", ExecutionRestrictions::unrestricted());
+        let dispatch = Dispatch::new(&f.context);
+        let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
+        let key = WorkAdmissionKey::new(format!("helper-r{}", raised + 1)).expect("key");
+        let fence = GovernedHelperAdmissionFence::from_dispatch(
+            dispatch.call(),
+            &dispatch.context,
+            f.ledger.clone(),
+            retained_originals(&["s"]),
+            "default",
+            WorkNamespace::default(),
+            service
+                .admission_identity(key.clone(), setup_request())
+                .expect("identity"),
+        )
+        .expect("the dispatch's own operation builds the fence");
+        assert!(
+            service
+                .create_idempotent_with_fence(key, setup_request(), fence.clone())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fence.refusal(),
+            Some(HelperAdmissionRefusal::Denied),
+            "fence at R{}",
+            raised + 1
+        );
+        assert!(
+            service
+                .list(meerkat_workgraph::WorkItemFilter {
+                    include_terminal: true,
+                    ..Default::default()
+                })
+                .await
+                .expect("list")
+                .is_empty(),
+            "nothing committed"
+        );
+        assert_eq!(
+            GovernedHelperChildIssuance::from_dispatch(
+                dispatch.call(),
+                &dispatch.context,
+                f.ledger.clone(),
+                retained_originals(&["s"]),
+                f.intent("dispatch-child"),
+            )
+            .expect("the dispatch's own operation builds the issuance")
+            .issue_or_recover(),
+            Err(HelperChildIssuanceRefusal::Denied),
+            "issuance at R{}",
+            raised + 1
+        );
+        assert_eq!(f.issued("dispatch-child"), None, "nothing appended");
+    }
+}

@@ -506,9 +506,12 @@ async fn e2e_smoke_mob_partial_resume_collaborative_joke() {
 
     let (service_2, _store_2) = persistent_service(&paths, runtime_store_resumed.clone());
     let storage_2 = persistent_mob_storage(&paths);
+    // The row reads the restore's Broken verdict and the members' live comms
+    // runtimes right after the resume, so the start materializes every member.
     let handle_2 = MobBuilder::for_resume(storage_2)
         .with_session_service(service_2.clone())
         .notify_orchestrator_on_resume(false)
+        .with_member_restore_policy(meerkat_mob::MemberRestorePolicy::Eager)
         .resume()
         .await
         .expect("partial resume should succeed");
@@ -660,9 +663,12 @@ async fn e2e_smoke_mob_partial_resume_collaborative_joke() {
 
     let (service_3, _store_3) = persistent_service(&paths, runtime_store_resumed);
     let storage_3 = persistent_mob_storage(&paths);
+    // The row sends from the members' live comms runtimes right after the
+    // resume, so the start materializes every member.
     let handle_3 = MobBuilder::for_resume(storage_3)
         .with_session_service(service_3.clone())
         .notify_orchestrator_on_resume(false)
+        .with_member_restore_policy(meerkat_mob::MemberRestorePolicy::Eager)
         .resume()
         .await
         .expect("second full resume should succeed");

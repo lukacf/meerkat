@@ -3301,6 +3301,7 @@ mod tests {
                 generation: Some(crate::meerkat_machine::dsl::Generation::from(7)),
                 runtime_epoch_id: Some(epoch_id),
                 session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                residency_owner: crate::meerkat_machine::dsl::SessionResidencyOwner::Session,
             },
         )
         .expect("attach dispatch test authority");

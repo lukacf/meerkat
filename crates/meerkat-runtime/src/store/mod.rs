@@ -12,6 +12,7 @@ pub use execution_custody::{
 };
 
 pub mod memory;
+pub(crate) mod recovery_obligation;
 pub mod spi;
 #[cfg(feature = "sqlite-store")]
 pub mod sqlite;
@@ -9648,8 +9649,13 @@ pub trait RuntimeStore: Send + Sync {
     /// to authorize a session resume attempt.
     ///
     /// Backends must read the session authority, catalog projection, and raw
-    /// lifecycle row under one snapshot. This method never materializes the
-    /// accumulated Session body.
+    /// lifecycle row under one snapshot. This method decodes no Session. On
+    /// most backends it reads only those rows; the host store adapter
+    /// (`spi::SpiRuntimeStore`) keeps the session authority among a
+    /// runtime's rows, so it answers the first such read of a runtime whose
+    /// rows are not resident by loading all of them from the host, the
+    /// committed session document's bytes included (its row entry, or the
+    /// chunk that holds it), and they then stay resident.
     async fn load_session_resume_observation(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -10021,6 +10027,41 @@ pub trait RuntimeStore: Send + Sync {
     ) -> Result<Vec<(LogicalRuntimeId, RuntimeDeliveryAuthorityRecord)>, RuntimeStoreError> {
         Err(RuntimeStoreError::Unsupported(
             "list_runtime_delivery_authorities".into(),
+        ))
+    }
+
+    /// Every runtime whose durable state holds recovery work, in one
+    /// store-wide read that loads no runtime body. Each runtime appears once.
+    ///
+    /// A runtime holds recovery work when it has nonterminal input rows,
+    /// pending terminal owners, a provisional tail (an open run cursor), a
+    /// machine lifecycle record that names a current run or does not decode,
+    /// input rows with no lifecycle record, or an ops lifecycle snapshot
+    /// that owes work (a background operation completion its session was not
+    /// woken for, or a detached job wait still running). An archived runtime
+    /// holds none, by the rule the session owner applies: its session
+    /// catalog entry carries the Archived terminal, or its machine lifecycle
+    /// record names a Retired or Destroyed runtime (a retire records the
+    /// archive only there). A retired runtime's work stays durable and runs
+    /// once its session is revived: by a resume that names it, or by the next
+    /// wake of a mob member still seated on it. A destroyed runtime's session
+    /// is never revived. The host store adapter's open loads exactly the
+    /// bodies of runtimes that hold work, by the same predicate.
+    ///
+    /// A mob boot reads this to decide which members it materializes: a
+    /// member whose runtime appears here is materialized, and one with no
+    /// other reason to start stays dormant until something wakes it. An
+    /// implementation must therefore never omit a runtime that holds work;
+    /// listing one that holds none only materializes its member early. The
+    /// default answers [`RuntimeStoreError::Unsupported`]: a boot over such a
+    /// store cannot tell which members hold work and materializes all of
+    /// them. A decorator forwards this method to the store it wraps; left to
+    /// the default, every boot through it materializes every member.
+    async fn list_runtimes_with_recovery_work(
+        &self,
+    ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "list_runtimes_with_recovery_work".into(),
         ))
     }
 
@@ -11414,6 +11455,36 @@ mod runtime_store_write_fence_tests {
         assert_eq!(
             inner.load_session_snapshot(&runtime_id).await.unwrap(),
             None
+        );
+    }
+
+    /// A store that does not implement the obligation scan answers
+    /// `Unsupported`: the provided default, which a decorator that does not
+    /// forward the scan keeps even when the store it wraps answers it.
+    #[tokio::test]
+    async fn boot_obligation_scan_default_answers_unsupported() {
+        let inner = InMemoryRuntimeStore::new();
+        let runtime_id = LogicalRuntimeId::new("boot-obligation-default");
+        inner
+            .persist_input_state(
+                &runtime_id,
+                &InputStatePersistenceRecord::from_machine_snapshot(
+                    StoredInputState::new_accepted(InputId::new()),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            inner.list_runtimes_with_recovery_work().await.unwrap(),
+            vec![runtime_id],
+            "the wrapped store answers the scan"
+        );
+        let store = DefaultFenceDecorator { inner };
+        let scanned = store.list_runtimes_with_recovery_work().await;
+        assert!(
+            matches!(scanned, Err(RuntimeStoreError::Unsupported(_))),
+            "{scanned:?}"
         );
     }
 }

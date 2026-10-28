@@ -1296,6 +1296,7 @@ mod tests {
                 generation: Some(mm_dsl::Generation::from(1)),
                 runtime_epoch_id: None,
                 session_id: mm_dsl::SessionId::from_domain(&session_id),
+                residency_owner: mm_dsl::SessionResidencyOwner::Session,
             },
             "standalone close placement countercase",
         )

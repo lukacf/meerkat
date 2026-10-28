@@ -532,12 +532,15 @@ async fn run_cold_resume_harness(fixture: Fixture) {
     let service_2 = persistent_service(&paths, &client, NO_COMPACTION_THRESHOLD);
     let resume_start = DigestMark::now();
     let resume_clock = Instant::now();
+    // The gate measures the digest work of the start's own restore, so the
+    // start materializes every member.
     let handle_2 = MobBuilder::for_resume(
         MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
     )
     .with_session_service(service_2.clone())
     .with_default_llm_client(Arc::new(client.clone()))
     .notify_orchestrator_on_resume(false)
+    .with_member_restore_policy(meerkat_mob::MemberRestorePolicy::Eager)
     .resume()
     .await
     .expect("mob resume after cold restart");

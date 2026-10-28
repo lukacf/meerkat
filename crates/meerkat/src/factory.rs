@@ -317,6 +317,35 @@ impl AssemblyConsequencePolicy {
     }
 }
 
+/// How long a rebuilt session waits for its MCP servers to connect before its
+/// first request: the longest connect timeout among the servers it connects
+/// (each server's `connect_timeout_secs`, or the MCP client's default, which
+/// also bounds the servers a session attached live). `None` when this build
+/// connects no MCP server, so it waits for nothing.
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+fn rebuilt_session_mcp_wait_bound(
+    servers: &[meerkat_core::mcp_config::McpServerConfig],
+) -> Option<std::time::Duration> {
+    if servers.is_empty() {
+        return None;
+    }
+    let default_secs = meerkat_mcp::McpConnection::DEFAULT_CONNECT_TIMEOUT_SECS;
+    let secs = servers
+        .iter()
+        .map(|server| server.connect_timeout_secs.unwrap_or(default_secs))
+        .fold(default_secs, u32::max);
+    Some(std::time::Duration::from_secs(u64::from(secs)))
+}
+
+/// Without the native MCP client a build connects no MCP server, so a rebuilt
+/// session has none to wait for.
+#[cfg(not(all(feature = "mcp", not(target_arch = "wasm32"))))]
+fn rebuilt_session_mcp_wait_bound(
+    _servers: &[meerkat_core::mcp_config::McpServerConfig],
+) -> Option<std::time::Duration> {
+    None
+}
+
 /// A trusted host's composition of one construction's own MCP router adapter.
 ///
 /// Called once per construction that creates a router for its configured MCP
@@ -1900,6 +1929,62 @@ fn validate_openai_prompt_cache_retention(
     }
 }
 
+/// Refuse a `prompt_cache_options.ttl` the resolved OpenAI catalog row does
+/// not accept when the agent is built, instead of failing its first request.
+///
+/// It applies exactly where the request lowering would send the field: on a
+/// Responses client built for a backend that admits the prompt-cache fields
+/// (`OpenAiBackendKind::admits_prompt_cache_fields`, the public OpenAI API).
+/// The ChatGPT backend, Azure OpenAI and Copilot drop the field, so their
+/// agents build as before; a realtime text client sends no prompt-cache
+/// fields, and a client this build did not resolve (an override, a prepared
+/// controller) leaves the decision to its own lowering (`backend` `None`).
+/// The lowering keeps the same check, with the same text, as the
+/// backstop for per-turn overrides. Uncatalogued models keep the
+/// pass-through, and a disabled cache sends no TTL.
+fn validate_openai_prompt_cache_ttl(
+    provider: Provider,
+    model: &str,
+    provider_params: Option<&meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    backend: Option<meerkat_providers::NormalizedBackendKind>,
+) -> Result<(), BuildAgentError> {
+    use meerkat_core::lifecycle::run_primitive::ProviderTag;
+    if provider != Provider::OpenAI {
+        return Ok(());
+    }
+    let Some(meerkat_providers::NormalizedBackendKind::OpenAi(backend)) = backend else {
+        return Ok(());
+    };
+    if !backend.admits_prompt_cache_fields() {
+        return Ok(());
+    }
+    let Some(ProviderTag::OpenAi(tag)) =
+        provider_params.and_then(|params| params.provider_tag.as_ref())
+    else {
+        return Ok(());
+    };
+    let Some(ttl) = tag
+        .prompt_cache_options
+        .and_then(|options| options.ttl)
+        .filter(|_| tag.prompt_cache_enabled != Some(false))
+    else {
+        return Ok(());
+    };
+    let Some(capabilities) = meerkat_models::capabilities_for(Provider::OpenAI, model) else {
+        return Ok(());
+    };
+    if capabilities
+        .openai_responses_params
+        .is_some_and(|params| params.prompt_cache_ttls.contains(&ttl))
+    {
+        return Ok(());
+    }
+    Err(BuildAgentError::Config(format!(
+        "OpenAI model '{model}' does not support prompt cache TTL '{}'",
+        ttl.as_wire_str()
+    )))
+}
+
 /// Refuse Anthropic request-shaping knobs the resolved catalog row rejects
 /// (a thinking type or budget the model does not accept, `top_k` without
 /// top-k support, `between_tools` or a capped `disabled` above `high`
@@ -3046,6 +3131,13 @@ struct ResolvedLlmClientPhase {
     credential_identity: Option<meerkat_core::AuthCredentialIdentity>,
     #[cfg(not(target_arch = "wasm32"))]
     auto_image_generation_executor: Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
+    /// The backend whose Responses lowering decides which OpenAI prompt-cache
+    /// fields reach the wire: the resolved connection's backend when this
+    /// phase built a Responses text client from it. `None` otherwise: a
+    /// realtime text client (it sends no prompt-cache fields), a client
+    /// override, the test shim, a self-hosted client, a prepared controller,
+    /// a handoff bootstrap.
+    prompt_cache_backend: Option<meerkat_providers::NormalizedBackendKind>,
 }
 
 /// Where a controller's adapters publish run events.
@@ -7513,6 +7605,7 @@ impl AgentFactory {
                     credential_identity: graph.credential_identity.clone(),
                     #[cfg(not(target_arch = "wasm32"))]
                     auto_image_generation_executor: graph.auto_image_generation_executor.clone(),
+                    prompt_cache_backend: None,
                 })
             }
             None => {
@@ -7563,6 +7656,7 @@ impl AgentFactory {
                     llm_client: Some(bootstrap_client),
                     credential_identity: None,
                     auto_image_generation_executor: None,
+                    prompt_cache_backend: None,
                 }
             }
             Err(error) => return Err(error),
@@ -7590,6 +7684,7 @@ impl AgentFactory {
                 .and_then(|client| client.output_token_limit()),
         };
         let resolved_auth_credential_identity = resolved_llm_client_phase.credential_identity;
+        let prompt_cache_backend = resolved_llm_client_phase.prompt_cache_backend;
         #[cfg(not(target_arch = "wasm32"))]
         let auto_image_generation_executor =
             resolved_llm_client_phase.auto_image_generation_executor;
@@ -9060,19 +9155,46 @@ impl AgentFactory {
             None
         };
 
-        // 11f. Wait for pending MCP connections when requested.
+        // 11f. Wait for pending MCP connections when requested, and before a
+        // rebuilt session's first request.
         //
         // poll_external_updates() is forwarded through the full dispatcher
-        // chain (CompositeDispatcher → ToolGateway → McpRouterAdapter), so
+        // chain (CompositeDispatcher -> ToolGateway -> McpRouterAdapter), so
         // this drains background MCP connection results regardless of how
         // many dispatchers are composed.
         //
-        // The contract is unconditional: `wait_for_mcp` blocks until every
-        // server finishes connecting (success or failure). Connection-timeout
-        // policy is owned by the per-server `connect_timeout_secs` in the MCP
-        // client — the factory does NOT own a second, hard-coded timeout that
-        // silently releases the first turn while servers are still pending.
-        if build_config.wait_for_mcp {
+        // `wait_for_mcp` blocks until every server finishes connecting
+        // (success or failure). Connection-timeout policy is owned by the
+        // per-server `connect_timeout_secs` in the MCP client - the factory
+        // does NOT own a second, hard-coded timeout that silently releases
+        // the first turn while servers are still pending.
+        //
+        // A rebuild (a build that continues a session that already had a
+        // model request: a restart, a wake, a revival or a reload) waits too,
+        // bounded by its servers' connect timeout. A server still connecting
+        // forces the deferred catalog mode, so a first request sent before it
+        // connects carries a different tools array than the session's
+        // requests before the rebuild, and the provider's prompt cache
+        // misses. A server still pending at the bound keeps connecting in the
+        // background, exactly as without the wait, and the bound is reported
+        // with a WARN. A session with no model response yet has no cached
+        // prefix to keep, so its build does not wait.
+        let rebuilds_a_requested_session = build_config.resume_session_intent
+            == meerkat_core::SessionBuildIntent::Resume
+            && build_config.resume_session.as_ref().is_some_and(|resumed| {
+                resumed.messages().iter().any(|message| {
+                    matches!(message, meerkat_core::types::Message::BlockAssistant(_))
+                })
+            });
+        let rebuild_mcp_wait_bound = if !build_config.wait_for_mcp && rebuilds_a_requested_session {
+            rebuilt_session_mcp_wait_bound(&build_config.mcp_servers)
+        } else {
+            None
+        };
+        if build_config.wait_for_mcp || rebuild_mcp_wait_bound.is_some() {
+            #[cfg(not(target_arch = "wasm32"))]
+            let rebuild_deadline =
+                rebuild_mcp_wait_bound.map(|bound| tokio::time::Instant::now() + bound);
             loop {
                 let update = tools.poll_external_updates().await;
                 // This wait consumes the same completed notices as a model
@@ -9084,6 +9206,16 @@ impl AgentFactory {
                     }
                 }
                 if update.pending.is_empty() {
+                    break;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if rebuild_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                {
+                    tracing::warn!(
+                        session_id = %session.id(),
+                        pending = ?update.pending,
+                        "a rebuilt session's MCP servers were still connecting at their connect timeout; its first request goes out without their tools, and they keep connecting in the background"
+                    );
                     break;
                 }
                 #[cfg(not(target_arch = "wasm32"))]
@@ -9317,6 +9449,12 @@ impl AgentFactory {
             provider,
             &model,
             build_config.provider_params.as_ref(),
+        )?;
+        validate_openai_prompt_cache_ttl(
+            provider,
+            &model,
+            build_config.provider_params.as_ref(),
+            prompt_cache_backend,
         )?;
         validate_anthropic_request_shaping(
             provider,
@@ -10320,6 +10458,7 @@ impl AgentFactory {
                 .as_ref()
                 .map(meerkat_core::AuthCredentialIdentity::from_auth_binding)
         };
+        let mut prompt_cache_backend: Option<meerkat_providers::NormalizedBackendKind> = None;
         let llm_client: Option<Arc<dyn LlmClient>> = if build_config
             .agent_llm_client_override
             .is_some()
@@ -10520,6 +10659,10 @@ impl AgentFactory {
                         // composition seam (dogma §9).
                         let realtime_route = matches!(provider, Provider::OpenAI)
                             && is_openai_realtime_capable(&build_config.model);
+                        // The Responses client below lowers the prompt-cache
+                        // fields for this backend; a realtime text client
+                        // sends none.
+                        prompt_cache_backend = (!realtime_route).then_some(connection.backend);
                         let text_identity = SessionLlmIdentity {
                             model: build_config.model.clone(),
                             provider,
@@ -10664,6 +10807,7 @@ impl AgentFactory {
             credential_identity,
             #[cfg(not(target_arch = "wasm32"))]
             auto_image_generation_executor,
+            prompt_cache_backend,
         })
     }
 }
@@ -13025,6 +13169,64 @@ mod tests {
         }
     }
 
+    /// Every GPT-5.6-and-later row lists `12h` beside `30m`, and the factory's
+    /// default lifetime stays `30m` on every one: `12h` is only an explicit
+    /// choice (a profile, config or turn override).
+    #[test]
+    fn twelve_hour_prompt_cache_ttl_is_never_a_default() {
+        use meerkat_core::lifecycle::run_primitive::ProviderTag;
+        use meerkat_core::model_profile::capabilities::OpenAiPromptCacheTtl;
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let session_id = meerkat_core::SessionId::parse("018f2f0d-7b1d-7a34-8c09-0a1b2c3d4e5f")
+            .expect("fixed session id");
+        for model in [
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6.1-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.6",
+        ] {
+            let accepted = meerkat_models::capabilities_for(Provider::OpenAI, model)
+                .and_then(|capabilities| capabilities.openai_responses_params)
+                .map(|params| params.prompt_cache_ttls)
+                .unwrap_or_default();
+            assert!(
+                accepted.contains(&OpenAiPromptCacheTtl::TwelveHours),
+                "{model} lists 12h: {accepted:?}"
+            );
+            let identity = SessionLlmIdentity {
+                model: model.to_string(),
+                provider: Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: None,
+            };
+            let policy = factory
+                .request_policy_for_session_llm_identity(
+                    &Config::default(),
+                    &identity,
+                    ToolCategoryOverride::Disable,
+                    &session_id,
+                )
+                .expect("request policy");
+            let Some(ProviderTag::OpenAi(defaults)) = policy.provider_tool_defaults else {
+                panic!("{model} must receive OpenAI request defaults");
+            };
+            assert_eq!(
+                defaults
+                    .prompt_cache_options
+                    .and_then(|options| options.ttl),
+                Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+                "{model}: the default lifetime stays 30m"
+            );
+        }
+    }
+
     #[test]
     fn in_memory_prompt_cache_retention_is_refused_at_build_for_gpt_6() {
         use meerkat_core::lifecycle::run_primitive::{
@@ -13046,7 +13248,7 @@ mod tests {
         };
         assert!(message.contains("'in_memory'"), "{message}");
         assert!(
-            message.contains("prompt_cache_options.ttl ('30m')"),
+            message.contains("prompt_cache_options.ttl ('30m', '12h')"),
             "{message}"
         );
         assert!(!message.contains("24h"), "{message}");
@@ -13067,6 +13269,147 @@ mod tests {
             .is_ok(),
             "rows without GPT-5.6-and-later cache capabilities keep accepting it"
         );
+    }
+
+    /// A `prompt_cache_options.ttl` the cataloged OpenAI row does not accept
+    /// is refused when the agent is built on the public OpenAI API, with the
+    /// request lowering's own text; accepted TTLs, a disabled cache,
+    /// uncatalogued models and other providers pass.
+    #[test]
+    fn unsupported_prompt_cache_ttl_is_refused_at_build() {
+        use meerkat_core::lifecycle::run_primitive::{
+            OpenAiPromptCacheOptions, OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+        };
+        use meerkat_core::model_profile::capabilities::OpenAiPromptCacheTtl;
+        use meerkat_core::provider_matrix::OpenAiBackendKind;
+        use meerkat_providers::NormalizedBackendKind;
+        let api = Some(NormalizedBackendKind::OpenAi(OpenAiBackendKind::OpenAiApi));
+        let params = |ttl: OpenAiPromptCacheTtl, enabled: Option<bool>| ProviderParamsOverride {
+            provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                prompt_cache_enabled: enabled,
+                prompt_cache_options: Some(OpenAiPromptCacheOptions {
+                    mode: None,
+                    ttl: Some(ttl),
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        for model in ["gpt-5.5", "gpt-5.5-pro", "gpt-5.4"] {
+            let Err(BuildAgentError::Config(message)) = validate_openai_prompt_cache_ttl(
+                Provider::OpenAI,
+                model,
+                Some(&params(OpenAiPromptCacheTtl::TwelveHours, None)),
+                api,
+            ) else {
+                panic!("{model} must refuse the 12h prompt-cache TTL at build");
+            };
+            assert_eq!(
+                message,
+                format!("OpenAI model '{model}' does not support prompt cache TTL '12h'")
+            );
+            assert!(
+                validate_openai_prompt_cache_ttl(
+                    Provider::OpenAI,
+                    model,
+                    Some(&params(OpenAiPromptCacheTtl::TwelveHours, Some(false))),
+                    api,
+                )
+                .is_ok(),
+                "{model}: a disabled cache sends no TTL"
+            );
+        }
+        for model in ["gpt-5.6-sol", "gpt-6-astra"] {
+            for ttl in [
+                OpenAiPromptCacheTtl::ThirtyMinutes,
+                OpenAiPromptCacheTtl::TwelveHours,
+            ] {
+                assert!(
+                    validate_openai_prompt_cache_ttl(
+                        Provider::OpenAI,
+                        model,
+                        Some(&params(ttl, None)),
+                        api,
+                    )
+                    .is_ok(),
+                    "{model} accepts {}",
+                    ttl.as_wire_str()
+                );
+            }
+        }
+        assert!(
+            validate_openai_prompt_cache_ttl(
+                Provider::OpenAI,
+                "gpt-5.9-future",
+                Some(&params(OpenAiPromptCacheTtl::TwelveHours, None)),
+                api,
+            )
+            .is_ok(),
+            "uncatalogued models keep the pass-through"
+        );
+        assert!(
+            validate_openai_prompt_cache_ttl(
+                Provider::SelfHosted,
+                "gpt-5.5",
+                Some(&params(OpenAiPromptCacheTtl::TwelveHours, None)),
+                api,
+            )
+            .is_ok(),
+            "only the OpenAI provider is checked"
+        );
+    }
+
+    /// The build check applies exactly where the request lowering sends the
+    /// TTL. The ChatGPT backend, Azure OpenAI and Copilot drop the
+    /// prompt-cache fields, so an agent there with any TTL on a model without
+    /// TTL support builds, as it did before the check; so does one with no
+    /// prompt-cache backend (a realtime text client, which sends no
+    /// prompt-cache fields, or a client this build did not resolve).
+    #[test]
+    fn prompt_cache_ttl_build_check_follows_the_backend_that_sends_it() {
+        use meerkat_core::lifecycle::run_primitive::{
+            OpenAiPromptCacheOptions, OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+        };
+        use meerkat_core::model_profile::capabilities::OpenAiPromptCacheTtl;
+        use meerkat_core::provider_matrix::OpenAiBackendKind;
+        use meerkat_providers::NormalizedBackendKind;
+        for ttl in [
+            OpenAiPromptCacheTtl::ThirtyMinutes,
+            OpenAiPromptCacheTtl::TwelveHours,
+        ] {
+            let params = ProviderParamsOverride {
+                provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                    prompt_cache_options: Some(OpenAiPromptCacheOptions {
+                        mode: None,
+                        ttl: Some(ttl),
+                    }),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+            for kind in OpenAiBackendKind::ALL {
+                let refused = validate_openai_prompt_cache_ttl(
+                    Provider::OpenAI,
+                    "gpt-5.5",
+                    Some(&params),
+                    Some(NormalizedBackendKind::OpenAi(*kind)),
+                )
+                .is_err();
+                assert_eq!(
+                    refused,
+                    kind.admits_prompt_cache_fields(),
+                    "gpt-5.5 with ttl {} on {}: refused only where the field is sent",
+                    ttl.as_wire_str(),
+                    kind.as_str()
+                );
+            }
+            assert!(
+                validate_openai_prompt_cache_ttl(Provider::OpenAI, "gpt-5.5", Some(&params), None)
+                    .is_ok(),
+                "no prompt-cache backend (a realtime client, an override) leaves the \
+                 decision to the client's own lowering"
+            );
+        }
     }
 
     /// A Gemini thinking level the cataloged model refuses is refused when
@@ -13193,6 +13536,58 @@ mod tests {
                 "{provider:?} {model} {effort:?}"
             );
         }
+    }
+
+    /// A build records an explicitly named auth binding stamped with the
+    /// realm that declares it. The session builder answers that form for a
+    /// named binding, so a caller can match a binding it names with the one
+    /// a session recorded: an inherited binding is answered under its owner,
+    /// a realm's own binding as named, and a binding no realm declares is an
+    /// error.
+    #[tokio::test]
+    async fn the_session_builder_answers_the_recorded_form_of_a_named_binding() {
+        use meerkat_session::SessionAgentBuilder as _;
+        let mut config = Config::default();
+        config.realm.insert(
+            "global".to_string(),
+            inline_realm_section(&[("openai", "test-key")]),
+        );
+        config.realm.insert(
+            "tenant_child".to_string(),
+            inline_realm_section(&[("anthropic", "test-key")]),
+        );
+        let temp = tempfile::tempdir().expect("temp root");
+        let builder = crate::FactoryAgentBuilder::new(
+            AgentFactory::new(temp.path().join("sessions")),
+            config,
+        );
+
+        assert_eq!(
+            builder
+                .recorded_auth_binding(&configured_auth_binding("tenant_child", "default_openai"))
+                .await
+                .expect("an inherited binding resolves"),
+            Some(configured_auth_binding("global", "default_openai")),
+            "an inherited binding is recorded under the realm that declares it"
+        );
+        assert_eq!(
+            builder
+                .recorded_auth_binding(&configured_auth_binding(
+                    "tenant_child",
+                    "default_anthropic"
+                ))
+                .await
+                .expect("a realm's own binding resolves"),
+            Some(configured_auth_binding("tenant_child", "default_anthropic")),
+            "a realm's own binding is recorded as named"
+        );
+        assert!(
+            builder
+                .recorded_auth_binding(&configured_auth_binding("tenant_child", "missing"))
+                .await
+                .is_err(),
+            "a binding no realm declares does not resolve"
+        );
     }
 
     /// A realm whose OpenAI binding is the private ChatGPT backend.
@@ -14060,9 +14455,11 @@ mod tests {
         }
 
         /// A child whose durable ceiling witnessed the parent's MCP tools is
-        /// resumed with the retained handoff while its own connection is
-        /// pending again: the ceiling survives the reconnect, and the tool is
-        /// requested, lists and dispatches once the child reconnects.
+        /// resumed with the retained handoff. The resume rebuilds a session
+        /// that already had a model request, so its build reconnects the
+        /// child's own server before the first request (bounded by the
+        /// server's connect timeout): the ceiling survives the reconnect, and
+        /// the tool is requested, lists and dispatches.
         #[tokio::test]
         async fn a_resumed_child_keeps_its_witnessed_mcp_ceiling_across_a_reconnect() {
             let temp = tempfile::tempdir().expect("temp root");
@@ -14102,7 +14499,8 @@ mod tests {
             let session = first.session().clone();
             first.release_owned_resources().await;
 
-            // Resumed with the retained handoff; the connection is pending again.
+            // Resumed with the retained handoff: the rebuild reconnects the
+            // child's own server.
             let mut resumed = build_child(
                 &factory,
                 session,
@@ -14112,15 +14510,11 @@ mod tests {
                 &captured,
             )
             .await
-            .expect("the resume builds while the child's own connection is pending");
+            .expect("the resume builds");
             let adapter = last_adapter(&observed);
-            let pending = resumed.tool_scope_snapshot().expect("resumed scope");
-            assert!(
-                !names_contain(&pending.known_base_names, "echo"),
-                "precondition: the resumed child's connection is pending: {pending:?}"
-            );
+            let rebuilt = resumed.tool_scope_snapshot().expect("resumed scope");
             assert_eq!(
-                &pending.base_filter,
+                &rebuilt.base_filter,
                 ceiling.filter(),
                 "the resumed durable ceiling keeps every witnessed name across the reconnect"
             );
@@ -14159,10 +14553,10 @@ mod tests {
         }
 
         /// An actual incoming narrowing still narrows: a resumed child handed
-        /// a narrower parent snapshot while its connection is pending keeps
-        /// exactly what both ceilings allow. After the reconnect the kept tool
-        /// is requested, lists and dispatches; the narrowed-away tool, though
-        /// mounted, can be neither requested, listed nor called.
+        /// a narrower parent snapshot keeps exactly what both ceilings allow.
+        /// After the reconnect the kept tool is requested, lists and
+        /// dispatches; the narrowed-away tool, though mounted, can be neither
+        /// requested, listed nor called.
         #[tokio::test]
         async fn a_resumed_child_applies_an_incoming_narrowing_to_its_mcp_ceiling() {
             let temp = tempfile::tempdir().expect("temp root");
@@ -14210,15 +14604,11 @@ mod tests {
                 &captured,
             )
             .await
-            .expect("a narrowing resume builds while the narrowed-away source is pending");
+            .expect("a narrowing resume builds");
             let adapter = last_adapter(&observed);
-            let pending = resumed.tool_scope_snapshot().expect("resumed scope");
-            assert!(
-                !names_contain(&pending.known_base_names, "echo"),
-                "precondition: the resumed child's connection is pending: {pending:?}"
-            );
+            let rebuilt = resumed.tool_scope_snapshot().expect("resumed scope");
             assert_eq!(
-                &pending.base_filter,
+                &rebuilt.base_filter,
                 narrowed.filter(),
                 "an incoming narrowing narrows the durable ceiling to what both allow"
             );
@@ -14265,6 +14655,159 @@ mod tests {
 
             resumed.release_owned_resources().await;
             parent.release_owned_resources().await;
+        }
+    }
+
+    /// A rebuild (a build that continues a session that already had a model
+    /// request) waits for the session's MCP servers before its first request,
+    /// bounded by their connect timeout. The rebuilt session's first request
+    /// then carries the tools array it sent before the rebuild, so the
+    /// provider's prompt cache keeps matching. Without the wait, a server
+    /// still connecting forces the deferred catalog and the array changes.
+    #[cfg(all(
+        feature = "test-mcp-oauth-fixtures",
+        feature = "mcp",
+        not(target_arch = "wasm32")
+    ))]
+    mod rebuilt_session_mcp_wait {
+        use super::*;
+        use std::time::Duration;
+
+        type CapturedRequest = Arc<std::sync::Mutex<Option<LlmRequest>>>;
+
+        /// The fixture's one-tool form server (a small catalog, listed
+        /// inline), started only once `gate` exists when one is given.
+        fn form_server(gate: Option<&std::path::Path>) -> meerkat_core::McpServerConfig {
+            let fixture = mcp_test_server::fixture_binary()
+                .to_string_lossy()
+                .to_string();
+            match gate {
+                None => meerkat_core::McpServerConfig::stdio(
+                    "forms",
+                    fixture,
+                    vec!["--form-elicitation".to_string()],
+                    HashMap::new(),
+                ),
+                Some(gate) => meerkat_core::McpServerConfig::stdio(
+                    "forms",
+                    "/bin/sh",
+                    vec![
+                        "-c".to_string(),
+                        "while [ ! -e \"$0\" ]; do sleep 0.02; done; exec \"$1\" --form-elicitation"
+                            .to_string(),
+                        gate.to_string_lossy().to_string(),
+                        fixture,
+                    ],
+                    HashMap::new(),
+                ),
+            }
+        }
+
+        async fn build(
+            factory: &AgentFactory,
+            session: Session,
+            server: meerkat_core::McpServerConfig,
+            wait_for_mcp: bool,
+            captured: &CapturedRequest,
+        ) -> DynAgent {
+            let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+            let bindings = runtime
+                .prepare_bindings(session.id().clone())
+                .await
+                .expect("session bindings");
+            let mut build = AgentBuildConfig::new("gpt-5.6-sol");
+            build.provider = Some(Provider::OpenAI);
+            build.llm_client_override = Some(Arc::new(CapturingLlmClient {
+                request: Arc::clone(captured),
+            }));
+            build.resume_session = Some(session);
+            build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+            build.override_builtins = ToolCategoryOverride::Disable;
+            build.mcp_servers = vec![server];
+            build.wait_for_mcp = wait_for_mcp;
+            factory
+                .build_agent(build, &Config::default())
+                .await
+                .expect("the agent builds")
+        }
+
+        /// One turn; returns every tool its provider request carried, as
+        /// (name, description, input schema).
+        async fn tools_of_a_turn(
+            agent: &mut DynAgent,
+            text: &str,
+            captured: &CapturedRequest,
+        ) -> Vec<(String, String, String)> {
+            agent.set_runtime_execution_kind(Some(
+                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+            ));
+            agent
+                .run(meerkat_core::ContentInput::Text(text.into()))
+                .await
+                .expect("an agent turn");
+            captured
+                .lock()
+                .unwrap()
+                .take()
+                .expect("the turn's provider request")
+                .tools
+                .iter()
+                .map(|tool| {
+                    (
+                        tool.name.as_str().to_string(),
+                        tool.description.clone(),
+                        tool.input_schema.to_string(),
+                    )
+                })
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn a_rebuilt_session_sends_the_tools_it_sent_before_the_rebuild() {
+            let temp = tempfile::tempdir().expect("temp root");
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+            let captured = CapturedRequest::default();
+
+            // Before the rebuild: the server is connected and its one tool is
+            // listed inline.
+            let mut before =
+                build(&factory, Session::new(), form_server(None), true, &captured).await;
+            let tools_before = tools_of_a_turn(&mut before, "before the rebuild", &captured).await;
+            assert!(
+                tools_before
+                    .iter()
+                    .any(|(name, _, _)| name.contains("mcp_form")),
+                "precondition: the server's tool is listed before the rebuild: {tools_before:?}"
+            );
+            let session = before.session().clone();
+            before.release_owned_resources().await;
+
+            // The rebuild: the same session, its server slower to connect
+            // than a build without a wait takes, and no explicit wait. The
+            // turn runs right after the build.
+            let gate = temp.path().join("server-gate");
+            let opener = {
+                let gate = gate.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(1_000)).await;
+                    std::fs::write(&gate, b"open").expect("open the server gate");
+                })
+            };
+            let mut after = build(
+                &factory,
+                session,
+                form_server(Some(&gate)),
+                false,
+                &captured,
+            )
+            .await;
+            let tools_after = tools_of_a_turn(&mut after, "after the rebuild", &captured).await;
+            opener.await.expect("the gate opener");
+            assert_eq!(
+                tools_after, tools_before,
+                "the rebuilt session's first request carries the tools it sent before the rebuild"
+            );
+            after.release_owned_resources().await;
         }
     }
 

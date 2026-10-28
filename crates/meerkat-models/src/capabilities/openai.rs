@@ -66,6 +66,21 @@ const GPT56_EFFORT: &[EffortLevel] = &[
     EffortLevel::Max,
 ];
 
+/// Prompt-cache lifetimes accepted by GPT-5.6 and later (every GPT-5.6 and
+/// GPT-6 row): `30m` (OpenAI's default, the one Meerkat requests by default)
+/// and `12h` (an explicit opt-in).
+///
+/// Source: https://developers.openai.com/api/docs/guides/prompt-caching
+/// ("Summary of model differences", GPT-5.6 and later: supported values
+/// `"30m"` (default) or `"12h"`, a minimum lifetime of 30 minutes or 12
+/// hours, cache writes billed at 1.25x for `"30m"` and 2.5x for `"12h"`;
+/// GPT-5.5, GPT-5.5 Pro and earlier models set `prompt_cache_retention`
+/// instead).
+const GPT56_AND_LATER_PROMPT_CACHE_TTLS: &[OpenAiPromptCacheTtl] = &[
+    OpenAiPromptCacheTtl::ThirtyMinutes,
+    OpenAiPromptCacheTtl::TwelveHours,
+];
+
 const GPT56_RESPONSES_PARAMS: OpenAiResponsesParamCapabilities = OpenAiResponsesParamCapabilities {
     reasoning_modes: &[OpenAiReasoningMode::Standard, OpenAiReasoningMode::Pro],
     reasoning_contexts: &[
@@ -83,7 +98,7 @@ const GPT56_RESPONSES_PARAMS: OpenAiResponsesParamCapabilities = OpenAiResponses
         OpenAiPromptCacheMode::Explicit,
     ],
     default_prompt_cache_mode: Some(OpenAiPromptCacheMode::Explicit),
-    prompt_cache_ttls: &[OpenAiPromptCacheTtl::ThirtyMinutes],
+    prompt_cache_ttls: GPT56_AND_LATER_PROMPT_CACHE_TTLS,
     supports_in_memory_prompt_cache_retention: false,
 };
 
@@ -94,9 +109,9 @@ const GPT56_RESPONSES_PARAMS: OpenAiResponsesParamCapabilities = OpenAiResponses
 /// Sources:
 ///   - https://developers.openai.com/api/docs/guides/prompt-caching
 ///     ("GPT-5.6 and later": implicit breakpoints at the end of the latest
-///     eligible message, explicit breakpoints supported, `30m` TTL only; "You
-///     can add explicit breakpoints without turning off the implicit
-///     breakpoint")
+///     eligible message, explicit breakpoints supported, `30m` (default) and
+///     `12h` TTLs; "You can add explicit breakpoints without turning off the
+///     implicit breakpoint")
 ///   - https://developers.openai.com/api/docs/guides/latest-model
 ///     (gpt-6-astra is the latest model; migrating replaces
 ///     `prompt_cache_retention` with `prompt_cache_options.ttl` = `"30m"`)
@@ -116,7 +131,7 @@ const GPT6_RESPONSES_PARAMS: OpenAiResponsesParamCapabilities = OpenAiResponsesP
     // uncached. Implicit mode plus the single turn anchor keeps fork_off
     // children cacheable (#1235). Explicit stays available as an opt-in.
     default_prompt_cache_mode: Some(OpenAiPromptCacheMode::Implicit),
-    prompt_cache_ttls: &[OpenAiPromptCacheTtl::ThirtyMinutes],
+    prompt_cache_ttls: GPT56_AND_LATER_PROMPT_CACHE_TTLS,
     supports_in_memory_prompt_cache_retention: false,
 };
 

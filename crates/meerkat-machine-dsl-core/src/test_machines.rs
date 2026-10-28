@@ -1397,4 +1397,127 @@ machine HelperCycle {
             "expected helper-call cycle error, got: {msg}"
         );
     }
+
+    /// A guard that reads the phase only through a helper call is removed by
+    /// schema lowering, and a phase call conjoined with another test keeps only
+    /// the other conjunct: the lowered model admits the arm in every phase while
+    /// production refuses some of them. Member-residency arms therefore split
+    /// per phase and never pass the phase to a call (the machine-schema guard
+    /// scan enforces that for them).
+    #[test]
+    fn schema_lowering_strips_a_guard_call_taking_the_phase() {
+        let def = parse(ORDER_LIFECYCLE);
+        let first_guard = |name: &str| {
+            def.transitions
+                .iter()
+                .find(|t| t.name == name)
+                .expect("transition")
+                .guards[0]
+                .expr
+                .clone()
+        };
+
+        let cancel = first_guard("CancelActive");
+        assert!(crate::gen_schema::guard_mentions_phase(&def, &cancel));
+        assert!(!crate::gen_schema::is_source_phase_guard(&def, &cancel));
+        assert!(
+            crate::gen_schema::strip_phase_guards(&def, &cancel).is_none(),
+            "a guard call taking the phase is removed from the lowered guards"
+        );
+
+        let tag = first_guard("TagActive");
+        assert!(crate::gen_schema::guard_mentions_phase(&def, &tag));
+        let lowered = crate::gen_schema::strip_phase_guards(&def, &tag)
+            .expect("the conjunct that does not read the phase stays");
+        assert!(!crate::gen_schema::guard_mentions_phase(&def, &lowered));
+        assert!(format!("{lowered:?}").contains("Contains"), "{lowered:?}");
+
+        let draft = first_guard("AddItemDraft");
+        assert!(crate::gen_schema::is_source_phase_guard(&def, &draft));
+        assert!(crate::gen_schema::strip_phase_guards(&def, &draft).is_none());
+    }
+
+    const NESTED_PHASE_CALL: &str = r#"
+machine NestedPhaseProbe {
+    version: 1,
+    rust: "test" / "nested_phase_probe",
+
+    state {
+        lifecycle_phase: NestedPhase,
+        ready: bool,
+    }
+
+    init(Open) {
+        ready = false,
+    }
+
+    terminal []
+
+    phase NestedPhase {
+        Open,
+        Closed,
+    }
+
+    input NestedInput {
+        Poke,
+    }
+
+    effect NestedEffect {
+        Poked,
+    }
+
+    disposition Poked => local seam NoOwnerRealization,
+
+    helper is_open(p: NestedPhase) -> bool {
+        p == Phase::Open
+    }
+
+    transition PokeMixed {
+        on input Poke
+        guard "mixed" { is_open(self.lifecycle_phase) == true || self.ready == true }
+        update {}
+        to Open
+        emit Poked
+    }
+
+    transition PokeNested {
+        on input Poke
+        guard "nested" { is_open(self.lifecycle_phase) == true }
+        update {}
+        to Open
+        emit Poked
+    }
+}
+"#;
+
+    /// A phase call inside a comparison or a disjunction is not a bare phase
+    /// read, so lowering keeps it: the guard detector must still see it, or a
+    /// mixed member-residency guard would pass the scan unnoticed.
+    #[test]
+    fn a_phase_call_inside_a_comparison_or_disjunction_is_still_a_phase_read() {
+        let def = parse(NESTED_PHASE_CALL);
+        let first_guard = |name: &str| {
+            def.transitions
+                .iter()
+                .find(|t| t.name == name)
+                .expect("transition")
+                .guards[0]
+                .expr
+                .clone()
+        };
+
+        let mixed = first_guard("PokeMixed");
+        assert!(crate::gen_schema::guard_mentions_phase(&def, &mixed));
+        assert!(!crate::gen_schema::is_source_phase_guard(&def, &mixed));
+        let lowered = crate::gen_schema::strip_phase_guards(&def, &mixed)
+            .expect("a disjunct that is not a bare phase read stays");
+        assert!(
+            crate::gen_schema::guard_mentions_phase(&def, &lowered),
+            "{lowered:?}"
+        );
+
+        let nested = first_guard("PokeNested");
+        assert!(crate::gen_schema::guard_mentions_phase(&def, &nested));
+        assert!(crate::gen_schema::strip_phase_guards(&def, &nested).is_some());
+    }
 }

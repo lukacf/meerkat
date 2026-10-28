@@ -213,6 +213,15 @@ impl meerkat_runtime::RuntimeStore for CommitGateRuntimeStore {
         self.inner.session_authority_ops()
     }
 
+    // A mob boot over this store plans its members from the wrapped store's
+    // obligation scan, as over the store itself.
+    async fn list_runtimes_with_recovery_work(
+        &self,
+    ) -> Result<Vec<meerkat_runtime::LogicalRuntimeId>, meerkat_runtime::store::RuntimeStoreError>
+    {
+        meerkat_runtime::RuntimeStore::list_runtimes_with_recovery_work(&self.inner).await
+    }
+
     fn session_persistence_profile(
         &self,
     ) -> meerkat_runtime::store::RuntimeSessionPersistenceProfile {

@@ -222,7 +222,10 @@ pub enum SessionError {
 /// [`SessionError::DurableEvidenceQuarantined`] so surfaces route "held,
 /// nothing lost" separately from "the service faulted" without parsing prose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    any(feature = "schema", feature = "jsonschema"),
+    derive(schemars::JsonSchema)
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DurableResumeHold {
     /// A verified durable tail sits past the last committed runtime boundary.

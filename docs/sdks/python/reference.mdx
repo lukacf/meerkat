@@ -8,7 +8,7 @@ icon: "book"
 
 ```python
 from meerkat import CONTRACT_VERSION
-print(CONTRACT_VERSION)  # "0.9.6"
+print(CONTRACT_VERSION)  # "0.9.7"
 ```
 
 ## Primary handles
@@ -619,7 +619,10 @@ that had already exited.
 A failed `session.send(...)` carries the server's typed `CommsSendErrorData`
 in `MeerkatError.details`, tagged on `code` (`peer_not_found_or_not_trusted`,
 `peer_unreachable`, `peer_admission_dropped`, `peer_input_rejected`,
-`send_ambiguous`, `send_failed`, `invalid_command`). `comms_send_error(error)`
+`peer_wake_refused`, `send_ambiguous`, `send_failed`, `invalid_command`).
+`peer_wake_refused` is a seated member whose wake was refused: nothing was
+delivered, `refusal["kind"]` says why and `retryable` whether a later send can
+succeed. `comms_send_error(error)`
 returns it, or `None` for any other error. Branch on `code`, never on the
 message text. `send_ambiguous` means the delivery may already have landed
 (`retry_safe` is `False`, `required_action` is `"reconcile"`): reconcile by its

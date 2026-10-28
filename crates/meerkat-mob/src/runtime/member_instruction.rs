@@ -124,6 +124,16 @@ impl MobHandle {
                     "has no session binding",
                 )
             })?;
+        // A seated member that is not materialized in this process is woken
+        // first (`WakeMember`, cause Operator), as every route that needs the
+        // member's live session wakes it; the activation then applies to the
+        // woken session. A refused wake appended nothing.
+        self.ensure_member_live(identity).await.map_err(|error| {
+            MemberInstructionActivationError::not_materialized(
+                identity,
+                &format!("could not be woken: {error}"),
+            )
+        })?;
         let runtime_adapter = self.runtime_adapter.clone().ok_or_else(|| {
             MemberInstructionActivationError::Admission {
                 code: InstructionActivationAdmissionErrorCode::DurabilityUnavailable,

@@ -867,6 +867,9 @@ mod s1_scoped_original;
 #[path = "native_governed_loop/owner_change_wait.rs"]
 mod owner_change_wait;
 
+#[path = "native_governed_loop/entered_consent_steps.rs"]
+mod entered_consent_steps;
+
 #[cfg(unix)]
 #[path = "native_governed_loop/connector_call_context.rs"]
 mod connector_call_context;

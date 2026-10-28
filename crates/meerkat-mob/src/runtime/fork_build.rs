@@ -69,7 +69,18 @@
 //! like this:
 //!
 //! - **Warm revival** (in process): the child's retained overlay, which is the
-//!   one it was built with.
+//!   one it was built with. A wake of a member this process built before (a
+//!   released member, or a revival that runs through the member's wake) keeps
+//!   its retained overlay the same way, an ordinary member's own overlay
+//!   included: its tools stay what they were while it was live, as for a
+//!   member that stayed live, until a respawn or a restart.
+//! - **Wake of a child this process did not build** (a lazy start leaves
+//!   every member Dormant, and a wake rebuilds one member): a child seated
+//!   with its source's overlay gets the overlay its source holds in this
+//!   process when the source was built here, live or released since; else
+//!   the overlay its source would be rebuilt with, computed from the source's
+//!   own overlay rule (walking up the chain the same way) without waking the
+//!   source.
 //! - **Explicit resume and process-restart restore** (the host's spawn
 //!   customizer re-supplies an ordinary member's overlay for its own
 //!   identity): a child seated with its source's overlay gets the overlay its
@@ -194,6 +205,91 @@ impl RetainedOverlayOrigin {
     }
 }
 
+/// The per-spawn overlay a member was last built with in this process, and
+/// where it came from: what an in-process rebuild of the member (its warm
+/// revival, or a wake of a member this process built before) composes again.
+#[derive(Clone)]
+pub(crate) struct RetainedMemberOverlay {
+    pub(crate) overlay: Arc<dyn AgentToolDispatcher>,
+    pub(crate) origin: RetainedOverlayOrigin,
+}
+
+/// Where the wake of a fork child that follows its source, and that this
+/// process did not build, takes its source's overlay from (see the module
+/// docs): the source is not rebuilt beside it, and is never woken for it.
+pub(crate) enum FollowedSourceOverlay {
+    /// The overlay the source, or the in-mob ancestor its overlay comes
+    /// through, was built with in this process.
+    Retained(Option<Arc<dyn AgentToolDispatcher>>),
+    /// The member whose own overlay the chain carries was not built in this
+    /// process: the overlay its rebuild would compose
+    /// ([`rebuilt_own_overlay`]), on its bound session, with what its seat
+    /// carries to a first build.
+    Rebuild {
+        entry: Box<RosterEntry>,
+        session_id: SessionId,
+        seat_build: Option<Arc<super::SeatBuild>>,
+    },
+}
+
+/// What a lift's preparation resolved, off the actor, for the rebuild of a
+/// fork that follows its source ([`resolve_followed_source_overlay`]): what
+/// the fork takes when its source holds no overlay in this process by then.
+pub(crate) enum PreparedFollowedOverlay {
+    /// The overlay the source (or the in-mob ancestor its overlay comes
+    /// through) holds in this process, or the one its rebuild would compose.
+    Resolved(Option<Arc<dyn AgentToolDispatcher>>),
+    /// That overlay could not be computed: the fork takes its own rule,
+    /// warned, as a woken fork does.
+    Unavailable,
+}
+
+/// Resolve, off the actor, the overlay a fork follows when `followed` is
+/// where its source's overlay comes from (`None`: the source's lineage could
+/// not be walked): a retained overlay as it is, or the overlay the rebuild of
+/// the member the chain carries it from would compose
+/// ([`rebuilt_own_overlay`]). Nothing is rebuilt or woken.
+pub(crate) async fn resolve_followed_source_overlay(
+    mob_id: &MobId,
+    session_service: &dyn super::session_service::MobSessionService,
+    customizer: Option<&Arc<dyn super::handle::SpawnMemberCustomizer>>,
+    member: &AgentIdentity,
+    followed: Option<FollowedSourceOverlay>,
+) -> PreparedFollowedOverlay {
+    match followed {
+        Some(FollowedSourceOverlay::Retained(overlay)) => {
+            PreparedFollowedOverlay::Resolved(overlay)
+        }
+        Some(FollowedSourceOverlay::Rebuild {
+            entry,
+            session_id,
+            seat_build,
+        }) => match rebuilt_own_overlay(
+            mob_id,
+            session_service,
+            customizer,
+            &entry,
+            &session_id,
+            seat_build.as_deref(),
+        )
+        .await
+        {
+            Ok(overlay) => PreparedFollowedOverlay::Resolved(overlay),
+            Err(error) => {
+                tracing::warn!(
+                    %mob_id,
+                    agent_identity = %member,
+                    overlay_member = %entry.agent_identity,
+                    %error,
+                    "the overlay a rebuilt fork follows could not be computed from its source's rebuild"
+                );
+                PreparedFollowedOverlay::Unavailable
+            }
+        },
+        None => PreparedFollowedOverlay::Unavailable,
+    }
+}
+
 /// Every member's retained per-spawn overlay and where it came from, written
 /// only by the mob actor (and the restart restore that seeds it) and shared
 /// read-only with its handles.
@@ -209,6 +305,16 @@ impl RetainedOverlays {
     /// `identity`'s retained overlay, if it has one.
     pub(crate) fn get(&self, identity: &AgentIdentity) -> Option<&Arc<dyn AgentToolDispatcher>> {
         self.tools.get(identity)
+    }
+
+    /// `identity`'s retained overlay with where it came from, if it has one.
+    pub(crate) fn retained(&self, identity: &AgentIdentity) -> Option<RetainedMemberOverlay> {
+        self.tools
+            .get(identity)
+            .map(|overlay| RetainedMemberOverlay {
+                overlay: Arc::clone(overlay),
+                origin: self.origin(identity),
+            })
     }
 
     /// Where `identity`'s retained overlay came from.
@@ -712,6 +818,63 @@ impl super::actor::MobActor {
         )
     }
 
+    /// Where the wake of a fork child that follows `source`, and that this
+    /// process did not build, takes its overlay from (see the module docs):
+    /// walking up from `source`, the first member built in this process (a
+    /// Live one, or one whose retained overlay outlived its release) gives
+    /// the overlay it was built with; a member whose overlay is its own and
+    /// that this process did not build gives the overlay its rebuild would
+    /// compose. Machine and roster reads only: nothing is woken. `None` when
+    /// the walk finds no seated, bound member (the child's rule already
+    /// checked each link, so only a malformed lineage ends there).
+    pub(super) async fn followed_source_overlay(
+        &self,
+        source: &AgentIdentity,
+    ) -> Option<FollowedSourceOverlay> {
+        let roster = self.roster.read().await;
+        let retained = self.per_spawn_external_tools.read().await;
+        let state = self.dsl_authority.state();
+        let mut current = source.clone();
+        let mut visited = BTreeSet::new();
+        loop {
+            let live = matches!(
+                state
+                    .member_materialization
+                    .get(&mob_dsl::AgentIdentity::from_domain(&current)),
+                Some(mob_dsl::MemberMaterializationPhase::Live)
+            );
+            if live {
+                return Some(FollowedSourceOverlay::Retained(
+                    retained.get(&current).cloned(),
+                ));
+            }
+            if let Some(overlay) = retained.get(&current) {
+                return Some(FollowedSourceOverlay::Retained(Some(Arc::clone(overlay))));
+            }
+            if !visited.insert(current.clone()) {
+                return None;
+            }
+            let entry = roster.get(&current)?;
+            match fork_overlay_rule(
+                entry,
+                &self.definition.id,
+                |identity| roster.get(identity),
+                state,
+            ) {
+                ForkOverlayRule::FollowSource(next) => current = next,
+                ForkOverlayRule::Own
+                | ForkOverlayRule::Caller
+                | ForkOverlayRule::SourceUnavailable(_) => {
+                    return Some(FollowedSourceOverlay::Rebuild {
+                        session_id: machine_session_binding(&current, state)?,
+                        seat_build: roster.seat_build(&current),
+                        entry: Box::new(entry.clone()),
+                    });
+                }
+            }
+        }
+    }
+
     /// The per-spawn overlay a warm revival of `entry` (bound to
     /// `session_id`) composes.
     ///
@@ -758,12 +921,15 @@ impl super::actor::MobActor {
     /// `session_id` composes, given `spec`, its rebuild request
     /// ([`rebuild_resume_spec`]), and where it comes from. Sources are rebuilt
     /// before their forks in the same pass, so a source's retained overlay is
-    /// the one it is rebuilt with.
+    /// the one it is rebuilt with. A fork whose source holds no overlay in
+    /// this process takes `followed`, what the lift's preparation resolved
+    /// from its source's chain.
     pub(super) async fn recustomized_rebuild_overlay(
         &self,
         entry: &RosterEntry,
         session_id: &SessionId,
         spec: &super::handle::SpawnMemberSpec,
+        followed: Option<&PreparedFollowedOverlay>,
     ) -> Result<(Option<Arc<dyn AgentToolDispatcher>>, RetainedOverlayOrigin), MobError> {
         let own = || {
             rebuild_own_overlay(
@@ -784,13 +950,33 @@ impl super::actor::MobActor {
                 own
             }
             ForkOverlayRule::FollowSource(source) => {
-                let inherited = self
-                    .per_spawn_external_tools
-                    .read()
-                    .await
-                    .get(&source)
-                    .cloned();
-                return Ok((inherited, RetainedOverlayOrigin::Inherited));
+                // The overlay the source, or the in-mob ancestor its overlay
+                // comes through, was built with in this process: a source
+                // rebuilt earlier in this pass included.
+                if let Some(FollowedSourceOverlay::Retained(overlay)) =
+                    self.followed_source_overlay(&source).await
+                {
+                    return Ok((overlay, RetainedOverlayOrigin::Inherited));
+                }
+                match followed {
+                    Some(PreparedFollowedOverlay::Resolved(overlay)) => {
+                        return Ok((overlay.clone(), RetainedOverlayOrigin::Inherited));
+                    }
+                    Some(PreparedFollowedOverlay::Unavailable) => {
+                        let own = own()?;
+                        warn_fork_source_unavailable(
+                            &self.definition.id,
+                            entry,
+                            &ForkSourceUnavailable::NotRebuilt,
+                            own.is_some(),
+                        );
+                        own
+                    }
+                    // Nothing was prepared for it (a rebuild of the explicit
+                    // resume's own live members): it follows what its source
+                    // holds in this process, which is none.
+                    None => return Ok((None, RetainedOverlayOrigin::Inherited)),
+                }
             }
             ForkOverlayRule::SourceUnavailable(reason) => {
                 let own = own()?;
@@ -853,9 +1039,27 @@ pub(crate) fn rebuild_resume_spec(
     entry: &RosterEntry,
     durable: &super::handle::ResumedMemberView,
 ) -> Result<super::handle::SpawnMemberSpec, MobError> {
+    rebuild_seat_resume_spec(mob_id, customizer, entry, durable, None)
+}
+
+/// [`rebuild_resume_spec`] for a member whose session no build has created
+/// yet: `seat_build`, what its seat carries to that first build
+/// ([`super::SeatBuild`]), is set on the request before the customizer is
+/// asked, as a spawn's caller sets these inputs on its spec. `None` is
+/// [`rebuild_resume_spec`].
+pub(crate) fn rebuild_seat_resume_spec(
+    mob_id: &MobId,
+    customizer: Option<&Arc<dyn super::handle::SpawnMemberCustomizer>>,
+    entry: &RosterEntry,
+    durable: &super::handle::ResumedMemberView,
+    seat_build: Option<&super::SeatBuild>,
+) -> Result<super::handle::SpawnMemberSpec, MobError> {
     let mut spec = member_resume_spec(entry, &durable.session_id);
     if entry.fork_source.is_some() {
         return Ok(spec);
+    }
+    if let Some(seat_build) = seat_build {
+        seat_build.apply_to(&mut spec);
     }
     if let Some(customizer) = customizer {
         customizer.customize_resume(
@@ -977,6 +1181,30 @@ pub(crate) fn rebuild_own_overlay(
     } else {
         Ok(spec.external_tools.clone())
     }
+}
+
+/// The overlay for `entry`'s own identity that a rebuild of it on
+/// `session_id` would compose, without rebuilding or waking it: its rebuild
+/// request made as its restore makes it ([`rebuild_seat_resume_spec`], with
+/// what its seat carries to a first build, after one read of the session's
+/// durable view for an ordinary member's customizer), then
+/// [`rebuild_own_overlay`]. What a fork child that follows `entry` is woken
+/// with when this process never built `entry`.
+pub(crate) async fn rebuilt_own_overlay(
+    mob_id: &MobId,
+    session_service: &dyn super::session_service::MobSessionService,
+    customizer: Option<&Arc<dyn super::handle::SpawnMemberCustomizer>>,
+    entry: &RosterEntry,
+    session_id: &SessionId,
+    seat_build: Option<&super::SeatBuild>,
+) -> Result<Option<Arc<dyn AgentToolDispatcher>>, MobError> {
+    let view = if entry.fork_source.is_none() && customizer.is_some() {
+        load_resumed_member_view(session_service, session_id).await?
+    } else {
+        super::handle::ResumedMemberView::new(session_id.clone(), None)
+    };
+    let spec = rebuild_seat_resume_spec(mob_id, customizer, entry, &view, seat_build)?;
+    rebuild_own_overlay(mob_id, customizer, entry, session_id, &spec)
 }
 
 /// The resume request a rebuild of `entry` on its bound session

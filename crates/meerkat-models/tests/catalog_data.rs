@@ -1657,7 +1657,7 @@ mod schema {
                     .collect::<std::collections::BTreeSet<_>>()
             };
             assert_eq!(cache_enum("mode"), expected(&["implicit", "explicit"]));
-            assert_eq!(cache_enum("ttl"), expected(&["30m"]));
+            assert_eq!(cache_enum("ttl"), expected(&["30m", "12h"]));
             assert!(cache.get("minProperties").is_none());
 
             let keys = property_keys(&schema);
@@ -1674,6 +1674,77 @@ mod schema {
                     "{id} Responses metadata must not advertise {unsupported}"
                 );
             }
+        }
+    }
+
+    /// OpenAI's prompt-caching guide ("Summary of model differences"):
+    /// GPT-5.6 and later set the cache lifetime with
+    /// `prompt_cache_options.ttl`, `30m` (the default) or `12h`; GPT-5.5,
+    /// GPT-5.5 Pro and earlier models use `prompt_cache_retention` and have
+    /// no TTL control. Every OpenAI row is named here, so a new row has to
+    /// take a side.
+    #[test]
+    fn openai_prompt_cache_ttls_follow_the_gpt_56_and_later_split() {
+        use meerkat_core::model_profile::capabilities::OpenAiPromptCacheTtl;
+        let gpt_56_and_later = [
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6.1-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.6",
+        ];
+        let without_ttl_control = [
+            "gpt-5.5",
+            "gpt-5.5-pro",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.3-codex",
+            "gpt-live-1-codex",
+            "gpt-live-1",
+            "gpt-realtime-2",
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for caps in all_capabilities().filter(|caps| caps.provider == Provider::OpenAI) {
+            seen.insert(caps.id);
+            let ttls = caps
+                .openai_responses_params
+                .map(|params| params.prompt_cache_ttls)
+                .unwrap_or_default();
+            let schema = build_params_schema(caps);
+            let advertised = schema
+                .pointer("/properties/prompt_cache_options/properties/ttl/enum")
+                .cloned();
+            if gpt_56_and_later.contains(&caps.id) {
+                assert_eq!(
+                    ttls,
+                    [
+                        OpenAiPromptCacheTtl::ThirtyMinutes,
+                        OpenAiPromptCacheTtl::TwelveHours
+                    ],
+                    "{}",
+                    caps.id
+                );
+                assert_eq!(
+                    advertised,
+                    Some(serde_json::json!(["30m", "12h"])),
+                    "{}",
+                    caps.id
+                );
+            } else {
+                assert!(
+                    without_ttl_control.contains(&caps.id),
+                    "OpenAI row {} is in neither list",
+                    caps.id
+                );
+                assert!(ttls.is_empty(), "{} must accept no TTL", caps.id);
+                assert_eq!(advertised, None, "{} must advertise no TTL", caps.id);
+            }
+        }
+        for id in gpt_56_and_later.iter().chain(&without_ttl_control) {
+            assert!(seen.contains(id), "{id} is not an OpenAI catalog row");
         }
     }
 

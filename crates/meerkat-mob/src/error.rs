@@ -353,6 +353,104 @@ impl std::fmt::Display for MemberRuntimeDetachment {
     }
 }
 
+/// Why Core did not make a seated member ready for a host delivery that
+/// needed it (see [`MobError::MemberWakeRefused`]). A member whose restore
+/// failed is [`MobError::MemberRestoreFailed`] instead, and a non-member is
+/// [`MobError::MemberNotFound`]. Nothing was delivered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MemberWakeRefusal {
+    /// The member is being retired. Its token is the peer-message wire's,
+    /// `member_retiring`.
+    #[serde(rename = "member_retiring")]
+    Retiring,
+    /// The member is placed on a member host, which owns its materialization.
+    HostOwned,
+    /// The mob is not running (stopped, completed or destroyed).
+    MobNotRunning,
+    /// The mob is quiescing its lifecycle (completion or destroy).
+    LifecycleOriginFenced,
+    /// The mob is a candidate composition, which never materializes members.
+    NonAuthoritativeComposition,
+    /// The member's host has preparation pending for it (a first-boot row,
+    /// or its build preparation asked to be retried).
+    HostPreparationPending,
+    /// The member's restore could not proceed now and keeps its authority:
+    /// its durable resume gate was unavailable, a lifecycle operation on its
+    /// session (the takeover of its attachment) was still in flight, or the
+    /// session service could not serve it now (a store failure that clears
+    /// on its own, a busy session, unavailable runtime authority, a hosting
+    /// claim another owner holds, an external write authority that could not
+    /// be checked without waiting).
+    ResumeGateUnavailable,
+    /// The mob's wake bound (`MobBuilder::with_member_wake_timeout`) ended
+    /// before the member was ready. The member is dormant again.
+    WakeTimedOut,
+    /// The mob is shutting down and admits no new work.
+    AdmissionClosed,
+    /// The mob's actor exited while the wake waited.
+    MobUnavailable,
+}
+
+impl MemberWakeRefusal {
+    /// Whether the same delivery can succeed later without an operator
+    /// action. Every refusal is safe to retry: nothing was delivered.
+    pub fn is_retryable(self) -> bool {
+        match self {
+            Self::MobNotRunning
+            | Self::HostPreparationPending
+            | Self::ResumeGateUnavailable
+            | Self::WakeTimedOut
+            | Self::AdmissionClosed
+            | Self::MobUnavailable => true,
+            Self::Retiring
+            | Self::HostOwned
+            | Self::LifecycleOriginFenced
+            | Self::NonAuthoritativeComposition => false,
+        }
+    }
+
+    /// Stable snake_case token.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Retiring => "member_retiring",
+            Self::HostOwned => "host_owned",
+            Self::MobNotRunning => "mob_not_running",
+            Self::LifecycleOriginFenced => "lifecycle_origin_fenced",
+            Self::NonAuthoritativeComposition => "non_authoritative_composition",
+            Self::HostPreparationPending => "host_preparation_pending",
+            Self::ResumeGateUnavailable => "resume_gate_unavailable",
+            Self::WakeTimedOut => "wake_timed_out",
+            Self::AdmissionClosed => "admission_closed",
+            Self::MobUnavailable => "mob_unavailable",
+        }
+    }
+
+    /// The same refusal on the peer-message wire.
+    pub fn peer_refusal(self) -> meerkat_core::comms::PeerWakeRefusal {
+        use meerkat_core::comms::PeerWakeRefusal;
+        match self {
+            Self::Retiring => PeerWakeRefusal::MemberRetiring,
+            Self::HostOwned => PeerWakeRefusal::HostOwned,
+            Self::MobNotRunning => PeerWakeRefusal::MobNotRunning,
+            Self::LifecycleOriginFenced => PeerWakeRefusal::LifecycleOriginFenced,
+            Self::NonAuthoritativeComposition => PeerWakeRefusal::NonAuthoritativeComposition,
+            Self::HostPreparationPending => PeerWakeRefusal::HostPreparationPending,
+            Self::ResumeGateUnavailable => PeerWakeRefusal::ResumeGateUnavailable,
+            Self::WakeTimedOut => PeerWakeRefusal::WakeTimedOut,
+            Self::AdmissionClosed => PeerWakeRefusal::AdmissionClosed,
+            Self::MobUnavailable => PeerWakeRefusal::MobUnavailable,
+        }
+    }
+}
+
+impl std::fmt::Display for MemberWakeRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// The member registration hook call that refused a member's registration.
 /// A restored member its host refused stays Broken with this call recorded
 /// (see [`MobError::MemberRegistrationRefused`]).
@@ -828,6 +926,35 @@ pub enum MobError {
         session_id: Option<meerkat_core::types::SessionId>,
         reason: String,
         hold: Option<meerkat_core::service::DurableResumeHold>,
+    },
+
+    /// Member `member_id` is seated but was not materialized in this
+    /// process, and the wake the delivery needed was refused or did not
+    /// finish. Nothing was delivered, so a retry cannot duplicate it;
+    /// [`MemberWakeRefusal::is_retryable`] says whether a retry can succeed.
+    #[error("member {member_id} was not made ready for the delivery: {refusal}")]
+    MemberWakeRefused {
+        member_id: AgentIdentity,
+        refusal: MemberWakeRefusal,
+    },
+
+    /// A resume of `member_id` on session `session_id` would reuse the
+    /// session's live actor, but that actor does not run the requested auth
+    /// binding: the binding its session recorded (`recorded`, `None` when it
+    /// recorded none) is neither `requested` nor the form a build of
+    /// `requested` records. A live actor is never reused on another binding.
+    /// Nothing was changed; once that actor's runtime is stopped or released,
+    /// the resume rebuilds the member on the requested binding.
+    #[error(
+        "member {member_id} cannot reuse the live actor of session {session_id}: it runs auth binding {}, not the requested {}",
+        display_auth_binding(.recorded.as_deref()),
+        display_auth_binding(Some(.requested.as_ref()))
+    )]
+    MemberAuthBindingConflict {
+        member_id: AgentIdentity,
+        session_id: meerkat_core::SessionId,
+        requested: Box<meerkat_core::AuthBindingRef>,
+        recorded: Option<Box<meerkat_core::AuthBindingRef>>,
     },
 
     /// The mob's startup recovery could not restore member `member_id`'s
@@ -2354,6 +2481,23 @@ impl From<BridgeRejectionReply> for MobError {
     }
 }
 
+/// An auth binding as an error message names it: `realm/binding`, with its
+/// profile when it names one, or `none`.
+fn display_auth_binding(binding: Option<&meerkat_core::AuthBindingRef>) -> String {
+    match binding {
+        None => "none".to_string(),
+        Some(binding) => match binding.profile.as_ref() {
+            Some(profile) => format!(
+                "{}/{}@{}",
+                binding.realm.as_str(),
+                binding.binding.as_str(),
+                profile.as_str()
+            ),
+            None => format!("{}/{}", binding.realm.as_str(), binding.binding.as_str()),
+        },
+    }
+}
+
 impl MobError {
     /// Structured-data `kind` of [`Self::held_before_activation`].
     pub const HELD_BEFORE_ACTIVATION_KIND: &'static str = "mob_held_before_activation";
@@ -2741,6 +2885,26 @@ impl MobError {
                 "authority_retained": true,
                 "required_action": "reload_member_registration",
             })),
+            Self::MemberWakeRefused { member_id, refusal } => Some(serde_json::json!({
+                "kind": "mob_member_wake_refused",
+                "member_id": member_id.as_str(),
+                "refusal": refusal.as_str(),
+                "retryable": refusal.is_retryable(),
+                "delivered": false,
+            })),
+            Self::MemberAuthBindingConflict {
+                member_id,
+                session_id,
+                requested,
+                recorded,
+            } => Some(serde_json::json!({
+                "kind": "member_auth_binding_conflict",
+                "member_id": member_id.as_str(),
+                "session_id": session_id.to_string(),
+                "requested": requested,
+                "recorded": recorded,
+                "retryable": false,
+            })),
             Self::MemberAdmissionBacklogFull { member_id, depth } => Some(serde_json::json!({
                 "kind": "mob_member_admission_backlog_full",
                 "member_id": member_id.as_str(),
@@ -2841,6 +3005,14 @@ impl MobError {
         match self {
             Self::SessionError(error) => error.durable_resume_hold(),
             Self::MemberRestoreFailed { hold, .. } => *hold,
+            // A resume its session owner refused at an unprovable committed
+            // boundary: the durable tail is withheld from resume (held for,
+            // or refused by, its recovery) and kept intact, as a start
+            // reported it before 0.9.7 (`MemberDurableTailUnprovable`).
+            Self::SessionUnavailableForResume {
+                reason: SessionResumeUnavailableReason::CommittedBoundaryUnprovable,
+                ..
+            } => Some(meerkat_core::service::DurableResumeHold::TailHeldForRecovery),
             Self::SharedRetirementFailure(error)
             | Self::SharedLifecycleFailure(error)
             | Self::MemberRetirementStuck { cause: error, .. }
@@ -2921,6 +3093,31 @@ impl MobError {
                 Self::MemberReloadRequired { .. } => {
                     Some(meerkat_contracts::ErrorCode::MemberReloadRequired)
                 }
+                // A refused member wake: the member's runtime could not be
+                // made available now (retry later), is held by its own
+                // lifecycle (busy), or is never materialized here.
+                // The member will not run for this delivery: its mob is not
+                // running or is quiescing, or the member is being retired.
+                // The data's `retryable` says whether a later delivery can
+                // succeed.
+                Self::MemberWakeRefused { refusal, .. } => Some(match refusal {
+                    MemberWakeRefusal::Retiring
+                    | MemberWakeRefusal::LifecycleOriginFenced
+                    | MemberWakeRefusal::MobNotRunning => {
+                        meerkat_contracts::ErrorCode::SessionNotRunning
+                    }
+                    MemberWakeRefusal::HostOwned
+                    | MemberWakeRefusal::NonAuthoritativeComposition => {
+                        meerkat_contracts::ErrorCode::CapabilityUnavailable
+                    }
+                    MemberWakeRefusal::HostPreparationPending
+                    | MemberWakeRefusal::ResumeGateUnavailable
+                    | MemberWakeRefusal::WakeTimedOut
+                    | MemberWakeRefusal::AdmissionClosed
+                    | MemberWakeRefusal::MobUnavailable => {
+                        meerkat_contracts::ErrorCode::SessionRuntimeUnavailable
+                    }
+                }),
                 Self::SupervisorProtocolUpgradeRequired { .. } => {
                     Some(meerkat_contracts::ErrorCode::SupervisorRotationIncomplete)
                 }
@@ -2928,6 +3125,11 @@ impl MobError {
                     Some(meerkat_contracts::ErrorCode::ForkInstructionRefused)
                 }
                 Self::ForkContextTooLarge { .. } => {
+                    Some(meerkat_contracts::ErrorCode::InvalidParams)
+                }
+                // The caller named a binding the session's live actor does
+                // not run.
+                Self::MemberAuthBindingConflict { .. } => {
                     Some(meerkat_contracts::ErrorCode::InvalidParams)
                 }
                 Self::MemberSendIdempotency { refusal, .. } => refusal.error_code(),
@@ -3059,6 +3261,16 @@ impl MobError {
             | Self::MemberStartupRecoveryFailed { cause: error, .. } => error.failure_class(),
             // A failed probe is classified by what failed it.
             Self::HostFeaturesProbeFailed { cause, .. } => cause.failure_class(),
+            // A refused member wake delivered nothing: a retryable refusal is
+            // resubmitted (the next delivery wakes the member again), a final
+            // one is the mob's answer.
+            Self::MemberWakeRefused { refusal, .. } => {
+                if refusal.is_retryable() {
+                    MobFailureClass::Transport
+                } else {
+                    MobFailureClass::MobRejected
+                }
+            }
             // The close's answer: AdmissionClosed falls to MobRejected.
             Self::DurabilityFailStop { .. } => MobFailureClass::MobRejected,
             Self::MobNotFound(_)

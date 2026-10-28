@@ -15,6 +15,18 @@ pub(super) enum CanonicalMemberStatus {
     Completed,
 }
 
+impl CanonicalMemberStatus {
+    const fn to_public(self) -> MobMemberStatus {
+        match self {
+            Self::Unknown => MobMemberStatus::Unknown,
+            Self::Active => MobMemberStatus::Active,
+            Self::Retiring => MobMemberStatus::Retiring,
+            Self::Broken => MobMemberStatus::Broken,
+            Self::Completed => MobMemberStatus::Completed,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct CanonicalMemberSnapshotMaterial {
     pub(super) member_present: bool,
@@ -35,15 +47,8 @@ pub(super) struct CanonicalMemberSnapshotMaterial {
 
 impl CanonicalMemberSnapshotMaterial {
     pub(super) fn to_snapshot(&self) -> MobMemberSnapshot {
-        let status = match self.status {
-            CanonicalMemberStatus::Unknown => MobMemberStatus::Unknown,
-            CanonicalMemberStatus::Active => MobMemberStatus::Active,
-            CanonicalMemberStatus::Retiring => MobMemberStatus::Retiring,
-            CanonicalMemberStatus::Broken => MobMemberStatus::Broken,
-            CanonicalMemberStatus::Completed => MobMemberStatus::Completed,
-        };
         MobMemberSnapshot {
-            status,
+            status: self.status.to_public(),
             agent_identity: self.agent_identity.clone(),
             agent_runtime_id: self.agent_runtime_id.clone(),
             fence_token: self.fence_token,
@@ -144,6 +149,18 @@ impl MobMemberLifecycleProjection {
         lifecycle: &mob_dsl::MobMemberLifecycleMaterial,
     ) -> bool {
         lifecycle.status == mob_dsl::MobMemberLifecycleStatus::Active
+    }
+
+    /// The public status and finality a member's snapshot carries: both come
+    /// from its machine lifecycle alone, so a reader that needs only these
+    /// two fields reads them here, with no session observation.
+    pub(super) fn status_and_finality(
+        lifecycle: &mob_dsl::MobMemberLifecycleMaterial,
+    ) -> (MobMemberStatus, bool) {
+        (
+            Self::canonical_status(lifecycle.status).to_public(),
+            lifecycle.is_terminal(),
+        )
     }
 
     pub(super) fn materialize(input: MobMemberLifecycleInput) -> CanonicalMemberSnapshotMaterial {

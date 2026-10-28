@@ -335,7 +335,9 @@ pub trait OperationReviewObserver: Send + Sync {
 
 /// Owner-issued attempt handle bound to the exact operation binding and the
 /// original admitted work. Not cloneable, not serializable, not constructible
-/// outside the approval owner; the raw id never leaves core.
+/// outside the approval owner; the raw id never leaves core. Only the
+/// approval owner duplicates one (`twin`), for the entered state of a spent
+/// attempt.
 pub(crate) struct ReviewAttemptHandle {
     id: Arc<str>,
     binding: PreparedAuthorizationBinding,
@@ -367,6 +369,19 @@ impl ReviewAttemptHandle {
 
     pub(super) fn attempt_ref(&self) -> ReviewAttemptRef {
         ReviewAttemptRef(Arc::clone(&self.id))
+    }
+
+    /// The same attempt, bound to the same operation and work. Only the
+    /// approval owner calls it: the consent owner, for the entered state of a
+    /// spent consent attempt (the spend removed the candidate, and its own
+    /// handle, from the owner's live custody), kept until the attempt is
+    /// released.
+    pub(super) fn twin(&self) -> Self {
+        Self {
+            id: Arc::clone(&self.id),
+            binding: self.binding.clone(),
+            work: self.work.clone(),
+        }
     }
 
     fn attribution(&self) -> ReviewOperationAttribution {
@@ -1455,8 +1470,17 @@ enum ReviewEntryState {
     /// A fresh attempt of a retained R3 candidate holding an authenticated
     /// human approval; the leaf spends it once.
     Consent(RetainedConsent),
+    /// Spent, and its attempt handed back: the admitting dispatch ended, or
+    /// the spend's final check refused after its commit, so nothing entered.
+    /// A second spend refuses as already consumed.
     Consumed,
     Settled,
+    /// The effect entered with this entry's one spend. The spent attempt
+    /// stays registered with its owner as `Used`, the entered state, until
+    /// the admitting dispatch ends and hands it back, leaving `Consumed`
+    /// (the owner keeps it `Used` while an admitted step is in flight). A
+    /// second spend refuses as already consumed.
+    Entered(EnteredAttempt),
 }
 
 impl Drop for ReviewEntryInner {
@@ -1478,6 +1502,7 @@ impl fmt::Debug for ReviewEntry {
             ReviewEntryState::Consent(_) => "ReviewEntry(Consent)",
             ReviewEntryState::Consumed => "ReviewEntry(Consumed)",
             ReviewEntryState::Settled => "ReviewEntry(Settled)",
+            ReviewEntryState::Entered(_) => "ReviewEntry(Entered)",
         })
     }
 }
@@ -1504,6 +1529,43 @@ impl ReviewEntry {
 
     pub(crate) fn same_entry(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// What this entry says about the effect its dispatch entered: the basis
+    /// of the dispatch's entered witness. Reads the entry only; it spends,
+    /// releases and observes nothing.
+    pub(crate) fn entered_basis(&self) -> EnteredBasis {
+        let inner = self.0.lock();
+        match &inner.state {
+            ReviewEntryState::NotRequired => EnteredBasis::Unreviewed,
+            ReviewEntryState::Entered(entered) => {
+                match (entered.handle.as_ref(), inner.review.as_ref()) {
+                    (Some(handle), Some(review)) => EnteredBasis::Entered {
+                        spent: entered.spent.clone(),
+                        steps: EnteredSteps {
+                            entry: self.clone(),
+                            review: Arc::clone(review),
+                            attempt: Arc::new(handle.twin()),
+                        },
+                    },
+                    // Handed back already: nothing is entered any more.
+                    _ => EnteredBasis::Ended,
+                }
+            }
+            ReviewEntryState::Retained(_) | ReviewEntryState::Consent(_) => EnteredBasis::NotSpent,
+            ReviewEntryState::Consumed | ReviewEntryState::Settled => EnteredBasis::Ended,
+        }
+    }
+
+    /// Reports settled by a later step of the entered effect, deferred with
+    /// the spend's own `Used` projection: they run once the admitting
+    /// dispatch ended and no entered custody is held, never inside a step
+    /// (which may run under a store's lock).
+    fn defer(&self, reports: SettledReports) {
+        self.0
+            .lock()
+            .deferred
+            .extend(PendingObservations::default().with_reports(reports));
     }
 
     /// Test adapter: the check point's settled projection.
@@ -1629,6 +1691,14 @@ impl ReviewEntry {
                 // timed-out attempt) stays with its owner, still spendable
                 // by a later fresh attempt; only this dispatch is closed.
                 ReviewEntryState::Consent(_) => {}
+                // The entered effect's dispatch ended: its spent attempt is
+                // handed back (never waiting), so no later step is admitted;
+                // the owner releases it once no admitted step is in flight.
+                // A second spend still refuses as already consumed.
+                ReviewEntryState::Entered(mut entered) => {
+                    pending.extend(entered.release());
+                    inner.state = ReviewEntryState::Consumed;
+                }
                 // A spent or not-required entry keeps its state: nested or
                 // late R1 staging remains a plain authorization check, and a
                 // second spend still refuses as already consumed.
@@ -1663,6 +1733,12 @@ pub struct ReviewedEntryCustody(Option<ReviewEntry>);
 impl ReviewedEntryCustody {
     pub(crate) fn none() -> Self {
         Self(None)
+    }
+
+    /// The entry this custody holds, `None` for an inert custody (an
+    /// unreviewed entry, which names no dispatch).
+    pub(crate) fn entry(&self) -> Option<&ReviewEntry> {
+        self.0.as_ref()
     }
 }
 
@@ -1711,6 +1787,76 @@ impl Drop for ReviewDispatchGuard {
     }
 }
 
+/// What a dispatch's own review entry says about the effect it entered.
+pub(crate) enum EnteredBasis {
+    /// Not reviewed (R1): nothing was spent and no attempt exists.
+    Unreviewed,
+    /// Entered with the entry's one spend: the decision spent, and the
+    /// generated owner's custody of the spent attempt for the effect's later
+    /// steps.
+    Entered {
+        spent: PreparedOperationCheck,
+        steps: EnteredSteps,
+    },
+    /// Not spent: a retained review allow or consent.
+    NotSpent,
+    /// The admitting dispatch ended, or the spend entered nothing.
+    Ended,
+}
+
+/// Custody of one entered effect's spent attempt for the effect's later
+/// steps: each is admitted by the generated owner (`AdmitEnteredStep`) and
+/// finished when its guard drops (`FinishEnteredStep`). Neither spends, and
+/// this custody keeps nothing registered: the attempt stays `Used` only
+/// while the owner says so (the admitting dispatch is live or an admitted
+/// step is in flight).
+#[derive(Clone)]
+pub(crate) struct EnteredSteps {
+    entry: ReviewEntry,
+    review: Arc<BoundOperationReview>,
+    attempt: Arc<ReviewAttemptHandle>,
+}
+
+impl EnteredSteps {
+    /// Admit one later step of the entered effect for exactly `binding` and
+    /// `work`, never waiting: a held owner is `Unavailable` at once, and the
+    /// review inputs queued behind an earlier holder are settled into the
+    /// owner before it decides. The step is in flight until the returned
+    /// guard drops. Every report this settles is deferred with the entry's
+    /// `Used` projection, so none runs inside the step.
+    pub(crate) fn admit(
+        &self,
+        binding: &crate::authorization::PreparedAuthorizationBinding,
+        work: &WorkAuthorizationContext,
+    ) -> Result<EnteredStep, ReviewOwnerError> {
+        let (admitted, reports) =
+            self.review
+                .approvals
+                .admit_entered_step(&self.attempt, binding, work);
+        self.entry.defer(reports);
+        admitted.map(|()| EnteredStep(self.clone()))
+    }
+}
+
+/// One admitted step of an entered effect, in flight until dropped. Its drop
+/// finishes the step (`FinishEnteredStep`) on every exit path, an unwind
+/// included, without waiting: a held owner gets the finish queued for its
+/// next holder, so no finish is lost. The last finish of a closing effect
+/// releases its attempt.
+#[must_use = "the step is in flight until the guard drops"]
+pub(crate) struct EnteredStep(EnteredSteps);
+
+impl Drop for EnteredStep {
+    fn drop(&mut self) {
+        let reports = self
+            .0
+            .review
+            .approvals
+            .finish_entered_step(self.0.attempt.id());
+        self.0.entry.defer(reports);
+    }
+}
+
 type Transition = (
     ReviewEntryState,
     Result<(), ReviewAdmissionRefusal>,
@@ -1718,7 +1864,7 @@ type Transition = (
 );
 
 fn check_state(current: ReviewEntryState, entering: &PreparedOperationCheck) -> Transition {
-    use ReviewEntryState::{Consent, Consumed, NotRequired, Retained, Settled};
+    use ReviewEntryState::{Consent, Consumed, Entered, NotRequired, Retained, Settled};
     match (entering.review_tier(), current) {
         // Identity, not tier: the consented decision is the entering one (an
         // R3 candidate, or an R2 one a human took over).
@@ -1741,6 +1887,7 @@ fn check_state(current: ReviewEntryState, entering: &PreparedOperationCheck) -> 
         // R3 catch-all: a spent clone stays spent (its spend refuses as
         // already consumed) and an ended dispatch's clone stays ended.
         (_, Consumed) => (Consumed, Ok(()), PendingObservations::default()),
+        (_, Entered(entered)) => (Entered(entered), Ok(()), PendingObservations::default()),
         (_, Settled) => (
             Settled,
             Err(unavailable(ReviewUnavailableKind::DispatchEnded).into()),
@@ -1807,16 +1954,22 @@ fn consume_state(
     PendingObservations,
     PendingObservations,
 ) {
-    use ReviewEntryState::{Consent, Consumed, NotRequired, Retained, Settled};
+    use ReviewEntryState::{Consent, Consumed, Entered, NotRequired, Retained, Settled};
     let none = PendingObservations::default;
     match current {
         Consent(consent) => match consent.consume(entering) {
-            Ok(used) => (Consumed, Ok(()), none(), used),
+            Ok((used, entered)) => (Entered(entered), Ok(()), none(), used),
             Err(refused) => (*refused).into_transition(),
         },
         NotRequired => (NotRequired, Ok(()), none(), none()),
         Consumed => (
             Consumed,
+            Err(unsatisfied(ReviewUnsatisfiedKind::AlreadyConsumed).into()),
+            none(),
+            none(),
+        ),
+        Entered(entered) => (
+            Entered(entered),
             Err(unsatisfied(ReviewUnsatisfiedKind::AlreadyConsumed).into()),
             none(),
             none(),
@@ -1844,7 +1997,7 @@ fn consume_state(
                 return (Settled, Err(error.into()), pending, none());
             }
             match retained.consume(entering) {
-                Ok(used) => (Consumed, Ok(()), none(), used),
+                Ok((used, entered)) => (Entered(entered), Ok(()), none(), used),
                 Err(refused) => (*refused).into_transition(),
             }
         }
@@ -1880,12 +2033,13 @@ impl RetainedConsent {
     }
 
     /// Spend the decision once for the exact entering decision. Returns the
-    /// deferred `Used` projection and notice; the caller must not deliver
-    /// them before the effect.
+    /// deferred `Used` projection and notice, which the caller must not
+    /// deliver before the effect, and the attempt the spend left registered
+    /// (`Used`) for the entered effect, until its dispatch ends.
     fn consume(
         &self,
         entering: &PreparedOperationCheck,
-    ) -> Result<PendingObservations, Box<SpendRefused>> {
+    ) -> Result<(PendingObservations, EnteredAttempt), Box<SpendRefused>> {
         let (entered, spent, mut projections) = self.review.approvals.consume_consent_for_entry(
             &self.approval_id,
             &self.candidate,
@@ -1899,12 +2053,92 @@ impl RetainedConsent {
             projections.notify(&self.candidate, &self.approval_id, ConsentNoticeKind::Used);
         }
         match entered {
-            Ok(()) => Ok(PendingObservations::consent(projections)),
-            Err(refusal) => Err(Box::new(SpendRefused {
-                refusal: refusal.into_entry_refusal(),
-                pending: PendingObservations::consent(projections),
-                spent,
-            })),
+            Ok(()) => Ok((
+                PendingObservations::consent(projections),
+                EnteredAttempt::new(
+                    Arc::clone(&self.review),
+                    self.candidate.entered_attempt(),
+                    entering.clone(),
+                ),
+            )),
+            Err(refusal) => {
+                let mut pending = PendingObservations::consent(projections);
+                if spent {
+                    // Committed, but nothing entered: its attempt stays
+                    // registered until released, so release it now.
+                    pending.extend(
+                        EnteredAttempt::new(
+                            Arc::clone(&self.review),
+                            self.candidate.entered_attempt(),
+                            entering.clone(),
+                        )
+                        .release(),
+                    );
+                }
+                Err(Box::new(SpendRefused {
+                    refusal: refusal.into_entry_refusal(),
+                    pending,
+                    spent,
+                }))
+            }
+        }
+    }
+}
+
+/// The attempt one entry's spend left registered with its owner as `Used`:
+/// the entered state of that effect. The admitting dispatch's end hands it
+/// back (`ReleaseReview`, never waiting): the owner releases the attempt
+/// when no admitted step of the effect is in flight, and otherwise closes
+/// the effect, so no new step is admitted and the last admitted step's
+/// finish releases it. It is handed back at once when the spend's final
+/// check refused after its commit, so nothing entered. Dropped unreleased
+/// (its entry dropped with no dispatch guard), it is handed back then.
+pub(crate) struct EnteredAttempt {
+    review: Arc<BoundOperationReview>,
+    /// `None` once released.
+    handle: Option<ReviewAttemptHandle>,
+    /// The decision this entry's one spend entered: its review tier is the
+    /// entered tier and its validity bounds every later step of the effect.
+    spent: PreparedOperationCheck,
+}
+
+impl EnteredAttempt {
+    fn new(
+        review: Arc<BoundOperationReview>,
+        handle: ReviewAttemptHandle,
+        spent: PreparedOperationCheck,
+    ) -> Self {
+        Self {
+            review,
+            handle: Some(handle),
+            spent,
+        }
+    }
+
+    /// Hand the spent attempt back to its owner (`ReleaseReview`) without
+    /// waiting: settled now when the owner is free, otherwise queued for its
+    /// next commit. The owner releases it, or closes its effect while
+    /// admitted steps are in flight (the last one's finish releases it).
+    /// Returns the reports of other disposals settled here, which the caller
+    /// delivers outside every lock.
+    fn release(&mut self) -> PendingObservations {
+        let Some(handle) = self.handle.take() else {
+            return PendingObservations::default();
+        };
+        // A released `Used` attempt has no projection of its own: its `Used`
+        // was observed at the spend.
+        let (_, reports) = self.review.approvals.dispose_review(handle.id(), None, || {
+            Box::new(|_: Result<ReviewAttemptStatus, ReviewOwnerError>| {})
+        });
+        PendingObservations::default().with_reports(reports)
+    }
+}
+
+impl Drop for EnteredAttempt {
+    fn drop(&mut self) {
+        if self.handle.is_some() {
+            let pending = self.release();
+            self.review.deliver(pending);
         }
     }
 }
@@ -1983,17 +2217,19 @@ impl RetainedReview {
         if let Some(status) = refused.committed {
             // A committed spend refused by its final check after the owner
             // exit: the attempt stays spent (its `Used` is reported now, as
-            // nothing will enter) and nothing is refunded.
-            let pending = match self.handle.take() {
+            // nothing will enter) and nothing is refunded. Nothing entered,
+            // so the spent attempt is released now (never waiting).
+            let mut pending = match self.handle.as_ref() {
                 Some(handle) => PendingObservations::one(BoundOperationReview::observation(
-                    &handle,
+                    handle,
                     &self.tool_call_id,
                     status,
                     None,
                 )),
                 None => PendingObservations::default(),
-            }
-            .with_reports(refused.reports);
+            };
+            pending.extend(self.dispose(None));
+            let pending = pending.with_reports(refused.reports);
             let refusal = match refused.error {
                 ReservedReviewError::FinalCheck(FinalCheckFailure::AuthorityChanged(error)) => {
                     EntryRefusal::Authority {
@@ -2219,14 +2455,16 @@ impl RetainedReview {
         self.dispose(None)
     }
 
-    /// Spend the allow once for the exact entering decision and its work.
-    /// The spend and the attempt's disposal share one reservation, so nothing
-    /// waits on the owner between them and the effect. Returns the deferred
-    /// `Used` projection; the caller must not deliver it before the effect.
+    /// Spend the allow once for the exact entering decision and its work,
+    /// under one reservation, so nothing waits on the owner between the
+    /// spend and the effect. Returns the deferred `Used` projection, which
+    /// the caller must not deliver before the effect, and the attempt the
+    /// spend left registered (`Used`) for the entered effect, until its
+    /// dispatch ends.
     fn consume(
         &mut self,
         entering: &PreparedOperationCheck,
-    ) -> Result<PendingObservations, Box<SpendRefused>> {
+    ) -> Result<(PendingObservations, EnteredAttempt), Box<SpendRefused>> {
         let Some(handle) = self.handle.as_ref() else {
             return Err(Box::new(SpendRefused {
                 refusal: unavailable(ReviewUnavailableKind::OwnerUnavailable).into(),
@@ -2249,11 +2487,17 @@ impl RetainedReview {
             Ok((status, reports)) => {
                 let used =
                     BoundOperationReview::observation(handle, &self.tool_call_id, status, None);
-                // Already disposed under the spend's reservation.
-                self.handle = None;
                 // `Used` and the reports this reservation settled are
                 // delivered together, after the effect.
-                Ok(PendingObservations::one(used).with_reports(reports))
+                let pending = PendingObservations::one(used).with_reports(reports);
+                // The attempt now belongs to the entered effect: registered
+                // as `Used` until its dispatch ends and releases it.
+                let entered = EnteredAttempt {
+                    review: Arc::clone(&self.review),
+                    handle: self.handle.take(),
+                    spent: entering.clone(),
+                };
+                Ok((pending, entered))
             }
             Err(refused) => {
                 let spent = refused.committed.is_some();
@@ -3220,9 +3464,39 @@ mod reservation_tests {
         h.release(holder);
     }
 
-    /// A successful spend takes the owner's reservation exactly once: the
-    /// spend and the attempt's disposal share it. With the owner then held,
-    /// the effect, its custody and the dispatch end complete without it.
+    /// The spent attempt this entry holds as its entered state, if any.
+    fn entered_attempt_id(entry: &ReviewEntry) -> Option<String> {
+        match &entry.0.lock().state {
+            ReviewEntryState::Entered(entered) => {
+                entered.handle.as_ref().map(|handle| handle.id().to_owned())
+            }
+            _ => None,
+        }
+    }
+
+    /// The generated owner's answer for one later step of `attempt`'s
+    /// effect: `Ok(Used)` while it is registered and open. An admitted probe
+    /// step is finished at once, which leaves the owner as it was.
+    fn step_answer(
+        approvals: &ApprovalService,
+        attempt: &str,
+    ) -> Result<ReviewAttemptStatus, ReviewOwnerError> {
+        let admitted =
+            approvals.apply_review(|authority| authority.admit_entered_step(attempt.to_owned()));
+        if admitted.is_ok() {
+            approvals
+                .apply_review(|authority| authority.finish_entered_step(attempt.to_owned()))
+                .expect("the probe step finishes");
+        }
+        admitted
+    }
+
+    /// A successful spend takes the owner's reservation exactly once. It no
+    /// longer disposes the attempt there: the attempt stays registered as
+    /// `Used`, the entered state of the effect, and the admitting dispatch's
+    /// end releases it. With the owner then held, the effect, its custody
+    /// and the dispatch end complete without it: the release is queued, and
+    /// applied once the owner is free.
     #[tokio::test]
     async fn successful_spend_takes_the_owner_lock_once_before_the_effect() {
         let h = harness();
@@ -3236,7 +3510,13 @@ mod reservation_tests {
         assert_eq!(
             h.approvals.review_lock_acquisitions.load(Ordering::SeqCst) - before,
             1,
-            "the spend and the attempt's disposal share one reservation"
+            "the spend takes the owner's reservation once"
+        );
+        let attempt = entered_attempt_id(&entry).expect("the spend leaves its attempt entered");
+        assert_eq!(
+            step_answer(&h.approvals, &attempt),
+            Ok(ReviewAttemptStatus::Used),
+            "registered as Used until the dispatch ends"
         );
         let holder = h.hold_reservation();
         drop(custody);
@@ -3245,7 +3525,288 @@ mod reservation_tests {
             observer.statuses().last().copied(),
             Some((ReviewAttemptStatus::Used, None))
         );
+        assert_eq!(
+            entered_attempt_id(&entry),
+            None,
+            "the dispatch end handed the release to the owner"
+        );
         h.release(holder);
+        assert_eq!(
+            step_answer(&h.approvals, &attempt),
+            Err(ReviewOwnerError::Rejected(
+                crate::generated::approval_lifecycle::ApprovalLifecycleRejectionReason::NotFound
+            )),
+            "the queued release applied once the owner was free"
+        );
+    }
+
+    /// This entry's custody of its spent attempt for the effect's later steps.
+    fn entered_steps(entry: &ReviewEntry) -> EnteredSteps {
+        match entry.entered_basis() {
+            EnteredBasis::Entered { steps, .. } => Some(steps),
+            EnteredBasis::Unreviewed | EnteredBasis::NotSpent | EnteredBasis::Ended => None,
+        }
+        .expect("the spend left the effect entered")
+    }
+
+    /// At the owner: the admitting dispatch is cancelled
+    /// while a step admitted under the entered effect is still in flight (a
+    /// store commit blocked inside it). The attempt stays registered as
+    /// `Used`, closing: a new step and a second spend are refused, and `Used`
+    /// is not observed. The blocked step then completes and its finish
+    /// releases the attempt; `Used` is delivered once the effect's custody
+    /// is dropped.
+    #[tokio::test]
+    async fn a_dispatch_cancelled_during_a_step_keeps_the_attempt_until_the_step_ends() {
+        use crate::generated::approval_lifecycle::ApprovalLifecycleRejectionReason as Reason;
+        let h = harness();
+        let (review, observer) = h.review(Arc::new(ImmediateAllow), DEADLINE);
+        let entry = admit(&review, &h.check, &h.work)
+            .await
+            .expect("allowed and retained");
+        let guard = ReviewDispatchGuard::new(entry.clone());
+        let custody = entry.consume_held(&h.check).expect("spend");
+        let attempt = entered_attempt_id(&entry).expect("the spend leaves its attempt entered");
+        let steps = entered_steps(&entry);
+        let blocked = steps
+            .admit(h.check.binding(), &h.work)
+            .expect("a step while the dispatch is live");
+
+        drop(guard);
+        assert_eq!(
+            step_answer(&h.approvals, &attempt),
+            Err(ReviewOwnerError::Rejected(Reason::Expired)),
+            "still registered as Used and closing"
+        );
+        assert_eq!(
+            steps.admit(h.check.binding(), &h.work).err(),
+            Some(ReviewOwnerError::Rejected(Reason::Expired)),
+            "a step after the dispatch end refuses as ended"
+        );
+        assert_eq!(
+            h.approvals
+                .apply_review(|authority| authority.consume_review_for_entry(attempt.clone())),
+            Err(ReviewOwnerError::Rejected(Reason::AlreadyDecided)),
+            "the review is still in use: a second spend refuses"
+        );
+        assert!(!observer.used(), "Used waits for the work");
+
+        drop(blocked);
+        assert_eq!(
+            step_answer(&h.approvals, &attempt),
+            Err(ReviewOwnerError::Rejected(Reason::NotFound)),
+            "the last step's finish released the attempt"
+        );
+        assert!(!observer.used(), "the effect's custody is still held");
+        drop(custody);
+        assert_eq!(
+            observer
+                .statuses()
+                .iter()
+                .filter(|(status, _)| *status == ReviewAttemptStatus::Used)
+                .count(),
+            1,
+            "Used once, after the work"
+        );
+    }
+
+    /// The dispatch end's hand-back, queued behind a held owner and not yet
+    /// settled when the owner frees (seeded under a raw guard, as a reader's
+    /// race leaves it), is settled into the owner by the next step's own
+    /// reservation before the admission: the generated owner alone decides,
+    /// and no step is admitted after the dispatch ended.
+    #[tokio::test]
+    async fn a_queued_dispatch_end_is_settled_before_a_step_is_admitted() {
+        use crate::generated::approval_lifecycle::ApprovalLifecycleRejectionReason as Reason;
+        let h = harness();
+        let (review, observer) = h.review(Arc::new(ImmediateAllow), DEADLINE);
+        let entry = admit(&review, &h.check, &h.work)
+            .await
+            .expect("allowed and retained");
+        let guard = ReviewDispatchGuard::new(entry.clone());
+        let custody = entry.consume_held(&h.check).expect("spend");
+        let steps = entered_steps(&entry);
+        {
+            let state = h.approvals.state.write();
+            guard.complete();
+            assert_eq!(
+                h.approvals.queued_disposals.lock().len(),
+                1,
+                "the hand-back is queued behind the held owner"
+            );
+            drop(state);
+        }
+        assert_eq!(
+            h.approvals.queued_disposals.lock().len(),
+            1,
+            "nothing settled it yet"
+        );
+        assert_eq!(
+            steps.admit(h.check.binding(), &h.work).err(),
+            Some(ReviewOwnerError::Rejected(Reason::NotFound)),
+            "the queued hand-back released the attempt first"
+        );
+        assert!(h.approvals.queued_disposals.lock().is_empty());
+        drop(custody);
+        assert!(observer.used());
+    }
+
+    /// While the owner is held a step is unavailable at once (never
+    /// admitted, never waiting); once the queued dispatch end settles, a
+    /// step is refused as ended.
+    #[tokio::test]
+    async fn a_step_after_a_queued_dispatch_end_is_never_admitted() {
+        use crate::generated::approval_lifecycle::ApprovalLifecycleRejectionReason as Reason;
+        let h = harness();
+        let (review, _observer) = h.review(Arc::new(ImmediateAllow), DEADLINE);
+        let entry = admit(&review, &h.check, &h.work)
+            .await
+            .expect("allowed and retained");
+        let guard = ReviewDispatchGuard::new(entry.clone());
+        let _custody = entry.consume_held(&h.check).expect("spend");
+        let steps = entered_steps(&entry);
+        let holder = h.hold_reservation();
+        guard.complete();
+        assert_eq!(
+            steps.admit(h.check.binding(), &h.work).err(),
+            Some(ReviewOwnerError::Unavailable),
+            "a held owner admits nothing"
+        );
+        assert!(!holder.is_finished(), "refused while the owner was held");
+        h.release(holder);
+        assert_eq!(
+            steps.admit(h.check.binding(), &h.work).err(),
+            Some(ReviewOwnerError::Rejected(Reason::NotFound)),
+            "released by the queued hand-back: never admitted after the end"
+        );
+    }
+
+    /// A step's finish behind a held owner is queued, never lost: with the
+    /// dispatch's hand-back queued before or after it, the holder settles
+    /// both in order and the attempt is released exactly once, never before
+    /// its step finished.
+    #[tokio::test]
+    async fn a_finish_behind_a_held_owner_is_queued_and_releases_once() {
+        use crate::generated::approval_lifecycle::ApprovalLifecycleRejectionReason as Reason;
+        for end_first in [false, true] {
+            let h = harness();
+            let (review, observer) = h.review(Arc::new(ImmediateAllow), DEADLINE);
+            let entry = admit(&review, &h.check, &h.work)
+                .await
+                .expect("allowed and retained");
+            let guard = ReviewDispatchGuard::new(entry.clone());
+            let custody = entry.consume_held(&h.check).expect("spend");
+            let attempt = entered_attempt_id(&entry).expect("entered");
+            let steps = entered_steps(&entry);
+            let step = steps
+                .admit(h.check.binding(), &h.work)
+                .expect("a step while the dispatch is live");
+            let holder = h.hold_reservation();
+            if end_first {
+                guard.complete();
+                drop(step);
+            } else {
+                drop(step);
+                guard.complete();
+            }
+            assert_eq!(
+                h.approvals.queued_disposals.lock().len(),
+                2,
+                "both queued behind the held owner (end first: {end_first})"
+            );
+            h.release(holder);
+            assert!(h.approvals.queued_disposals.lock().is_empty());
+            assert_eq!(
+                step_answer(&h.approvals, &attempt),
+                Err(ReviewOwnerError::Rejected(Reason::NotFound)),
+                "released exactly once (end first: {end_first})"
+            );
+            drop(custody);
+            assert!(observer.used());
+        }
+    }
+
+    /// A step that unwinds still finishes: its guard's drop is the finish,
+    /// on every exit path, so the dispatch end then releases the attempt.
+    #[tokio::test]
+    async fn an_unwinding_step_still_finishes() {
+        use crate::generated::approval_lifecycle::ApprovalLifecycleRejectionReason as Reason;
+        let h = harness();
+        let (review, _observer) = h.review(Arc::new(ImmediateAllow), DEADLINE);
+        let entry = admit(&review, &h.check, &h.work)
+            .await
+            .expect("allowed and retained");
+        let guard = ReviewDispatchGuard::new(entry.clone());
+        let _custody = entry.consume_held(&h.check).expect("spend");
+        let attempt = entered_attempt_id(&entry).expect("entered");
+        let steps = entered_steps(&entry);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _step = steps
+                .admit(h.check.binding(), &h.work)
+                .expect("a step while the dispatch is live");
+            std::panic::resume_unwind(Box::new("the step's work failed"));
+        }));
+        assert!(unwound.is_err());
+        guard.complete();
+        assert_eq!(
+            step_answer(&h.approvals, &attempt),
+            Err(ReviewOwnerError::Rejected(Reason::NotFound)),
+            "the unwound step finished, so the dispatch end released the attempt"
+        );
+    }
+
+    /// Reports a step settles with the owner (here a queued disposal's
+    /// observer report, settled by the step's own reservation) never run
+    /// inside the step or at its finish, which may hold a store's lock: they
+    /// run with `Used`, once the dispatch ended and the custody dropped.
+    #[tokio::test]
+    async fn reports_a_step_settles_run_only_after_the_effect() {
+        let h = harness();
+        let (review, observer) = h.review(Arc::new(ImmediateAllow), DEADLINE);
+        let entry = admit(&review, &h.check, &h.work)
+            .await
+            .expect("allowed and retained");
+        let guard = ReviewDispatchGuard::new(entry.clone());
+        let custody = entry.consume_held(&h.check).expect("spend");
+        let steps = entered_steps(&entry);
+        let unrelated = h
+            .approvals
+            .begin_review(h.check.binding(), &h.work)
+            .expect("unrelated attempt");
+        let (report_tx, report_rx) = mpsc::channel();
+        {
+            let state = h.approvals.state.write();
+            let (queued, reports) = h.approvals.dispose_review(
+                unrelated.id(),
+                Some(ReviewRetirementReason::Abandoned),
+                move || -> crate::approval::QueuedDisposalReport {
+                    Box::new(move |settled| {
+                        let _ = report_tx.send(settled);
+                    })
+                },
+            );
+            assert!(queued.is_none(), "queued behind the held owner");
+            reports.run();
+            drop(state);
+        }
+        let step = steps
+            .admit(h.check.binding(), &h.work)
+            .expect("a step while the dispatch is live");
+        assert!(
+            h.approvals.queued_disposals.lock().is_empty(),
+            "the step's reservation settled the queue"
+        );
+        assert!(report_rx.try_recv().is_err(), "no report inside the step");
+        drop(step);
+        assert!(report_rx.try_recv().is_err(), "nor at its finish");
+        guard.complete();
+        assert!(report_rx.try_recv().is_err(), "the custody is still held");
+        drop(custody);
+        assert_eq!(
+            report_rx.recv_timeout(BOUND).expect("after the effect"),
+            Ok(ReviewAttemptStatus::Retired)
+        );
+        assert!(observer.used());
     }
 
     /// A disposal queued DURING a successful spend's own reservation is

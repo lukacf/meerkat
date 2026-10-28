@@ -3631,19 +3631,23 @@ impl LlmClient for OpenAiClient {
             ResponsesCacheBreakpoints::EveryInput,
             self.backend_wire.carries_web_search_evidence(),
         )?;
-        let ttl = if tag
-            .prompt_cache_options
-            .and_then(|options| options.ttl)
-            .is_some()
-        {
-            meerkat_core::ProviderCacheTtl::ThirtyMinutes
-        } else if matches!(
-            tag.prompt_cache_retention,
-            Some(OpenAiPromptCacheRetention::TwentyFourHours)
-        ) {
-            meerkat_core::ProviderCacheTtl::TwentyFourHours
-        } else {
-            meerkat_core::ProviderCacheTtl::ProviderDefault
+        // Every authored breakpoint is `{"mode": "explicit"}` without its own
+        // `ttl`, so it takes the request-level `prompt_cache_options.ttl`.
+        let ttl = {
+            use meerkat_core::ProviderCacheTtl;
+            use meerkat_core::model_profile::capabilities::OpenAiPromptCacheTtl;
+            match tag.prompt_cache_options.and_then(|options| options.ttl) {
+                Some(OpenAiPromptCacheTtl::ThirtyMinutes) => ProviderCacheTtl::ThirtyMinutes,
+                Some(OpenAiPromptCacheTtl::TwelveHours) => ProviderCacheTtl::TwelveHours,
+                None if matches!(
+                    tag.prompt_cache_retention,
+                    Some(OpenAiPromptCacheRetention::TwentyFourHours)
+                ) =>
+                {
+                    ProviderCacheTtl::TwentyFourHours
+                }
+                None => ProviderCacheTtl::ProviderDefault,
+            }
         };
         boundaries
             .into_iter()
@@ -5983,6 +5987,116 @@ mod tests {
             !body.to_string().contains("prompt_cache_breakpoint"),
             "implicit mode must leave breakpoint placement to OpenAI"
         );
+    }
+
+    /// GPT-5.6 and later accept a 12-hour minimum cache lifetime. It lowers
+    /// as the request-level `prompt_cache_options.ttl`, which OpenAI applies
+    /// to the implicit breakpoint and to every explicit breakpoint without
+    /// its own `ttl`. Meerkat's breakpoint markers carry no `ttl`, so the
+    /// input items are the same bytes under either lifetime, and the
+    /// authored cache evidence records the 12-hour lifetime.
+    #[test]
+    fn twelve_hour_prompt_cache_ttl_lowers_as_the_request_level_ttl() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let messages = vec![
+            Message::System(meerkat_core::SystemMessage::new("Stable instructions")),
+            Message::User(UserMessage::text("Hello".to_string())),
+        ];
+        let with_cache = |model: &str, mode: OpenAiPromptCacheMode, ttl: OpenAiPromptCacheTtl| {
+            LlmRequest::new(model, messages.clone()).with_openai_tag_merge(|tag| {
+                tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                    mode: Some(mode),
+                    ttl: Some(ttl),
+                });
+            })
+        };
+
+        let explicit = with_cache(
+            "gpt-5.6-sol",
+            OpenAiPromptCacheMode::Explicit,
+            OpenAiPromptCacheTtl::TwelveHours,
+        );
+        let body = client
+            .build_request_body(&explicit)
+            .expect("GPT-5.6 accepts the 12h TTL");
+        assert_eq!(
+            body["prompt_cache_options"],
+            serde_json::json!({"mode": "explicit", "ttl": "12h"})
+        );
+        let thirty_minutes = client
+            .build_request_body(&with_cache(
+                "gpt-5.6-sol",
+                OpenAiPromptCacheMode::Explicit,
+                OpenAiPromptCacheTtl::ThirtyMinutes,
+            ))
+            .expect("GPT-5.6 accepts the 30m TTL");
+        assert_eq!(
+            thirty_minutes["prompt_cache_options"],
+            serde_json::json!({"mode": "explicit", "ttl": "30m"})
+        );
+        assert!(
+            body.to_string().contains("prompt_cache_breakpoint"),
+            "explicit mode authors breakpoints"
+        );
+        assert_eq!(
+            body["input"], thirty_minutes["input"],
+            "the lifetime never changes the input items or their breakpoint markers"
+        );
+        assert!(
+            !body["input"].to_string().contains("ttl"),
+            "breakpoint markers carry no ttl of their own"
+        );
+        let claims = client
+            .authored_cache_breakpoints(&explicit, &explicit.messages)
+            .expect("authored breakpoints");
+        assert!(!claims.is_empty(), "explicit mode claims its breakpoints");
+        assert!(
+            claims
+                .iter()
+                .all(|claim| claim.ttl() == meerkat_core::ProviderCacheTtl::TwelveHours),
+            "the evidence records the 12h lifetime: {claims:?}"
+        );
+
+        let implicit = client
+            .build_request_body(&with_cache(
+                "gpt-6-astra",
+                OpenAiPromptCacheMode::Implicit,
+                OpenAiPromptCacheTtl::TwelveHours,
+            ))
+            .expect("GPT-6 accepts the 12h TTL");
+        assert_eq!(
+            implicit["prompt_cache_options"],
+            serde_json::json!({"mode": "implicit", "ttl": "12h"})
+        );
+    }
+
+    /// A cataloged model without GPT-5.6-and-later prompt caching refuses the
+    /// 12-hour TTL with a typed error naming the model and the value, before
+    /// any request is sent.
+    #[test]
+    fn twelve_hour_prompt_cache_ttl_is_refused_typed_on_older_models() {
+        let client = OpenAiClient::new("test-key".to_string());
+        for model in ["gpt-5.5", "gpt-5.5-pro", "gpt-5.4"] {
+            let request = LlmRequest::new(
+                model,
+                vec![Message::User(UserMessage::text("Hello".to_string()))],
+            )
+            .with_openai_tag_merge(|tag| {
+                tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                    mode: None,
+                    ttl: Some(OpenAiPromptCacheTtl::TwelveHours),
+                });
+            });
+            let Err(LlmError::InvalidRequest { message }) = client.build_request_body(&request)
+            else {
+                panic!("{model} must refuse the 12h prompt-cache TTL");
+            };
+            assert!(
+                message.contains(&format!("'{model}'"))
+                    && message.contains("prompt cache TTL '12h'"),
+                "{message}"
+            );
+        }
     }
 
     #[test]

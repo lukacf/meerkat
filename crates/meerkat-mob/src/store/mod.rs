@@ -22,6 +22,9 @@ pub use realm_profile::{RealmProfileStore, StoredRealmProfile};
 pub(crate) use sqlite::{IDENTITY_RUNTIME_WRITE_FENCE_WAIT, identity_fence_test_hooks};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use sqlite::{MemberBindingStoreRead, read_member_binding_store_at};
+#[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
+#[doc(hidden)]
+pub use sqlite::{ParkedStoreReadForTest, StoreReadReleaseForTest, park_next_store_read_for_test};
 #[cfg(not(target_arch = "wasm32"))]
 pub use sqlite::{
     SqliteForkedParticipantStore, SqliteMobEventStore, SqliteMobIdentityStatusStore,
@@ -5848,6 +5851,26 @@ pub(crate) trait MobIdentityMemberStore: Send + Sync {
         &self,
         mob_id: &MobId,
     ) -> Result<MemberBindingJournalRead, MobStoreError>;
+
+    /// Read the journal events whose cursor is at least `from_cursor`, in
+    /// cursor order, and the identities `mob_id` holds an identity intent
+    /// row for, in one store transaction, as
+    /// [`Self::read_member_binding_journal`] reads the whole journal. Never
+    /// writes. A reader that folded the journal up to one event reads from
+    /// that event's cursor, so the event it gets back first shows whether
+    /// the journal still holds what it folded.
+    ///
+    /// The default filters a whole read: the same answer, at the cost of a
+    /// whole read. The built-in stores read only the tail.
+    async fn read_member_binding_journal_from(
+        &self,
+        mob_id: &MobId,
+        from_cursor: u64,
+    ) -> Result<MemberBindingJournalRead, MobStoreError> {
+        let mut read = self.read_member_binding_journal(mob_id).await?;
+        read.events.retain(|event| event.cursor >= from_cursor);
+        Ok(read)
+    }
 }
 
 /// One store-transaction read of a mob store's structural event journal and
@@ -5855,7 +5878,8 @@ pub(crate) trait MobIdentityMemberStore: Send + Sync {
 /// [`crate::MemberBindingHistory`] fold.
 #[derive(Debug)]
 pub(crate) struct MemberBindingJournalRead {
-    /// Every journal event, in cursor order.
+    /// The journal events read (all of them, or those from the read's cursor
+    /// on), in cursor order.
     pub(crate) events: Vec<MobEvent>,
     /// How each identity intent row (Present or Absent) of the read mob
     /// reads: [`intent_row_management`] of its stored observation.

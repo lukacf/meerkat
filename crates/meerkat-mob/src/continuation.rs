@@ -125,12 +125,14 @@ impl ContinuationAddressResolver for MobContinuationResolver {
         let Some(session_id) = entry.bridge_session_id().cloned() else {
             return Ok(AddressResolution::NotServed);
         };
-        // Serving means live: revive a member whose executor the runtime
-        // retired, once per resolution. A revival that cannot happen now
-        // leaves the address unserved (its rows wait for the next wake); a
-        // member or mob that is gone for good retires it.
+        // Serving means live: the delivery wakes the member through
+        // MobMachine (`WakeMember`, cause HostDelivery), dormant or with an
+        // executor the runtime retired, once per resolution. A wake that
+        // cannot happen now leaves the address unserved (its rows wait for
+        // the next resolution); a member or mob that is gone for good
+        // retires it.
         let identity = AgentIdentity::from(member.identity.as_str());
-        match handle.ensure_member_live(&identity).await {
+        match handle.wake_member_for_delivery(&identity).await {
             Ok(()) => Ok(AddressResolution::Session(session_id)),
             Err(
                 crate::MobError::MemberNotFound(_)
@@ -139,6 +141,17 @@ impl ContinuationAddressResolver for MobContinuationResolver {
                     ..
                 },
             ) => Ok(AddressResolution::Retired),
+            // A mob that is not running refuses every wake; only one that
+            // completed or was destroyed never serves the address again.
+            Err(crate::MobError::MemberWakeRefused {
+                refusal: crate::MemberWakeRefusal::MobNotRunning,
+                ..
+            }) => match handle.status().await {
+                Ok(crate::MobState::Completed | crate::MobState::Destroyed) => {
+                    Ok(AddressResolution::Retired)
+                }
+                _ => Ok(AddressResolution::NotServed),
+            },
             Err(_) => Ok(AddressResolution::NotServed),
         }
     }

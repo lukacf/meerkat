@@ -31,9 +31,10 @@ impl MeerkatMachine {
     ///
     /// # Errors
     /// [`RuntimeDriverError::RetainedResumeRefused`] for a terminal policy
-    /// outcome (an immutably missing or invalid binding, an actual denial);
-    /// any other error is an unavailable owner or an infrastructure failure
-    /// and is retryable.
+    /// outcome (an immutably missing or invalid binding, a destination its
+    /// session has since bound a later generation of, an actual denial); any
+    /// other error is an unavailable owner or an infrastructure failure and
+    /// is retryable.
     pub async fn accept_retained_resume(
         &self,
         session_id: &SessionId,
@@ -57,6 +58,18 @@ impl MeerkatMachine {
         let contributors = self
             .resolve_retained_work_contributors(session_id, &request.identity)
             .await?;
+        // A resume whose destination its session has since moved can never
+        // be admitted, whatever its owners answer now. It is refused for good
+        // before any owner is asked, so an owner that is not ready for the
+        // work (no client for its controller any more) cannot keep it owed.
+        if self
+            .retained_destination_superseded(session_id, &contributors)
+            .await?
+        {
+            return Err(RuntimeDriverError::RetainedResumeRefused {
+                reason: crate::retained_work::RetainedResumeRefusal::NoAdmissibleWorkBinding,
+            });
+        }
         let evidence = RetainedResumeEvidence {
             identity: request.identity,
             delivery: request.delivery,
@@ -76,6 +89,40 @@ impl MeerkatMachine {
         };
         input.header_mut().retained_resume = Some(Arc::new(grant));
         self.accept_input_with_completion(session_id, input).await
+    }
+
+    /// Whether `session_id`'s session document has superseded the
+    /// destination of the work whose resolved original contributors are
+    /// `contributors` (the canonical, first, original's target): the rule the
+    /// driver applies at admission, read now under the session's driver
+    /// lock. Generations only advance, so a read that is already stale can
+    /// only miss a supersession, which the driver's check then finds.
+    async fn retained_destination_superseded(
+        &self,
+        session_id: &SessionId,
+        contributors: &[crate::input_authority::RetainedInputAuthority],
+    ) -> Result<bool, RuntimeDriverError> {
+        let Some(canonical) = contributors.first() else {
+            return Ok(false);
+        };
+        let driver = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: crate::runtime_state::RuntimeState::Destroyed,
+                })?
+                .driver
+                .clone()
+        };
+        let driver = driver.lock().await;
+        let target = &canonical.association().candidate().target;
+        match &*driver {
+            DriverEntry::Ephemeral(driver) => driver.scoped_destination_superseded(target),
+            DriverEntry::Persistent(driver) => {
+                driver.inner_ref().scoped_destination_superseded(target)
+            }
+        }
     }
 }
 

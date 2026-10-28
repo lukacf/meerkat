@@ -77,10 +77,19 @@ impl<'a> LifecycleRollback<'a> {
         ))
     }
 
+    /// A compensating notice that met no live recipient has nothing to undo.
+    /// `PeerNotFound` is a recipient that is no member (a seated member always
+    /// has a route, live or wake). `PeerWakeRefused` is a seated member that
+    /// is not live (dormant in a stopped mob, broken, retiring): it holds no
+    /// live state the notice could correct, and its wake rebuilds its trust
+    /// from machine state.
     fn is_benign_compensation_absence(error: &MobError) -> bool {
         matches!(
             error,
-            MobError::CommsError(meerkat_core::comms::SendError::PeerNotFound(_))
+            MobError::CommsError(
+                meerkat_core::comms::SendError::PeerNotFound(_)
+                    | meerkat_core::comms::SendError::PeerWakeRefused { .. }
+            )
         )
     }
 }
@@ -105,6 +114,29 @@ mod tests {
         assert!(
             matches!(error, MobError::Internal(message) if message == "primary failure"),
             "already-absent peer compensation should not obscure the primary failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_suppresses_compensation_to_a_member_that_is_not_live() {
+        let mut rollback = LifecycleRollback::new("test rollback");
+        rollback.defer("compensating peer notice", || async {
+            Err(MobError::CommsError(
+                meerkat_core::comms::SendError::PeerWakeRefused {
+                    peer: "peer-1".to_string(),
+                    envelope_id: uuid::Uuid::nil(),
+                    refusal: meerkat_core::comms::PeerWakeRefusal::MobNotRunning,
+                },
+            ))
+        });
+
+        let error = rollback
+            .fail(MobError::Internal("primary failure".to_string()))
+            .await;
+
+        assert!(
+            matches!(error, MobError::Internal(message) if message == "primary failure"),
+            "a compensation refused because its recipient is not live has nothing to undo"
         );
     }
 

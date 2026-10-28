@@ -22,6 +22,7 @@ use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 fn deserialize_optional_peer_id<'de, D>(deserializer: D) -> Result<Option<PeerId>, D::Error>
 where
@@ -191,6 +192,32 @@ pub struct Roster {
     entries: BTreeMap<AgentIdentity, RosterEntry>,
     #[serde(skip)]
     pub(crate) creation_history: std::sync::Arc<crate::member_creation::MemberCreationProjection>,
+    /// The prompt of the kickoff each member's incarnation owes, with that
+    /// incarnation's generation, from its `MemberSpawned` row
+    /// (`MemberSpawnedEvent::kickoff_prompt`). MobMachine owns whether the
+    /// kickoff is still owed; this is only its content.
+    #[serde(skip)]
+    owed_kickoff_prompts: BTreeMap<AgentIdentity, (Generation, meerkat_core::types::ContentInput)>,
+    /// What each unborn seat session carries to its first build, keyed by
+    /// the session: the build inputs its seat rows journaled
+    /// (`MemberSpawnedEvent::seat_build_inputs`, a later seat of the same
+    /// never-born session overlaying what its own spec names) and, in the
+    /// process that seated it, the process-local inputs the actor adds
+    /// ([`Self::retain_seat_local_build_inputs`]). It outlives a retirement
+    /// of its member before the first build (only the process-local inputs
+    /// go with the member), and the session's born row removes it.
+    /// MobMachine owns whether the session is unborn; this is only what its
+    /// first build applies.
+    #[serde(skip)]
+    seat_builds: BTreeMap<SessionId, Arc<crate::runtime::SeatBuild>>,
+    /// The sessions whose member comms endpoint (and so its public key) a
+    /// journal row of this mob recorded: a `MemberSpawned` or a
+    /// `MemberSessionBindingRecovered` row naming the session with its
+    /// endpoint, or a `MemberRetirementStarted` row with the retiring
+    /// runtime's endpoint. Peers of this mob trusted that key, so a seat of
+    /// such a session never mints another one.
+    #[serde(skip)]
+    sessions_with_recorded_endpoint: BTreeSet<SessionId>,
 }
 
 impl Roster {
@@ -229,6 +256,13 @@ impl Roster {
                     );
                     return;
                 };
+                if let Some(session_id) = member_ref.bridge_session_id() {
+                    self.record_seat_build(session_id, member_spawned);
+                    if member_spawned.member_peer_endpoint().is_some() {
+                        self.sessions_with_recorded_endpoint
+                            .insert(session_id.clone());
+                    }
+                }
                 self.add(RosterAddEntry {
                     agent_identity: member_spawned.agent_identity.clone(),
                     generation: member_spawned.generation,
@@ -251,11 +285,48 @@ impl Roster {
                     fork_source: member_spawned.fork_source.clone(),
                     fork_overlay: member_spawned.fork_overlay,
                 });
+                match member_spawned.kickoff_prompt() {
+                    Some(prompt) => {
+                        self.owed_kickoff_prompts.insert(
+                            member_spawned.agent_identity.clone(),
+                            (member_spawned.generation, prompt.clone()),
+                        );
+                    }
+                    None => {
+                        self.owed_kickoff_prompts
+                            .remove(&member_spawned.agent_identity);
+                    }
+                }
             }
             // Retirement admission is not roster terminality. Keep the spawn
             // projection intact so a restart retains the cleanup anchor.
-            MobEventKind::MemberRetirementStarted { .. }
-            | MobEventKind::RemoteMemberRuntimeRetired { .. }
+            MobEventKind::MemberRetirementStarted {
+                agent_identity,
+                generation,
+                releasing,
+                session_id,
+                retiring_peer_endpoint,
+                ..
+            } => {
+                // The retiring runtime's endpoint: an older journal may record
+                // a member's endpoint only here.
+                if retiring_peer_endpoint.is_some() {
+                    let retiring_session = session_id
+                        .clone()
+                        .or_else(|| releasing.clone())
+                        .or_else(|| {
+                            self.entries
+                                .get(agent_identity)
+                                .filter(|entry| entry.generation == *generation)
+                                .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
+                        });
+                    if let Some(retiring_session) = retiring_session {
+                        self.sessions_with_recorded_endpoint
+                            .insert(retiring_session);
+                    }
+                }
+            }
+            MobEventKind::RemoteMemberRuntimeRetired { .. }
             | MobEventKind::RemoteMemberSupervisorRevoked { .. } => {}
             MobEventKind::MemberRetired {
                 agent_identity,
@@ -264,12 +335,25 @@ impl Roster {
             } => {
                 // A delayed completion for an older runtime generation must
                 // never erase a newer incarnation of the same stable identity.
-                if self
+                if let Some(entry) = self
                     .entries
                     .get(agent_identity)
-                    .is_some_and(|entry| entry.generation == *generation)
+                    .filter(|entry| entry.generation == *generation)
                 {
+                    // A seat session its member never built keeps its
+                    // journaled inputs for a later seat of it; the
+                    // process-local ones were the retired member's.
+                    if let Some(session_id) = entry.member_ref.bridge_session_id().cloned() {
+                        self.drop_seat_local_build_inputs(&session_id);
+                    }
                     self.remove_by_identity(agent_identity);
+                }
+                if self
+                    .owed_kickoff_prompts
+                    .get(agent_identity)
+                    .is_some_and(|(owed, _)| owed == generation)
+                {
+                    self.owed_kickoff_prompts.remove(agent_identity);
                 }
             }
             MobEventKind::RespawnTopologyAbandoned { agent_identity, .. } => {
@@ -310,6 +394,15 @@ impl Roster {
                         &recovered.agent_identity,
                         bridge_session_id.clone(),
                     );
+                    // The born row: the first build created the session and
+                    // applied what its seat carried.
+                    if recovered.records_seat_session_born() {
+                        self.seat_builds.remove(bridge_session_id);
+                    }
+                    if recovered.member_peer_endpoint.is_some() {
+                        self.sessions_with_recorded_endpoint
+                            .insert(bridge_session_id.clone());
+                    }
                 }
             }
             MobEventKind::MemberKickoffUpdated { member, kickoff } => {
@@ -381,6 +474,9 @@ impl Roster {
             }
             MobEventKind::MobReset => {
                 self.entries.clear();
+                self.owed_kickoff_prompts.clear();
+                self.seat_builds.clear();
+                self.sessions_with_recorded_endpoint.clear();
             }
             _ => {}
         }
@@ -422,6 +518,9 @@ impl Roster {
     pub(crate) fn from_projected_entries(entries: impl IntoIterator<Item = RosterEntry>) -> Self {
         let mut projected = Self {
             creation_history: Default::default(),
+            owed_kickoff_prompts: BTreeMap::new(),
+            seat_builds: BTreeMap::new(),
+            sessions_with_recorded_endpoint: BTreeSet::new(),
             entries: entries
                 .into_iter()
                 .map(|entry| (entry.agent_identity.clone(), entry))
@@ -515,6 +614,91 @@ impl Roster {
     #[doc(hidden)]
     pub fn get(&self, agent_identity: &AgentIdentity) -> Option<&RosterEntry> {
         self.entries.get(agent_identity)
+    }
+
+    /// The prompt of the kickoff the current incarnation of `agent_identity`
+    /// owes, when its `MemberSpawned` row named one. Whether the kickoff is
+    /// still owed is MobMachine's (`member_kickoff_pending`).
+    pub(crate) fn owed_kickoff_prompt(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Option<&meerkat_core::types::ContentInput> {
+        let (generation, prompt) = self.owed_kickoff_prompts.get(agent_identity)?;
+        (self.entries.get(agent_identity)?.generation == *generation).then_some(prompt)
+    }
+
+    /// What the session `agent_identity` is bound to carries to its first
+    /// build, while no build has created it: the inputs its seat named (see
+    /// [`crate::runtime::SeatBuild`]). Whether the session is still unborn
+    /// is MobMachine's (`member_seat_session_unborn`).
+    pub(crate) fn seat_build(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Option<Arc<crate::runtime::SeatBuild>> {
+        let session_id = self
+            .entries
+            .get(agent_identity)?
+            .member_ref
+            .bridge_session_id()?;
+        self.seat_builds.get(session_id).cloned()
+    }
+
+    /// Whether a journal row of this mob recorded the member comms endpoint
+    /// of `session_id` (its public key): peers trusted that key, so a seat of
+    /// the session whose key pair is missing is refused rather than given a
+    /// new one.
+    pub(crate) fn session_endpoint_recorded(&self, session_id: &SessionId) -> bool {
+        self.sessions_with_recorded_endpoint.contains(session_id)
+    }
+
+    /// Keep `local`, the process-local build inputs of the seat just
+    /// committed on the unborn session `session_id`, with what the session
+    /// carries to its first build. This process only: they are never
+    /// journaled.
+    pub(crate) fn retain_seat_local_build_inputs(
+        &mut self,
+        session_id: &SessionId,
+        local: crate::runtime::SeatLocalBuildInputs,
+    ) {
+        let build = self.seat_builds.entry(session_id.clone()).or_default();
+        let mut next = crate::runtime::SeatBuild::clone(build);
+        next.local = local;
+        *build = Arc::new(next);
+    }
+
+    /// Record what a `MemberSpawned` row's seat carries to the first build
+    /// of its session `session_id`: an unborn seat's journaled inputs,
+    /// overlaid on what an earlier seat of the same never-born session
+    /// recorded. A row whose session exists carries nothing to it.
+    fn record_seat_build(
+        &mut self,
+        session_id: &SessionId,
+        member_spawned: &crate::event::MemberSpawnedEvent,
+    ) {
+        if !member_spawned.seat_session_unborn() {
+            self.seat_builds.remove(session_id);
+            return;
+        }
+        let Some(inputs) = member_spawned.seat_build_inputs() else {
+            return;
+        };
+        let build = self.seat_builds.entry(session_id.clone()).or_default();
+        let mut next = crate::runtime::SeatBuild::clone(build);
+        next.inputs.overlay(inputs);
+        *build = Arc::new(next);
+    }
+
+    /// Drop the process-local build inputs the unborn session `session_id`
+    /// carries, keeping its journaled ones.
+    fn drop_seat_local_build_inputs(&mut self, session_id: &SessionId) {
+        if let Some(build) = self.seat_builds.get_mut(session_id)
+            && !build.local.is_empty()
+        {
+            *build = Arc::new(crate::runtime::SeatBuild {
+                inputs: build.inputs.clone(),
+                local: crate::runtime::SeatLocalBuildInputs::default(),
+            });
+        }
     }
 
     /// Get a mutable roster entry by identity.
@@ -1832,5 +2016,187 @@ mod tests {
         assert!(roster.is_empty());
         assert!(roster.is_index_coherent());
         assert!(roster.resolve_identity(&AgentIdentity::from("a")).is_none());
+    }
+
+    /// An unborn seat's row of `generation` on `session`, carrying `inputs`.
+    fn unborn_seat_kind(
+        identity: &AgentIdentity,
+        generation: Generation,
+        session: &SessionId,
+        inputs: Option<crate::runtime::SeatBuildInputs>,
+    ) -> MobEventKind {
+        MobEventKind::MemberSpawned(
+            crate::event::MemberSpawnedEvent::new(
+                identity.clone(),
+                generation,
+                FenceToken::new(generation.get()),
+                AgentRuntimeId::new(identity.clone(), generation),
+                ProfileName::from("worker"),
+            )
+            .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(session.clone())))
+            .with_seat_session_unborn(true)
+            .with_seat_build_inputs(inputs),
+        )
+    }
+
+    fn instructions(text: &str) -> crate::runtime::SeatBuildInputs {
+        crate::runtime::SeatBuildInputs {
+            additional_instructions: Some(vec![text.to_string()]),
+            ..Default::default()
+        }
+    }
+
+    /// What an unborn seat session carries to its first build is the
+    /// session's: its member's retirement before the first build keeps the
+    /// journaled inputs (and drops the process-local ones, which were the
+    /// retired member's), a later seat of the same never-born session
+    /// overlays what its own spec names, and the born row removes them.
+    #[test]
+    fn a_seat_build_belongs_to_its_unborn_session_until_the_born_row() {
+        let identity = AgentIdentity::from("seated");
+        let session = session_id();
+        let first = crate::runtime::SeatBuildInputs {
+            system_prompt_override: Some(crate::runtime::SpawnSystemPromptOverride::Replace(
+                "You keep the north desk.".to_string(),
+            )),
+            ..instructions("first")
+        };
+        let mut roster = Roster::project(&[make_event(
+            1,
+            unborn_seat_kind(
+                &identity,
+                Generation::INITIAL,
+                &session,
+                Some(first.clone()),
+            ),
+        )]);
+        roster.retain_seat_local_build_inputs(
+            &session,
+            crate::runtime::SeatLocalBuildInputs {
+                shell_env: Some(std::collections::HashMap::from([(
+                    "DESK".to_string(),
+                    "north".to_string(),
+                )])),
+                ..Default::default()
+            },
+        );
+        let build = roster.seat_build(&identity).expect("the seat's build");
+        assert_eq!(build.inputs, first);
+        assert!(build.local.shell_env.is_some());
+
+        roster.apply(&make_event(
+            2,
+            MobEventKind::MemberRetired {
+                agent_identity: identity.clone(),
+                generation: Generation::INITIAL,
+                role: ProfileName::from("worker"),
+            },
+        ));
+        assert!(
+            roster.seat_build(&identity).is_none(),
+            "no member, no build"
+        );
+
+        let next = Generation::new(Generation::INITIAL.get() + 1);
+        roster.apply(&make_event(
+            3,
+            unborn_seat_kind(&identity, next, &session, Some(instructions("second"))),
+        ));
+        let build = roster.seat_build(&identity).expect("the re-seat's build");
+        assert_eq!(
+            build.inputs.additional_instructions,
+            Some(vec!["second".to_string()]),
+            "the re-seat's spec names its instructions"
+        );
+        assert_eq!(
+            build.inputs.system_prompt_override, first.system_prompt_override,
+            "the first seat's prompt stays: the re-seat's spec names none"
+        );
+        assert!(
+            build.local.is_empty(),
+            "the retired member's process-local inputs went with it"
+        );
+
+        roster.apply(&make_event(
+            4,
+            MobEventKind::MemberSessionBindingRecovered(
+                crate::event::MemberSessionBindingRecoveredEvent::seat_session_born(
+                    identity.clone(),
+                    AgentRuntimeId::new(identity.clone(), next),
+                    session.clone(),
+                ),
+            ),
+        ));
+        assert!(
+            roster.seat_build(&identity).is_none(),
+            "the born row removes what the first build applied"
+        );
+    }
+
+    /// A session's endpoint counts as recorded when a spawn row carries it,
+    /// and, for an older journal whose spawn row does not, when the
+    /// retirement row of its runtime carries it.
+    #[test]
+    fn a_session_endpoint_is_recorded_by_its_spawn_or_its_retirement_row() {
+        let pubkey = [9u8; 32];
+        let endpoint = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "mob/worker/w",
+            PeerId::from_ed25519_pubkey(&pubkey).to_string(),
+            pubkey,
+            "inproc://mob/worker/w",
+        )
+        .expect("a valid endpoint");
+        let (spawned, retired, unrecorded) = (session_id(), session_id(), session_id());
+        let spawn_with_endpoint = MobEventKind::MemberSpawned(
+            crate::event::MemberSpawnedEvent::new(
+                AgentIdentity::from("spawned"),
+                Generation::INITIAL,
+                FenceToken::new(0),
+                AgentRuntimeId::initial(AgentIdentity::from("spawned")),
+                ProfileName::from("worker"),
+            )
+            .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(spawned.clone())))
+            .with_member_peer_endpoint(Some(endpoint.clone())),
+        );
+        let mut retirement = MobEventKind::MemberRetirementStarted {
+            agent_identity: AgentIdentity::from("retired"),
+            agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("retired")),
+            generation: Generation::INITIAL,
+            role: ProfileName::from("worker"),
+            releasing: Some(retired.clone()),
+            session_id: Some(retired.clone()),
+            retiring_peer_endpoint: None,
+            preserve_machine_topology: false,
+        };
+        retirement
+            .set_retiring_peer_endpoint(endpoint)
+            .expect("a retirement row carries the retiring endpoint");
+        let roster = Roster::project(&[
+            make_event(1, spawn_with_endpoint),
+            make_event(
+                2,
+                spawned_kind(
+                    "retired",
+                    "worker",
+                    MobRuntimeMode::TurnDriven,
+                    MemberRef::from_bridge_session_id(retired.clone()),
+                    BTreeMap::new(),
+                ),
+            ),
+            make_event(3, retirement),
+            make_event(
+                4,
+                spawned_kind(
+                    "unrecorded",
+                    "worker",
+                    MobRuntimeMode::TurnDriven,
+                    MemberRef::from_bridge_session_id(unrecorded.clone()),
+                    BTreeMap::new(),
+                ),
+            ),
+        ]);
+        assert!(roster.session_endpoint_recorded(&spawned));
+        assert!(roster.session_endpoint_recorded(&retired));
+        assert!(!roster.session_endpoint_recorded(&unrecorded));
     }
 }

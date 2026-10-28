@@ -13034,6 +13034,14 @@ impl meerkat_core::service::SessionServiceHistoryExt for RunMobSessionService {
 #[async_trait::async_trait]
 #[cfg(feature = "mob")]
 impl meerkat_mob::MobSessionService for RunMobSessionService {
+    async fn recorded_auth_binding(
+        &self,
+        auth_binding: &meerkat_core::AuthBindingRef,
+    ) -> Result<Option<meerkat_core::AuthBindingRef>, meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::recorded_auth_binding(self.inner.as_ref(), auth_binding)
+            .await
+    }
+
     async fn subscribe_session_activity(
         &self,
         session_id: &meerkat_core::SessionId,
@@ -15256,6 +15264,20 @@ async fn resume_session_with_llm_override(
         let stored_metadata = session
             .session_metadata()
             .ok_or_else(|| anyhow::anyhow!("persisted session {session_id} is missing metadata"))?;
+        // A mob member's session is its mob's to materialize: a standalone
+        // resume would build the member outside its mob, bypassing its wake,
+        // its wiring and its tools. No mob runs in this command's process, so
+        // it is refused typed; deliver to the member through its mob, which
+        // wakes it.
+        if let Some(binding) = stored_metadata.mob_member_binding.as_ref() {
+            return Err(exit_status::typed_failure(
+                meerkat_core::SessionError::Unsupported(format!(
+                    "session {session_id} belongs to member '{}' of mob '{}': deliver to the member through its mob, which wakes it",
+                    binding.member, binding.mob_id
+                )),
+                ToString::to_string,
+            ));
+        }
         let build_state = session.build_state().unwrap_or_default();
         let mut tooling = stored_metadata.tooling.clone();
         let explicit_tooling = if yolo || tools.is_some() {
@@ -16965,6 +16987,14 @@ impl meerkat_core::service::SessionServiceHistoryExt for MobCliSessionService {
 #[async_trait::async_trait]
 #[cfg(all(feature = "mob", feature = "session-store"))]
 impl meerkat_mob::MobSessionService for MobCliSessionService {
+    async fn recorded_auth_binding(
+        &self,
+        auth_binding: &meerkat_core::AuthBindingRef,
+    ) -> Result<Option<meerkat_core::AuthBindingRef>, meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::recorded_auth_binding(self.inner.as_ref(), auth_binding)
+            .await
+    }
+
     async fn subscribe_session_activity(
         &self,
         session_id: &meerkat_core::SessionId,

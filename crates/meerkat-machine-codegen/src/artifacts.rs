@@ -11664,7 +11664,7 @@ impl<'a> MachineTlaCompiler<'a> {
         );
         pushln!(
             out,
-            "       \\cup {{ [name |-> edge.endpoint.name, peer_id |-> edge.endpoint.peer_id, address |-> edge.endpoint.address, signing_key |-> edge.endpoint.signing_key] : edge \\in local_external_edges }}"
+            "       \\cup {{ [name |-> edge.endpoint.name, peer_id |-> edge.endpoint.peer_id, address |-> edge.endpoint.address, signing_key |-> edge.endpoint.signing_key, transport |-> \"Tcp\"] : edge \\in local_external_edges }}"
         );
         writeln!(
             out,
@@ -11727,7 +11727,7 @@ impl<'a> MachineTlaCompiler<'a> {
         );
         pushln!(
             out,
-            "       \\cup {{ [name |-> edge.endpoint.name, peer_id |-> edge.endpoint.peer_id, address |-> edge.endpoint.address, signing_key |-> edge.endpoint.signing_key] : edge \\in local_external_edges }}"
+            "       \\cup {{ [name |-> edge.endpoint.name, peer_id |-> edge.endpoint.peer_id, address |-> edge.endpoint.address, signing_key |-> edge.endpoint.signing_key, transport |-> \"Tcp\"] : edge \\in local_external_edges }}"
         );
         writeln!(
             out,

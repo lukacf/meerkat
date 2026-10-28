@@ -1495,9 +1495,8 @@ impl AgentMobToolSurface {
         spec.runtime_mode = args.runtime_mode;
         spec.backend = args.backend;
         spec.placement = lower_wire_placement(args.placement);
-        if let Some(auto_wire) = args.auto_wire_parent {
-            spec.auto_wire_parent = auto_wire;
-        }
+        let auto_wire_requested = args.auto_wire_parent.unwrap_or(false);
+        spec.auto_wire_parent = auto_wire_requested;
         if let Some(tooling) = tooling {
             let resolved = self.resolve_spawn_tooling_boxed(&tooling).await?;
             spec.inherited_tool_filter = resolved.inherited_tool_filter;
@@ -1518,9 +1517,41 @@ impl AgentMobToolSurface {
             .spawn_spec_with_generated_owner_context_boxed(&audit_handle, spec)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
+        let parent_wiring = self
+            .spawn_parent_wiring(
+                &audit_handle,
+                &spawn_result.agent_identity,
+                auto_wire_requested,
+            )
+            .await;
         self.record_successful_operator_action_boxed(&audit_handle, call.name)
             .await;
-        Self::encode_result(call, Self::spawn_result_payload(&mob_id, &spawn_result))
+        let mut result = Self::spawn_result_payload(&mob_id, &spawn_result);
+        result["wired"] = json!(parent_wiring.is_wired());
+        result["parent_wiring"] = json!(parent_wiring);
+        Self::encode_result(call, result)
+    }
+
+    /// What `auto_wire_parent` did for a spawn into the mob `handle` serves,
+    /// read from that mob's committed wiring after the spawn returned: the
+    /// caller is the member its own session is bound to there, if any, and
+    /// it is wired only when the new member's committed edges name it.
+    async fn spawn_parent_wiring(
+        &self,
+        handle: &MobHandle,
+        member: &AgentIdentity,
+        requested: bool,
+    ) -> SpawnParentWiring {
+        let roster = handle.roster().await;
+        let caller = roster
+            .find_by_bridge_session_id(&self.owner_bridge_session_id)
+            .map(|entry| entry.agent_identity.clone());
+        let edge_committed = caller.as_ref().is_some_and(|caller| {
+            roster
+                .get_by_identity(member)
+                .is_some_and(|entry| entry.wired_to.contains(caller))
+        });
+        SpawnParentWiring::classify(requested, caller.is_some(), edge_committed)
     }
 
     async fn dispatch_fork_off(
@@ -2892,9 +2923,14 @@ fn build_tool_defs_with_profile_support(
                session persistence, compaction, and event streaming.\n\
              - \"external\": Member delegates execution to an external process.\n\n\
              AUTO_WIRE_PARENT:\n\
-             When true, the spawned member is automatically wired as a trusted peer of the \
-             mob's orchestrator, enabling bidirectional comms immediately after spawn. When \
-             false (default), you must wire peers manually or rely on the mob's wiring rules.\n\n\
+             When true and you are a member of the target mob (you spawn into your own mob), \
+             the new member is wired to you: you trust each other and can message each \
+             other. When you are not a member of the target mob (for example a mob you \
+             created with mob_create), nothing is wired to you. Default false: nothing is \
+             wired to you unless the mob's wiring rules do it.\n\
+             The result says what happened: wired is true only when you and the new member \
+             are wired peers now, and parent_wiring is member_peer, not_requested, \
+             caller_outside_mob or not_wired.\n\n\
              TOOLING OVERRIDE:\n\
              If provided, overrides the profile's model/tool config for this specific member. \
              Same options as delegate's tooling parameter: inherit_parent, minimal, or profile \
@@ -3530,6 +3566,48 @@ struct CheckMemberResult {
     note: Option<String>,
 }
 
+/// What `auto_wire_parent` did for one `mob_spawn_member` call, reported as
+/// the result's `parent_wiring`, with `wired` true only for
+/// [`Self::MemberPeer`]. It is read from the target mob's committed wiring
+/// once the spawn returned, never assumed from the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SpawnParentWiring {
+    /// The caller is a member of the target mob and the new member is its
+    /// wired peer there: each trusts the other and they can message each
+    /// other.
+    MemberPeer,
+    /// `auto_wire_parent` was false or omitted, and no edge joins the caller
+    /// to the new member.
+    NotRequested,
+    /// The caller is not a member of the target mob (for example a mob it
+    /// created with `mob_create`), so nothing was wired to it.
+    CallerOutsideMob,
+    /// `auto_wire_parent` was requested and the caller is a member of the
+    /// target mob, but no edge between them was committed.
+    NotWired,
+}
+
+impl SpawnParentWiring {
+    /// The one classification: an edge the target mob committed between the
+    /// caller and the new member is the only way to report it wired.
+    fn classify(requested: bool, caller_in_mob: bool, edge_committed: bool) -> Self {
+        if edge_committed {
+            Self::MemberPeer
+        } else if !requested {
+            Self::NotRequested
+        } else if !caller_in_mob {
+            Self::CallerOutsideMob
+        } else {
+            Self::NotWired
+        }
+    }
+
+    const fn is_wired(self) -> bool {
+        matches!(self, Self::MemberPeer)
+    }
+}
+
 const MEMBER_TURN_RUNNING_NOTE: &str = "The member's turn is still running. output_preview \
      and tokens_used are from its last completed turn.";
 
@@ -3990,7 +4068,9 @@ struct SpawnMemberArgs {
     /// Bound host peer ID for placed execution; omit for the controlling host.
     #[serde(default)]
     placement: Option<WireHostRef>,
-    /// If true, auto-wire bidirectional comms with the orchestrator after spawn.
+    /// If true and you are a member of the target mob, wire the new member to
+    /// you. Nothing is wired to a caller outside the target mob; the result's
+    /// wired and parent_wiring fields report what happened.
     #[serde(default)]
     auto_wire_parent: Option<bool>,
     /// Optional tool-surface override for this member (same shape as delegate's tooling).
@@ -7858,7 +7938,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        surface
+        let spawned = surface
             .dispatch(ToolCallView {
                 id: "spawn-auto-wire-child",
                 name: "mob_spawn_member",
@@ -7866,6 +7946,14 @@ mod tests {
             })
             .await
             .expect("owner-bound spawn should succeed");
+        let spawned: serde_json::Value =
+            serde_json::from_str(&spawned.result.text_content()).expect("spawn result JSON");
+        assert_eq!(
+            spawned["wired"],
+            json!(true),
+            "the result reports the committed edge: {spawned}"
+        );
+        assert_eq!(spawned["parent_wiring"], json!("member_peer"));
 
         let roster = handle.roster().await;
         let child = roster
@@ -7884,6 +7972,158 @@ mod tests {
             creation.creation.provenance,
             meerkat_mob::MemberCreationProvenance::Unproven,
             "nonpersistent caller metadata must not become an independent host root"
+        );
+    }
+
+    /// A caller that is not a member of the target mob (here: a session that
+    /// holds spawn scope over a mob a host created) is never wired to the
+    /// member it spawns. With `auto_wire_parent` the result says so, typed,
+    /// instead of reporting nothing; without it the result says wiring was
+    /// not requested. Neither spawn commits an edge to the caller.
+    #[tokio::test]
+    async fn mob_spawn_member_reports_a_caller_outside_the_mob_as_not_wired() {
+        let state = MobMcpState::new_in_memory();
+        let mob_id = state
+            .mob_create_definition(sample_definition("spawn-outside-caller"))
+            .await
+            .expect("create mob");
+        let handle = state.handle_for(&mob_id).await.expect("handle");
+        let outside_session = SessionId::new();
+        let surface: Arc<dyn AgentToolDispatcher> = Arc::new(AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            spawn_profile_authority(
+                mob_id.as_str(),
+                live_incarnation(&state, &mob_id).await,
+                "worker",
+            ),
+            "claude-sonnet-4-5".to_string(),
+            outside_session.clone(),
+            None,
+            None,
+            None,
+        ));
+        let surface = surface
+            .bind_ops_lifecycle(
+                Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                outside_session,
+            )
+            .expect("bind ops lifecycle")
+            .into_dispatcher();
+
+        for (member, auto_wire_parent, expected) in [
+            ("requested", Some(true), "caller_outside_mob"),
+            ("omitted", None, "not_requested"),
+        ] {
+            let mut args = json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "member_id": member,
+            });
+            if let Some(auto_wire_parent) = auto_wire_parent {
+                args["auto_wire_parent"] = json!(auto_wire_parent);
+            }
+            let args = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+            let spawned = surface
+                .dispatch(ToolCallView {
+                    id: "spawn-outside-caller",
+                    name: "mob_spawn_member",
+                    args: &args,
+                })
+                .await
+                .expect("the spawn itself succeeds");
+            let spawned: serde_json::Value =
+                serde_json::from_str(&spawned.result.text_content()).expect("spawn result JSON");
+            assert_eq!(
+                spawned["wired"],
+                json!(false),
+                "{member}: nothing is reported wired: {spawned}"
+            );
+            assert_eq!(spawned["parent_wiring"], json!(expected), "{member}");
+            let roster = handle.roster().await;
+            let entry = roster
+                .get_by_identity(&AgentIdentity::from(member))
+                .expect("the member is seated");
+            assert!(
+                entry.wired_to.is_empty(),
+                "{member}: no edge was committed: {:?}",
+                entry.wired_to
+            );
+        }
+    }
+
+    /// The classification behind `wired`: only a committed edge between the
+    /// caller and the new member reports it wired, whatever was requested.
+    #[test]
+    fn spawn_parent_wiring_reports_wired_only_for_a_committed_edge() {
+        for requested in [false, true] {
+            for caller_in_mob in [false, true] {
+                for edge_committed in [false, true] {
+                    let wiring =
+                        SpawnParentWiring::classify(requested, caller_in_mob, edge_committed);
+                    assert_eq!(
+                        wiring.is_wired(),
+                        edge_committed,
+                        "requested={requested} caller_in_mob={caller_in_mob} \
+                         edge_committed={edge_committed}: {wiring:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            SpawnParentWiring::classify(true, true, true),
+            SpawnParentWiring::MemberPeer
+        );
+        assert_eq!(
+            SpawnParentWiring::classify(false, true, false),
+            SpawnParentWiring::NotRequested
+        );
+        assert_eq!(
+            SpawnParentWiring::classify(true, false, false),
+            SpawnParentWiring::CallerOutsideMob
+        );
+        assert_eq!(
+            SpawnParentWiring::classify(true, true, false),
+            SpawnParentWiring::NotWired
+        );
+        assert_eq!(
+            serde_json::to_value(SpawnParentWiring::CallerOutsideMob).expect("serialize"),
+            json!("caller_outside_mob")
+        );
+    }
+
+    /// The model reads what `auto_wire_parent` wires from the tool's own
+    /// text: who gets wired, that a caller outside the target mob gets
+    /// nothing, and which result fields report it. No orchestrator wiring
+    /// is promised.
+    #[test]
+    fn mob_spawn_member_text_says_exactly_what_auto_wire_parent_wires() {
+        let defs = build_tool_defs();
+        let spawn = defs
+            .iter()
+            .find(|def| def.name == TOOL_MOB_SPAWN_MEMBER)
+            .expect("mob_spawn_member is defined");
+        for needle in [
+            "you are a member of the target mob",
+            "nothing is wired to you",
+            "wired is true only when you and the new member are wired peers",
+            "caller_outside_mob",
+        ] {
+            assert!(
+                spawn.description.contains(needle),
+                "description lacks {needle:?}: {}",
+                spawn.description
+            );
+        }
+        assert!(
+            !spawn.description.contains("orchestrator"),
+            "no orchestrator wiring is promised: {}",
+            spawn.description
+        );
+        let argument = spawn.input_schema["properties"]["auto_wire_parent"].to_string();
+        assert!(
+            argument.contains("member of the target mob") && !argument.contains("orchestrator"),
+            "{argument}"
         );
     }
 

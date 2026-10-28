@@ -485,6 +485,21 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "ResolveRuntimeCompletionResultOutcomeUnknownRunning",
     "ResolveRuntimeCompletionResultOutcomeUnknownRetired",
     "ResolveRuntimeCompletionResultOutcomeUnknownStopped",
+    "ResolveEmptyResumeRetirementRetireIdle",
+    "ResolveEmptyResumeRetirementRetireAttached",
+    "ResolveEmptyResumeRetirementRetireRunning",
+    "ResolveEmptyResumeRetirementRetireRetired",
+    "ResolveEmptyResumeRetirementRetireStopped",
+    "ResolveEmptyResumeRetirementKeepServingIdle",
+    "ResolveEmptyResumeRetirementKeepServingAttached",
+    "ResolveEmptyResumeRetirementKeepServingRunning",
+    "ResolveEmptyResumeRetirementKeepServingRetired",
+    "ResolveEmptyResumeRetirementKeepServingStopped",
+    "ClaimCompositionResidencyIdle",
+    "ClaimCompositionResidencyAttached",
+    "ClaimCompositionResidencyRunning",
+    "ClaimCompositionResidencyRetired",
+    "ClaimCompositionResidencyStopped",
 ];
 
 // Append-only emission tails for the other machines, whose public
@@ -513,6 +528,54 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "ReclaimExhaustedAfterUnprovenDispatch",
             "UnprovenLateNotAdmittedFromClaimed",
             "UnprovenLateNotAdmittedFromDispatching",
+        ],
+    ),
+    // The member residency twins (archive-only retirements, a Dormant
+    // member's external wiring) sit beside their siblings in the catalog.
+    // Every MobMachine arm added after them is appended here too: an
+    // unlisted arm would be emitted ahead of this tail and move it.
+    (
+        "MobMachine",
+        &[
+            "RetireMemberArchiveOnly",
+            "AdmitDestroyMemberRetireArchiveOnlyRunning",
+            "AdmitDestroyMemberRetireArchiveOnlyStopped",
+            "WireExternalPeerDormantRunning",
+            "WireExternalPeerAlreadyWiredDormant",
+            "UnwireExternalPeerDormantRunning",
+            "RetireRunningReleasingArchiveOnly",
+            "RetireRunningPreservingBindingArchiveOnly",
+            "RetireStoppedReleasingArchiveOnly",
+            "RetireStoppedPreservingBindingArchiveOnly",
+            "ResolveMemberRevivalSessionCreatedRunning",
+            "ResolveMemberRevivalSessionCreatedStaleRunning",
+            "ResolveMemberRevivalSessionCreatedStaleStopped",
+            "ResolveMemberRevivalSessionCreatedStaleCompleted",
+            "ResolveMemberRevivalSessionCreatedStaleDestroyed",
+            "RecoverMemberSeatSessionUnbornRunning",
+            "RecoverMemberSeatSessionBornRunning",
+            "AuthorizeSpawnProfileSeatedRunning",
+        ],
+    ),
+    // The entered-step arms of the review attempt lifecycle (0.9.7), after
+    // every arm 0.9.6 published. Every ApprovalLifecycleMachine arm added
+    // after them is appended here too, so none of them moves.
+    (
+        "ApprovalLifecycleMachine",
+        &[
+            "AdmitEnteredStepRejectedMissing",
+            "AdmitEnteredStepRejectedConsentLinked",
+            "AdmitEnteredStepRejectedRetired",
+            "AdmitEnteredStepRejectedNotEntered",
+            "AdmitEnteredStep",
+            "AdmitEnteredStepRejectedClosing",
+            "ReleaseReviewUsedClosing",
+            "ReleaseReviewRejectedClosing",
+            "FinishEnteredStepRejectedMissing",
+            "FinishEnteredStepRejectedNotInFlight",
+            "FinishEnteredStepOpen",
+            "FinishEnteredStepClosing",
+            "FinishEnteredStepReleases",
         ],
     ),
 ];

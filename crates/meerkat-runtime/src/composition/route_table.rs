@@ -276,9 +276,10 @@ mod tests {
         let schema = meerkat_mob_seam_composition();
         let table = RouteTable::from_schema(&schema).unwrap();
 
-        // The live schema declares 4 Input-kind and 3 Signal-kind routes.
+        // The live schema declares 4 Input-kind and 4 Signal-kind routes
+        // (the bound registration, its release, the retire and the destroy).
         assert_eq!(table.len(), 4);
-        assert_eq!(table.signal_route_count(), 3);
+        assert_eq!(table.signal_route_count(), 4);
     }
 
     #[test]
@@ -378,6 +379,7 @@ mod tests {
             vec![
                 ("agent_runtime_id", "agent_runtime_id"),
                 ("fence_token", "fence_token"),
+                ("runtime_epoch_id", "runtime_epoch_id"),
             ]
         );
     }

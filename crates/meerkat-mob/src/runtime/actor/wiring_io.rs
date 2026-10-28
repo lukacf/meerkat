@@ -106,6 +106,31 @@ impl PreparedWiring {
         self.plan.members()
     }
 
+    /// The (sender, recipient) pair of every lifecycle notice this plan
+    /// sends: the sender is the step's owner (whose comms carries it), the
+    /// recipient its counterpart.
+    fn notice_pairs(&self) -> Vec<(AgentIdentity, AgentIdentity)> {
+        self.steps
+            .iter()
+            .filter_map(|step| match step {
+                WiringStep::Notify {
+                    owner, counterpart, ..
+                } => Some((owner.clone(), counterpart.clone())),
+                WiringStep::AddTrust { .. } | WiringStep::RemoveTrust { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Keep only the lifecycle notices in `deliver`; trust steps stay.
+    fn retain_notices(&mut self, deliver: &BTreeSet<(AgentIdentity, AgentIdentity)>) {
+        self.steps.retain(|step| match step {
+            WiringStep::Notify {
+                owner, counterpart, ..
+            } => deliver.contains(&(owner.clone(), counterpart.clone())),
+            WiringStep::AddTrust { .. } | WiringStep::RemoveTrust { .. } => true,
+        });
+    }
+
     /// Stable lane name for logs and typed uncertainty reasons.
     pub(in crate::runtime) fn context(&self) -> &'static str {
         self.plan.context()
@@ -171,6 +196,9 @@ pub(in crate::runtime) struct LocalEndpointObservation {
     member_ref: MemberRef,
     comms_name: String,
     context: &'static str,
+    /// The durable endpoint of a member MobMachine holds Waking: when its
+    /// comms runtime does not exist yet, it resolves `LocalDormant` from it.
+    unmaterialized_spec: Option<TrustedPeerDescriptor>,
 }
 
 impl LocalEndpointObservation {
@@ -186,6 +214,7 @@ impl LocalEndpointObservation {
             member_ref,
             comms_name,
             context,
+            unmaterialized_spec,
         } = self;
         if let Some(comms) = provisioner.comms_runtime(&member_ref).await {
             let public_key = comms.public_key().ok_or_else(|| {
@@ -224,10 +253,15 @@ impl LocalEndpointObservation {
                 let spec = MobActor::peer_only_spec_for_binding(&binding, context)?;
                 Ok(WiringEndpoint::PeerOnly { spec, binding })
             }
-            MemberRef::Session { .. } => Err(MobError::WiringError(format!(
-                "{context} requires comms runtime for '{}'",
-                entry.agent_identity
-            ))),
+            MemberRef::Session { .. } => match unmaterialized_spec {
+                // Waking, comms runtime not built yet: its wake's topology
+                // step realizes the edge from machine state.
+                Some(spec) => Ok(WiringEndpoint::LocalDormant { entry, spec }),
+                None => Err(MobError::WiringError(format!(
+                    "{context} requires comms runtime for '{}'",
+                    entry.agent_identity
+                ))),
+            },
         }
     }
 }
@@ -855,7 +889,8 @@ impl MobActor {
         match command {
             MobCommand::Retire { agent_identity, .. }
             | MobCommand::Respawn { agent_identity, .. }
-            | MobCommand::ReloadMemberRegistration { agent_identity, .. } => {
+            | MobCommand::ReloadMemberRegistration { agent_identity, .. }
+            | MobCommand::ReleaseMember { agent_identity, .. } => {
                 self.wiring_effect_pending_for_member(agent_identity)
             }
             MobCommand::Wire { local, target, .. } | MobCommand::Unwire { local, target, .. } => {
@@ -993,6 +1028,7 @@ impl MobActor {
         prepared: PreparedWiring,
         reply: Option<WiringIoReply>,
     ) -> WiringIoTicket {
+        let prepared = self.classify_wiring_notices(prepared);
         let ticket = self.next_wiring_io_ticket();
         if self.member_effect_start_is_gated() {
             // Reciprocal graph fence is up: preserve the owned preparation
@@ -1003,6 +1039,36 @@ impl MobActor {
             return ticket;
         }
         self.start_prepared_wiring(ticket, prepared, reply)
+    }
+
+    /// A plan's lifecycle notices are sent only where MobMachine's
+    /// disposition says `Deliver`. A notice to or from a member that is not
+    /// live is `Suppressed`: it wakes no one, and the member's trust, which
+    /// its wake realizes from the machine's edges, carries its content. A
+    /// classifier fault skips the notice (it is advisory) and is logged; the
+    /// trust steps always run.
+    fn classify_wiring_notices(&mut self, mut prepared: PreparedWiring) -> PreparedWiring {
+        let mut deliver = BTreeSet::new();
+        for (sender, recipient) in prepared.notice_pairs() {
+            match self.classify_peer_notice(&recipient, &sender, mob_dsl::PeerInputClass::Lifecycle)
+            {
+                Ok(mob_dsl::PeerNoticeDisposition::Deliver) => {
+                    deliver.insert((sender, recipient));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        sender = %sender,
+                        recipient = %recipient,
+                        %error,
+                        "a wiring notice could not be classified; it is not sent"
+                    );
+                }
+            }
+        }
+        prepared.retain_notices(&deliver);
+        prepared
     }
 
     /// Start every queued wiring dispatch whose gate has cleared. Driven by
@@ -1107,6 +1173,22 @@ impl MobActor {
                 },
             )));
         }
+        // A Dormant member is resolved here, from its durable endpoint: no
+        // comms runtime of it is looked up, and nothing wakes it.
+        let state = self.dsl_authority.state();
+        if crate::runtime::boot_plan::domain_member_is_dormant(state, &entry.agent_identity) {
+            return Ok(WiringEndpointObservation::Resolved(Box::new(
+                self.local_dormant_wiring_endpoint(entry, context)?,
+            )));
+        }
+        let unmaterialized_spec = if crate::runtime::boot_plan::domain_member_is_unmaterialized(
+            state,
+            &entry.agent_identity,
+        ) {
+            self.machine_member_peer_spec_for(&entry.agent_identity, context)?
+        } else {
+            None
+        };
         Ok(WiringEndpointObservation::Observe(Box::new(
             LocalEndpointObservation {
                 provisioner: Arc::clone(&self.provisioner),
@@ -1114,6 +1196,7 @@ impl MobActor {
                 member_ref,
                 comms_name,
                 context,
+                unmaterialized_spec,
             },
         )))
     }
@@ -1171,6 +1254,7 @@ impl MobActor {
         &mut self,
         prepared: PreparedWiring,
     ) -> Result<(), MobError> {
+        let prepared = self.classify_wiring_notices(prepared);
         let realized = prepared.realize().await;
         self.commit_realized_wiring(realized).await
     }

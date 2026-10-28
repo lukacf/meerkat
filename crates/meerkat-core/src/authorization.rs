@@ -584,6 +584,31 @@ pub trait WorkAuthorization: Send + Sync {
         Err(OperationAuthorizationError::Unavailable)
     }
 
+    /// As `run_if_current_within`, for a further step of an effect a
+    /// dispatch already entered (`crate::EnteredDispatchOperation`): the
+    /// complete current decision, computed inside this owner's own
+    /// non-waiting exclusion, may require no more review than
+    /// `entered_tier`, the review the dispatch actually entered (the rule
+    /// `issue_child_if_current_within` applies), and no review runs here.
+    /// `prepared` is the validity of the decision the dispatch entered (its
+    /// window and monotonic cutoff; `None` refuses). An implementor must
+    /// refuse a decision stricter than `entered_tier` under its own
+    /// exclusion, whatever its caller checked before. Wrappers check their
+    /// own custody and forward. The default is unavailable and never runs
+    /// `operation`: a wrapper that does not forward it refuses every entered
+    /// step as unavailable. `operation` runs at most once and must not
+    /// await.
+    fn run_entered_if_current_within(
+        &self,
+        _binding: &PreparedAuthorizationBinding,
+        _prepared: Option<&OperationValidity>,
+        _further: &(dyn std::any::Any + Send + Sync),
+        _operation: &mut dyn FnMut(),
+        _entered_tier: OperationReviewTier,
+    ) -> Result<(), OperationAuthorizationError> {
+        Err(OperationAuthorizationError::Unavailable)
+    }
+
     /// Whether this owner can take `further` and `intent` for
     /// `issue_child_if_current_within`: their types and this owner's own
     /// issuance composition, checked before any review is spent. It decides

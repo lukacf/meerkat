@@ -3383,6 +3383,20 @@ pub trait SessionAgentBuilder: Send + Sync {
         meerkat_models::inline_video_support_for(identity.provider, &identity.model)
     }
 
+    /// The auth binding a build that names `auth_binding` records in its
+    /// session's metadata: the same binding stamped with the realm that
+    /// declares it (a binding a realm inherits is recorded under its owner).
+    /// `Ok(None)` when this builder does not resolve bindings, so a caller
+    /// compares the named form alone. A binding this builder cannot resolve
+    /// is an error.
+    async fn recorded_auth_binding(
+        &self,
+        auth_binding: &meerkat_core::AuthBindingRef,
+    ) -> Result<Option<meerkat_core::AuthBindingRef>, SessionError> {
+        let _ = auth_binding;
+        Ok(None)
+    }
+
     /// Build an agent for a new session.
     async fn build_agent(
         &self,
@@ -4557,6 +4571,16 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
 }
 
 impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
+    /// The auth binding a build of this service that names `auth_binding`
+    /// records in its session's metadata (see
+    /// [`SessionAgentBuilder::recorded_auth_binding`]).
+    pub async fn recorded_auth_binding(
+        &self,
+        auth_binding: &meerkat_core::AuthBindingRef,
+    ) -> Result<Option<meerkat_core::AuthBindingRef>, SessionError> {
+        self.builder.recorded_auth_binding(auth_binding).await
+    }
+
     /// The host's MCP attempt guards this service's builder carries, if any.
     pub fn mcp_attempt_guards(&self) -> Option<&B::Guards>
     where

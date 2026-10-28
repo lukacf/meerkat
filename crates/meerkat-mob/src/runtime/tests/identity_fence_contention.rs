@@ -448,6 +448,15 @@ async fn an_adopted_identity_converges_while_status_commits_hold_the_mob_databas
 /// probe's plain reads of the runtime store keep completing while fences
 /// wait. Prints the per-identity numbers.
 ///
+/// Whether a status commit holds mob.db when an identity's bounded-wait
+/// attempt starts is up to the scheduler: each identity's own status commit
+/// ends before its attempt, and in some runs every attempt took the lock
+/// between two commits. So the first bounded-wait attempt starts while a
+/// writer holds mob.db's write lock and keeps it 200 ms more, as a held
+/// status commit does: every run contains a bounded wait of about 200 ms,
+/// and the probe reads during it. The other attempts meet the status
+/// commits as they come.
+///
 /// The statuses of the other steps commit at full speed: adopting a member
 /// retires its materialization first, and the load of every status held
 /// belongs to the retirement test below.
@@ -469,6 +478,7 @@ async fn eight_adopted_identities_converge_together_while_status_commits_hold_th
         Some(crate::identity::IdentityReconcileDecision::EnsureRuntimeRegistration),
     );
     hooks::record_fence_attempts(&mob.mob_db);
+    hooks::contend_next_waiting_attempt(&mob.mob_db, REGISTRATION_STATUS_HOLD);
 
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let probe = tokio::spawn(probe_runtime_reads(mob.runtime_store.clone(), stopped));
@@ -484,6 +494,7 @@ async fn eight_adopted_identities_converge_together_while_status_commits_hold_th
     stop.send_replace(true);
     let reads = probe.await.expect("the probe task");
     let attempts = hooks::fence_attempts(&mob.mob_db);
+    let contending_writer = hooks::contending_writer(&mob.mob_db);
     hooks::release(&mob.mob_db);
 
     let report = ContentionReport::new(&members, &attempts, &converged, &reads);
@@ -505,7 +516,7 @@ async fn eight_adopted_identities_converge_together_while_status_commits_hold_th
             .iter()
             .any(|attempt| attempt.blocking && attempt.waited >= Duration::from_millis(100)),
         "the run shows the contention it measures: a bounded-wait attempt waited 100 ms or \
-         more:\n{report}"
+         more (the writer across the first one's start: {contending_writer:?}):\n{report}"
     );
     assert!(
         report.max_single_wait() < IDENTITY_RUNTIME_WRITE_FENCE_WAIT,

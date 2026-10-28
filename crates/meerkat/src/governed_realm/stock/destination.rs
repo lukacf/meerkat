@@ -15,7 +15,9 @@ use meerkat_authorization_contracts::work_association::NativeWorkTarget;
 use meerkat_core::authorization::OwnerQualifiedTarget;
 use meerkat_core::{PrincipalRef, SessionId};
 use meerkat_runtime::meerkat_machine::scoped_destination_target;
-use meerkat_runtime::{LogicalRuntimeId, MeerkatMachine, RuntimeDriverError};
+use meerkat_runtime::{
+    LogicalRuntimeId, MeerkatMachine, RuntimeDriverError, RuntimeSessionRegistrationWitness,
+};
 
 /// The last generation this process bound. A bind proposes the larger of its
 /// successor and the wall clock in milliseconds: best effort, so that a
@@ -158,6 +160,19 @@ pub async fn bind_stock_session_within(
     session_id: &SessionId,
     within: impl FnOnce(&mut dyn FnMut()) -> Result<(), RuntimeDriverError> + Send,
 ) -> Result<StockSessionDestination, RuntimeDriverError> {
+    bind_stock_session_on_registration(machine, operator, session_id, within)
+        .await
+        .map(|(destination, _)| destination)
+}
+
+/// [`bind_stock_session_within`], with the exact registration the
+/// destination was bound on.
+pub(crate) async fn bind_stock_session_on_registration(
+    machine: &MeerkatMachine,
+    operator: &PrincipalRef,
+    session_id: &SessionId,
+    within: impl FnOnce(&mut dyn FnMut()) -> Result<(), RuntimeDriverError> + Send,
+) -> Result<(StockSessionDestination, RuntimeSessionRegistrationWitness), RuntimeDriverError> {
     let registration = machine
         .current_session_registration_witness(session_id)
         .await
@@ -167,7 +182,7 @@ pub async fn bind_stock_session_within(
     machine
         .bind_scoped_context_within(&registration, destination.target(), within)
         .await?;
-    Ok(destination)
+    Ok((destination, registration))
 }
 
 #[cfg(test)]

@@ -22,16 +22,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use meerkat_mob::machines::mob_machine::{
-    AgentIdentity, AgentRuntimeId, AutonomousShutdownMemberActionKind, ControlScope, FenceToken,
-    FlowStepDispatchKind, Generation, HostBindPhase, HostId, InputId, LiveWsEndpointUrl,
-    MemberLiveMaterializationObservationKind, MemberOperatorRejectKind, MemberPeerEndpoint,
-    MemberRevivalVerdictKind, MemberSessionDisposal, MobId, MobLifecycleJournalKind,
-    MobMachineAuthority, MobMachineEffect, MobMachineInput, MobMachineMutator, MobMachineSignal,
-    MobMachineState, MobPhase, MobSpawnMemberAdmissionKind, PeerAddress, PeerId, PeerName,
-    PeerSigningKey, PlacedCompletionLifecycleIntentKind, PlacedSpawnId, PrincipalId,
-    RemoteTurnObligation, RouteInstallObligation, RouteObligationKind, RunId, SessionId,
-    SpawnExecPhase, SpawnPolicyRuntimeMode, StepId, SubmitWorkRejectReasonKind, WiringEdge,
-    WorkContentAttribution, WorkId, WorkOrigin,
+    AgentIdentity, AgentRuntimeId, AutonomousShutdownMemberActionKind, BootMaterializationKind,
+    ControlScope, FenceToken, FlowStepDispatchKind, Generation, HostBindPhase, HostId, InputId,
+    LiveWsEndpointUrl, MemberBootObligationCause, MemberLiveMaterializationObservationKind,
+    MemberMaterializationLossCause, MemberMaterializationPhase,
+    MemberMaterializationReleaseOutcome, MemberOperatorRejectKind, MemberPeerEndpoint,
+    MemberRecoveryObligationKind, MemberReleaseVerdict, MemberRevivalVerdictKind,
+    MemberSessionDisposal, MemberWakeCause, MobId, MobLifecycleJournalKind, MobMachineAuthority,
+    MobMachineEffect, MobMachineInput, MobMachineMutator, MobMachineSignal, MobMachineState,
+    MobPhase, MobSpawnMemberAdmissionKind, PeerAddress, PeerId, PeerName, PeerSigningKey,
+    PlacedCompletionLifecycleIntentKind, PlacedSpawnId, PrincipalId, RemoteTurnObligation,
+    RouteInstallObligation, RouteObligationKind, RunId, RuntimeEpochId, SessionId, SpawnExecPhase,
+    SpawnPolicyRuntimeMode, StepId, SubmitWorkRejectReasonKind, WiringEdge, WorkContentAttribution,
+    WorkId, WorkOrigin,
 };
 
 fn identity(name: &str) -> AgentIdentity {
@@ -67,12 +70,12 @@ fn provision_operation_id(identity_name: &str, generation: u64) -> String {
 }
 
 fn member_endpoint(identity_name: &str, key_byte: u8) -> MemberPeerEndpoint {
-    MemberPeerEndpoint {
-        name: PeerName(identity_name.to_string()),
-        peer_id: PeerId(format!("peer-{identity_name}")),
-        address: PeerAddress(format!("tcp://members/{identity_name}")),
-        signing_key: PeerSigningKey([key_byte; 32]),
-    }
+    MemberPeerEndpoint::new(
+        PeerName(identity_name.to_string()),
+        PeerId(format!("peer-{identity_name}")),
+        PeerAddress(format!("tcp://members/{identity_name}")),
+        PeerSigningKey([key_byte; 32]),
+    )
 }
 
 /// Capability shape for a bind/rebind test host.
@@ -2935,6 +2938,21 @@ fn route_install_obligations_validate_kind_against_wiring_graph() {
     let host = host_id("host-b");
     bind_owner_bridge(&mut authority);
     bind_host(&mut authority, &host, 1, HostCaps::FULL);
+    // A wiring edge joins seated members (`edge_endpoints_seated_or_held`):
+    // seat both ends as local members, so neither is placed on the host and
+    // the route-install guards read the same placement facts as before.
+    seed_local_member(
+        &mut authority,
+        "alpha",
+        0,
+        SpawnPolicyRuntimeMode::TurnDriven,
+    );
+    seed_local_member(
+        &mut authority,
+        "beta",
+        0,
+        SpawnPolicyRuntimeMode::TurnDriven,
+    );
 
     let edge = WiringEdge::new(identity("alpha"), identity("beta"));
     let install = RouteInstallObligation {
@@ -3105,6 +3123,411 @@ fn route_removal_before_unwire_is_ephemeral_authority_not_pending_ledger() {
     assert!(authority.state().pending_route_installs.is_empty());
 }
 
+/// A placed member and a Live local member with an inproc endpoint (key byte
+/// 6), each at generation 0 (fence 1).
+fn placed_and_local_members(placed: &str, local: &str) -> MobMachineAuthority {
+    let mut authority = MobMachineAuthority::new();
+    let host = host_id("host-b");
+    bind_owner_bridge(&mut authority);
+    bind_host(&mut authority, &host, 1, HostCaps::FULL);
+    seed_remote_member(
+        &mut authority,
+        placed,
+        0,
+        &host,
+        SpawnPolicyRuntimeMode::TurnDriven,
+    );
+    seed_local_member(&mut authority, local, 0, SpawnPolicyRuntimeMode::TurnDriven);
+    MobMachineMutator::apply(
+        &mut authority,
+        MobMachineInput::RegisterMemberPeer {
+            agent_identity: identity(local),
+            agent_runtime_id: runtime_id(local, 0),
+            generation: Generation(0),
+            fence_token: FenceToken(1),
+            peer_endpoint: MemberPeerEndpoint::new(
+                PeerName(local.to_string()),
+                PeerId(format!("peer-{local}")),
+                PeerAddress(format!("inproc://{local}")),
+                PeerSigningKey([6; 32]),
+            ),
+        },
+    )
+    .expect("the local member's inproc endpoint is registered");
+    authority
+}
+
+/// The state replay leaves after a cold restart: the local member Dormant,
+/// with nothing registered in this process (no epoch, no binding ladder).
+fn as_replayed_dormant(state: &MobMachineState, local: &str) -> MobMachineAuthority {
+    let mut state = state.clone();
+    let local_runtime = runtime_id(local, 0);
+    state
+        .member_materialization
+        .insert(identity(local), MemberMaterializationPhase::Dormant);
+    state.member_materialization_epoch.remove(&identity(local));
+    state
+        .member_startup_binding_requested
+        .remove(&local_runtime);
+    state.member_startup_runtime_ready.remove(&local_runtime);
+    state.member_startup_ready.remove(&local_runtime);
+    MobMachineAuthority::recover_from_state(state).expect("a replay-shaped Dormant member recovers")
+}
+
+/// A local member wired to a placed member is network-reachable for the boot
+/// verdict: the placed peer, in another process, cannot use an inproc wake
+/// route, so the boot plan wakes the member although its own endpoint is
+/// inproc. Without that edge the same member stays Dormant (lazy by default).
+/// `WiringEdge::new` orders its ends, so both orders are checked: the local
+/// member as the edge's second end and as its first.
+#[test]
+fn a_local_member_wired_to_a_placed_member_wakes_at_boot() {
+    assert_wired_member_wakes_at_boot("alpha", "beta");
+    assert_wired_member_wakes_at_boot("zulu", "beta");
+}
+
+fn assert_wired_member_wakes_at_boot(placed: &str, local: &str) {
+    let mut authority = placed_and_local_members(placed, local);
+    let plan = MobMachineInput::PlanBootMaterialization {
+        agent_identity: identity(local),
+        obligation: MemberRecoveryObligationKind::None,
+        host_required: false,
+        orchestrator_notified: false,
+    };
+    let planned_verdict = |authority: &mut MobMachineAuthority| {
+        MobMachineMutator::apply(authority, plan.clone())
+            .expect("the boot plan answers for the Dormant member")
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                MobMachineEffect::BootMaterializationPlanned { verdict, .. } => Some(*verdict),
+                _ => None,
+            })
+            .expect("the boot plan emits its verdict")
+    };
+
+    let mut unwired = as_replayed_dormant(authority.state(), local);
+    assert_eq!(
+        planned_verdict(&mut unwired),
+        BootMaterializationKind::StayDormant,
+        "an inproc member with no edge to a placed member stays lazy"
+    );
+
+    let edge = WiringEdge::new(identity(placed), identity(local));
+    MobMachineMutator::apply(&mut authority, MobMachineInput::WireMembers { edge })
+        .expect("wire accepted");
+    let mut wired = as_replayed_dormant(authority.state(), local);
+    assert_eq!(
+        planned_verdict(&mut wired),
+        BootMaterializationKind::Wake,
+        "a member wired to a placed member wakes so the placed peer can reach it ({placed} - {local})"
+    );
+}
+
+fn release_verdict(authority: &mut MobMachineAuthority, name: &str) -> MemberReleaseVerdict {
+    MobMachineMutator::apply(
+        authority,
+        MobMachineInput::ClassifyMemberRelease {
+            agent_identity: identity(name),
+        },
+    )
+    .expect("the release verdict answers in every phase")
+    .effects()
+    .iter()
+    .find_map(|effect| match effect {
+        MobMachineEffect::MemberReleaseClassified { verdict, .. } => Some(*verdict),
+        _ => None,
+    })
+    .expect("the release verdict is emitted")
+}
+
+/// The routed release of a generation-0 member's registration under `epoch`.
+fn release_registration(
+    authority: &mut MobMachineAuthority,
+    name: &str,
+    epoch: &RuntimeEpochId,
+) -> MemberMaterializationReleaseOutcome {
+    authority
+        .apply_signal(MobMachineSignal::ReleaseMemberMaterialization {
+            agent_runtime_id: Some(runtime_id(name, 0)),
+            fence_token: Some(FenceToken(1)),
+            runtime_epoch_id: Some(epoch.clone()),
+            cause: MemberMaterializationLossCause::RegistrationReleased,
+        })
+        .expect("a registration release is answered")
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            MobMachineEffect::MemberMaterializationReleased { outcome, .. } => Some(*outcome),
+            _ => None,
+        })
+        .expect("the release outcome is emitted")
+}
+
+/// On release: a Live local member that a wiring edge joins to a placed
+/// member is pinned Live, so its placed peer can always reach it. Its release
+/// verdict is PinnedByPlacedPeer, never Release, and the release of its
+/// registration is a Stale no-op. Unwiring the last such edge makes it
+/// releasable again as normal. Both edge orders (`WiringEdge::new` orders its
+/// ends).
+#[test]
+fn a_local_member_wired_to_a_placed_member_is_pinned_live() {
+    assert_wired_member_pinned_live("alpha", "beta");
+    assert_wired_member_pinned_live("zulu", "beta");
+}
+
+fn assert_wired_member_pinned_live(placed: &str, local: &str) {
+    let mut authority = placed_and_local_members(placed, local);
+    let epoch = RuntimeEpochId(format!("epoch-{local}"));
+    authority
+        .apply_signal(MobMachineSignal::ObserveRuntimeReady {
+            agent_runtime_id: runtime_id(local, 0),
+            fence_token: FenceToken(1),
+            runtime_epoch_id: Some(epoch.clone()),
+        })
+        .expect("the routed binding records the registration's epoch");
+    assert_eq!(
+        release_verdict(&mut authority, local),
+        MemberReleaseVerdict::Release,
+        "unwired, the Live member is releasable"
+    );
+
+    let edge = WiringEdge::new(identity(placed), identity(local));
+    MobMachineMutator::apply(
+        &mut authority,
+        MobMachineInput::WireMembers { edge: edge.clone() },
+    )
+    .expect("wire accepted");
+    assert_eq!(
+        release_verdict(&mut authority, local),
+        MemberReleaseVerdict::PinnedByPlacedPeer,
+        "a member wired to a placed member is pinned Live ({placed} - {local})"
+    );
+    assert_eq!(
+        release_registration(&mut authority, local, &epoch),
+        MemberMaterializationReleaseOutcome::Stale,
+        "the pinned member's registration release changes nothing ({placed} - {local})"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .member_materialization
+            .get(&identity(local)),
+        Some(&MemberMaterializationPhase::Live)
+    );
+
+    MobMachineMutator::apply(&mut authority, MobMachineInput::UnwireMembers { edge })
+        .expect("unwire accepted");
+    assert_eq!(
+        release_verdict(&mut authority, local),
+        MemberReleaseVerdict::Release,
+        "with its last placed edge unwired the member is releasable again"
+    );
+    assert_eq!(
+        release_registration(&mut authority, local, &epoch),
+        MemberMaterializationReleaseOutcome::Released
+    );
+    assert_eq!(
+        authority
+            .state()
+            .member_materialization
+            .get(&identity(local)),
+        Some(&MemberMaterializationPhase::Dormant)
+    );
+}
+
+/// A placed member's retirement cleans its wiring up and restores it when the
+/// disposal rolls back. A local neighbour released while the edge was gone is
+/// Dormant when the edge returns: the restore records it owed
+/// (PlacedPeerWired) for the owner's retry timer and tells the owner so
+/// (OwedMemberWakesRecorded). Both edge orders.
+#[test]
+fn a_restored_edge_of_a_placed_member_owes_its_dormant_neighbour_a_wake() {
+    assert_restored_edge_owes_dormant_neighbour("alpha", "beta");
+    assert_restored_edge_owes_dormant_neighbour("zulu", "beta");
+}
+
+fn assert_restored_edge_owes_dormant_neighbour(placed: &str, local: &str) {
+    let mut authority = placed_and_local_members(placed, local);
+    let epoch = RuntimeEpochId(format!("epoch-{local}"));
+    authority
+        .apply_signal(MobMachineSignal::ObserveRuntimeReady {
+            agent_runtime_id: runtime_id(local, 0),
+            fence_token: FenceToken(1),
+            runtime_epoch_id: Some(epoch.clone()),
+        })
+        .expect("the routed binding records the registration's epoch");
+    let edge = WiringEdge::new(identity(placed), identity(local));
+    MobMachineMutator::apply(
+        &mut authority,
+        MobMachineInput::WireMembers { edge: edge.clone() },
+    )
+    .expect("wire accepted");
+    let placed_session = authority
+        .state()
+        .member_session_bindings
+        .get(&identity(placed))
+        .cloned()
+        .expect("the placed member's session is bound");
+    MobMachineMutator::apply(
+        &mut authority,
+        MobMachineInput::Retire {
+            mob_id: MobId("test-mob".to_string()),
+            agent_runtime_id: runtime_id(placed, 0),
+            agent_identity: identity(placed),
+            generation: Generation(0),
+            releasing: Some(placed_session.clone()),
+            session_id: Some(placed_session),
+        },
+    )
+    .expect("the placed member's retirement starts");
+    let cleanup = MobMachineInput::CleanupRetiringMemberWiring {
+        edge: edge.clone(),
+        a_identity: edge.a.clone(),
+        b_identity: edge.b.clone(),
+        agent_identity: identity(placed),
+        agent_runtime_id: runtime_id(placed, 0),
+        fence_token: FenceToken(1),
+        generation: Generation(0),
+    };
+    MobMachineMutator::apply(&mut authority, cleanup).expect("the retirement unwires the edge");
+    assert_eq!(
+        release_registration(&mut authority, local, &epoch),
+        MemberMaterializationReleaseOutcome::Released,
+        "with the edge gone the neighbour is releasable"
+    );
+
+    let restored = MobMachineMutator::apply(
+        &mut authority,
+        MobMachineInput::RestoreRetiringMemberWiring {
+            edge: edge.clone(),
+            a_identity: edge.a.clone(),
+            b_identity: edge.b.clone(),
+            agent_identity: identity(placed),
+            agent_runtime_id: runtime_id(placed, 0),
+            fence_token: FenceToken(1),
+            generation: Generation(0),
+        },
+    )
+    .expect("the rolled-back disposal restores the edge");
+    let shape = format!("{placed} - {local}");
+    assert!(
+        restored
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, MobMachineEffect::OwedMemberWakesRecorded)),
+        "the owner is told to arm its retry timer ({shape})"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .member_boot_obligation_owed
+            .get(&identity(local)),
+        Some(&MemberBootObligationCause::PlacedPeerWired),
+        "the Dormant neighbour of a placed member is owed a wake ({shape})"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .member_materialization
+            .get(&identity(local)),
+        Some(&MemberMaterializationPhase::Dormant)
+    );
+    assert!(authority.state().wiring_edges.contains(&edge));
+}
+
+fn wire_input(edge: &WiringEdge, trust: bool) -> MobMachineInput {
+    if trust {
+        MobMachineInput::WireMembersWithTrust {
+            edge: edge.clone(),
+            a_identity: edge.a.clone(),
+            b_identity: edge.b.clone(),
+        }
+    } else {
+        MobMachineInput::WireMembers { edge: edge.clone() }
+    }
+}
+
+/// At wiring: wiring a Dormant local member to a placed member wakes it
+/// through the machine, never a shell decision. The wiring opens one wake
+/// attempt and emits its materialization (cause PlacedPeerWired), owed until
+/// Live (cause PlacedPeerWired) like a boot wake. Both wiring inputs, both
+/// edge orders. Wired to a local member instead, the Dormant member stays
+/// Dormant.
+#[test]
+fn wiring_a_dormant_member_to_a_placed_member_wakes_it() {
+    for trust in [false, true] {
+        assert_wiring_wakes_dormant_member("alpha", "beta", trust);
+        assert_wiring_wakes_dormant_member("zulu", "beta", trust);
+    }
+
+    let mut seeded = placed_and_local_members("alpha", "beta");
+    seed_local_member(&mut seeded, "gamma", 0, SpawnPolicyRuntimeMode::TurnDriven);
+    let mut authority = as_replayed_dormant(seeded.state(), "beta");
+    let wired = MobMachineMutator::apply(
+        &mut authority,
+        MobMachineInput::WireMembers {
+            edge: WiringEdge::new(identity("beta"), identity("gamma")),
+        },
+    )
+    .expect("wire accepted");
+    assert!(
+        !wired
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, MobMachineEffect::MaterializeMember { .. })),
+        "an edge between local members wakes nobody"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .member_materialization
+            .get(&identity("beta")),
+        Some(&MemberMaterializationPhase::Dormant)
+    );
+}
+
+fn assert_wiring_wakes_dormant_member(placed: &str, local: &str, trust: bool) {
+    let seeded = placed_and_local_members(placed, local);
+    let mut authority = as_replayed_dormant(seeded.state(), local);
+    let edge = WiringEdge::new(identity(placed), identity(local));
+    let wired =
+        MobMachineMutator::apply(&mut authority, wire_input(&edge, trust)).expect("wire accepted");
+    let shape = format!("{placed} - {local}, trust {trust}");
+    let attempt = *authority
+        .state()
+        .member_wake_attempts
+        .get(&identity(local))
+        .unwrap_or_else(|| panic!("the wiring opens the member's wake ({shape})"));
+    assert!(
+        wired.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::MaterializeMember {
+                agent_identity,
+                cause: MemberWakeCause::PlacedPeerWired,
+                attempt: materialized,
+            } if agent_identity == &identity(local) && *materialized == attempt
+        )),
+        "the wiring emits the member's materialization ({shape})"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .member_materialization
+            .get(&identity(local)),
+        Some(&MemberMaterializationPhase::Waking)
+    );
+    assert_eq!(
+        authority
+            .state()
+            .member_boot_obligation_owed
+            .get(&identity(local)),
+        Some(&MemberBootObligationCause::PlacedPeerWired),
+        "the wake is owed until Live, so a retryable failure is retried ({shape})"
+    );
+    assert!(authority.state().wiring_edges.contains(&edge));
+}
+
 /// Phase 4 — the `host_bound` guard on `RecordRouteInstall{Install}`
 /// has its own pin: an obligation naming an UNBOUND host is rejected, a
 /// half-bound (`Requested`) host is still rejected, and only a committed
@@ -3114,6 +3537,20 @@ fn route_install_requires_bound_host() {
     let mut authority = MobMachineAuthority::new();
     bind_owner_bridge(&mut authority);
     let host = host_id("host-c");
+    // A wiring edge joins seated members (`edge_endpoints_seated_or_held`):
+    // seat both ends, local, so only the host's bind phase decides.
+    seed_local_member(
+        &mut authority,
+        "alpha",
+        0,
+        SpawnPolicyRuntimeMode::TurnDriven,
+    );
+    seed_local_member(
+        &mut authority,
+        "beta",
+        0,
+        SpawnPolicyRuntimeMode::TurnDriven,
+    );
     let edge = WiringEdge::new(identity("alpha"), identity("beta"));
     MobMachineMutator::apply(
         &mut authority,
@@ -4399,9 +4836,10 @@ fn grant_inputs_maintain_scope_and_expiry_key_parity_at_every_step() {
 // ==========================================================================
 // Leg B - revival re-emits the runtime binding only on the LOCAL lane.
 //
-// The local half (exact tuple re-emitted, and the fail-closed refusal when the
-// tuple cannot be named) lives in `member_revival_rebinding.rs`; the placed
-// half needs the bound-host ladder, so it lives here.
+// The local half (the exact tuple re-emitted by the Bound step, and the typed
+// Stale verdict for feedback without an open attempt) lives in
+// `member_revival_rebinding.rs`; the placed half needs the bound-host ladder,
+// so it lives here.
 // ==========================================================================
 
 #[test]
@@ -4418,6 +4856,28 @@ fn placed_member_revival_leaves_the_runtime_binding_to_its_member_host() {
         SpawnPolicyRuntimeMode::TurnDriven,
     );
 
+    let authorized = authority
+        .apply_signal(MobMachineSignal::ClassifyMemberLiveMaterialization {
+            agent_identity: identity("remote-revive"),
+            observation: MemberLiveMaterializationObservationKind::DurableSnapshotPresent,
+            reason: "live materialization missing at dispatch".to_string(),
+        })
+        .expect("a durable snapshot must authorize one revival attempt for a placed member");
+    let attempt = authorized
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            MobMachineEffect::MemberLiveMaterializationClassified {
+                verdict: MemberRevivalVerdictKind::ReviveAuthorized,
+                attempt,
+                ..
+            } => *attempt,
+            _ => None,
+        })
+        .expect("the placed fixture depends on the machine-owned revival authorization");
+
+    // The open attempt is a placed member's: a local recreation completion
+    // cannot bind its member-host-owned runtime.
     let before = authority.state().clone();
     authority
         .apply_signal(MobMachineSignal::ResolveRecreatedMemberSessionSucceeded {
@@ -4426,31 +4886,16 @@ fn placed_member_revival_leaves_the_runtime_binding_to_its_member_host() {
             fence_token: FenceToken(1),
             generation: Generation(0),
             bridge_session_id: session_id("member-host-session-remote-revive"),
+            attempt,
         })
         .expect_err("local recreation completion cannot bind a member-host-owned runtime");
     assert_eq!(authority.state(), &before);
 
-    let authorized = authority
-        .apply_signal(MobMachineSignal::ClassifyMemberLiveMaterialization {
-            agent_identity: identity("remote-revive"),
-            observation: MemberLiveMaterializationObservationKind::DurableSnapshotPresent,
-            reason: "live materialization missing at dispatch".to_string(),
-        })
-        .expect("a durable snapshot must authorize one revival attempt for a placed member");
-    assert!(
-        authorized.effects().iter().any(|effect| matches!(
-            effect,
-            MobMachineEffect::MemberLiveMaterializationClassified {
-                verdict: MemberRevivalVerdictKind::ReviveAuthorized,
-                ..
-            }
-        )),
-        "the placed fixture depends on the machine-owned revival authorization",
-    );
-
+    // A placed wake has no Bound step: its attempt closes Live directly.
     let resolved = authority
         .apply_signal(MobMachineSignal::ResolveMemberRevivalSucceeded {
             agent_identity: identity("remote-revive"),
+            attempt,
         })
         .expect("a placed revival with an active carrier binding must resolve");
     assert!(
@@ -4464,9 +4909,9 @@ fn placed_member_revival_leaves_the_runtime_binding_to_its_member_host() {
     assert!(
         !authority
             .state()
-            .member_revival_pending
-            .contains(&identity("remote-revive")),
-        "a resolved placed revival still clears the machine-owned obligation",
+            .member_wake_attempts
+            .contains_key(&identity("remote-revive")),
+        "a resolved placed revival still closes the machine-owned attempt",
     );
     check_multi_host_invariants(authority.state());
 }

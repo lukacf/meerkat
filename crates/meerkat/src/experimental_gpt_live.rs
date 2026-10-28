@@ -27076,6 +27076,12 @@ mod tests {
                     .load_pending_compaction_projections(runtime_id)
                     .await
             }
+
+            async fn list_runtimes_with_recovery_work(
+                &self,
+            ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
+                self.inner.list_runtimes_with_recovery_work().await
+            }
         }
 
         #[derive(Debug, PartialEq, Eq, serde::Deserialize)]

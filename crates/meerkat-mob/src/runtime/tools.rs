@@ -105,6 +105,25 @@ impl AgentToolDispatcher for NameFilteredDispatcher {
         self.inner.live_bridge_effect_kind(tool_name)
     }
 
+    /// Forward the owner's mutation class; an excluded name stays `Unknown`.
+    fn tool_mutation_class(&self, tool_name: &str) -> meerkat_core::ToolMutationClass {
+        if self.excluded.contains(tool_name) {
+            return meerkat_core::ToolMutationClass::Unknown;
+        }
+        self.inner.tool_mutation_class(tool_name)
+    }
+
+    /// Forward the owner's review entry support; an excluded name stays `Unsupported`.
+    fn review_entry_support(
+        &self,
+        tool_name: &str,
+    ) -> meerkat_core::approval::review::ReviewEntrySupport {
+        if self.excluded.contains(tool_name) {
+            return meerkat_core::approval::review::ReviewEntrySupport::Unsupported;
+        }
+        self.inner.review_entry_support(tool_name)
+    }
+
     fn execution_binding_fingerprint(
         &self,
         tool_name: &str,
@@ -212,6 +231,199 @@ impl AgentToolDispatcher for NameFilteredDispatcher {
         } else {
             BindOutcome::Skipped(wrapper)
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NameOrderedDispatcher
+// ---------------------------------------------------------------------------
+
+/// A host's per-spawn tools (a spawn customizer's or a spawn request's
+/// external tools) in one deterministic order: their tools and catalog
+/// entries sorted by name, as the MCP router orders an MCP server's tools. A
+/// host may return its tools in any order, and a member rebuilt by a wake or
+/// a reload asks the customizer again; without this the member's tools array
+/// could change across the rebuild, and the provider's prompt cache with it.
+/// Everything else, including how a tool executes, is the inner dispatcher's
+/// own.
+pub(crate) struct NameOrderedDispatcher {
+    inner: Arc<dyn AgentToolDispatcher>,
+}
+
+impl NameOrderedDispatcher {
+    pub(crate) fn new(inner: Arc<dyn AgentToolDispatcher>) -> Self {
+        Self { inner }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl AgentToolDispatcher for NameOrderedDispatcher {
+    async fn resolve_tool_application(
+        &self,
+        source_tool: &str,
+        request: &meerkat_core::ToolApplicationRequest,
+        invocation: &serde_json::Value,
+        context: &ToolDispatchContext,
+    ) -> Result<meerkat_core::tool_application::ToolApplicationResolution, ToolError> {
+        self.inner
+            .resolve_tool_application(source_tool, request, invocation, context)
+            .await
+    }
+
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        let mut tools = self.inner.tools().to_vec();
+        tools.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
+        tools.into()
+    }
+
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        self.inner.tool_catalog_capabilities()
+    }
+
+    fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        let mut entries = self.inner.tool_catalog().to_vec();
+        entries.sort_by(|left, right| left.tool.name.as_str().cmp(right.tool.name.as_str()));
+        entries.into()
+    }
+
+    fn tool_mutation_class(&self, tool_name: &str) -> meerkat_core::ToolMutationClass {
+        self.inner.tool_mutation_class(tool_name)
+    }
+
+    fn live_bridge_effect_kind(&self, tool_name: &str) -> meerkat_core::LiveBridgeEffectKind {
+        self.inner.live_bridge_effect_kind(tool_name)
+    }
+
+    fn review_entry_support(
+        &self,
+        tool_name: &str,
+    ) -> meerkat_core::approval::review::ReviewEntrySupport {
+        self.inner.review_entry_support(tool_name)
+    }
+
+    fn execution_binding_epoch(&self, tool_name: &str) -> u64 {
+        self.inner.execution_binding_epoch(tool_name)
+    }
+
+    fn execution_binding_fingerprint(
+        &self,
+        tool_name: &str,
+    ) -> Result<
+        meerkat_core::EphemeralToolBindingFingerprint,
+        meerkat_core::ToolExecutionResolutionError,
+    > {
+        self.inner.execution_binding_fingerprint(tool_name)
+    }
+
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        dispatch_context: &ToolDispatchContext,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    {
+        self.inner
+            .resolve_execution_plan(call, dispatch_context, resolution_context)
+    }
+
+    fn validate_resolved_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        resolution_context: &meerkat_core::ToolExecutionResolutionContext,
+        plan: &meerkat_core::ResolvedToolExecutionPlan,
+    ) -> Result<(), meerkat_core::ToolExecutionResolutionError> {
+        self.inner
+            .validate_resolved_execution_plan(call, resolution_context, plan)
+    }
+
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        self.inner.pending_catalog_sources()
+    }
+
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.inner.dispatch(call).await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.inner.dispatch_with_context(call, context).await
+    }
+
+    async fn dispatch_resolved_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: &meerkat_core::ResolvedToolExecutionPlan,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.inner
+            .dispatch_resolved_with_context(call, context, plan)
+            .await
+    }
+
+    async fn poll_external_updates(&self) -> meerkat_core::ExternalToolUpdate {
+        self.inner.poll_external_updates().await
+    }
+
+    fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
+        self.inner.external_tool_surface_snapshot()
+    }
+
+    fn capabilities(&self) -> DispatcherCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn OpsLifecycleRegistry>,
+        owner_bridge_session_id: SessionId,
+    ) -> Result<BindOutcome, OpsLifecycleBindError> {
+        let owned = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
+        let outcome = owned
+            .inner
+            .bind_ops_lifecycle(registry, owner_bridge_session_id)?;
+        let bound = outcome.was_bound();
+        let wrapper = Arc::new(NameOrderedDispatcher {
+            inner: outcome.into_dispatcher(),
+        });
+        Ok(if bound {
+            BindOutcome::Bound(wrapper)
+        } else {
+            BindOutcome::Skipped(wrapper)
+        })
+    }
+
+    fn completion_enrichment(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::completion_feed::CompletionEnrichmentProvider>> {
+        self.inner.completion_enrichment()
+    }
+
+    fn bind_mcp_server_lifecycle_handle(
+        &self,
+        handle: Arc<dyn meerkat_core::handles::McpServerLifecycleHandle>,
+    ) {
+        self.inner.bind_mcp_server_lifecycle_handle(handle);
+    }
+
+    fn bind_external_tool_surface_handle(
+        &self,
+        handle: Arc<dyn meerkat_core::handles::ExternalToolSurfaceHandle>,
+    ) {
+        self.inner.bind_external_tool_surface_handle(handle);
+    }
+
+    fn bind_session_mob_tool_authority(
+        &self,
+        authority: Option<Arc<std::sync::RwLock<MobToolAuthorityContext>>>,
+    ) {
+        self.inner.bind_session_mob_tool_authority(authority);
     }
 }
 
@@ -564,6 +776,25 @@ impl AgentToolDispatcher for McpProvenanceFilter {
         self.inner.live_bridge_effect_kind(tool_name)
     }
 
+    /// Forward the owner's mutation class; a tool this filter hides stays `Unknown`.
+    fn tool_mutation_class(&self, tool_name: &str) -> meerkat_core::ToolMutationClass {
+        if self.visibility_for_name(tool_name) == Some(false) {
+            return meerkat_core::ToolMutationClass::Unknown;
+        }
+        self.inner.tool_mutation_class(tool_name)
+    }
+
+    /// Forward the owner's review entry support; a tool this filter hides stays `Unsupported`.
+    fn review_entry_support(
+        &self,
+        tool_name: &str,
+    ) -> meerkat_core::approval::review::ReviewEntrySupport {
+        if self.visibility_for_name(tool_name) == Some(false) {
+            return meerkat_core::approval::review::ReviewEntrySupport::Unsupported;
+        }
+        self.inner.review_entry_support(tool_name)
+    }
+
     fn execution_binding_fingerprint(
         &self,
         tool_name: &str,
@@ -873,6 +1104,9 @@ pub(super) fn compose_external_tools_for_profile(
     // registry that gets populated later via tools/register). Dropping it here
     // would permanently disconnect the session from late-registered tools.
     if let Some(ext) = per_spawn_external_tools {
+        // A host returns its tools in any order; the member lists them in
+        // name order, so a rebuild sends the tools array it sent before.
+        let ext: Arc<dyn AgentToolDispatcher> = Arc::new(NameOrderedDispatcher::new(ext));
         let profile_names: HashSet<String> = dispatchers
             .iter()
             .flat_map(|d| {
@@ -2358,5 +2592,289 @@ mod application_target_tests {
                 }
             }
         }
+    }
+}
+
+/// The member filters pass the owning leaf's review entry support and
+/// mutation class through for every tool they pass through, and answer the
+/// fail-closed defaults for a tool they hide.
+#[cfg(test)]
+mod declaration_forwarding_tests {
+    use super::*;
+    use meerkat_core::approval::review::ReviewEntrySupport;
+    use meerkat_core::{
+        ExecutionPolicyGatedDispatcher, ToolAccessPolicy, ToolExecutionPolicy, ToolMutationClass,
+    };
+    use std::sync::Mutex;
+
+    /// What [`DeclaringLeaf`] declares for every tool it owns.
+    const DECLARED: (ToolMutationClass, ReviewEntrySupport) = (
+        ToolMutationClass::ReadOnly,
+        ReviewEntrySupport::ConsumesAtEntry,
+    );
+
+    /// The trait defaults: what a dispatcher answers for a tool it hides.
+    const FAIL_CLOSED: (ToolMutationClass, ReviewEntrySupport) =
+        (ToolMutationClass::Unknown, ReviewEntrySupport::Unsupported);
+
+    /// The tools [`DeclaringLeaf`] owns: one on the MCP source the member
+    /// allowlists, one on another MCP source and one host callback tool.
+    const LEAF_TOOLS: [(&str, ToolSourceKind, &str); 3] = [
+        ("allowed_read", ToolSourceKind::Mcp, "allowed"),
+        ("blocked_read", ToolSourceKind::Mcp, "blocked"),
+        ("host_read", ToolSourceKind::Callback, "host"),
+    ];
+
+    /// A leaf that declares every tool it owns read-only, with its review
+    /// consumed at entry, and records each call it enters together with
+    /// whether the call reached it under read-only execution.
+    #[derive(Default)]
+    struct DeclaringLeaf {
+        entered: Mutex<Vec<(String, bool)>>,
+    }
+
+    impl DeclaringLeaf {
+        fn owns(tool_name: &str) -> bool {
+            LEAF_TOOLS.iter().any(|(name, ..)| *name == tool_name)
+        }
+
+        fn entered_calls(&self) -> Vec<(String, bool)> {
+            self.entered.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl AgentToolDispatcher for DeclaringLeaf {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            LEAF_TOOLS
+                .into_iter()
+                .map(|(name, kind, source)| {
+                    Arc::new(
+                        ToolDef::new(name, "declared read", serde_json::json!({"type": "object"}))
+                            .with_provenance(ToolProvenance::new(kind, source)),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        fn tool_mutation_class(&self, tool_name: &str) -> ToolMutationClass {
+            if Self::owns(tool_name) {
+                ToolMutationClass::ReadOnly
+            } else {
+                ToolMutationClass::Unknown
+            }
+        }
+
+        fn review_entry_support(&self, tool_name: &str) -> ReviewEntrySupport {
+            if Self::owns(tool_name) {
+                ReviewEntrySupport::ConsumesAtEntry
+            } else {
+                ReviewEntrySupport::Unsupported
+            }
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+            self.dispatch_with_context(call, &ToolDispatchContext::default())
+                .await
+        }
+
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &ToolDispatchContext,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+            if !Self::owns(call.name) {
+                return Err(ToolError::not_found(call.name));
+            }
+            // The declared review entry, consumed once right before the body.
+            let entered = context.enter_reviewed_effect(call, None)?;
+            let context = entered.as_ref().unwrap_or(context);
+            self.entered.lock().unwrap().push((
+                call.name.to_string(),
+                context.read_only_execution_required(),
+            ));
+            Ok(ToolResult::new(call.id.to_string(), "read".to_string(), false).into())
+        }
+    }
+
+    /// The profile tool that wins the `host_read` name collision. It declares
+    /// itself mutating and leaves its review entry support at the default.
+    struct ProfileTool;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl AgentToolDispatcher for ProfileTool {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from(vec![Arc::new(ToolDef::new(
+                "host_read",
+                "profile tool",
+                serde_json::json!({"type": "object"}),
+            ))])
+        }
+
+        fn tool_mutation_class(&self, _tool_name: &str) -> ToolMutationClass {
+            ToolMutationClass::Mutating
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(call.id.to_string(), "profile tool ran".to_string(), false).into())
+        }
+    }
+
+    /// A member's composed tools when its profile allowlists the `allowed`
+    /// MCP source and a profile tool wins the `host_read` name collision: the
+    /// composite [`compose_external_tools_for_profile`] builds over the name
+    /// filter and the MCP allowlist.
+    fn member_surface(leaf: Arc<DeclaringLeaf>) -> Arc<dyn AgentToolDispatcher> {
+        let external: Arc<dyn AgentToolDispatcher> = Arc::new(McpProvenanceFilter::new(
+            leaf,
+            ["allowed".to_string()].into_iter().collect(),
+        ));
+        let external: Arc<dyn AgentToolDispatcher> = Arc::new(NameFilteredDispatcher::new(
+            external,
+            ["host_read".to_string()].into_iter().collect(),
+        ));
+        let profile: Arc<dyn AgentToolDispatcher> = Arc::new(ProfileTool);
+        Arc::new(DynamicToolComposite::new(vec![profile, external]))
+    }
+
+    fn declarations(
+        dispatcher: &dyn AgentToolDispatcher,
+        tool_name: &str,
+    ) -> (ToolMutationClass, ReviewEntrySupport) {
+        (
+            dispatcher.tool_mutation_class(tool_name),
+            dispatcher.review_entry_support(tool_name),
+        )
+    }
+
+    fn call<'a>(name: &'a str, args: &'a serde_json::value::RawValue) -> ToolCallView<'a> {
+        ToolCallView {
+            id: "call-1",
+            name,
+            args,
+        }
+    }
+
+    #[test]
+    fn name_filter_forwards_owner_declarations_and_keeps_excluded_names_fail_closed() {
+        let leaf: Arc<dyn AgentToolDispatcher> = Arc::new(DeclaringLeaf::default());
+        let filter = NameFilteredDispatcher::new(
+            Arc::clone(&leaf),
+            ["host_read".to_string()].into_iter().collect(),
+        );
+        for name in ["allowed_read", "blocked_read"] {
+            assert_eq!(
+                declarations(&filter, name),
+                DECLARED,
+                "{name} passes through"
+            );
+        }
+        assert_eq!(declarations(leaf.as_ref(), "host_read"), DECLARED);
+        assert_eq!(
+            declarations(&filter, "host_read"),
+            FAIL_CLOSED,
+            "an excluded name keeps the fail-closed default"
+        );
+    }
+
+    #[test]
+    fn mcp_allowlist_forwards_owner_declarations_and_keeps_other_sources_fail_closed() {
+        let leaf: Arc<dyn AgentToolDispatcher> = Arc::new(DeclaringLeaf::default());
+        let filter = McpProvenanceFilter::new(
+            Arc::clone(&leaf),
+            ["allowed".to_string()].into_iter().collect(),
+        );
+        // The allowlisted MCP source and the non-MCP tool the filter passes
+        // through unchanged.
+        for name in ["allowed_read", "host_read"] {
+            assert_eq!(
+                declarations(&filter, name),
+                DECLARED,
+                "{name} passes through"
+            );
+        }
+        assert_eq!(declarations(leaf.as_ref(), "blocked_read"), DECLARED);
+        assert_eq!(
+            declarations(&filter, "blocked_read"),
+            FAIL_CLOSED,
+            "a tool of another MCP source keeps the fail-closed default"
+        );
+    }
+
+    #[test]
+    fn member_surface_reads_owner_declarations_through_both_filters() {
+        let member = member_surface(Arc::new(DeclaringLeaf::default()));
+        let visible: Vec<String> = member
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert_eq!(visible, ["host_read", "allowed_read"]);
+        assert_eq!(declarations(member.as_ref(), "allowed_read"), DECLARED);
+        assert_eq!(
+            declarations(member.as_ref(), "blocked_read"),
+            FAIL_CLOSED,
+            "a tool the MCP allowlist hides has no owner on the member surface"
+        );
+        assert_eq!(
+            declarations(member.as_ref(), "host_read"),
+            (ToolMutationClass::Mutating, ReviewEntrySupport::Unsupported),
+            "the profile tool answers for the name it won, not the hidden leaf tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_gate_admits_a_declared_read_behind_the_member_filters() {
+        let leaf = Arc::new(DeclaringLeaf::default());
+        let gated = ExecutionPolicyGatedDispatcher::new(
+            member_surface(Arc::clone(&leaf)),
+            ToolExecutionPolicy::resolve(ToolAccessPolicy::ReadOnly).expect("read-only resolves"),
+        );
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).expect("raw args");
+        let context = ToolDispatchContext::default();
+        let resolution = meerkat_core::ToolExecutionResolutionContext::new(
+            meerkat_core::ToolDeadlineChain::new(vec![
+                meerkat_core::ToolDeadlineContributor::finite(
+                    meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                    std::time::Duration::from_secs(600),
+                ),
+            ])
+            .expect("valid test deadline chain"),
+        );
+
+        // The declared read is admitted at plan resolution and at dispatch,
+        // and reaches the leaf under read-only execution.
+        let read = call("allowed_read", &args);
+        let plan = gated
+            .resolve_execution_plan(read, &context, &resolution)
+            .expect("a declared read resolves behind the member filters");
+        let outcome = gated
+            .dispatch_resolved_with_context(read, &context, &plan)
+            .await
+            .expect("a declared read dispatches behind the member filters");
+        assert!(!outcome.result.is_error);
+
+        // Refused before anything runs: the tool of a source the allowlist
+        // hides, and the mutating profile tool that won `host_read`.
+        let hidden = gated
+            .dispatch_with_context(call("blocked_read", &args), &context)
+            .await
+            .expect_err("a hidden MCP tool stays refused");
+        assert_eq!(hidden, ToolError::not_found("blocked_read"));
+        let shadowing = gated
+            .dispatch_with_context(call("host_read", &args), &context)
+            .await
+            .expect_err("a mutating profile tool stays refused under read-only");
+        assert_eq!(shadowing, ToolError::access_denied("host_read"));
+        assert_eq!(leaf.entered_calls(), [("allowed_read".to_string(), true)]);
     }
 }

@@ -172,7 +172,12 @@ Provider tags also carry provider cache policy: OpenAI can override Responses
 `prompt_cache_retention`. Factory-built public OpenAI API GPT-5.6 sessions default to
 `prompt_cache_options: {"mode":"explicit","ttl":"30m"}` plus
 `prompt_cache_key: "meerkat:profile:openai:<model>"`; a caller-supplied key
-wins. These cache fields, defaults or explicit, reach only the public OpenAI
+wins. GPT-5.6 and later also accept `"ttl":"12h"`, a 12-hour minimum lifetime
+for a stable prefix reused across longer gaps, such as a long-lived agent that
+responds every few hours. It applies to every breakpoint of the request, so
+every cache write of a `12h` request costs 2.5x the uncached input rate instead
+of 1.25x, the conversation tail included; it is never a default. These cache
+fields, defaults or explicit, reach only the public OpenAI
 API: requests through the private ChatGPT backend, Azure OpenAI, GitHub
 Copilot or a self-hosted OpenAI-compatible server carry none of them. In
 `explicit` mode Meerkat authors append-monotone breakpoints at deterministic

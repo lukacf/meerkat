@@ -7964,7 +7964,7 @@ async def test_client_live_open_passes_provider_managed_turning_mode():
 # ---------------------------------------------------------------------------
 
 
-def _fork_cache_available() -> dict[str, object]:
+def _fork_cache_available(ttl: object = "provider_default") -> dict[str, object]:
     return {
         "status": "available",
         "fork_point": {
@@ -7985,7 +7985,7 @@ def _fork_cache_available() -> dict[str, object]:
                     "encoding": "open_ai_responses_json",
                     "body_sha256": [7] * 32,
                 },
-                "ttl": "provider_default",
+                "ttl": ttl,
             },
         },
     }
@@ -8092,6 +8092,55 @@ def test_fork_session_parses_unavailable_cache_inheritance() -> None:
     assert result.cache_inheritance.status == "unavailable"
     assert result.cache_inheritance.message_count == 3
     assert result.cache_inheritance.reason == "provider_model_mismatch"
+
+
+def test_fork_session_parses_twelve_hour_cache_ttl() -> None:
+    """Breakpoint evidence authored under the 12-hour OpenAI prompt-cache TTL
+    carries ``twelve_hours``. The evidence ttl is advisory, so a lifetime this
+    SDK does not know reads as ``{"unknown": <value>}`` instead of failing the
+    fork result; a missing, empty or non-string ttl is still malformed."""
+    from meerkat import ForkCacheInheritanceAvailable, ForkCacheTtl
+
+    assert get_args(ForkCacheTtl) == (
+        "five_minutes",
+        "one_hour",
+        "thirty_minutes",
+        "twenty_four_hours",
+        "provider_default",
+        "twelve_hours",
+    )
+
+    def fork_result(ttl: object) -> dict[str, object]:
+        return {
+            "source_session_id": "src-1",
+            "session_id": "fork-1",
+            "message_count": 4,
+            "cache_inheritance": _fork_cache_available(ttl),
+        }
+
+    def parsed_ttl(ttl: object) -> object:
+        result = MeerkatClient._parse_session_fork_result(fork_result(ttl))
+        assert isinstance(result.cache_inheritance, ForkCacheInheritanceAvailable)
+        return result.cache_inheritance.fork_point.authored_cache_breakpoint.ttl
+
+    assert parsed_ttl("twelve_hours") == "twelve_hours"
+    assert parsed_ttl("thirty_minutes") == "thirty_minutes"
+    assert parsed_ttl("forty_eight_hours") == {"unknown": "forty_eight_hours"}
+
+    for malformed in (12, "", None):
+        with pytest.raises(MeerkatError) as exc_info:
+            MeerkatClient._parse_session_fork_result(fork_result(malformed))
+        assert exc_info.value.code == "INVALID_RESPONSE", malformed
+
+
+def test_openai_prompt_cache_ttl_vocabularies_list_twelve_hours() -> None:
+    """The generated OpenAI prompt-cache TTL types carry ``12h`` after
+    ``30m``, the Rust enums' declaration order."""
+    from meerkat.generated.event_types import OpenAiPromptCacheTtl
+    from meerkat.generated.types import WireOpenAiPromptCacheTtl
+
+    assert get_args(WireOpenAiPromptCacheTtl) == ("30m", "12h")
+    assert get_args(OpenAiPromptCacheTtl) == ("30m", "12h")
 
 
 def test_fork_session_rejects_missing_cache_inheritance() -> None:

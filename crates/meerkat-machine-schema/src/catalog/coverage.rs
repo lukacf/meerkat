@@ -1295,7 +1295,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 "approval_lifecycle_authority",
                 "ApprovalLifecycleMachine",
                 "crates/meerkat-core/src/generated/approval_lifecycle.rs",
-                "generated ApprovalLifecycleMachine owner for CreateRejectedEmptyAllowedDecisions, CreateRejectedAlreadyExists, CreatePending, CreateConsentRejectedEmptyAllowedDecisions, CreateConsentRejectedAlreadyExists, CreateConsentPending, RestoreRejectedDuplicate, RestoreRejectedEmptyAllowedDecisions, RestorePending, RestoreExpired, RestoreCancelled, RestoreApproved, RestoreDenied, RestoreRejectedInvalidRecord, ReconcileRejectedMissing, ReconcileRejectedLinked, ReconcileRejectedInvalidRecord, ReconcileAppliedPending, ReconcileAppliedExpired, ReconcileAppliedCancelled, ReconcileAppliedApproved, ReconcileAppliedDenied, ObserveExpiryRejectedMissing, ObserveExpiryExpiresPending, ObserveExpiryPendingNoop, ObserveExpiryApprovedNoop, ObserveExpiryDeniedNoop, ObserveExpiryExpiredNoop, ObserveExpiryCancelledNoop, DecideRejectedMissing, DecideRejectedExpired, DecideRejectedAlreadyDecided, DecideRejectedAuthenticationRequired, DecideRejectedApproveNotAllowed, DecideRejectedDenyNotAllowed, DecideApprove, DecideDeny, DecideConsentRejectedMissing, DecideConsentRejectedMismatch, DecideConsentRejectedExpired, DecideConsentRejectedAlreadyDecided, DecideConsentRejectedAuthenticationRequired, DecideConsentRejectedNotAllowed, DecideConsentApprove, DecideConsentDeny, ConsumeConsentRejectedMissing, ConsumeConsentRejectedAlreadyConsumed, ConsumeConsentRejectedMismatch, ConsumeConsentRejectedNotSatisfied, ConsumeConsentForEntry, WithdrawConsentRejectedMissing, WithdrawConsentRejectedMismatch, WithdrawConsentPending, WithdrawConsentSettled, SettleUnlinkedRejectedMissing, SettleUnlinkedRejectedNotConsent, SettleUnlinkedRejectedLinked, SettleUnlinkedRejectedConsumed, SettleUnlinkedRejectedExpired, SettleUnlinkedRejectedSettled, SettleUnlinkedPending, SettleUnlinkedApproved, BeginReviewRejectedDuplicate, BeginReviewPending, RecordReviewVerdictRejectedMissing, RecordReviewVerdictRejectedConsentLinked, RecordReviewVerdictRejectedRetired, RecordReviewVerdictRejectedSettled, RecordReviewVerdictAllowed, RecordReviewVerdictDenied, RecordReviewVerdictEscalated, RecordReviewUnavailableRejectedMissing, RecordReviewUnavailableRejectedConsentLinked, RecordReviewUnavailableRejectedRetired, RecordReviewUnavailableRejectedSettled, RecordReviewUnavailable, RetireReviewRejectedMissing, RetireReviewRejectedConsentLinked, RetireReviewRejectedRetired, RetireReviewRejectedSettled, RetireReview, ConsumeReviewRejectedMissing, ConsumeReviewRejectedConsentLinked, ConsumeReviewRejectedRetired, ConsumeReviewRejectedUsed, ConsumeReviewRejectedNotSatisfied, ConsumeReviewForEntry, ReleaseReviewRejectedMissing, ReleaseReviewRejectedConsentLinked, ReleaseReviewRejectedPending, ReleaseReviewAllowed, ReleaseReviewDenied, ReleaseReviewEscalated, ReleaseReviewUnavailable, ReleaseReviewRetired, ReleaseReviewUsed, ApprovalStatusResolved, ApprovalLifecycleRejected, ReviewStatusResolved, and ReviewLifecycleRejected",
+                "generated ApprovalLifecycleMachine owner for CreateRejectedEmptyAllowedDecisions, CreateRejectedAlreadyExists, CreatePending, CreateConsentRejectedEmptyAllowedDecisions, CreateConsentRejectedAlreadyExists, CreateConsentPending, RestoreRejectedDuplicate, RestoreRejectedEmptyAllowedDecisions, RestorePending, RestoreExpired, RestoreCancelled, RestoreApproved, RestoreDenied, RestoreRejectedInvalidRecord, ReconcileRejectedMissing, ReconcileRejectedLinked, ReconcileRejectedInvalidRecord, ReconcileAppliedPending, ReconcileAppliedExpired, ReconcileAppliedCancelled, ReconcileAppliedApproved, ReconcileAppliedDenied, ObserveExpiryRejectedMissing, ObserveExpiryExpiresPending, ObserveExpiryPendingNoop, ObserveExpiryApprovedNoop, ObserveExpiryDeniedNoop, ObserveExpiryExpiredNoop, ObserveExpiryCancelledNoop, DecideRejectedMissing, DecideRejectedExpired, DecideRejectedAlreadyDecided, DecideRejectedAuthenticationRequired, DecideRejectedApproveNotAllowed, DecideRejectedDenyNotAllowed, DecideApprove, DecideDeny, DecideConsentRejectedMissing, DecideConsentRejectedMismatch, DecideConsentRejectedExpired, DecideConsentRejectedAlreadyDecided, DecideConsentRejectedAuthenticationRequired, DecideConsentRejectedNotAllowed, DecideConsentApprove, DecideConsentDeny, ConsumeConsentRejectedMissing, ConsumeConsentRejectedAlreadyConsumed, ConsumeConsentRejectedMismatch, ConsumeConsentRejectedNotSatisfied, ConsumeConsentForEntry, WithdrawConsentRejectedMissing, WithdrawConsentRejectedMismatch, WithdrawConsentPending, WithdrawConsentSettled, SettleUnlinkedRejectedMissing, SettleUnlinkedRejectedNotConsent, SettleUnlinkedRejectedLinked, SettleUnlinkedRejectedConsumed, SettleUnlinkedRejectedExpired, SettleUnlinkedRejectedSettled, SettleUnlinkedPending, SettleUnlinkedApproved, BeginReviewRejectedDuplicate, BeginReviewPending, RecordReviewVerdictRejectedMissing, RecordReviewVerdictRejectedConsentLinked, RecordReviewVerdictRejectedRetired, RecordReviewVerdictRejectedSettled, RecordReviewVerdictAllowed, RecordReviewVerdictDenied, RecordReviewVerdictEscalated, RecordReviewUnavailableRejectedMissing, RecordReviewUnavailableRejectedConsentLinked, RecordReviewUnavailableRejectedRetired, RecordReviewUnavailableRejectedSettled, RecordReviewUnavailable, RetireReviewRejectedMissing, RetireReviewRejectedConsentLinked, RetireReviewRejectedRetired, RetireReviewRejectedSettled, RetireReview, ConsumeReviewRejectedMissing, ConsumeReviewRejectedConsentLinked, ConsumeReviewRejectedRetired, ConsumeReviewRejectedUsed, ConsumeReviewRejectedNotSatisfied, ConsumeReviewForEntry, ReleaseReviewRejectedMissing, ReleaseReviewRejectedConsentLinked, ReleaseReviewRejectedPending, ReleaseReviewAllowed, ReleaseReviewDenied, ReleaseReviewEscalated, ReleaseReviewUnavailable, ReleaseReviewRetired, ReleaseReviewUsed, AdmitEnteredStepRejectedMissing, AdmitEnteredStepRejectedConsentLinked, AdmitEnteredStepRejectedRetired, AdmitEnteredStepRejectedNotEntered, AdmitEnteredStep, AdmitEnteredStepRejectedClosing, ReleaseReviewUsedClosing, ReleaseReviewRejectedClosing, FinishEnteredStepRejectedMissing, FinishEnteredStepRejectedNotInFlight, FinishEnteredStepOpen, FinishEnteredStepClosing, FinishEnteredStepReleases, ApprovalStatusResolved, ApprovalLifecycleRejected, ReviewStatusResolved, and ReviewLifecycleRejected",
                 CoverageClaims::none()
                     .transitions(&[
                         "CreateRejectedEmptyAllowedDecisions",
@@ -1394,6 +1394,19 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "ReleaseReviewUnavailable",
                         "ReleaseReviewRetired",
                         "ReleaseReviewUsed",
+                        "AdmitEnteredStepRejectedMissing",
+                        "AdmitEnteredStepRejectedConsentLinked",
+                        "AdmitEnteredStepRejectedRetired",
+                        "AdmitEnteredStepRejectedNotEntered",
+                        "AdmitEnteredStep",
+                        "AdmitEnteredStepRejectedClosing",
+                        "ReleaseReviewUsedClosing",
+                        "ReleaseReviewRejectedClosing",
+                        "FinishEnteredStepRejectedMissing",
+                        "FinishEnteredStepRejectedNotInFlight",
+                        "FinishEnteredStepOpen",
+                        "FinishEnteredStepClosing",
+                        "FinishEnteredStepReleases",
                     ])
                     .effects(&[
                         "ApprovalStatusResolved",
@@ -1558,6 +1571,27 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "ReleaseReviewUnavailable",
                             "ReleaseReviewRetired",
                             "ReleaseReviewUsed",
+                        ])
+                        .effects(&["ReviewStatusResolved", "ReviewLifecycleRejected"]),
+                ),
+                scenario(
+                    "approval_entered_effect_steps",
+                    "AdmitEnteredStepRejectedMissing, AdmitEnteredStepRejectedConsentLinked, AdmitEnteredStepRejectedRetired, AdmitEnteredStepRejectedNotEntered, AdmitEnteredStep, AdmitEnteredStepRejectedClosing, ReleaseReviewUsedClosing, ReleaseReviewRejectedClosing, FinishEnteredStepRejectedMissing, FinishEnteredStepRejectedNotInFlight, FinishEnteredStepOpen, FinishEnteredStepClosing, FinishEnteredStepReleases keep the entered state of a spent attempt's effect: a later step begins only against the attempt its entry spent once while that effect is open, and ends with its finish; neither spends; the admitting dispatch's end releases the attempt with no step in flight and otherwise closes the effect, which admits no new step and is released by its last step's finish; an unknown or released, consent-linked, retired or never spent attempt admits none",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "AdmitEnteredStepRejectedMissing",
+                            "AdmitEnteredStepRejectedConsentLinked",
+                            "AdmitEnteredStepRejectedRetired",
+                            "AdmitEnteredStepRejectedNotEntered",
+                            "AdmitEnteredStep",
+                            "AdmitEnteredStepRejectedClosing",
+                            "ReleaseReviewUsedClosing",
+                            "ReleaseReviewRejectedClosing",
+                            "FinishEnteredStepRejectedMissing",
+                            "FinishEnteredStepRejectedNotInFlight",
+                            "FinishEnteredStepOpen",
+                            "FinishEnteredStepClosing",
+                            "FinishEnteredStepReleases",
                         ])
                         .effects(&["ReviewStatusResolved", "ReviewLifecycleRejected"]),
                 ),

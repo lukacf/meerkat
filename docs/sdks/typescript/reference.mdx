@@ -954,7 +954,9 @@ A failed `session.send()` carries the server's typed `CommsSendErrorData` in
 `err.details`, tagged on `code`: `peer_not_found_or_not_trusted`,
 `peer_unreachable` (`reason` is `offline_or_no_ack` or `transport_error`; a
 transport error's text is in `details`), `peer_admission_dropped`,
-`peer_input_rejected` (with the `envelope_id`), `send_ambiguous` (the
+`peer_input_rejected` (with the `envelope_id`), `peer_wake_refused` (a
+seated member whose wake was refused: nothing was delivered, `refusal.kind`
+says why and `retryable` whether a later send can succeed), `send_ambiguous` (the
 delivery may already have landed: `retry_safe` is `false` and
 `required_action` is `"reconcile"`, so reconcile by its `envelope_id` before
 any new attempt, since a retry can duplicate it), `send_failed` and
@@ -1049,7 +1051,7 @@ source UUID explicitly when multiple sources provide that name.
 
 ```typescript
 import { CONTRACT_VERSION } from "@rkat/sdk";
-console.log(CONTRACT_VERSION);  // "0.9.6"
+console.log(CONTRACT_VERSION);  // "0.9.7"
 ```
 
 - While the major version is `0`, minor versions must match exactly between SDK and server.

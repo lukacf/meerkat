@@ -82,11 +82,14 @@ async fn mob_with_restored_worker() -> (MobHandle, Arc<MockSessionService>, Sess
         .await
         .expect("discard live session");
     crash_stop_and_release_routes(handle).await;
+    // The rows read the tools the resume pass composes when it restores the
+    // worker at the lift, so the start materializes it.
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,
         runtime_metadata,
     ))
     .with_session_service(service.clone())
+    .with_member_restore_policy(crate::runtime::MemberRestorePolicy::Eager)
     .resume()
     .await
     .expect("reconstruct the mob");

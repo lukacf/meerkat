@@ -470,11 +470,14 @@ async fn whole_blob_cold_resume_with_deep_rewrite_history() {
     let service_2 = persistent_service(&paths, &client);
     let resume_start = CostMark::now();
     let resume_clock = Instant::now();
+    // The gate measures the decode work of the start's own restore, so the
+    // start materializes every member.
     let handle_2 =
         MobBuilder::for_resume(MobStorage::persistent(&paths.mob_db).expect("reopen mob storage"))
             .with_session_service(service_2.clone())
             .with_default_llm_client(Arc::new(client.clone()))
             .notify_orchestrator_on_resume(false)
+            .with_member_restore_policy(meerkat_mob::MemberRestorePolicy::Eager)
             .resume()
             .await
             .expect("mob resume");

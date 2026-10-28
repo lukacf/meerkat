@@ -970,7 +970,8 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
         .flatten();
 
     // 7. Host identity (§20.3): 0700 dir BEFORE key material lands (the key
-    //    file itself is written 0600 + zeroized by `Keypair::save`).
+    //    file itself is created 0600 by `Keypair::load_or_generate`, its
+    //    secret buffer zeroized).
     tokio::fs::create_dir_all(&composition.identity_dir).await?;
     #[cfg(unix)]
     {

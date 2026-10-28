@@ -443,8 +443,11 @@ pub(crate) enum RuntimeRevivalIntent {
     MissingLiveMaterialization,
     /// `MobBuilder::resume` restoring a member at boot: on its durable session,
     /// or on a fresh one (as when the session service keeps no durable
-    /// sessions).
-    /// It provisions as `None` does; a host refusal of the registration it
+    /// sessions). A member's wake restores it the same way.
+    /// It provisions as `None` does, except that a durable session that still
+    /// holds a parent-owned operation binding in this process (the wake of a
+    /// coordinator-owned worker) is rebound under that owner context, as a
+    /// missing-live revival rebinds it. A host refusal of the registration it
     /// prepared comes back typed (`MobError::MemberRegistrationRefused`), and
     /// the transaction's own rollback removes that registration.
     ColdRestore,
@@ -1705,15 +1708,18 @@ pub trait MobProvisioner: Send + Sync {
         deadline: Instant,
     ) -> Result<crate::machines::mob_machine::MemberSessionDisposal, MobError>;
 
-    /// Retire a member whose host refused its registration, as MobMachine
-    /// records it. The refusal left the member no owner operation binding in
-    /// this process, so its retirement projects into one only when one is
+    /// Retire a member whose retirement is archive-only: MobMachine routes
+    /// it no runtime retire (it was not materialized in this process when its
+    /// retirement started, or its retirement was recovered at a start), or
+    /// its host refused its registration, as MobMachine records it. Such a
+    /// member holds no owner operation binding in this process unless one
+    /// was bound since, so its retirement projects into one only when one is
     /// bound, where the fresh archive of any other member fails closed on a
     /// missing binding. `deadline` bounds it as in
     /// [`Self::retire_member_until`]; without one it retires under
     /// [`Self::retire_member`]'s budget. The default retires it as any
     /// member.
-    async fn retire_refused_member(
+    async fn retire_member_archive_only(
         &self,
         member_ref: &MemberRef,
         member_identity: &AgentIdentity,
@@ -2069,6 +2075,30 @@ pub trait MobProvisioner: Send + Sync {
         deadline: Instant,
         admission: Option<super::state::LifecycleAdmissionSignal>,
     ) -> Result<bool, MobError>;
+    /// Retire this provisioner's own live exact attachment of `session_id`
+    /// at the explicit mob-resume seam, because the member's live actor runs
+    /// another auth binding than its resume spec names: a live actor is never
+    /// reused on another binding. The attachment is retired as
+    /// [`Self::prepare_member_session_for_explicit_resume`] retires one it
+    /// does not own (same exact witness fence, attachment-local queued work
+    /// never adopted), and the caller rebuilds the member on its spec at
+    /// once. Because that rebuild follows at once, the eligible inputs queued
+    /// on the retired registration stay durably queued for the rebuilt one (a
+    /// requeue with the default max age, as a graceful process shutdown keeps
+    /// them), so a run queued while the mob was stopped runs on the binding
+    /// the spec names, never on the old one. The requeue applies only there:
+    /// a retirement no rebuild follows ends them as stopped, since nothing
+    /// would run them before the member's next wake.
+    /// Returns `true` when the caller must rebuild, `false` when nothing was
+    /// retired (no runtime adapter participates). Default: `false`.
+    async fn retire_live_member_session_for_explicit_resume(
+        &self,
+        session_id: &SessionId,
+        deadline: Instant,
+    ) -> Result<bool, MobError> {
+        let _ = (session_id, deadline);
+        Ok(false)
+    }
     async fn ensure_runtime_session_state(&self, member_ref: &MemberRef) -> Result<(), MobError> {
         let _ = member_ref;
         Ok(())
@@ -2405,6 +2435,44 @@ pub struct SessionBackend {
 #[derive(Clone)]
 struct ExplicitResumeAttachmentRetirement {
     completion: Arc<Mutex<oneshot::Receiver<Result<bool, MobError>>>>,
+}
+
+/// What the explicit-resume retirement does with this provisioner's own
+/// exact attachment when its actor is live.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OwnLiveAttachment {
+    /// Keep it: it is the complete active incarnation.
+    Keep,
+    /// Retire it for the member's rebuild, which follows at once: its actor
+    /// runs another auth binding than the member's resume spec names.
+    Retire,
+    /// Retire it with no rebuild after it: the live materialization of a
+    /// seat session a retryable wake keeps, released so that the member is
+    /// Dormant until its next wake.
+    Release,
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl OwnLiveAttachment {
+    /// The disposition, for the inputs queued on the registration the
+    /// retirement ends, of a retirement the member's rebuild on the binding
+    /// its resume request names follows at once: the eligible ones are kept
+    /// durably queued for the rebuilt registration, as a graceful process
+    /// shutdown keeps them, so a run queued while the mob was stopped runs on
+    /// that binding. The requeue applies only where that rebuild follows at
+    /// once. `None`, which ends them as stopped as it always did, for a
+    /// takeover and for a release no rebuild follows: a requeue there would
+    /// leave a Dormant member holding queued work that nothing wakes it to
+    /// run, its waiters told not to resubmit.
+    fn requeue_for_rebuild(self) -> Option<meerkat_runtime::UnregisterQueuedInputs> {
+        match self {
+            Self::Keep | Self::Release => None,
+            Self::Retire => Some(meerkat_runtime::UnregisterQueuedInputs::Requeue {
+                max_age: meerkat_runtime::UnregisterQueuedInputs::DEFAULT_MAX_AGE,
+            }),
+        }
+    }
 }
 
 /// Exact physical capabilities retained across retryable cold-recovery
@@ -5709,7 +5777,10 @@ impl SessionBackend {
                 let task_session_id = session_id.clone();
                 tokio::spawn(async move {
                     let result = backend
-                        .retire_exact_attachment_for_explicit_resume_owned(&task_session_id)
+                        .retire_exact_attachment_for_explicit_resume_owned(
+                            &task_session_id,
+                            OwnLiveAttachment::Keep,
+                        )
                         .await;
                     let _ = result_tx.send(result);
                 });
@@ -5759,6 +5830,48 @@ impl SessionBackend {
         }
         drop(retirements);
         result
+    }
+
+    /// Retire this provisioner's own live exact attachment of `session_id`,
+    /// either for a rebuild on another auth binding that follows at once
+    /// ([`OwnLiveAttachment::Retire`], see
+    /// [`MobProvisioner::retire_live_member_session_for_explicit_resume`]) or
+    /// with no rebuild after it ([`OwnLiveAttachment::Release`], see
+    /// [`MultiBackendProvisioner::release_live_member_session_without_rebuild`]).
+    /// The retirement runs to its end in its own task, as the takeover of an
+    /// attachment this provisioner does not own does: a caller past
+    /// `deadline` is answered pending, and its retry finds the attachment
+    /// retired.
+    async fn retire_live_attachment_for_explicit_resume(
+        &self,
+        session_id: &SessionId,
+        deadline: Instant,
+        own_live: OwnLiveAttachment,
+    ) -> Result<bool, MobError> {
+        let pending = || MobError::LifecycleOperationPending {
+            intent: format!("explicit_resume_attachment_retirement:{session_id}"),
+        };
+        if Instant::now() >= deadline {
+            return Err(pending());
+        }
+        let backend = self.clone();
+        let task_session_id = session_id.clone();
+        let retirement = tokio::spawn(async move {
+            backend
+                .retire_exact_attachment_for_explicit_resume_owned(&task_session_id, own_live)
+                .await
+        });
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(pending)?;
+        tokio::time::timeout(remaining, retirement)
+            .await
+            .map_err(|_| pending())?
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "the explicit-resume retirement of '{session_id}' ended without a result: {error}"
+                ))
+            })?
     }
 
     /// Release the member's session binding at the end of a resumed-provision
@@ -5824,6 +5937,7 @@ impl SessionBackend {
     async fn retire_exact_attachment_for_explicit_resume_owned(
         &self,
         session_id: &SessionId,
+        own_live: OwnLiveAttachment,
     ) -> Result<bool, MobError> {
         let Some(adapter) = self.runtime_adapter.as_ref() else {
             // Runtime-less session services retain their existing live actor;
@@ -5855,7 +5969,7 @@ impl SessionBackend {
                         .session_service
                         .live_session_actor_registered(session_id)
                         .await?;
-                if exact_actor_live {
+                if exact_actor_live && own_live == OwnLiveAttachment::Keep {
                     return Ok(false);
                 }
             }
@@ -5899,16 +6013,28 @@ impl SessionBackend {
                                 .registration_is_current_without_runtime_owner(&registration)
                                 .await
                         {
-                            adapter
-                                .unregister_session_registration_until_terminal_if_current(
-                                    &registration,
-                                )
-                                .await
-                                .map_err(|error| {
-                                    MobError::Internal(format!(
-                                        "explicit resume could not release the unattached runtime registration for '{session_id}': {error}"
-                                    ))
-                                })?;
+                            let released = match own_live.requeue_for_rebuild() {
+                                None => {
+                                    adapter
+                                        .unregister_session_registration_until_terminal_if_current(
+                                            &registration,
+                                        )
+                                        .await
+                                }
+                                Some(queued_inputs) => {
+                                    adapter
+                                        .unregister_session_registration_until_terminal_with_queued_inputs_if_current(
+                                            &registration,
+                                            queued_inputs,
+                                        )
+                                        .await
+                                }
+                            };
+                            released.map_err(|error| {
+                                MobError::Internal(format!(
+                                    "explicit resume could not release the unattached runtime registration for '{session_id}': {error}"
+                                ))
+                            })?;
                         }
                         self.remove_runtime_session_state(session_id, observed_sidecar.as_ref())
                             .await;
@@ -5943,8 +6069,11 @@ impl SessionBackend {
             // The retirement lease retains exact M. Release B before the
             // process-owned teardown reacquires B for post-stop cleanup.
             drop(boundary);
-            let retired = retirement
-            .commit()
+            let committed = match own_live.requeue_for_rebuild() {
+                None => retirement.commit(),
+                Some(queued_inputs) => retirement.commit_with_queued_inputs(queued_inputs),
+            };
+            let retired = committed
             .map_err(|error| {
                 MobError::Internal(format!(
                     "failed to start exact explicit-resume takeover for '{session_id}': {error}"
@@ -6428,18 +6557,18 @@ impl SessionBackend {
 
     /// Dispose a session-backed member's session under `deadline`, then
     /// project its retirement into its owner operation binding. A member
-    /// whose host refused its registration holds no such binding here (see
-    /// [`MobProvisioner::retire_refused_member`]), so its projection runs
-    /// only when one is bound.
+    /// whose retirement is archive-only may hold no such binding here (see
+    /// [`MobProvisioner::retire_member_archive_only`]), so its projection
+    /// runs only when one is bound.
     async fn retire_session_member_until(
         &self,
         member_ref: &MemberRef,
         deadline: Instant,
-        registration_refused: bool,
+        archive_only: bool,
     ) -> Result<crate::machines::mob_machine::MemberSessionDisposal, MobError> {
         tracing::debug!(
             member_ref = ?member_ref,
-            registration_refused,
+            archive_only,
             "SessionBackend::retire_member start"
         );
         let session_id = Self::require_session(member_ref, "retire")?;
@@ -6456,7 +6585,7 @@ impl SessionBackend {
             disposal,
             MemberSessionDisposalVerdict::ArchivedWithRecoveredOpsRetired
         ) {
-            if registration_refused {
+            if archive_only {
                 self.ops_adapter
                     .mark_member_retired_if_bound(member_ref)
                     .await?;
@@ -13788,16 +13917,35 @@ impl SessionBackend {
         // committed the member-owned AgentRuntimeId and fence.
         // A missing-live revival replaces a runtime incarnation that is gone;
         // observe its ops binding now so the stale one can be released by
-        // exact compare before the new registration is bound.
-        let superseded_ops_binding = if missing_live_revival {
-            admitted_bridge_session_id.as_ref().and_then(|session_id| {
-                backend
-                    .ops_adapter
-                    .capture_session_binding_witness(session_id)
-            })
-        } else {
-            None
+        // exact compare before the new registration is bound. A cold restore
+        // whose session still holds a parent-owned binding in this process
+        // (the wake of a coordinator-owned worker that was released, or whose
+        // runtime tore its idle executor down, here: its binding stays with
+        // the coordinator's still-open registry) is rebound the same way,
+        // under the owner context that binding preserves. A cold restore in a
+        // process that never bound the session (a boot) observes none, and a
+        // member's own binding left by its retired registration is replaced
+        // by the ordinary bind.
+        let superseded_ops_binding = match req.runtime_revival_intent {
+            RuntimeRevivalIntent::MissingLiveMaterialization => {
+                admitted_bridge_session_id.as_ref().and_then(|session_id| {
+                    backend
+                        .ops_adapter
+                        .capture_session_binding_witness(session_id)
+                })
+            }
+            RuntimeRevivalIntent::ColdRestore => {
+                admitted_bridge_session_id.as_ref().and_then(|session_id| {
+                    backend
+                        .ops_adapter
+                        .capture_session_binding_witness(session_id)
+                        .filter(|witness| witness.is_parent_owned(session_id))
+                })
+            }
+            RuntimeRevivalIntent::None => None,
         };
+        let rebind_superseded_ops_binding =
+            missing_live_revival || superseded_ops_binding.is_some();
         // Only a restored member's revival or boot restore settles a host
         // refusal of its registration itself; spawns keep the transaction's
         // own rollback and the host's own error.
@@ -14301,6 +14449,7 @@ impl SessionBackend {
             generated_self_owned_operation_owner: req.generated_self_owned_operation_owner,
             prepared_ops_binding,
             superseded_ops_binding,
+            rebind_superseded_ops_binding,
             missing_live_revival,
             peer_name: req.peer_name,
             recovered_attached_state,
@@ -14350,6 +14499,11 @@ struct ProvisionFinish {
     generated_self_owned_operation_owner: Option<SessionId>,
     prepared_ops_binding: Option<(SessionId, Arc<dyn OpsLifecycleRegistry>)>,
     superseded_ops_binding: Option<super::ops_adapter::SessionOpsBindingWitness>,
+    /// The new registration is bound by the revival rebind, under the
+    /// owner context of the binding the session held (a missing-live
+    /// revival, or a cold restore whose session still held a parent-owned
+    /// binding in this process).
+    rebind_superseded_ops_binding: bool,
     missing_live_revival: bool,
     peer_name: String,
     recovered_attached_state: Option<Arc<RuntimeSessionState>>,
@@ -14376,6 +14530,7 @@ impl ProvisionFinish {
             generated_self_owned_operation_owner,
             prepared_ops_binding,
             superseded_ops_binding,
+            rebind_superseded_ops_binding,
             missing_live_revival,
             peer_name,
             mut recovered_attached_state,
@@ -14383,6 +14538,11 @@ impl ProvisionFinish {
             held,
         } = self;
         let backend = &backend;
+        // The generated binding this attempt installs (answered by the bind
+        // itself: none for an exact retry of the binding the session held),
+        // released if the attempt fails before it publishes its receipt.
+        let mut installed_generated_binding = None;
+        let binding_session_id = created_bridge_session_id.clone();
         let finalize_result = async {
         // Runtime-backed paths retain the exact prepared materialization for
         // the subsequent attachment transaction.
@@ -14415,7 +14575,7 @@ impl ProvisionFinish {
                     bridge_session_id = %created_bridge_session_id,
                     "SessionBackend::provision_member binding owner session registry"
                 );
-                if missing_live_revival {
+                if rebind_superseded_ops_binding {
                     backend.ops_adapter.release_superseded_session_binding_for_revival(
                         &created_bridge_session_id,
                         superseded_ops_binding.as_ref(),
@@ -14449,7 +14609,7 @@ impl ProvisionFinish {
                     bridge_session_id = %created_bridge_session_id,
                     "SessionBackend::provision_member binding generated owner session registry"
                 );
-                if missing_live_revival {
+                if rebind_superseded_ops_binding {
                     // Rebind under the owner context observed before the
                     // revival: a parent-owned member keeps its coordinator
                     // owner and registry while that context is live, and
@@ -14470,7 +14630,7 @@ impl ProvisionFinish {
                             bridge_session_id = %created_bridge_session_id,
                             owner_bridge_session_id = %owner_bridge_session_id,
                             terminalized_operation_id = ?terminalized_operation_id,
-                            "missing-live revival found the parent owner context ended; the member is now self-owned"
+                            "a member revival found the parent owner context ended; the member is now self-owned"
                         );
                     } else {
                         tracing::debug!(
@@ -14480,11 +14640,22 @@ impl ProvisionFinish {
                         );
                     }
                 } else {
-                    backend.ops_adapter.bind_session_registry(
-                        created_bridge_session_id.clone(),
-                        generated_owner_session_id,
-                        registry,
-                    )?;
+                    installed_generated_binding = backend
+                        .ops_adapter
+                        .bind_session_registry_installing(
+                            created_bridge_session_id.clone(),
+                            generated_owner_session_id,
+                            registry,
+                        )?;
+                    #[cfg(test)]
+                    if provision_finish_test_hooks::take(
+                        &created_bridge_session_id,
+                        provision_finish_test_hooks::ProvisionFinishFault::AfterGeneratedBind,
+                    ) {
+                        return Err(MobError::Internal(format!(
+                            "injected failure of the provision of '{created_bridge_session_id}' after its generated bind"
+                        )));
+                    }
                 }
                 tracing::debug!(
                     bridge_session_id = %created_bridge_session_id,
@@ -14583,9 +14754,28 @@ impl ProvisionFinish {
         }
         .await;
         if let Err(error) = finalize_result {
-            if let Some(transaction) = actor_transaction.take()
-                && let Err(cleanup_error) = transaction.abort().await
+            let cleanup = match actor_transaction.take() {
+                Some(transaction) => transaction.abort().await,
+                None => Ok(()),
+            };
+            // A failed attempt leaves no generated binding it installed. The
+            // operation's own rollback removes it whenever this attempt
+            // registered the operation (a fresh registration holds no live
+            // operation to replay), and keeps it only for a Running operation
+            // a registration that was already in place replays. This release
+            // covers what is left: that case, and a failure between the bind
+            // and the operation claim.
+            if let Some(installed) = installed_generated_binding.as_ref()
+                && backend
+                    .ops_adapter
+                    .release_unpublished_session_binding(&binding_session_id, installed)
             {
+                tracing::debug!(
+                    bridge_session_id = %binding_session_id,
+                    "SessionBackend::provision_member released the generated binding of a failed attempt"
+                );
+            }
+            if let Err(cleanup_error) = cleanup {
                 return Err(MobError::Internal(format!(
                     "provision failed: {error}; exact actor/materialization cleanup failed: {cleanup_error}"
                 )));
@@ -14593,6 +14783,54 @@ impl ProvisionFinish {
             return Err(error);
         }
         finalize_result
+    }
+}
+
+/// Test seam: a member provision that fails at a named step of its finish.
+#[cfg(test)]
+pub(crate) mod provision_finish_test_hooks {
+    use std::sync::{Mutex, PoisonError};
+
+    use meerkat_core::types::SessionId;
+
+    /// Where the provision's finish fails.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum ProvisionFinishFault {
+        /// Right after it bound its generated operation owner.
+        AfterGeneratedBind,
+    }
+
+    static FAULTS: Mutex<Vec<(SessionId, ProvisionFinishFault)>> = Mutex::new(Vec::new());
+
+    /// The next provision of `session` fails at `fault`, once.
+    pub(crate) fn fail(session: &SessionId, fault: ProvisionFinishFault) {
+        FAULTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((session.clone(), fault));
+    }
+
+    /// Whether the failure armed for `session` at `fault` has not fired yet.
+    pub(crate) fn armed(session: &SessionId, fault: ProvisionFinishFault) -> bool {
+        FAULTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|(armed, armed_fault)| armed == session && *armed_fault == fault)
+    }
+
+    pub(super) fn take(session: &SessionId, fault: ProvisionFinishFault) -> bool {
+        let mut faults = FAULTS.lock().unwrap_or_else(PoisonError::into_inner);
+        match faults
+            .iter()
+            .position(|(armed, armed_fault)| armed == session && *armed_fault == fault)
+        {
+            Some(index) => {
+                faults.remove(index);
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -15152,7 +15390,7 @@ impl MobProvisioner for SessionBackend {
             .await
     }
 
-    async fn retire_refused_member(
+    async fn retire_member_archive_only(
         &self,
         member_ref: &MemberRef,
         _member_identity: &AgentIdentity,
@@ -15715,6 +15953,19 @@ impl MobProvisioner for SessionBackend {
     ) -> Result<bool, MobError> {
         self.retire_exact_attachment_for_explicit_resume(session_id, deadline, admission)
             .await
+    }
+
+    async fn retire_live_member_session_for_explicit_resume(
+        &self,
+        session_id: &SessionId,
+        deadline: Instant,
+    ) -> Result<bool, MobError> {
+        self.retire_live_attachment_for_explicit_resume(
+            session_id,
+            deadline,
+            OwnLiveAttachment::Retire,
+        )
+        .await
     }
 
     async fn ensure_runtime_session_state(&self, member_ref: &MemberRef) -> Result<(), MobError> {
@@ -16399,6 +16650,29 @@ impl MultiBackendProvisioner {
         let deadline = Instant::now() + EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT;
         self.session
             .retire_exact_attachment_for_explicit_resume(session_id, deadline, None)
+            .await
+    }
+
+    /// Release this provisioner's own live exact attachment of `session_id`
+    /// with no rebuild after it: the live materialization of a seat session
+    /// a retryable wake keeps. The attachment is retired as
+    /// [`MobProvisioner::retire_live_member_session_for_explicit_resume`]
+    /// retires one, except that the inputs queued on its registration end as
+    /// stopped instead of staying queued: no rebuild follows to run them,
+    /// and the member stays Dormant until its next wake. Returns `true` once
+    /// the attachment was retired, `false` when nothing was retired (no
+    /// runtime adapter participates).
+    pub(super) async fn release_live_member_session_without_rebuild(
+        &self,
+        session_id: &SessionId,
+        deadline: Instant,
+    ) -> Result<bool, MobError> {
+        self.session
+            .retire_live_attachment_for_explicit_resume(
+                session_id,
+                deadline,
+                OwnLiveAttachment::Release,
+            )
             .await
     }
 
@@ -18858,15 +19132,15 @@ impl MobProvisioner for MultiBackendProvisioner {
         }
     }
 
-    async fn retire_refused_member(
+    async fn retire_member_archive_only(
         &self,
         member_ref: &MemberRef,
         member_identity: &AgentIdentity,
         deadline: Option<Instant>,
     ) -> Result<crate::machines::mob_machine::MemberSessionDisposal, MobError> {
         match member_ref {
-            // A peer-only member has no session here whose registration a
-            // host could refuse.
+            // A peer-only member has no session here: it is retired as any
+            // peer-only member.
             MemberRef::BackendPeer {
                 session_id: None, ..
             } => match deadline {
@@ -18878,7 +19152,7 @@ impl MobProvisioner for MultiBackendProvisioner {
             },
             _ => {
                 self.session
-                    .retire_refused_member(member_ref, member_identity, deadline)
+                    .retire_member_archive_only(member_ref, member_identity, deadline)
                     .await
             }
         }
@@ -20210,6 +20484,20 @@ impl MobProvisioner for MultiBackendProvisioner {
     ) -> Result<bool, MobError> {
         self.session
             .retire_exact_attachment_for_explicit_resume(session_id, deadline, admission)
+            .await
+    }
+
+    async fn retire_live_member_session_for_explicit_resume(
+        &self,
+        session_id: &SessionId,
+        deadline: Instant,
+    ) -> Result<bool, MobError> {
+        self.session
+            .retire_live_attachment_for_explicit_resume(
+                session_id,
+                deadline,
+                OwnLiveAttachment::Retire,
+            )
             .await
     }
 

@@ -1280,6 +1280,13 @@ mod tests {
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
             self.inner.delete_ops_lifecycle(runtime_id).await
         }
+
+        async fn list_runtimes_with_recovery_work(
+            &self,
+        ) -> Result<Vec<meerkat_runtime::LogicalRuntimeId>, meerkat_runtime::RuntimeStoreError>
+        {
+            self.inner.list_runtimes_with_recovery_work().await
+        }
     }
 
     #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]

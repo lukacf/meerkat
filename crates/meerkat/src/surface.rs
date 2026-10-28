@@ -2884,7 +2884,7 @@ family = "gemma-4"
             );
             assert_eq!(
                 properties["prompt_cache_options"]["properties"]["ttl"]["enum"],
-                serde_json::json!(["30m"])
+                serde_json::json!(["30m", "12h"])
             );
         }
 

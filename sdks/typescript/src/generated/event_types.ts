@@ -850,7 +850,7 @@ export type OpenAiPromptCacheMode = "implicit" | "explicit";
 /**
  * Minimum lifetime for GPT-5.6 prompt-cache entries.
  */
-export type OpenAiPromptCacheTtl = "30m";
+export type OpenAiPromptCacheTtl = "30m" | "12h";
 
 /**
  * GPT-5.6 request-wide prompt-cache controls.

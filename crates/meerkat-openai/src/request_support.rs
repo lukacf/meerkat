@@ -163,7 +163,8 @@ mod tests {
             prompt_cache_retention_rejection("gpt-5.6-sol", OpenAiPromptCacheRetention::InMemory)
                 .expect("GPT-5.6 refuses in_memory retention");
         assert!(
-            rejection.contains("prompt_cache_options.ttl ('30m')") && !rejection.contains("24h"),
+            rejection.contains("prompt_cache_options.ttl ('30m', '12h')")
+                && !rejection.contains("24h"),
             "{rejection}"
         );
         assert_eq!(
@@ -193,6 +194,54 @@ mod tests {
             Some(false)
         );
         assert_eq!(supports_legacy_penalties("gpt-5.5"), Some(true));
+    }
+
+    /// OpenAI's prompt-caching guide: GPT-5.6 and later accept
+    /// `prompt_cache_options.ttl` `30m` (the default) and `12h`; GPT-5.5 and
+    /// earlier have no TTL control. A cataloged row without it answers
+    /// `Some(false)`, which the request gate refuses; an uncatalogued model
+    /// answers `None` and keeps the pass-through.
+    #[test]
+    fn twelve_hour_prompt_cache_ttl_is_gpt_56_and_later_only() {
+        for model in [
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6.1-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.6",
+        ] {
+            for ttl in [
+                OpenAiPromptCacheTtl::ThirtyMinutes,
+                OpenAiPromptCacheTtl::TwelveHours,
+            ] {
+                assert_eq!(
+                    supports_prompt_cache_ttl(model, ttl),
+                    Some(true),
+                    "{model} accepts {}",
+                    ttl.as_wire_str()
+                );
+            }
+        }
+        for model in [
+            "gpt-5.5",
+            "gpt-5.5-pro",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.3-codex",
+        ] {
+            assert_eq!(
+                supports_prompt_cache_ttl(model, OpenAiPromptCacheTtl::TwelveHours),
+                Some(false),
+                "{model} has no prompt_cache_options.ttl"
+            );
+        }
+        assert_eq!(
+            supports_prompt_cache_ttl("gpt-5.9-future", OpenAiPromptCacheTtl::TwelveHours),
+            None
+        );
     }
 
     #[test]

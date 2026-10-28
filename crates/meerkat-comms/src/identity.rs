@@ -256,17 +256,172 @@ impl Keypair {
         Ok(Self::from_secret(secret))
     }
 
-    /// Load existing keypair or generate a new one.
+    /// Load the keypair stored in `dir`, or generate one and store it there.
+    ///
+    /// A new key never replaces a stored one, so concurrent first calls on
+    /// one directory all return the one key it ends up holding. The new key
+    /// is written whole to a temporary file in `dir` and hard-linked into
+    /// place as `identity.key`, which fails when a key is there already;
+    /// where the file system cannot hard-link, `identity.key` is created
+    /// exclusively instead. A call that finds a key stored first loads that
+    /// key instead of its own, waiting a moment for one another call is
+    /// still writing. The key file is readable by its owner only on Unix
+    /// (mode `0600`), as [`Self::save`] writes it.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn load_or_generate(dir: &Path) -> Result<Self, IdentityError> {
         let key_path = dir.join("identity.key");
         if tokio::fs::try_exists(&key_path).await? {
-            Self::load(dir).await
-        } else {
-            let keypair = Self::generate();
-            keypair.save(dir).await?;
-            Ok(keypair)
+            return Self::load_stored(dir).await;
         }
+        let keypair = Self::generate();
+        let secret = zeroize::Zeroizing::new(keypair.secret_bytes());
+        let key_dir = dir.to_path_buf();
+        let stored = tokio::task::spawn_blocking(move || {
+            store_new_key(&key_dir, secret.as_slice(), hard_link_key)
+        })
+        .await
+        .map_err(|error| IdentityError::Io(std::io::Error::other(error)))??;
+        match stored {
+            KeyFileCreation::Created => {
+                tokio::fs::write(dir.join("identity.pub"), keypair.public_key().0).await?;
+                Ok(keypair)
+            }
+            // Another call stored its key first: that key is the identity.
+            KeyFileCreation::AlreadyStored => Self::load_stored(dir).await,
+        }
+    }
+
+    /// [`Self::load`], waiting a moment for a key another call is still
+    /// writing. Where the file system cannot hard-link, the key file is
+    /// created exclusively and exists before its bytes do (see
+    /// [`store_new_key`]); a hard-linked key file is whole as soon as it
+    /// exists.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn load_stored(dir: &Path) -> Result<Self, IdentityError> {
+        const PARTIAL_KEY_RETRIES: u32 = 50;
+        const PARTIAL_KEY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+        let mut retries = 0;
+        loop {
+            match Self::load(dir).await {
+                Err(IdentityError::InvalidKeyLength { actual, .. })
+                    if actual < 32 && retries < PARTIAL_KEY_RETRIES =>
+                {
+                    retries += 1;
+                    tokio::time::sleep(PARTIAL_KEY_RETRY_DELAY).await;
+                }
+                loaded => return loaded,
+            }
+        }
+    }
+}
+
+/// How [`store_new_key`] left a directory's `identity.key`.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyFileCreation {
+    /// The key given is the stored key.
+    Created,
+    /// A key was stored already (another call's): it stays the stored key.
+    AlreadyStored,
+}
+
+/// Store `secret` as `dir`'s `identity.key` unless a key is stored there
+/// already. A stored key is never replaced, and never read half written:
+/// the key is written to a temporary file in `dir`, which is hard-linked to
+/// `identity.key` (a link fails when that name exists) and then removed, on
+/// every path. Where the file system cannot hard-link (FAT and exFAT
+/// volumes, some network shares), `identity.key` is created exclusively
+/// (`create_new`) and written instead, with the same outcome: the first key
+/// stays and every later store is told so. The files are created readable by
+/// their owner only on Unix (mode `0600`, which the umask can only narrow),
+/// and the stored key is then set to exactly `0600`, as [`Keypair::save`]
+/// sets it; a failure to set it is reported and the key stays stored, as
+/// with `save`. Nothing is synced, as `save` syncs nothing.
+#[cfg(not(target_arch = "wasm32"))]
+fn store_new_key(
+    dir: &Path,
+    secret: &[u8],
+    link: fn(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<KeyFileCreation> {
+    std::fs::create_dir_all(dir)?;
+    let key_path = dir.join("identity.key");
+    let temporary = TemporaryKeyFile(dir.join(format!(
+        ".identity.key.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    )));
+    write_new_private_file(&temporary.0, secret)?;
+    let linked = link(&temporary.0, &key_path);
+    drop(temporary);
+    match linked {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Ok(KeyFileCreation::AlreadyStored);
+        }
+        // No hard link here: create the key file exclusively.
+        Err(_) => match write_new_private_file(&key_path, secret) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Ok(KeyFileCreation::AlreadyStored);
+            }
+            Err(error) => return Err(error),
+        },
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(KeyFileCreation::Created)
+}
+
+/// The hard link [`store_new_key`] stores a key with.
+#[cfg(not(target_arch = "wasm32"))]
+fn hard_link_key(temporary: &Path, key: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(temporary, key)
+}
+
+/// Create `path`, never an existing file, holding `bytes`, readable by its
+/// owner only on Unix (mode `0600`, which the umask can only narrow). A file
+/// this created but could not write whole is removed: its bytes are short,
+/// so no reader took them as a key. Once they are written it stays.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_new_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+    if let Err(error) = file.write_all(bytes) {
+        drop(file);
+        remove_key_file(path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// A temporary key file of [`store_new_key`], removed when dropped.
+#[cfg(not(target_arch = "wasm32"))]
+struct TemporaryKeyFile(std::path::PathBuf);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for TemporaryKeyFile {
+    fn drop(&mut self) {
+        remove_key_file(&self.0);
+    }
+}
+
+/// Remove a key file this module wrote; one that is gone already is fine.
+#[cfg(not(target_arch = "wasm32"))]
+fn remove_key_file(path: &Path) {
+    if let Err(error) = std::fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            path = %path.display(),
+            %error,
+            "could not remove a comms identity key file"
+        );
     }
 }
 
@@ -436,6 +591,121 @@ mod tests {
         let keypair = Keypair::load_or_generate(tmp.path()).await.unwrap();
         assert!(tmp.path().join("identity.key").exists());
         assert_eq!(keypair.public_key().as_bytes().len(), 32);
+    }
+
+    /// The names in `dir`, sorted.
+    fn key_dir_entries(dir: &Path) -> Vec<String> {
+        let mut names = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    /// Concurrent first calls on one directory store one key: every call
+    /// returns it, the directory holds exactly it, and no temporary file is
+    /// left. Before, each call could store its own key, the last one
+    /// replacing the others.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_keypair_load_or_generate_concurrent_first_calls_share_one_key() {
+        for _ in 0..16 {
+            let tmp = TempDir::new().unwrap();
+            let dir = tmp.path().join("identity");
+            let calls = (0..8)
+                .map(|_| {
+                    let dir = dir.clone();
+                    tokio::spawn(async move { Keypair::load_or_generate(&dir).await })
+                })
+                .collect::<Vec<_>>();
+            let mut returned = Vec::with_capacity(calls.len());
+            for call in calls {
+                returned.push(call.await.unwrap().unwrap().public_key());
+            }
+            let stored = Keypair::load(&dir).await.unwrap().public_key();
+            assert!(
+                returned.iter().all(|key| *key == stored),
+                "every call returns the stored key {stored:?}: {returned:?}"
+            );
+            assert_eq!(std::fs::read(dir.join("identity.pub")).unwrap(), stored.0);
+            assert_eq!(key_dir_entries(&dir), ["identity.key", "identity.pub"]);
+        }
+    }
+
+    /// Concurrent stores of different keys in one directory leave exactly
+    /// one of them, tell every other store that a key is stored already, and
+    /// leave no temporary file: with a hard link, and, where the file system
+    /// cannot hard-link, with the exclusive create.
+    #[test]
+    fn test_store_new_key_keeps_one_key_with_and_without_hard_links() {
+        let links: [fn(&Path, &Path) -> std::io::Result<()>; 2] = [hard_link_key, |_, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        }];
+        for link in links {
+            for _ in 0..16 {
+                let tmp = TempDir::new().unwrap();
+                let dir = tmp.path().join("identity");
+                let secrets = (0..8)
+                    .map(|_| Keypair::generate().secret_bytes())
+                    .collect::<Vec<_>>();
+                let stored = std::thread::scope(|scope| {
+                    let dir = dir.as_path();
+                    let stores = secrets
+                        .iter()
+                        .map(|secret| scope.spawn(move || store_new_key(dir, secret, link)))
+                        .collect::<Vec<_>>();
+                    stores
+                        .into_iter()
+                        .map(|store| store.join().unwrap().unwrap())
+                        .collect::<Vec<_>>()
+                });
+                let created = (0..stored.len())
+                    .filter(|&index| stored[index] == KeyFileCreation::Created)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    created.len(),
+                    1,
+                    "exactly one store creates the key: {stored:?}"
+                );
+                assert_eq!(
+                    std::fs::read(dir.join("identity.key")).unwrap(),
+                    secrets[created[0]]
+                );
+                assert_eq!(key_dir_entries(&dir), ["identity.key"]);
+            }
+        }
+    }
+
+    /// A key file that exists before its bytes do (where the file system
+    /// cannot hard-link, the exclusive create makes it empty first) is
+    /// waited for: written whole a moment later, it is the key loaded. One
+    /// that stays empty fails with its short length once the bounded wait
+    /// is over, and is not replaced.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_keypair_load_or_generate_waits_for_a_key_still_being_written() {
+        let tmp = TempDir::new().unwrap();
+        let key_path = tmp.path().join("identity.key");
+        std::fs::File::create(&key_path).unwrap();
+        let secret = Keypair::generate().secret_bytes();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            std::fs::write(&key_path, secret).unwrap();
+        });
+        let loaded = Keypair::load_or_generate(tmp.path()).await.unwrap();
+        writer.join().unwrap();
+        assert_eq!(loaded.secret_bytes(), secret);
+
+        let empty = TempDir::new().unwrap();
+        std::fs::File::create(empty.path().join("identity.key")).unwrap();
+        let error = Keypair::load_or_generate(empty.path()).await.unwrap_err();
+        assert!(
+            matches!(error, IdentityError::InvalidKeyLength { actual: 0, .. }),
+            "{error:?}"
+        );
+        assert_eq!(
+            std::fs::read(empty.path().join("identity.key")).unwrap(),
+            Vec::<u8>::new()
+        );
     }
 
     // Phase 1: Security tests

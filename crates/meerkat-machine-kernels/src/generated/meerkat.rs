@@ -1949,6 +1949,58 @@ impl std::fmt::Display for DurableTailRecoveryDisposition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum EmptyResumeRetirementVerdict {
+    #[default]
+    #[serde(rename = "Retire")]
+    Retire,
+    #[serde(rename = "KeepServing")]
+    KeepServing,
+}
+impl EmptyResumeRetirementVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Retire => "Retire",
+            Self::KeepServing => "KeepServing",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for EmptyResumeRetirementVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Retire" => Ok(Self::Retire),
+            "KeepServing" => Ok(Self::KeepServing),
+            other => Err(format!(
+                "invalid EmptyResumeRetirementVerdict value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for EmptyResumeRetirementVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for EmptyResumeRetirementVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum ExternalToolSurfaceBaseState {
     #[default]
     #[serde(rename = "Absent")]
@@ -11740,6 +11792,56 @@ impl std::fmt::Display for SessionRegistrationRejectReasonKind {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SessionResidencyOwner {
+    #[default]
+    #[serde(rename = "Session")]
+    Session,
+    #[serde(rename = "Composition")]
+    Composition,
+}
+impl SessionResidencyOwner {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Session => "Session",
+            Self::Composition => "Composition",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SessionResidencyOwner {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Session" => Ok(Self::Session),
+            "Composition" => Ok(Self::Composition),
+            other => Err(format!("invalid SessionResidencyOwner value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SessionResidencyOwner {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SessionResidencyOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -13967,6 +14069,7 @@ pub struct State {
     pub active_fence_token: Option<FenceToken>,
     pub active_runtime_generation: Option<Generation>,
     pub active_runtime_epoch_id: Option<RuntimeEpochId>,
+    pub residency_owner: SessionResidencyOwner,
     pub current_run_id: Option<RunId>,
     pub pre_run_phase: Option<PreRunPhase>,
     pub runtime_stop_deferred: bool,
@@ -14513,6 +14616,7 @@ impl std::fmt::Debug for State {
             .field("active_fence_token", &self.active_fence_token)
             .field("active_runtime_generation", &self.active_runtime_generation)
             .field("active_runtime_epoch_id", &self.active_runtime_epoch_id)
+            .field("residency_owner", &self.residency_owner)
             .field("current_run_id", &self.current_run_id)
             .field("pre_run_phase", &self.pre_run_phase)
             .field("runtime_stop_deferred", &self.runtime_stop_deferred)
@@ -16213,6 +16317,7 @@ pub mod inputs {
         pub generation: Option<Generation>,
         pub runtime_epoch_id: Option<RuntimeEpochId>,
         pub session_id: SessionId,
+        pub residency_owner: SessionResidencyOwner,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SetPeerIngressContext {
@@ -18896,6 +19001,17 @@ pub mod inputs {
         pub prior_commit: DurableRecoveryPriorCommit,
         pub input_evidence: DurableRecoveryInputEvidence,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveEmptyResumeRetirement {
+        pub queued_input_present: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClaimCompositionResidency {
+        pub session_id: SessionId,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Option<Generation>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19323,6 +19439,8 @@ pub enum Input {
     SuspendRunForStop(inputs::SuspendRunForStop),
     ReplayAppliedRunContributor(inputs::ReplayAppliedRunContributor),
     AuthorizeOperatorDurableTailRepair(inputs::AuthorizeOperatorDurableTailRepair),
+    ResolveEmptyResumeRetirement(inputs::ResolveEmptyResumeRetirement),
+    ClaimCompositionResidency(inputs::ClaimCompositionResidency),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -19914,6 +20032,8 @@ impl Input {
             Self::AuthorizeOperatorDurableTailRepair(_) => {
                 InputKind::AuthorizeOperatorDurableTailRepair
             }
+            Self::ResolveEmptyResumeRetirement(_) => InputKind::ResolveEmptyResumeRetirement,
+            Self::ClaimCompositionResidency(_) => InputKind::ClaimCompositionResidency,
         }
     }
 }
@@ -20330,6 +20450,8 @@ pub enum InputKind {
     SuspendRunForStop,
     ReplayAppliedRunContributor,
     AuthorizeOperatorDurableTailRepair,
+    ResolveEmptyResumeRetirement,
+    ClaimCompositionResidency,
 }
 
 pub mod signals {
@@ -20427,6 +20549,7 @@ pub mod effects {
     pub struct RuntimeBound {
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
+        pub runtime_epoch_id: Option<RuntimeEpochId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeRetired {
@@ -22098,6 +22221,16 @@ pub mod effects {
     pub struct RunSuspendedForStop {
         pub run_id: RunId,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeRegistrationReleased {
+        pub agent_runtime_id: Option<AgentRuntimeId>,
+        pub fence_token: Option<FenceToken>,
+        pub runtime_epoch_id: Option<RuntimeEpochId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EmptyResumeRetirementResolved {
+        pub verdict: EmptyResumeRetirementVerdict,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -22373,6 +22506,8 @@ pub enum Effect {
     ResumableRunReleased(effects::ResumableRunReleased),
     ResumableRunSettled(effects::ResumableRunSettled),
     RunSuspendedForStop(effects::RunSuspendedForStop),
+    RuntimeRegistrationReleased(effects::RuntimeRegistrationReleased),
+    EmptyResumeRetirementResolved(effects::EmptyResumeRetirementResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -22635,6 +22770,8 @@ pub enum EffectKind {
     ResumableRunReleased,
     ResumableRunSettled,
     RunSuspendedForStop,
+    RuntimeRegistrationReleased,
+    EmptyResumeRetirementResolved,
 }
 
 pub mod command_capabilities {
@@ -25786,6 +25923,21 @@ pub enum TransitionId {
     ResolveRuntimeCompletionResultOutcomeUnknownRunning,
     ResolveRuntimeCompletionResultOutcomeUnknownRetired,
     ResolveRuntimeCompletionResultOutcomeUnknownStopped,
+    ResolveEmptyResumeRetirementRetireIdle,
+    ResolveEmptyResumeRetirementRetireAttached,
+    ResolveEmptyResumeRetirementRetireRunning,
+    ResolveEmptyResumeRetirementRetireRetired,
+    ResolveEmptyResumeRetirementRetireStopped,
+    ResolveEmptyResumeRetirementKeepServingIdle,
+    ResolveEmptyResumeRetirementKeepServingAttached,
+    ResolveEmptyResumeRetirementKeepServingRunning,
+    ResolveEmptyResumeRetirementKeepServingRetired,
+    ResolveEmptyResumeRetirementKeepServingStopped,
+    ClaimCompositionResidencyIdle,
+    ClaimCompositionResidencyAttached,
+    ClaimCompositionResidencyRunning,
+    ClaimCompositionResidencyRetired,
+    ClaimCompositionResidencyStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -25864,6 +26016,7 @@ pub fn initial_state() -> State {
         active_fence_token: None,
         active_runtime_generation: None,
         active_runtime_epoch_id: None,
+        residency_owner: SessionResidencyOwner::Session,
         current_run_id: None,
         pre_run_phase: None,
         runtime_stop_deferred: false,

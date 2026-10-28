@@ -223,13 +223,18 @@ AuditProgressStale ==
     \E open \in BOOLEAN, w \in AuditInFlight, tok \in AuditTokens, t \in AuditTimes :
         ObserveMemberProgressStaleRunning(AuditIdentity, open, w, tok, t)
 
+\* A recovered member is seated Dormant (it holds no registration), so its
+\* retirement takes the archive-only twin; the routed arms need a Live
+\* member, which member_residency_audit's retire run drives.
 AuditRetireReleasing ==
     \E rid \in AuditRuntimes, g \in AuditGenerations, s \in AuditSessions :
-        RetireRunningReleasing(AuditMob, rid, AuditIdentity, g, Some(s), Some(s))
+        \/ RetireRunningReleasing(AuditMob, rid, AuditIdentity, g, Some(s), Some(s))
+        \/ RetireRunningReleasingArchiveOnly(AuditMob, rid, AuditIdentity, g, Some(s), Some(s))
 
 AuditRetirePreservingBinding ==
     \E rid \in AuditRuntimes, g \in AuditGenerations, s \in AuditSessions :
-        RetireRunningPreservingBinding(AuditMob, rid, AuditIdentity, g, None, Some(s))
+        \/ RetireRunningPreservingBinding(AuditMob, rid, AuditIdentity, g, None, Some(s))
+        \/ RetireRunningPreservingBindingArchiveOnly(AuditMob, rid, AuditIdentity, g, None, Some(s))
 
 AuditRetireNoBinding ==
     \E rid \in AuditRuntimes, g \in AuditGenerations :
@@ -237,11 +242,13 @@ AuditRetireNoBinding ==
 
 AuditRetireStoppedReleasing ==
     \E rid \in AuditRuntimes, g \in AuditGenerations, s \in AuditSessions :
-        RetireStoppedReleasing(AuditMob, rid, AuditIdentity, g, Some(s), Some(s))
+        \/ RetireStoppedReleasing(AuditMob, rid, AuditIdentity, g, Some(s), Some(s))
+        \/ RetireStoppedReleasingArchiveOnly(AuditMob, rid, AuditIdentity, g, Some(s), Some(s))
 
 AuditRetireStoppedPreservingBinding ==
     \E rid \in AuditRuntimes, g \in AuditGenerations, s \in AuditSessions :
-        RetireStoppedPreservingBinding(AuditMob, rid, AuditIdentity, g, None, Some(s))
+        \/ RetireStoppedPreservingBinding(AuditMob, rid, AuditIdentity, g, None, Some(s))
+        \/ RetireStoppedPreservingBindingArchiveOnly(AuditMob, rid, AuditIdentity, g, None, Some(s))
 
 AuditRetireStoppedNoBinding ==
     \E rid \in AuditRuntimes, g \in AuditGenerations :
@@ -253,7 +260,8 @@ AuditRetireAbsentStopped == RetireAbsentStopped(AuditIdentity)
 
 AuditRetireMember ==
     \E rid \in AuditRuntimes, fence \in AuditFences, s \in AuditSessions :
-        RetireMember(AuditIdentity, rid, fence, Some(s))
+        \/ RetireMember(AuditIdentity, rid, fence, Some(s))
+        \/ RetireMemberArchiveOnly(AuditIdentity, rid, fence, Some(s))
 
 AuditDetachSessionIngress ==
     \E rid \in AuditRuntimes : SessionIngressDetachedForMobDestroyRunning(AuditMob, rid)
@@ -638,14 +646,19 @@ AuditCurrentEnabled(rid, fence, s) ==
     \/ ENABLED RetireAtScopeCurrentStopped(AuditIdentity, rid, fence, s)
 
 \* A Retire input for the incarnation `rid` of the audit identity is enabled,
-\* in the shapes the audit's Retire arms take.
+\* in the shapes the audit's Retire arms take: the routed arms for a Live (or
+\* phaseless) member, the archive-only twins for a Dormant or Waking one.
 AuditRetireEnabledFor(rid) ==
     \E g \in AuditGenerations, s \in AuditSessions :
         \/ ENABLED RetireRunningReleasing(AuditMob, rid, AuditIdentity, g, Some(s), Some(s))
+        \/ ENABLED RetireRunningReleasingArchiveOnly(AuditMob, rid, AuditIdentity, g, Some(s), Some(s))
         \/ ENABLED RetireRunningPreservingBinding(AuditMob, rid, AuditIdentity, g, None, Some(s))
+        \/ ENABLED RetireRunningPreservingBindingArchiveOnly(AuditMob, rid, AuditIdentity, g, None, Some(s))
         \/ ENABLED RetireRunningNoBinding(AuditMob, rid, AuditIdentity, g, None, None)
         \/ ENABLED RetireStoppedReleasing(AuditMob, rid, AuditIdentity, g, Some(s), Some(s))
+        \/ ENABLED RetireStoppedReleasingArchiveOnly(AuditMob, rid, AuditIdentity, g, Some(s), Some(s))
         \/ ENABLED RetireStoppedPreservingBinding(AuditMob, rid, AuditIdentity, g, None, Some(s))
+        \/ ENABLED RetireStoppedPreservingBindingArchiveOnly(AuditMob, rid, AuditIdentity, g, None, Some(s))
         \/ ENABLED RetireStoppedNoBinding(AuditMob, rid, AuditIdentity, g, None, None)
 
 AuditRetiring(rid) ==

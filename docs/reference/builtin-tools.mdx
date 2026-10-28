@@ -54,7 +54,7 @@ may apply explicit presets of their own.
 | `conclude_objective` | Mob | Yes | `mob` + kickoff objective | Conclude the pre-addressed kickoff objective |
 | `mob_create` | Mob | Yes | `mob` + generated authority | Create an explicit mob |
 | `mob_destroy` | Mob | Yes | `mob` + mob scope | Destroy an explicit mob |
-| `mob_spawn_member` | Mob | Yes | `mob` + spawn scope | Spawn a member |
+| `mob_spawn_member` | Mob | Yes | `mob` + spawn scope | Spawn a member; the result's `wired` and `parent_wiring` say whether the caller and the new member are wired peers |
 | `mob_retire_member` | Mob | Yes | `mob` + mob scope, or ownership of the member | Retire a member and archive its session |
 | `mob_check_member` | Mob | Yes | `mob` + mob scope, or ownership of the member | Read member execution status and output |
 | `mob_list_members` | Mob | Yes | `mob` + mob scope; without it, only the members the caller owns | List a mob's members |

@@ -101,6 +101,36 @@ _WIRE_FAILURES = [
     ),
     pytest.param(
         -32603,
+        f"peer 'alice' was not woken for envelope {_ENVELOPE_ID} (mob_not_running)",
+        {
+            "code": "peer_wake_refused",
+            "peer": "alice",
+            "envelope_id": _ENVELOPE_ID,
+            "refusal": {"kind": "mob_not_running"},
+            "retryable": True,
+            "message": f"peer 'alice' was not woken for envelope {_ENVELOPE_ID} (mob_not_running)",
+        },
+        id="peer_wake_refused-mob_not_running",
+    ),
+    pytest.param(
+        -32603,
+        f"peer 'alice' was not woken for envelope {_ENVELOPE_ID} (member_broken)",
+        {
+            "code": "peer_wake_refused",
+            "peer": "alice",
+            "envelope_id": _ENVELOPE_ID,
+            "refusal": {
+                "kind": "member_broken",
+                "reason": "missing durable session snapshot",
+                "hold": "tail_held_for_recovery",
+            },
+            "retryable": False,
+            "message": f"peer 'alice' was not woken for envelope {_ENVELOPE_ID} (member_broken)",
+        },
+        id="peer_wake_refused-member_broken",
+    ),
+    pytest.param(
+        -32603,
         _AMBIGUOUS_MESSAGE,
         {
             "code": "send_ambiguous",
@@ -145,3 +175,35 @@ async def test_comms_send_error_survives_the_rpc_transport(
 
     assert exc_info.value.code == data["code"]
     assert comms_send_error(exc_info.value) == data
+
+
+def test_peer_wake_refusal_kinds_are_the_wire_vocabulary() -> None:
+    """The refusal carried by ``peer_wake_refused`` is a closed vocabulary.
+
+    The kinds come from ``PeerWakeRefusal`` in wire-types.json; ``sender_waking``
+    and ``materialization_lost`` are among them, and a peer that is not a member
+    is never a wake refusal (it stays ``peer_not_found_or_not_trusted``).
+    """
+    arm = next(
+        arm
+        for arm in _SCHEMA["oneOf"]
+        if arm["properties"]["code"]["const"] == "peer_wake_refused"
+    )
+    assert set(arm["required"]) >= {"peer", "envelope_id", "refusal", "retryable", "message"}
+    refusal = _SCHEMA["$defs"]["PeerWakeRefusal"]
+    kinds = {variant["properties"]["kind"]["const"] for variant in refusal["oneOf"]}
+    assert kinds == {
+        "member_broken",
+        "member_retiring",
+        "mob_not_running",
+        "admission_closed",
+        "wake_timed_out",
+        "mob_unavailable",
+        "materialization_lost",
+        "non_authoritative_composition",
+        "host_preparation_pending",
+        "resume_gate_unavailable",
+        "host_owned",
+        "lifecycle_origin_fenced",
+        "sender_waking",
+    }

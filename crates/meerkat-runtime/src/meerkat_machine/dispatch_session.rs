@@ -822,6 +822,7 @@ mod compaction_coordinator_tests {
                         generation: Some(dsl::Generation::from(3)),
                         runtime_epoch_id: Some(self.dsl_epoch_id.clone()),
                         session_id: self.dsl_session_id.clone(),
+                        residency_owner: dsl::SessionResidencyOwner::Composition,
                     },
                     "compaction_coordinator_test::bind",
                 )
@@ -2285,7 +2286,10 @@ impl MeerkatMachine {
     /// Commit one exact runtime-placement tuple through the canonical
     /// `PrepareBindings` transition, then mechanically synchronize the driver
     /// projection. Callers own the surrounding session mutation gate and any
-    /// higher-level cleanup if the binding is rejected.
+    /// higher-level cleanup if the binding is rejected. `residency_owner`
+    /// says who holds the registration resident: `Session` for a
+    /// session-owned binding, `Composition` for a mob member's placement.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn commit_runtime_placement_binding(
         &self,
         session_id: &SessionId,
@@ -2294,6 +2298,7 @@ impl MeerkatMachine {
         agent_runtime_id: crate::identifiers::LogicalRuntimeId,
         fence_token: u64,
         generation: u64,
+        residency_owner: crate::meerkat_machine::dsl::SessionResidencyOwner,
     ) -> Result<(), RuntimeDriverError> {
         let dsl_input = crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
             agent_runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
@@ -2305,6 +2310,7 @@ impl MeerkatMachine {
                 epoch_id,
             )),
             session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+            residency_owner,
         };
         let staged = self
             .stage_session_dsl_transition(session_id, dsl_input, "PrepareBindings")
@@ -2933,6 +2939,7 @@ impl MeerkatMachine {
                     runtime_id,
                     0,
                     0,
+                    crate::meerkat_machine::dsl::SessionResidencyOwner::Session,
                 )
                 .await
             {

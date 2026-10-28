@@ -111,6 +111,17 @@ pub enum SendError {
         envelope_id: Uuid,
         park_bound: Duration,
     },
+    /// The destination is a seated member that had no live route, and the
+    /// wake the send needed was refused or did not finish within
+    /// `ack_timeout_secs`. Not delivered: the envelope never left the
+    /// sender's send future, so a retry cannot duplicate it. Distinct from
+    /// [`Self::PeerNotFound`] (not a member) and from
+    /// [`Self::InprocDeliveryUnconfirmed`] (handed off, unconfirmed).
+    #[error("Peer wake refused for envelope {envelope_id}: {refusal}")]
+    PeerWakeRefused {
+        envelope_id: Uuid,
+        refusal: meerkat_core::comms::PeerWakeRefusal,
+    },
 }
 
 /// Outcome of a successful router send.
@@ -219,14 +230,20 @@ where
 }
 
 #[inline]
-fn map_inproc_send_error(err: InprocSendError, dest: PeerId) -> SendError {
+fn map_inproc_send_error(err: InprocSendError, dest: PeerId, envelope_id: Uuid) -> SendError {
     match err {
+        // Only a key with neither a live nor a wake route: not a member.
         InprocSendError::PeerNotFound(_) => SendError::PeerNotFound(dest),
         InprocSendError::InboxClosed | InprocSendError::InboxFull => SendError::PeerOffline,
         // Preserve the typed ingress-drop reason all the way through to
         // REST/RPC/MCP payloads. Do NOT collapse into `PeerOffline` — the
         // transport worked, the receiver's admission policy rejected us.
         InprocSendError::IngressDropped(reason) => SendError::AdmissionDropped { reason },
+        // A seated member whose wake was refused: typed, never "not found".
+        InprocSendError::WakeRefused(refusal) => SendError::PeerWakeRefused {
+            envelope_id,
+            refusal,
+        },
     }
 }
 
@@ -729,12 +746,16 @@ impl Router {
         dest: PeerId,
     ) -> Result<SendOutcome, SendError> {
         let registry = InprocRegistry::global();
+        let envelope_id = envelope.id;
         // ONE bound, one meaning, both transports: the stream lane already caps
         // how long a sender waits on the receiver at `ack_timeout_secs`
         // (`send_on_stream`). The in-process lane waits on the receiver's drain
         // instead of on an ack frame, but it is the same question - how long
         // may our liveness depend on the peer - so it reuses the same knob
-        // rather than inventing a second timeout constant.
+        // rather than inventing a second timeout constant. It is also the
+        // bound on a wake the recipient needs first: one budget for the whole
+        // send, so the sender sees `wake_timed_out` (nothing handed off) or an
+        // unconfirmed delivery (handed off), whichever its budget reaches.
         let park_bound = Duration::from_secs(self.config.ack_timeout_secs);
         let delivery = match self.inproc_namespace.as_deref() {
             Some(namespace) => registry
@@ -748,7 +769,7 @@ impl Router {
                     park_bound,
                 )
                 .await
-                .map_err(|err| map_inproc_send_error(err, dest))?,
+                .map_err(|err| map_inproc_send_error(err, dest, envelope_id))?,
             None => registry
                 .send_to_pubkey_any_namespace_with_id_wait(
                     &self.keypair,
@@ -759,7 +780,7 @@ impl Router {
                     park_bound,
                 )
                 .await
-                .map_err(|err| map_inproc_send_error(err, dest))?,
+                .map_err(|err| map_inproc_send_error(err, dest, envelope_id))?,
         };
         let resolved = match delivery.outcome {
             crate::inproc::InprocDeliveryOutcome::Resolved(outcome) => outcome,

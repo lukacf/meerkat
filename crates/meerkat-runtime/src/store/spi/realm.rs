@@ -108,18 +108,39 @@ pub const BATCH_BUDGET: usize = MAX_BATCH_BYTES - 512 * 1024;
 /// Chunk rows written per batch.
 pub const CHUNK_ROWS_PER_BATCH: usize = 7;
 
-/// A checkpoint is written once the rows appended since the last one pass
-/// `max(CHECKPOINT_FACTOR x live bytes, CHECKPOINT_MIN_BYTES)`.
+/// A checkpoint (the host store reference's re-base) is written once the rows
+/// appended since the last one pass
+/// `max(CHECKPOINT_FACTOR x live bytes, CHECKPOINT_MIN_BYTES)`: the
+/// scope's next commit that carries its full image appends a reset and every
+/// live row entry, and drops every earlier row, in one batch. A scope's
+/// visible rows therefore stay within that threshold plus its last commit's
+/// rows. After a checkpoint the counter starts at the image's own bytes, so
+/// at least three times the live bytes are appended before the next one: a
+/// checkpoint adds at most about a third to the row bytes a scope writes.
 pub const CHECKPOINT_FACTOR: u64 = 4;
 
-/// See [`CHECKPOINT_FACTOR`].
-pub const CHECKPOINT_MIN_BYTES: u64 = 4 * 1024 * 1024;
+/// The least row bytes appended between two checkpoints (see
+/// [`CHECKPOINT_FACTOR`]). It bounds the superseded rows of a scope whose
+/// live entries are small but rewritten whole on every commit (a runtime's
+/// ops lifecycle snapshot is rewritten on every terminal operation
+/// transition): such a scope keeps at most this many row bytes plus its last
+/// commit's. 4 MiB before 0.9.7; the format is unchanged, and every release
+/// reads a scope checkpointed at either value.
+pub const CHECKPOINT_MIN_BYTES: u64 = 256 * 1024;
 
 /// Rows read per host call when loading.
-const READ_PAGE_ROWS: usize = 16;
+pub(crate) const READ_PAGE_ROWS: usize = 16;
 
-/// Heads read per host call when listing.
-const LIST_PAGE_HEADS: usize = 256;
+/// The most heads one `list_heads` call asks for, when the realm opens and
+/// when a stopped writer re-acquires. A listing visits every scope the realm
+/// holds, archived sessions and chunk scopes included, and a store's cost is
+/// often per call, so a page is large: the calls of a listing are
+/// `ceil(scopes / LIST_PAGE_HEADS)` per kind, at least one. A store may
+/// answer fewer heads with `next` set, and the listing reads on from there.
+/// A page of typical runtime heads (a few KiB each) is a few MiB; each head
+/// stays under [`HEAD_LIMIT`]. 256 before 0.9.7; no stored format depends on
+/// it.
+pub(crate) const LIST_PAGE_HEADS: usize = 2048;
 
 /// Values at least this large keep their allocation in the stamp, so an
 /// unchanged value (the same allocation) is recognized without hashing.
@@ -381,7 +402,8 @@ impl ScopeState {
 
     /// Whether the next commit should carry the scope's full image, so the
     /// journal writes a checkpoint (rows since the last checkpoint pass
-    /// `max(4 x live bytes, 4 MiB)`).
+    /// `max(4 x live bytes, 256 KiB)`: [`CHECKPOINT_FACTOR`],
+    /// [`CHECKPOINT_MIN_BYTES`]).
     #[must_use]
     pub fn wants_full_image(&self) -> bool {
         self.since_checkpoint

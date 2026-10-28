@@ -18,10 +18,28 @@
 //! // Unregister when done
 //! InprocRegistry::global().unregister(&pubkey);
 //! ```
+//!
+//! # Wake routes
+//!
+//! Besides live routes (an inbox that receives now), the registry holds a
+//! second table of wake routes: one per seated member of a mob whose member is
+//! not necessarily materialized in this process. A wake route is a declared
+//! projection of its owner's membership, never an inbox: it is published and
+//! retracted only from the owner's machine effects, it occupies no name, and
+//! it delivers nothing. When a send finds no live route (or a closed one) for
+//! a key that has a wake route, the registry asks the route's owner to wake
+//! the member, holds the envelope in the sender's own send future meanwhile,
+//! and hands it off once, through the ordinary receipt path, after the owner
+//! answered that the member is ready. A key with neither route is not a
+//! member: the send fails `PeerNotFound` exactly as before.
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, Weak};
 
+use meerkat_core::comms::PeerWakeRefusal;
+use meerkat_core::time_compat::Instant;
 use parking_lot::RwLock;
 use uuid::Uuid;
 
@@ -191,6 +209,115 @@ struct InprocPeer {
     meta: PeerMeta,
 }
 
+/// What the owner of a wake route is asked when a send needs its member.
+///
+/// `observed_missing` is the raw routing observation behind the request: the
+/// member had no live route, or its live route was closed. `sender_waking`
+/// is the sender's own residency as its owner published it: the send comes
+/// from a member that is itself being woken (from inside its own build). The
+/// registry forwards both as observations; the owner's machine decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PeerWakeRequest {
+    /// The owner's name for the member behind the route (as published).
+    pub member: String,
+    /// The recipient's signing key (the route's key).
+    pub recipient: PubKey,
+    /// The sender's signing key.
+    pub sender: PubKey,
+    /// The envelope the sender holds until the member is ready.
+    pub envelope_id: Uuid,
+    pub observed_missing: bool,
+    pub input_class: PeerWakeInputClass,
+    pub sender_waking: bool,
+}
+
+/// What kind of input a held envelope is, classified at the sender from its
+/// [`MessageKind`]. A silent lifecycle notice never needs its recipient
+/// woken: the recipient's topology at its wake carries the notice's content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PeerWakeInputClass {
+    /// Model-facing or reply traffic: a message, request, response, or a
+    /// kickoff status notice.
+    Content,
+    /// A silent control-plane lifecycle notice (peer added, retired,
+    /// unwired, dismiss).
+    Lifecycle,
+}
+
+impl PeerWakeInputClass {
+    /// Classify a held envelope's kind.
+    pub fn of(kind: &MessageKind) -> Self {
+        match kind {
+            MessageKind::Lifecycle { kind, .. } if !kind.is_kickoff() => Self::Lifecycle,
+            _ => Self::Content,
+        }
+    }
+}
+
+/// What a wake route's owner answered when the member can receive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerWakeAnswer {
+    /// The member is ready (woken, or already live): resolve its live route
+    /// and hand the envelope off once.
+    Ready,
+    /// The envelope is a silent control notice (`PeerWakeInputClass::Lifecycle`)
+    /// the owner consumed for its member without waking it: the member's
+    /// topology at its next wake carries the notice's content, exactly as a
+    /// live member's drain consumes such a notice without a turn. Nothing is
+    /// handed to an inbox.
+    ControlNoticeConsumed,
+}
+
+/// Why a wake route's owner did not make the member ready.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerWakeDenial {
+    /// The key's member is no longer a member of the owner (the route is
+    /// stale). The send is `PeerNotFound`, as for any non-member.
+    NotAMember,
+    /// The member is a member, and its wake was refused or did not finish.
+    Refused(PeerWakeRefusal),
+}
+
+/// The future a wake answers with.
+#[cfg(not(target_arch = "wasm32"))]
+pub type PeerWakeFuture =
+    futures::future::BoxFuture<'static, Result<PeerWakeAnswer, PeerWakeDenial>>;
+/// The future a wake answers with (wasm32: single-threaded, not `Send`).
+#[cfg(target_arch = "wasm32")]
+pub type PeerWakeFuture =
+    futures::future::LocalBoxFuture<'static, Result<PeerWakeAnswer, PeerWakeDenial>>;
+
+/// The owner of wake routes: wakes the seated member behind a route.
+///
+/// Implemented by the member's mob. The owner answers from its machine:
+/// whether the member is woken, already live, or refused (typed). It never
+/// delivers the envelope itself; the registry hands it off once after the
+/// answer.
+pub trait InprocPeerWaker: Send + Sync {
+    /// Wake the member behind `request.member`, and answer once it is ready
+    /// to receive, or with the typed refusal.
+    fn wake(&self, request: PeerWakeRequest) -> PeerWakeFuture;
+
+    /// Whether the member behind `member` is being woken right now, as the
+    /// owner last published its machine state. An observation only: it is
+    /// forwarded to the recipient's owner as `sender_waking`.
+    fn member_is_waking(&self, member: &str) -> bool;
+}
+
+/// A seated member's wake route.
+#[derive(Clone)]
+struct WakeRoute {
+    member: String,
+    waker: Weak<dyn InprocPeerWaker>,
+}
+
+/// A wake route whose owner is alive.
+struct ResolvedWakeRoute {
+    member: String,
+    waker: Arc<dyn InprocPeerWaker>,
+}
+
 /// Internal namespace state protected by a single lock to prevent deadlocks.
 #[derive(Default)]
 struct NamespaceState {
@@ -198,6 +325,24 @@ struct NamespaceState {
     peers: HashMap<PubKey, InprocPeer>,
     /// Map from name to pubkey for name-based lookup.
     names: HashMap<String, PubKey>,
+    /// Wake routes of seated members, by key. A declared projection of their
+    /// owners' membership (published and retracted only from the owners'
+    /// machine effects); never an inbox and never a name claim.
+    wake_routes: HashMap<PubKey, WakeRoute>,
+    /// Live routes their runtime closed for peer ingress while it lives on
+    /// (a stopped mob's live members). Never resolved for delivery and never a
+    /// name claim; kept only so the exact generation can reopen with its
+    /// metadata.
+    closed_routes: HashMap<PubKey, InprocPeer>,
+}
+
+/// Where a send resolves its destination: inside one namespace (the
+/// namespace-isolated routers), or in any namespace, failing closed on
+/// ambiguity.
+#[derive(Clone, Copy)]
+enum RouteScope<'a> {
+    Namespace(&'a str),
+    AnyNamespace,
 }
 
 /// Internal registry state keyed by namespace.
@@ -446,7 +591,43 @@ impl InprocRegistry {
     }
 
     /// Remove a route only when its exact inbox generation is still current.
+    /// A closed route of the same generation is forgotten too.
     pub(crate) fn unregister_sender_in_namespace(
+        &self,
+        namespace: &str,
+        pubkey: &PubKey,
+        sender: &InboxSender,
+    ) -> bool {
+        let mut state = self.state.write();
+        let Some(namespace_state) = state.namespaces.get_mut(namespace) else {
+            return false;
+        };
+        if namespace_state
+            .closed_routes
+            .get(pubkey)
+            .is_some_and(|peer| peer.sender.same_inbox(sender))
+        {
+            namespace_state.closed_routes.remove(pubkey);
+        }
+        if !namespace_state
+            .peers
+            .get(pubkey)
+            .is_some_and(|peer| peer.sender.same_inbox(sender))
+        {
+            return false;
+        }
+        let Some(peer) = namespace_state.peers.remove(pubkey) else {
+            return false;
+        };
+        if namespace_state.names.get(&peer.name) == Some(pubkey) {
+            namespace_state.names.remove(&peer.name);
+        }
+        true
+    }
+
+    /// Close an exact live route for peer ingress: it stops resolving and
+    /// frees its name, and is kept aside for [`Self::reopen_sender_in_namespace`].
+    pub(crate) fn close_sender_in_namespace(
         &self,
         namespace: &str,
         pubkey: &PubKey,
@@ -469,6 +650,37 @@ impl InprocRegistry {
         if namespace_state.names.get(&peer.name) == Some(pubkey) {
             namespace_state.names.remove(&peer.name);
         }
+        namespace_state.closed_routes.insert(*pubkey, peer);
+        true
+    }
+
+    /// Reopen an exact route [`Self::close_sender_in_namespace`] closed, under
+    /// the ordinary claim rule: its name and key must still be unbound.
+    pub(crate) fn reopen_sender_in_namespace(
+        &self,
+        namespace: &str,
+        pubkey: &PubKey,
+        sender: &InboxSender,
+    ) -> bool {
+        let mut state = self.state.write();
+        let Some(namespace_state) = state.namespaces.get_mut(namespace) else {
+            return false;
+        };
+        let reopenable = namespace_state
+            .closed_routes
+            .get(pubkey)
+            .is_some_and(|peer| {
+                peer.sender.same_inbox(sender) && !namespace_state.names.contains_key(&peer.name)
+            })
+            && !namespace_state.peers.contains_key(pubkey);
+        if !reopenable {
+            return false;
+        }
+        let Some(peer) = namespace_state.closed_routes.remove(pubkey) else {
+            return false;
+        };
+        namespace_state.names.insert(peer.name.clone(), *pubkey);
+        namespace_state.peers.insert(*pubkey, peer);
         true
     }
 
@@ -595,12 +807,137 @@ impl InprocRegistry {
         self.state.write().namespaces.clear();
     }
 
+    /// Publish a seated member's wake route under `pubkey` in `namespace`.
+    ///
+    /// Called only from the owner's machine effects (a seating transition).
+    /// The route occupies no name and never delivers: a live route under the
+    /// same key always wins. Re-publishing replaces the key's route (the
+    /// owner's own projection rebuild). A zero key is refused.
+    pub fn publish_wake_route(
+        &self,
+        namespace: &str,
+        pubkey: PubKey,
+        member: impl Into<String>,
+        waker: Weak<dyn InprocPeerWaker>,
+    ) -> bool {
+        if pubkey.is_zero() {
+            return false;
+        }
+        let route = WakeRoute {
+            member: member.into(),
+            waker,
+        };
+        self.state
+            .write()
+            .namespace_mut(namespace)
+            .wake_routes
+            .insert(pubkey, route);
+        true
+    }
+
+    /// Retract a wake route, only while it is still `waker`'s: an owner can
+    /// never retract a route another owner published for the same key.
+    /// Called only from the owner's machine effects (an unseating
+    /// transition or an endpoint migration).
+    pub fn retract_wake_route(
+        &self,
+        namespace: &str,
+        pubkey: &PubKey,
+        waker: &Weak<dyn InprocPeerWaker>,
+    ) -> bool {
+        let mut state = self.state.write();
+        let Some(namespace_state) = state.namespaces.get_mut(namespace) else {
+            return false;
+        };
+        if !namespace_state
+            .wake_routes
+            .get(pubkey)
+            .is_some_and(|route| Weak::ptr_eq(&route.waker, waker))
+        {
+            return false;
+        }
+        namespace_state.wake_routes.remove(pubkey).is_some()
+    }
+
+    /// Whether a wake route is published for `pubkey` in `namespace`.
+    pub fn has_wake_route_in_namespace(&self, namespace: &str, pubkey: &PubKey) -> bool {
+        self.state
+            .read()
+            .namespace(namespace)
+            .is_some_and(|ns| ns.wake_routes.contains_key(pubkey))
+    }
+
+    fn live_route(&self, scope: RouteScope<'_>, pubkey: &PubKey) -> Option<InboxSender> {
+        match scope {
+            RouteScope::Namespace(namespace) => self.get_by_pubkey_in_namespace(namespace, pubkey),
+            RouteScope::AnyNamespace => self.get_by_pubkey_any_namespace(pubkey),
+        }
+    }
+
+    /// The wake route for `pubkey`, as a route whose owner is alive.
+    ///
+    /// `Err(())` when the key has a route whose owner is gone (its mob actor
+    /// exited without retracting it): the member exists, but nothing in this
+    /// process can wake it. In any namespace, a key routed in more than one
+    /// namespace fails closed as no route, exactly as live routes do.
+    fn wake_route(
+        &self,
+        scope: RouteScope<'_>,
+        pubkey: &PubKey,
+    ) -> Result<Option<ResolvedWakeRoute>, ()> {
+        if pubkey.is_zero() {
+            return Ok(None);
+        }
+        let route = {
+            let state = self.state.read();
+            match scope {
+                RouteScope::Namespace(namespace) => state
+                    .namespace(namespace)
+                    .and_then(|ns| ns.wake_routes.get(pubkey))
+                    .cloned(),
+                RouteScope::AnyNamespace => {
+                    let mut found = None;
+                    for namespace_state in state.namespaces.values() {
+                        if let Some(route) = namespace_state.wake_routes.get(pubkey) {
+                            if found.is_some() {
+                                return Ok(None);
+                            }
+                            found = Some(route.clone());
+                        }
+                    }
+                    found
+                }
+            }
+        };
+        let Some(route) = route else {
+            return Ok(None);
+        };
+        match route.waker.upgrade() {
+            Some(waker) => Ok(Some(ResolvedWakeRoute {
+                member: route.member,
+                waker,
+            })),
+            None => Err(()),
+        }
+    }
+
+    /// Whether the sender is itself a seated member being woken, as its own
+    /// wake route's owner published it. No route, or a gone owner, is "not
+    /// waking": such a sender is in no build this registry can see.
+    fn sender_is_waking(&self, scope: RouteScope<'_>, sender: &PubKey) -> bool {
+        match self.wake_route(scope, sender) {
+            Ok(Some(route)) => route.waker.member_is_waking(&route.member),
+            Ok(None) | Err(()) => false,
+        }
+    }
+
     /// Backpressured pubkey-keyed delivery across all namespaces.
     ///
     /// Runtime-originated peer sends should await receiver capacity instead of
-    /// turning a transient full inbox into semantic message loss. `park_bound`
-    /// caps how long the sender's own liveness is allowed to depend on the
-    /// receiver's drain; see [`Self::deliver_to_sender_wait`].
+    /// turning a transient full inbox into semantic message loss. `budget`
+    /// caps the whole send: how long the sender's own liveness may depend on
+    /// the receiver's drain, and on a wake the receiver needs first; see
+    /// [`Self::send_resolving_wake`].
     pub(crate) async fn send_to_pubkey_any_namespace_with_id_wait(
         &self,
         from_keypair: &Keypair,
@@ -608,35 +945,32 @@ impl InprocRegistry {
         envelope_id: Uuid,
         kind: MessageKind,
         sign_envelope: bool,
-        park_bound: std::time::Duration,
+        budget: std::time::Duration,
     ) -> Result<InprocDelivery, InprocSendError> {
-        let sender = self
-            .get_by_pubkey_any_namespace(to_pubkey)
-            .ok_or_else(|| InprocSendError::PeerNotFound(to_pubkey.to_peer_id().to_string()))?;
-
-        Self::deliver_to_sender_wait(
+        self.send_resolving_wake(
+            RouteScope::AnyNamespace,
             from_keypair,
-            *to_pubkey,
-            sender,
+            to_pubkey,
             envelope_id,
             kind,
             sign_envelope,
-            park_bound,
+            budget,
         )
         .await
     }
 
     /// Namespace-scoped variant of
     /// [`Self::send_to_pubkey_any_namespace_with_id_wait`]: the destination is
-    /// resolved exactly once, *inside* `namespace`, and that resolved sender is
-    /// the delivery target.
+    /// resolved *inside* `namespace` only, and that resolution is the delivery
+    /// target.
     ///
     /// This is the single-resolution send for namespace-isolated routers. The
     /// namespace is the delivery authority, so the destination must not be
     /// re-derived from the global registry between an isolation check and the
-    /// inbox handoff — a second any-namespace lookup would open a window where
+    /// inbox handoff - a second any-namespace lookup would open a window where
     /// the peer re-registers elsewhere and delivery crosses the namespace
-    /// boundary.
+    /// boundary. A wake route is looked up in the same namespace, so a member
+    /// is never woken from another namespace.
     // One argument over the lint's threshold, and the extra one is the
     // `namespace` delivery authority that distinguishes this send from its
     // any-namespace sibling. Bundling the envelope arguments into a params
@@ -651,22 +985,248 @@ impl InprocRegistry {
         envelope_id: Uuid,
         kind: MessageKind,
         sign_envelope: bool,
-        park_bound: std::time::Duration,
+        budget: std::time::Duration,
     ) -> Result<InprocDelivery, InprocSendError> {
-        let sender = self
-            .get_by_pubkey_in_namespace(namespace, to_pubkey)
-            .ok_or_else(|| InprocSendError::PeerNotFound(to_pubkey.to_peer_id().to_string()))?;
+        self.send_resolving_wake(
+            RouteScope::Namespace(namespace),
+            from_keypair,
+            to_pubkey,
+            envelope_id,
+            kind,
+            sign_envelope,
+            budget,
+        )
+        .await
+    }
 
+    /// Resolve the destination and hand the envelope off once.
+    ///
+    /// Resolution order:
+    /// - a live route is the delivery target, exactly as before;
+    /// - no live route, but a wake route: the envelope stays in this future
+    ///   while the route's owner wakes the member; once it answers ready, the
+    ///   live route is resolved again and the envelope handed off once;
+    /// - neither: `PeerNotFound` (not a member, or another namespace).
+    ///
+    /// A live route that answers closed for a key with a wake route is a
+    /// stale route of a seated member: it takes the wake path too. After a
+    /// wake answered ready, a second miss or closed route wakes once more;
+    /// after that the send is refused `materialization_lost`. Every refusal
+    /// is "not delivered": nothing was handed off.
+    ///
+    /// `budget` bounds the whole send. Expiring while the wake is pending is
+    /// `wake_timed_out` (not delivered, safe to retry); expiring after the
+    /// hand-off is the ordinary unconfirmed delivery (ambiguous). The
+    /// registry lock is never held across an await.
+    ///
+    /// A sender that is itself being woken (the send comes from inside its
+    /// own build) never waits on another member's wake or on a waking
+    /// member's early live route: the recipient's owner is asked first, with
+    /// `sender_waking` set, and answers from its machine. Two builds that
+    /// message each other therefore cannot wait on each other.
+    // Same argument list as the two public owners above plus the scope.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_resolving_wake(
+        &self,
+        scope: RouteScope<'_>,
+        from_keypair: &Keypair,
+        to_pubkey: &PubKey,
+        envelope_id: Uuid,
+        kind: MessageKind,
+        sign_envelope: bool,
+        budget: std::time::Duration,
+    ) -> Result<InprocDelivery, InprocSendError> {
+        let started = Instant::now();
+        let remaining = || budget.saturating_sub(started.elapsed());
+        let input_class = PeerWakeInputClass::of(&kind);
+        let sender = from_keypair.public_key();
+        let peer_not_found = || InprocSendError::PeerNotFound(to_pubkey.to_peer_id().to_string());
+        let mut wakes = 0u8;
+        loop {
+            let live = self.live_route(scope, to_pubkey);
+            let wake = match self.wake_route(scope, to_pubkey) {
+                Ok(route) => route,
+                // A seated member whose owner is gone: nothing in this
+                // process can wake it. Only a live route can still serve.
+                Err(()) => match live {
+                    Some(inbox) => {
+                        return Self::deliver_within_budget(
+                            from_keypair,
+                            *to_pubkey,
+                            inbox,
+                            envelope_id,
+                            kind,
+                            sign_envelope,
+                            remaining(),
+                            budget,
+                        )
+                        .await;
+                    }
+                    None => {
+                        return Err(InprocSendError::WakeRefused(
+                            PeerWakeRefusal::MobUnavailable,
+                        ));
+                    }
+                },
+            };
+            let route = match (live, wake) {
+                (None, None) => return Err(peer_not_found()),
+                // Not a seated member of any owner: delivery as before.
+                (Some(inbox), None) => {
+                    return Self::deliver_within_budget(
+                        from_keypair,
+                        *to_pubkey,
+                        inbox,
+                        envelope_id,
+                        kind,
+                        sign_envelope,
+                        remaining(),
+                        budget,
+                    )
+                    .await;
+                }
+                (Some(inbox), Some(route)) => {
+                    // A member whose wake is in flight already has its live
+                    // route (its inbox is registered during its build) but
+                    // is not ready yet: its trust and drain settle before its
+                    // owner answers ready. The send joins that wake through
+                    // the owner first, and hands off only after it answered,
+                    // so it never meets a half-built inbox. A sender that is
+                    // itself being woken is refused there instead of waiting.
+                    if route.waker.member_is_waking(&route.member) {
+                        let request = PeerWakeRequest {
+                            member: route.member.clone(),
+                            recipient: *to_pubkey,
+                            sender,
+                            envelope_id,
+                            observed_missing: false,
+                            input_class,
+                            sender_waking: self.sender_is_waking(scope, &sender),
+                        };
+                        match Self::await_wake(&route, request, remaining()).await? {
+                            PeerWakeAnswer::Ready => {}
+                            PeerWakeAnswer::ControlNoticeConsumed => {
+                                return Ok(Self::consumed_by_owner(envelope_id));
+                            }
+                        }
+                    }
+                    match Self::deliver_within_budget(
+                        from_keypair,
+                        *to_pubkey,
+                        inbox,
+                        envelope_id,
+                        kind.clone(),
+                        sign_envelope,
+                        remaining(),
+                        budget,
+                    )
+                    .await
+                    {
+                        // A closed live route of a seated member is stale.
+                        // The closed inbox refused the envelope, or admitted
+                        // it and lost the receipt with its queue; either way
+                        // the wake path hands the same envelope, with the same
+                        // id, to the member's next inbox once, and the
+                        // runtime's peer-ingress idempotency (one input per
+                        // peer and envelope id) admits it at most once.
+                        Err(InprocSendError::InboxClosed) => route,
+                        other => return other,
+                    }
+                }
+                (None, Some(route)) => route,
+            };
+            // The wake path. The first wake answers the miss; one more is
+            // allowed after a miss that follows a ready answer.
+            if wakes >= 2 {
+                return Err(InprocSendError::WakeRefused(
+                    PeerWakeRefusal::MaterializationLost,
+                ));
+            }
+            wakes += 1;
+            let request = PeerWakeRequest {
+                member: route.member.clone(),
+                recipient: *to_pubkey,
+                sender,
+                envelope_id,
+                observed_missing: true,
+                input_class,
+                sender_waking: self.sender_is_waking(scope, &sender),
+            };
+            if let PeerWakeAnswer::ControlNoticeConsumed =
+                Self::await_wake(&route, request, remaining()).await?
+            {
+                return Ok(Self::consumed_by_owner(envelope_id));
+            }
+            if remaining().is_zero() {
+                // Ready, but the sender's budget is spent: hand nothing off
+                // rather than hand off with no time to confirm it.
+                return Err(InprocSendError::WakeRefused(PeerWakeRefusal::WakeTimedOut));
+            }
+        }
+    }
+
+    /// Hand the envelope off with what is left of the sender's budget, and
+    /// report an unconfirmed delivery against the whole-send budget: the
+    /// caller asked for one bound, and that is the bound it learns about.
+    #[allow(clippy::too_many_arguments)]
+    async fn deliver_within_budget(
+        from_keypair: &Keypair,
+        to_pubkey: PubKey,
+        sender: InboxSender,
+        envelope_id: Uuid,
+        kind: MessageKind,
+        sign_envelope: bool,
+        remaining: std::time::Duration,
+        budget: std::time::Duration,
+    ) -> Result<InprocDelivery, InprocSendError> {
         Self::deliver_to_sender_wait(
             from_keypair,
-            *to_pubkey,
+            to_pubkey,
             sender,
             envelope_id,
             kind,
             sign_envelope,
-            park_bound,
+            remaining,
         )
         .await
+        .map(|delivery| match delivery.outcome {
+            InprocDeliveryOutcome::Unconfirmed { .. } => InprocDelivery {
+                envelope_id: delivery.envelope_id,
+                outcome: InprocDeliveryOutcome::Unconfirmed { park_bound: budget },
+            },
+            InprocDeliveryOutcome::Resolved(_) => delivery,
+        })
+    }
+
+    /// Ask a wake route's owner and wait for its answer, bounded by what is
+    /// left of the sender's budget. The wake itself is the owner's: it goes
+    /// on when this future gives up or is dropped.
+    async fn await_wake(
+        route: &ResolvedWakeRoute,
+        request: PeerWakeRequest,
+        remaining: std::time::Duration,
+    ) -> Result<PeerWakeAnswer, InprocSendError> {
+        let recipient = request.recipient;
+        match tokio::time::timeout(remaining, route.waker.wake(request)).await {
+            Ok(Ok(answer)) => Ok(answer),
+            // The route was stale: its owner no longer holds the key as a
+            // member (the retraction has not been realized yet).
+            Ok(Err(PeerWakeDenial::NotAMember)) => Err(InprocSendError::PeerNotFound(
+                recipient.to_peer_id().to_string(),
+            )),
+            Ok(Err(PeerWakeDenial::Refused(refusal))) => Err(InprocSendError::WakeRefused(refusal)),
+            Err(_) => Err(InprocSendError::WakeRefused(PeerWakeRefusal::WakeTimedOut)),
+        }
+    }
+
+    /// The owner took a silent control notice for its member instead of
+    /// waking it, exactly as a live member's drain consumes one without a
+    /// turn: the receiver side's control consumer owns the envelope.
+    fn consumed_by_owner(envelope_id: Uuid) -> InprocDelivery {
+        InprocDelivery {
+            envelope_id,
+            outcome: InprocDeliveryOutcome::Resolved(IngressDeliveryOutcome::VolatileHandedOff),
+        }
     }
 
     /// Hand one envelope to a resolved in-process receiver.
@@ -808,6 +1368,7 @@ impl Default for InprocRegistry {
 /// Errors that can occur during inproc send operations.
 #[derive(Debug, thiserror::Error)]
 pub enum InprocSendError {
+    /// No live route and no wake route: not a member (or another namespace).
     #[error("Inproc peer not found: {0}")]
     PeerNotFound(String),
     #[error("Peer inbox has been closed")]
@@ -816,6 +1377,10 @@ pub enum InprocSendError {
     InboxFull,
     #[error("Peer inbox dropped ingress: {0:?}")]
     IngressDropped(crate::inbox::DropReason),
+    /// The recipient is a seated member, and the wake the send needed was
+    /// refused or did not finish. Nothing was handed off.
+    #[error("Peer wake refused: {0}")]
+    WakeRefused(PeerWakeRefusal),
 }
 
 #[cfg(test)]
@@ -2637,3 +3202,10 @@ mod tests {
         assert_eq!(peers[0].meta, PeerMeta::default());
     }
 }
+
+// Wake-route rows: they build classified inboxes with the workspace's test
+// classification context, so they are workspace-only like the other
+// classified-inbox rows above.
+#[cfg(all(test, feature = "workspace-tests"))]
+#[path = "inproc_wake_tests.rs"]
+mod wake_route_tests;

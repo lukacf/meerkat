@@ -1136,6 +1136,11 @@ pub(crate) async fn handle_live_open_routed(
         Ok(seed_window) => seed_window,
         Err(response) => return (*response).into(),
     };
+    // A live channel on a dormant mob member's session wakes the member
+    // through its owner first.
+    if let Err(error) = runtime.wake_session_owner_if_unserved(&session_id).await {
+        return RpcResponse::from_error(id, error).into();
+    }
 
     #[cfg(feature = "openai-live")]
     if let Some(execution_identity) = parsed.execution_identity.as_ref() {

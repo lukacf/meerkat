@@ -272,11 +272,13 @@ async fn cut_unregister_host_child() {
 
 /// Run the child host with `count` members until every unregister waits at
 /// its parked finalization, kill it there, and resume the mob over the same
-/// files. Returns the resumed mob with its store, sessions and members.
+/// files under `policy`. Returns the resumed mob with its store, sessions and
+/// members.
 // The host is this test binary re-executed: a test-only process launch.
 #[allow(clippy::disallowed_methods)]
 async fn cut_then_resume(
     count: usize,
+    policy: crate::runtime::MemberRestorePolicy,
 ) -> (
     tempfile::TempDir,
     MobHandle,
@@ -340,6 +342,7 @@ async fn cut_then_resume(
     let resume = MobBuilder::for_resume(mob_storage(&root_path))
         .with_session_service(service)
         .with_default_llm_client(Arc::new(AnswerClient))
+        .with_member_restore_policy(policy)
         .notify_orchestrator_on_resume(false)
         .resume();
     let handle = tokio::time::timeout(STEP, resume)
@@ -415,9 +418,12 @@ async fn assert_member_turn(handle: &MobHandle, identity: &AgentIdentity) {
 /// the cut unregister and registered the session fresh.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unregister_cut_by_process_exit_is_concluded_at_the_next_registration() {
-    let (_root, handle, store, sessions, identities) = cut_then_resume(1).await;
-    assert_every_member_back(&handle, &store, &sessions, &identities).await;
+    let (_root, handle, store, sessions, identities) =
+        cut_then_resume(1, crate::runtime::MemberRestorePolicy::OnDemand).await;
+    // The member holds no work, so the start leaves it dormant: its turn is
+    // the next registration, which concludes the cut unregister.
     assert_member_turn(&handle, &identities[0]).await;
+    assert_every_member_back(&handle, &store, &sessions, &identities).await;
     handle.shutdown().await.expect("shut the resumed mob down");
 }
 
@@ -426,7 +432,10 @@ async fn an_unregister_cut_by_process_exit_is_concluded_at_the_next_registration
 /// the start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_first_resume_after_many_cut_unregisters_brings_every_member_back() {
-    let (_root, handle, store, sessions, identities) = cut_then_resume(64).await;
+    // The row is about the start's own cold teardowns: it materializes every
+    // member at the restore.
+    let (_root, handle, store, sessions, identities) =
+        cut_then_resume(64, crate::runtime::MemberRestorePolicy::Eager).await;
     assert_every_member_back(&handle, &store, &sessions, &identities).await;
     assert_member_turn(&handle, &identities[identities.len() - 1]).await;
     handle.shutdown().await.expect("shut the resumed mob down");

@@ -12,6 +12,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `active_fence_token`: `Option<FenceToken>`
 - `active_runtime_generation`: `Option<Generation>`
 - `active_runtime_epoch_id`: `Option<RuntimeEpochId>`
+- `residency_owner`: `SessionResidencyOwner`
 - `current_run_id`: `Option<RunId>`
 - `pre_run_phase`: `Option<PreRunPhase>`
 - `runtime_stop_deferred`: `Bool`
@@ -484,7 +485,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RegisterSession`(session_id: SessionId, runtime_epoch_id: Option<RuntimeEpochId>, initial_run_start_holds: Set<RunStartHoldReason>)
 - `UnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `ReconfigureSessionLlmIdentity`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, previous_capability_surface: Option<SessionLlmCapabilitySurface>, previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus, previous_capability_base_filter: ToolFilter, view_image_tool_available: Bool, previous_view_image_visible: Bool, next_view_image_visible: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, target_identity: SessionLlmIdentity, target_capability_surface: SessionLlmCapabilitySurface, next_visibility_state: SessionToolVisibilityState, next_capability_base_filter: ToolFilter, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta)
-- `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, session_id: SessionId)
+- `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, session_id: SessionId, residency_owner: SessionResidencyOwner)
 - `SetPeerIngressContext`(keep_alive: Bool)
 - `NotifyDrainExited`(reason: DrainExitReason)
 - `CancelAfterBoundary`(reason: String)
@@ -905,6 +906,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SuspendRunForStop`(run_id: RunId, durable_session: Bool)
 - `ReplayAppliedRunContributor`(input_id: String, run_id: RunId, lane: InputLane)
 - `AuthorizeOperatorDurableTailRepair`(session_id: SessionId, candidate_id: String, candidate_run_id: RunId, class: DurableTailRecoveryClass, observed_lifecycle: DurableRecoveryObservedLifecycle, observed_current_run: DurableRecoveryObservedRun, last_committed_sequence: u64, prior_commit: DurableRecoveryPriorCommit, input_evidence: DurableRecoveryInputEvidence)
+- `ResolveEmptyResumeRetirement`(queued_input_present: Bool)
+- `ClaimCompositionResidency`(session_id: SessionId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>)
 
 ## Signals
 - `Initialize`
@@ -918,7 +921,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EnsureDrainRunning`
 
 ## Effects
-- `RuntimeBound`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `RuntimeBound`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, runtime_epoch_id: Option<RuntimeEpochId>)
 - `RuntimeRetired`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `RuntimeDestroyed`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `TurnRunStarted`(run_id: RunId)
@@ -1177,6 +1180,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResumableRunReleased`(run_id: RunId)
 - `ResumableRunSettled`(run_id: RunId, reason: InputAbandonReason)
 - `RunSuspendedForStop`(run_id: RunId)
+- `RuntimeRegistrationReleased`(agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_epoch_id: Option<RuntimeEpochId>)
+- `EmptyResumeRetirementResolved`(verdict: EmptyResumeRetirementVerdict)
 
 ## Helpers
 - `runtime_authority_reconcile_decision`(observation_kind: RuntimeAuthorityObservationKind, state: Option<RuntimeLifecycleObservedState>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, malformed_reclaim_safe: Bool) -> `RuntimeAuthorityReconcileDecision`
@@ -2612,6 +2617,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `completion_waiters_drained`
   - `live_channels_closed`
   - `live_recovery_obligations_settled`
+- Emits: `RuntimeRegistrationReleased`
 - To: `Idle`
 
 ### `UnregisterSessionAttached`
@@ -2629,6 +2635,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `completion_waiters_drained`
   - `live_channels_closed`
   - `live_recovery_obligations_settled`
+- Emits: `RuntimeRegistrationReleased`
 - To: `Idle`
 
 ### `UnregisterSessionRunning`
@@ -2646,6 +2653,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `completion_waiters_drained`
   - `live_channels_closed`
   - `live_recovery_obligations_settled`
+- Emits: `RuntimeRegistrationReleased`
 - To: `Idle`
 
 ### `UnregisterSessionRetired`
@@ -2663,6 +2671,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `completion_waiters_drained`
   - `live_channels_closed`
   - `live_recovery_obligations_settled`
+- Emits: `RuntimeRegistrationReleased`
 - To: `Retired`
 
 ### `UnregisterSessionStopped`
@@ -2680,6 +2689,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `completion_waiters_drained`
   - `live_channels_closed`
   - `live_recovery_obligations_settled`
+- Emits: `RuntimeRegistrationReleased`
 - To: `Idle`
 
 ### `ResolveRuntimeOpsLifecycleDurabilityIdle`
@@ -4022,7 +4032,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PrepareBindingsIdempotentInitializing`
 - From: `Initializing`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id, residency_owner)
 - Guards:
   - `not_draining`
   - `session_matches_current`
@@ -4035,7 +4045,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PrepareBindingsIdempotentIdle`
 - From: `Idle`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id, residency_owner)
 - Guards:
   - `not_draining`
   - `session_matches_current`
@@ -4048,7 +4058,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PrepareBindingsIdempotentAttached`
 - From: `Attached`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id, residency_owner)
 - Guards:
   - `not_draining`
   - `session_matches_current`
@@ -4061,7 +4071,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PrepareBindingsIdempotentRunning`
 - From: `Running`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id, residency_owner)
 - Guards:
   - `not_draining`
   - `session_matches_current`
@@ -4074,7 +4084,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PrepareBindingsIdempotentRetired`
 - From: `Retired`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id, residency_owner)
 - Guards:
   - `not_draining`
   - `session_matches_current`
@@ -4087,7 +4097,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PrepareBindingsInitializing`
 - From: `Initializing`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id, residency_owner)
 - Guards:
   - `not_draining`
   - `session_matches_current`
@@ -4102,7 +4112,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PrepareBindingsIdle`
 - From: `Idle`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id, residency_owner)
 - Guards:
   - `not_draining`
   - `session_matches_current`
@@ -4117,7 +4127,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PrepareBindingsAttached`
 - From: `Attached`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id, residency_owner)
 - Guards:
   - `not_draining`
   - `session_matches_current`
@@ -4132,7 +4142,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PrepareBindingsRunning`
 - From: `Running`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id, residency_owner)
 - Guards:
   - `not_draining`
   - `session_matches_current`
@@ -4147,7 +4157,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PrepareBindingsRetired`
 - From: `Retired`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id, residency_owner)
 - Guards:
   - `not_draining`
   - `session_matches_current`
@@ -4159,6 +4169,141 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_binding_not_already_exact`
 - Emits: `RuntimeBound`
 - To: `Retired`
+
+### `ResolveEmptyResumeRetirementRetireIdle`
+- From: `Idle`
+- On: `ResolveEmptyResumeRetirement`(queued_input_present)
+- Guards:
+  - `nothing_queued`
+  - `session_owned`
+- Emits: `EmptyResumeRetirementResolved`
+- To: `Idle`
+
+### `ResolveEmptyResumeRetirementRetireAttached`
+- From: `Attached`
+- On: `ResolveEmptyResumeRetirement`(queued_input_present)
+- Guards:
+  - `nothing_queued`
+  - `session_owned`
+- Emits: `EmptyResumeRetirementResolved`
+- To: `Attached`
+
+### `ResolveEmptyResumeRetirementRetireRunning`
+- From: `Running`
+- On: `ResolveEmptyResumeRetirement`(queued_input_present)
+- Guards:
+  - `nothing_queued`
+  - `session_owned`
+- Emits: `EmptyResumeRetirementResolved`
+- To: `Running`
+
+### `ResolveEmptyResumeRetirementRetireRetired`
+- From: `Retired`
+- On: `ResolveEmptyResumeRetirement`(queued_input_present)
+- Guards:
+  - `nothing_queued`
+  - `session_owned`
+- Emits: `EmptyResumeRetirementResolved`
+- To: `Retired`
+
+### `ResolveEmptyResumeRetirementRetireStopped`
+- From: `Stopped`
+- On: `ResolveEmptyResumeRetirement`(queued_input_present)
+- Guards:
+  - `nothing_queued`
+  - `session_owned`
+- Emits: `EmptyResumeRetirementResolved`
+- To: `Stopped`
+
+### `ResolveEmptyResumeRetirementKeepServingIdle`
+- From: `Idle`
+- On: `ResolveEmptyResumeRetirement`(queued_input_present)
+- Guards:
+  - `queued_or_composition_owned`
+- Emits: `EmptyResumeRetirementResolved`
+- To: `Idle`
+
+### `ResolveEmptyResumeRetirementKeepServingAttached`
+- From: `Attached`
+- On: `ResolveEmptyResumeRetirement`(queued_input_present)
+- Guards:
+  - `queued_or_composition_owned`
+- Emits: `EmptyResumeRetirementResolved`
+- To: `Attached`
+
+### `ResolveEmptyResumeRetirementKeepServingRunning`
+- From: `Running`
+- On: `ResolveEmptyResumeRetirement`(queued_input_present)
+- Guards:
+  - `queued_or_composition_owned`
+- Emits: `EmptyResumeRetirementResolved`
+- To: `Running`
+
+### `ResolveEmptyResumeRetirementKeepServingRetired`
+- From: `Retired`
+- On: `ResolveEmptyResumeRetirement`(queued_input_present)
+- Guards:
+  - `queued_or_composition_owned`
+- Emits: `EmptyResumeRetirementResolved`
+- To: `Retired`
+
+### `ResolveEmptyResumeRetirementKeepServingStopped`
+- From: `Stopped`
+- On: `ResolveEmptyResumeRetirement`(queued_input_present)
+- Guards:
+  - `queued_or_composition_owned`
+- Emits: `EmptyResumeRetirementResolved`
+- To: `Stopped`
+
+### `ClaimCompositionResidencyIdle`
+- From: `Idle`
+- On: `ClaimCompositionResidency`(session_id, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_matches_observation`
+  - `fence_binding_matches_observation`
+  - `generation_binding_matches_observation`
+- To: `Idle`
+
+### `ClaimCompositionResidencyAttached`
+- From: `Attached`
+- On: `ClaimCompositionResidency`(session_id, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_matches_observation`
+  - `fence_binding_matches_observation`
+  - `generation_binding_matches_observation`
+- To: `Attached`
+
+### `ClaimCompositionResidencyRunning`
+- From: `Running`
+- On: `ClaimCompositionResidency`(session_id, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_matches_observation`
+  - `fence_binding_matches_observation`
+  - `generation_binding_matches_observation`
+- To: `Running`
+
+### `ClaimCompositionResidencyRetired`
+- From: `Retired`
+- On: `ClaimCompositionResidency`(session_id, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_matches_observation`
+  - `fence_binding_matches_observation`
+  - `generation_binding_matches_observation`
+- To: `Retired`
+
+### `ClaimCompositionResidencyStopped`
+- From: `Stopped`
+- On: `ClaimCompositionResidency`(session_id, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_matches_observation`
+  - `fence_binding_matches_observation`
+  - `generation_binding_matches_observation`
+- To: `Stopped`
 
 ### `SetPeerIngressContextIdle`
 - From: `Idle`

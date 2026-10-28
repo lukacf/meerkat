@@ -2,38 +2,46 @@
 set -euo pipefail
 
 # usage: machine_verify_all_tlc_test.sh <xtask-bin> [--part <part>]
-#        machine_verify_all_tlc_test.sh --part audits-a|audits-b|audits-c|audits-d
+#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-g
 # The canonical TLC lane, split into parts so each fits a CI job limit:
 #   machine-verify  the bounded adaptive witness plus `machine-verify --all`
 #   audits-a        hand-written audit shard A
 #   audits-b        hand-written audit shard B
 #   audits-c        hand-written audit shard C
 #   audits-d        hand-written audit shard D
+#   audits-e        hand-written audit shard E
+#   audits-f        hand-written audit shard F
+#   audits-g        hand-written audit shard G
 #   all             every part (the default: `make machine-verify`, the
 #                   nightly bounded TLC job and the release gate)
-# Bazel runs the five parts as separate targets (machine_verify_all_tlc_test,
+# Bazel runs the eight parts as separate targets (machine_verify_all_tlc_test,
 # machine_verify_audits_a_tlc_test, machine_verify_audits_b_tlc_test,
-# machine_verify_audits_c_tlc_test, machine_verify_audits_d_tlc_test) so the
-# BuildBuddy machine-authority lane runs them in parallel; together they are
-# exactly `all`.
+# machine_verify_audits_c_tlc_test, machine_verify_audits_d_tlc_test,
+# machine_verify_audits_e_tlc_test, machine_verify_audits_f_tlc_test,
+# machine_verify_audits_g_tlc_test) so the BuildBuddy machine-authority lane
+# runs them in parallel; together they are exactly `all`. CI's tlc-audits job
+# runs the seven audit shards, one job each.
 # The audit shards never execute xtask, so they alone may omit its path.
+audit_shard() {
+  case "$1" in
+    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 lane_part="all"
-if [[ "${1:-}" == "--part" && ( "${2:-}" == "audits-a" || "${2:-}" == "audits-b" || "${2:-}" == "audits-c" || "${2:-}" == "audits-d" ) ]]; then
+if [[ "${1:-}" == "--part" ]] && audit_shard "${2:-}"; then
   xtask_bin=""
   lane_part="$2"
 else
-  xtask_bin="${1:?xtask binary path is required (only --part audits-a|audits-b|audits-c|audits-d may omit it)}"
+  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-g may omit it)}"
   if [[ "${2:-}" == "--part" ]]; then
-    lane_part="${3:?--part needs machine-verify, audits-a, audits-b, audits-c, audits-d or all}"
+    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-g) or all}"
   fi
 fi
-case "${lane_part}" in
-  machine-verify|audits-a|audits-b|audits-c|audits-d|all) ;;
-  *)
-    echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a, audits-b, audits-c, audits-d, all)" >&2
-    exit 2
-    ;;
-esac
+if [[ "${lane_part}" != "machine-verify" && "${lane_part}" != "all" ]] && ! audit_shard "${lane_part}"; then
+  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-g, all)" >&2
+  exit 2
+fi
 # run_part <part>: whether this invocation runs <part>.
 run_part() {
   [[ "${lane_part}" == "all" || "${lane_part}" == "$1" ]]
@@ -249,7 +257,7 @@ if [[ ! -x "${requeue_across_stop_audit}" ]]; then
   echo "error: requeue-across-stop audit runner is missing from workspace runfiles: ${requeue_across_stop_audit}" >&2
   exit 1
 fi
-if run_part audits-c; then
+if run_part audits-f; then
   echo "running bounded requeue-across-stop TLC audit"
   TLC_WORKERS="${tlc_workers}" "${requeue_across_stop_audit}" "${REQUEUE_ACROSS_STOP_AUDIT_MAX_STEPS:-36}"
 fi
@@ -282,7 +290,7 @@ if [[ ! -x "${materialization_rollback_keep_audit}" ]]; then
   echo "error: materialization-rollback keep audit runner is missing from workspace runfiles: ${materialization_rollback_keep_audit}" >&2
   exit 1
 fi
-if run_part audits-d; then
+if run_part audits-c; then
   echo "running bounded materialization-rollback keep TLC audit"
   TLC_WORKERS="${tlc_workers}" "${materialization_rollback_keep_audit}" "${MATERIALIZATION_ROLLBACK_KEEP_AUDIT_MAX_STEPS:-50}" --mutants
 fi
@@ -306,7 +314,7 @@ if [[ ! -x "${live_result_barrier_audit}" ]]; then
   echo "error: live-context result barrier audit runner is missing from workspace runfiles: ${live_result_barrier_audit}" >&2
   exit 1
 fi
-if run_part audits-b; then
+if run_part audits-d; then
   echo "running bounded live-context result barrier TLC audit"
   TLC_WORKERS="${tlc_workers}" "${live_result_barrier_audit}" "${LIVE_CONTEXT_RESULT_BARRIER_AUDIT_MAX_STEPS:-21}" --mutants
 fi
@@ -350,7 +358,7 @@ if [[ ! -x "${live_media_health_audit}" ]]; then
   echo "error: live media health audit runner is missing from workspace runfiles: ${live_media_health_audit}" >&2
   exit 1
 fi
-if run_part audits-c; then
+if run_part audits-f; then
   echo "running bounded live media health TLC audit"
   TLC_WORKERS="${tlc_workers}" "${live_media_health_audit}" "${LIVE_MEDIA_HEALTH_AUDIT_MAX_STEPS:-20}"
 fi
@@ -367,7 +375,7 @@ if [[ ! -x "${live_worker_start_after_close_audit}" ]]; then
   echo "error: live worker start after close audit runner is missing from workspace runfiles: ${live_worker_start_after_close_audit}" >&2
   exit 1
 fi
-if run_part audits-a; then
+if run_part audits-c; then
   echo "running bounded live worker start after close TLC audit"
   TLC_WORKERS="${tlc_workers}" "${live_worker_start_after_close_audit}" "${LIVE_WORKER_START_AFTER_CLOSE_AUDIT_MAX_STEPS:-22}"
 fi
@@ -387,7 +395,7 @@ if [[ ! -x "${live_causal_tail_batch_audit}" ]]; then
   echo "error: live-context causal-tail batch audit runner is missing from workspace runfiles: ${live_causal_tail_batch_audit}" >&2
   exit 1
 fi
-if run_part audits-c; then
+if run_part audits-f; then
   echo "running bounded live-context causal-tail batch TLC audit"
   TLC_WORKERS="${tlc_workers}" "${live_causal_tail_batch_audit}" "${LIVE_CONTEXT_CAUSAL_TAIL_BATCH_AUDIT_MAX_STEPS:-24}" --mutants
 fi
@@ -411,7 +419,7 @@ if [[ ! -x "${peer_request_maps_audit}" ]]; then
   echo "error: peer request maps audit runner is missing from workspace runfiles: ${peer_request_maps_audit}" >&2
   exit 1
 fi
-if run_part audits-c; then
+if run_part audits-d; then
   echo "running bounded peer request maps TLC audit"
   TLC_WORKERS="${tlc_workers}" "${peer_request_maps_audit}" "${PEER_REQUEST_MAPS_AUDIT_MAX_STEPS:-8}" --mutants
 fi
@@ -421,9 +429,33 @@ if [[ ! -x "${mob_operator_grant_audit}" ]]; then
   echo "error: mob operator grant audit runner is missing from workspace runfiles: ${mob_operator_grant_audit}" >&2
   exit 1
 fi
-if run_part audits-d; then
+if run_part audits-a; then
   echo "running bounded mob operator grant TLC audit"
   TLC_WORKERS="${tlc_workers}" "${mob_operator_grant_audit}" "${MOB_OPERATOR_GRANT_AUDIT_MAX_STEPS:-5}" --mutants
+fi
+
+# The empty-resume retirement verdict (a recovered registration whose resume
+# found nothing to run retires only when it is Session-owned with nothing
+# queued; a Composition-owned one, a mob member, keeps serving) reads the
+# registration's residency owner, which no ci-sweep step sets. A hand-written
+# audit over the same generated model drives one session and one runtime
+# binding through the registration, the placement with either owner, the
+# composition's claim and the verdict with and without queued input in Idle
+# and Attached, under every generated invariant plus: exactly one verdict
+# answers each observation, Retire fires only for a Session-owned
+# registration with nothing queued, and a Composition placement claims the
+# registration while a Session placement never downgrades it. It requires
+# four witnesses reached (a Session-owned retire, a Composition-owned keep,
+# a queued keep and the claim) and refuses two seeded defects (--mutants).
+# 4 steps reach every witness.
+empty_resume_residency_audit="${workspace_root}/specs/machines/meerkat_machine/empty_resume_residency_audit.sh"
+if [[ ! -x "${empty_resume_residency_audit}" ]]; then
+  echo "error: empty-resume residency audit runner is missing from workspace runfiles: ${empty_resume_residency_audit}" >&2
+  exit 1
+fi
+if run_part audits-e; then
+  echo "running bounded empty-resume residency TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${empty_resume_residency_audit}" "${EMPTY_RESUME_RESIDENCY_AUDIT_MAX_STEPS:-6}" --mutants
 fi
 
 # The member generation high-water (resume recovers each identity's highest
@@ -445,7 +477,7 @@ if [[ ! -x "${generation_highwater_audit}" ]]; then
   echo "error: generation high-water audit runner is missing from workspace runfiles: ${generation_highwater_audit}" >&2
   exit 1
 fi
-if run_part audits-c; then
+if run_part audits-f; then
   echo "running bounded generation high-water TLC audit"
   TLC_WORKERS="${tlc_workers}" "${generation_highwater_audit}" "${GENERATION_HIGHWATER_AUDIT_MAX_STEPS:-4}" --mutants
 fi
@@ -496,9 +528,74 @@ if [[ ! -x "${member_lifecycle_audit}" ]]; then
   echo "error: member lifecycle audit runner is missing from workspace runfiles: ${member_lifecycle_audit}" >&2
   exit 1
 fi
-if run_part audits-d; then
+if run_part audits-e; then
   echo "running member lifecycle TLC audit"
   TLC_WORKERS="${tlc_workers}" "${member_lifecycle_audit}" --mutants
+fi
+
+# MobMachine member residency (Dormant, Waking, Live) is empty in the ci
+# sweep, whose AgentIdentityValues are {}, so the residency invariants hold
+# there only vacuously. A hand-written audit over the same generated model
+# checks eight small runs over their whole reachable space, each under a cap
+# of minted wake attempts and the member lifecycle audit's VIEW
+# (model_step_count and topology_epoch left out, checked first): one identity
+# through the build seed, the boot plan, the seal and the host carry-out; one
+# identity through every WakeMember arm, every attempt-fenced resolution (the
+# fresh create of an unborn seat's session among them) and its stale twin in
+# Running and Stopped, the seat session replay, the runtime-ready observation,
+# every release shape, the drift and terminal classifications, the peer notice
+# classification, the release verdict and the mob's stop and resume; one
+# identity woken, released, retired (routed or archive-only), rotated, seated
+# again on its first seat's session and destroyed; one identity in the
+# Completed and Destroyed phases; one identity through an explicit resume; two
+# identities and one wiring edge; two identities from the spawn ladder's
+# Opened phase through the dormant seat, the embodied spawn, the release and
+# the rotation; and two identities woken beside each other. Under every
+# generated invariant plus the audit's own properties (no recovery or seat arm
+# overwrites a phase, an open attempt is never replaced and ends only Live,
+# Dormant or without a phase, every Waking member has an enabled closing arm of
+# every kind, a Lifecycle input never wakes), WakeMember totality, a local wake
+# that owes an endpoint closes Live only with it (and one owing no endpoint
+# cause always can), a boot plan that never leaves a member blocking the seal,
+# the release verdict helper and its agreement with the Released arm, the
+# attempt fence on the routed binding refusal, the fresh create only for an
+# unborn seat's session, the release epoch fence, no runtime retire routed for
+# a member with no registration, a settled retirement that can always archive
+# (under an admitted destroy no rotation or host carry-out holds it), no
+# rotation under an admitted destroy, a resume seat unborn exactly when no
+# build created its session, an explicit resume that can always join a wake
+# in flight before its topology whatever readiness it settled, holds no member
+# work in its readiness or topology stages and reserves the members it
+# rebuilds only before its readiness, with the ASSUME over the wake refusal
+# helper. It runs with TLC coverage and requires every listed arm to fire and
+# a floor of distinct states per run, and requires its thirty-two witnesses
+# reached. Its --mutants mode (run by hand, outside the shard's budget)
+# refuses fifty-three seeded defects, one per residency invariant and property.
+member_residency_audit="${workspace_root}/specs/machines/mob_machine/member_residency_audit.sh"
+if [[ ! -x "${member_residency_audit}" ]]; then
+  echo "error: member residency audit runner is missing from workspace runfiles: ${member_residency_audit}" >&2
+  exit 1
+fi
+if run_part audits-g; then
+  echo "running member residency TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${member_residency_audit}"
+fi
+
+# The MobMachine arm-coverage gate: every arm of the generated model's Next
+# relation is either in a hand-written audit runner's covered_actions array
+# (each runner checks with TLC coverage that every listed arm fires) or named
+# in specs/machines/mob_machine/arm_coverage_not_covered.txt with the reason
+# no audit drives it. A stale, contradictory or reasonless entry fails it too.
+# It reads model.tla and the runners only and runs no TLC, so it costs
+# seconds in the shard of the member lifecycle audit it reads.
+mob_arm_coverage_gate="${workspace_root}/specs/machines/mob_machine/arm_coverage_gate.sh"
+if [[ ! -x "${mob_arm_coverage_gate}" ]]; then
+  echo "error: MobMachine arm-coverage gate is missing from workspace runfiles: ${mob_arm_coverage_gate}" >&2
+  exit 1
+fi
+if run_part audits-e; then
+  echo "running MobMachine arm coverage gate"
+  "${mob_arm_coverage_gate}"
 fi
 
 # The SessionDocumentMachine durable-tail classification (Completed,
@@ -520,7 +617,7 @@ if [[ ! -x "${durable_tail_classification_audit}" ]]; then
   echo "error: durable-tail classification audit runner is missing from workspace runfiles: ${durable_tail_classification_audit}" >&2
   exit 1
 fi
-if run_part audits-b; then
+if run_part audits-e; then
   echo "running bounded durable-tail classification TLC audit"
   TLC_WORKERS="${tlc_workers}" "${durable_tail_classification_audit}" --mutants
 fi
@@ -545,9 +642,36 @@ if [[ ! -x "${durable_tail_recovery_ownership_audit}" ]]; then
   echo "error: durable-tail recovery ownership audit runner is missing from workspace runfiles: ${durable_tail_recovery_ownership_audit}" >&2
   exit 1
 fi
-if run_part audits-a; then
+if run_part audits-d; then
   echo "running bounded durable-tail recovery ownership TLC audit"
   TLC_WORKERS="${tlc_workers}" "${durable_tail_recovery_ownership_audit}" --mutants
+fi
+
+# The ApprovalLifecycleMachine entered state of a reviewed effect (a spent
+# attempt stays Used while its admitting dispatch is live or a step admitted
+# under it is in flight; AdmitEnteredStep and FinishEnteredStep never spend;
+# the dispatch end releases the attempt, or closes its effect until the last
+# admitted step finishes) needs two attempts, a step count and a dispatch
+# end with steps in flight, which the ci sweep (one id, six steps) never
+# reaches. A hand-written audit over the same generated model drives a
+# model-reviewed and a consented attempt through their spends, step
+# admissions and finishes requested at any time, and the dispatch end with
+# zero, one or more steps in flight, under every generated invariant plus six
+# history invariants and one action property. It requires every new arm to
+# fire (TLC coverage), three scenario witnesses reached (the dispatch
+# cancelled while a step is in flight, a step refused after the release, the
+# helper graph admission and two children under one consent spend) and
+# refuses ten seeded defects (--mutants). 16 steps reach both attempts
+# entered with two steps each and both dispatches ending with steps in
+# flight.
+entered_step_audit="${workspace_root}/specs/machines/approval_lifecycle/entered_step_audit.sh"
+if [[ ! -x "${entered_step_audit}" ]]; then
+  echo "error: approval entered-step audit runner is missing from workspace runfiles: ${entered_step_audit}" >&2
+  exit 1
+fi
+if run_part audits-c; then
+  echo "running bounded approval entered-step TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${entered_step_audit}" "${ENTERED_STEP_AUDIT_MAX_STEPS:-16}" --mutants
 fi
 
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
@@ -596,28 +720,38 @@ run_machine_verify() {
 # Shard assignment balances measured audit cost on hosted 4-vCPU CI runners
 # (4 TLC workers, default bounds), where each TLC run's JVM start and model
 # parse is most of a small audit. Hosted seconds per audit on pull-request
-# run 40434437174 (three shards then: 942, 976 and 758 s of audits; the
-# slowest of 40 pull-request runs before it reached 1046 s, near the 1080 s
-# execution budget):
-# audits-a = live unregister cleanup 298, durable-tail recovery ownership
-# with --mutants 214, live-context outbox 158, live worker start after close
-# 25: about 695 s;
-# audits-b = durable in-turn steer with its per-kind goal runs 531, live
-# delegation steer 45, live-context result barrier with --mutants 34,
-# durable-tail classification with --mutants 34: about 644 s;
-# audits-c = run-start hold 193, live media health 123, peer request maps
-# with --mutants 119, requeue-across-stop 111, live-context causal-tail batch
-# with --mutants 91, generation high-water with --mutants 44: about 681 s;
-# audits-d = member lifecycle with --mutants 247, mob operator grant with
-# --mutants 213, materialization-rollback keep with --mutants 196: about
-# 656 s.
-# Keep the durable-tail recovery ownership and materialization-rollback keep
-# audits apart: together in one shard of three they ran 1143 s on a pull
-# request, past the 1080 s execution budget, and hit the 20-minute job
-# timeout on the push. A new audit joins the lightest shard. Shard of the two
-# audits the `all` lane runs concurrently with machine-verify below:
+# run 40721495692 and push run 40721504088 (2026-10-28), the faster runner's
+# first; the two runners of one shard differed by 1.2-1.5x:
+# audits-a = live unregister cleanup 234-324, mob operator grant with
+# --mutants 180-235: 414-559 s;
+# audits-b = durable in-turn steer with its per-kind goal runs 368-535 (368
+# on the push; cut off after 451 on the pull request's runner, 1.45x slower
+# on the rest of its shard), live delegation steer 37-51: 405-586 s;
+# audits-c = run-start hold 209-256, materialization-rollback keep with
+# --mutants 212-259, live worker start after close 20-27, approval
+# entered-step with --mutants 16-24: 457-566 s;
+# audits-d = durable-tail recovery ownership with --mutants 179-233,
+# live-context outbox 122-153, peer request maps with --mutants 93-131,
+# live-context result barrier with --mutants 27-37: 421-554 s;
+# audits-e = member lifecycle with --mutants 307-458, empty-resume residency
+# with --mutants 45-64, durable-tail classification with --mutants 24-40, the
+# MobMachine arm coverage gate under 1: 376-562 s;
+# audits-f = live media health 147-171, requeue-across-stop 122-147,
+# live-context causal-tail batch with --mutants 98-122, generation high-water
+# with --mutants 56-71: 423-511 s;
+# audits-g = member residency without its mutants, alone: on the push its
+# eight whole-space runs took 165 s and its first 23 of 32 witness runs 173 s
+# before the job timeout cut it off, about 430 s in all, and about 525 s on
+# the pull request's runner, 1.22x slower on the rest of its shard.
+# Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
+# inside the 1080 s execution budget even on a runner 1.6x slower than the
+# faster ones here. As three shards these audits ran 13-18 minutes (audits-a),
+# 15 minutes and past the 20-minute job timeout (audits-b), and past it on
+# both runs (audits-c). A new audit joins the lightest shard, or a new shard
+# when it would take that shard past 10 minutes. Shard of the two audits the
+# `all` lane runs concurrently with machine-verify below:
 durable_steer_shard="audits-b"
-live_context_outbox_shard="audits-a"
+live_context_outbox_shard="audits-d"
 
 # A single part runs on its own (Bazel gives each part its own executor):
 # machine-verify takes every worker, and an audit shard runs its scheduled

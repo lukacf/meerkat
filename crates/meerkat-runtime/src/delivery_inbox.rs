@@ -2015,15 +2015,7 @@ impl RuntimeDeliveryInbox {
     pub async fn runtimes_with_pending_deliveries(
         &self,
     ) -> Result<Vec<LogicalRuntimeId>, RuntimeDeliveryError> {
-        let authorities = self.store.list_runtime_delivery_authorities().await?;
-        let mut runtimes = Vec::new();
-        for (runtime_id, record) in authorities {
-            if pending_delivery_count(&runtime_id, &record)? > 0 {
-                runtimes.push(runtime_id);
-            }
-        }
-        runtimes.sort_by(|left, right| left.0.cmp(&right.0));
-        Ok(runtimes)
+        runtimes_with_pending_deliveries_in(self.store.as_ref()).await
     }
 
     pub async fn applied_cursor(
@@ -2043,6 +2035,25 @@ impl RuntimeDeliveryInbox {
 fn validate_component(label: &str, value: String) -> Result<String, RuntimeDeliveryError> {
     validate_component_ref(label, &value)?;
     Ok(value)
+}
+
+/// Every runtime of `store` holding committed-but-unapplied deliveries,
+/// ordered by runtime id: the population
+/// [`RuntimeDeliveryInbox::runtimes_with_pending_deliveries`] answers, for a
+/// reader that holds the store and no inbox (a mob boot plans its members
+/// from it).
+pub(crate) async fn runtimes_with_pending_deliveries_in(
+    store: &dyn RuntimeStore,
+) -> Result<Vec<LogicalRuntimeId>, RuntimeDeliveryError> {
+    let authorities = store.list_runtime_delivery_authorities().await?;
+    let mut runtimes = Vec::new();
+    for (runtime_id, record) in authorities {
+        if pending_delivery_count(&runtime_id, &record)? > 0 {
+            runtimes.push(runtime_id);
+        }
+    }
+    runtimes.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(runtimes)
 }
 
 fn validate_component_ref(label: &str, value: &str) -> Result<(), RuntimeDeliveryError> {

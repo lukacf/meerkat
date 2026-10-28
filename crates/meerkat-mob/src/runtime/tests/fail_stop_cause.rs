@@ -300,7 +300,7 @@ fn line_of(code: &str, index: usize) -> usize {
 }
 
 /// Whether `name` occurs in `code` at `at` as a whole identifier.
-fn whole_identifier(code: &str, at: usize, name: &str) -> bool {
+pub(super) fn whole_identifier(code: &str, at: usize, name: &str) -> bool {
     let bytes = code.as_bytes();
     let before = at.checked_sub(1).map(|index| bytes[index]);
     let after = bytes.get(at + name.len()).copied();
@@ -380,7 +380,7 @@ fn record_constructions(code: &str) -> Vec<usize> {
 }
 
 /// The byte range of the body of the function `signature` starts in `code`.
-fn function_body(code: &str, signature: &str) -> Option<std::ops::Range<usize>> {
+pub(super) fn function_body(code: &str, signature: &str) -> Option<std::ops::Range<usize>> {
     let start = code.find(signature)?;
     let open = start + code[start..].find('{')?;
     Some(open..brace_group_end(code, open))
@@ -484,7 +484,7 @@ fn the_fail_stop_scans_see_writes_reads_and_constructions() {
 /// `source` with comments and literals blanked and every test-only item
 /// (`#[cfg(test)]`, `#[cfg(all(test, ..))]`, `#[test]` and `#[*::test]`)
 /// removed, so only code a shipped build compiles remains.
-fn shipped_code(source: &str) -> String {
+pub(super) fn shipped_code(source: &str) -> String {
     let code = blank_comments_and_literals(source);
     let bytes = code.as_bytes();
     let mut out = String::with_capacity(code.len());

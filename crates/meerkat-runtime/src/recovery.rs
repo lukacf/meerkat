@@ -1506,12 +1506,27 @@ fn prepare_whole_blob_recovery_candidate_in(
             "WholeBlob provisional tail does not name the exact committed base".to_string(),
         ));
     }
-    let candidate_session =
-        Session::from_persisted_bytes(provisional.candidate_bytes()).map_err(|error| {
+    // Decode the candidate exactly as the committed body is decoded
+    // (`CommittedWholeBlobSnapshot::new`): `decode_whole_blob_document` binds
+    // the decoded transcript to the exact rows of these bytes, the row-lineage
+    // origin every later transcript rewrite extends. A run continued from this
+    // tail is seeded from this session, so without that lineage none of its
+    // compactions could commit. The bytes must be the ones the store issued
+    // the provisional authority for; anything else is invalid evidence, as an
+    // undecodable payload is.
+    let decoded_candidate = Session::decode_whole_blob_document(provisional.candidate_bytes())
+        .map_err(|error| {
             DurableTailRecoveryError::InvalidEvidence(format!(
                 "provisional WholeBlob payload is invalid: {error}"
             ))
         })?;
+    if decoded_candidate.row_sha256_token() != provisional_authority.candidate_blob_sha256() {
+        return Err(DurableTailRecoveryError::InvalidEvidence(
+            "provisional WholeBlob payload digest differs from its store-issued candidate authority"
+                .to_string(),
+        ));
+    }
+    let candidate_session = decoded_candidate.into_session();
     if candidate_session.id() != committed_session.id()
         || candidate_session.version() != committed_session.version()
         || candidate_session.created_at() != committed_session.created_at()

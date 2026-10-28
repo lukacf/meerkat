@@ -61,6 +61,9 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `runtime_bound_reaches_mob`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `runtime_registration_released_reaches_mob`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `runtime_retired_reaches_mob`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

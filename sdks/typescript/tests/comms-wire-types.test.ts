@@ -49,6 +49,25 @@ const ambiguous: CommsSendErrorData = {
   retry_safe: false,
   required_action: "reconcile",
 };
+// A seated member whose wake was refused is its own code with the closed,
+// generated refusal vocabulary, never peer_not_found_or_not_trusted.
+const wakeRefused: CommsSendErrorData = {
+  code: "peer_wake_refused",
+  peer: "agent-a",
+  envelope_id: "00000000-0000-4000-8000-000000000001",
+  refusal: { kind: "wake_timed_out" },
+  retryable: true,
+  message: "peer was not woken",
+};
+const wakeRefusedUnknownKind: CommsSendErrorData = {
+  code: "peer_wake_refused",
+  peer: "agent-a",
+  envelope_id: "00000000-0000-4000-8000-000000000001",
+  // @ts-expect-error wake refusals are the generated closed vocabulary.
+  refusal: { kind: "not_a_refusal" },
+  retryable: true,
+  message: "peer was not woken",
+};
 // @ts-expect-error error codes are the generated closed vocabulary.
 const unknownCode: CommsSendErrorData = { code: "not_a_code", message: "m" };
-void [unreachable, ambiguous, unknownCode];
+void [unreachable, ambiguous, wakeRefused, wakeRefusedUnknownKind, unknownCode];

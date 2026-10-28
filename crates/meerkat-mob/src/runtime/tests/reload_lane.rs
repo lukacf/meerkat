@@ -1211,7 +1211,7 @@ async fn blocked_warm_constructor_keeps_query_and_peer_turn_progress() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn readiness_retry_reuses_the_exact_published_actor_without_reconstruction() {
+async fn readiness_failure_rolls_the_reload_back_and_leaves_the_member_dormant() {
     let mob = create_isolation_mob(2).await;
     mob.handle
         .wire(mob.member(0).clone(), mob.member(1).clone())
@@ -1245,7 +1245,6 @@ async fn readiness_retry_reuses_the_exact_published_actor_without_reconstruction
         .current_executor_attachment_witness(mob.session(0))
         .await
         .expect("published executor");
-    let creates = mob.service.session_counter.load(Ordering::Relaxed);
     mob.service.set_missing_comms_runtime(mob.session(0)).await;
     release
         .send(())
@@ -1257,93 +1256,85 @@ async fn readiness_retry_reuses_the_exact_published_actor_without_reconstruction
             .expect("reply")
             .is_err()
     );
-    assert_ne!(
-        mob.handle
-            .member_status(mob.member(0))
-            .await
-            .expect("member status")
-            .status,
-        crate::runtime::handle::MobMemberStatus::Broken
-    );
-    mob.service
-        .missing_comms_sessions
-        .write()
+    // A reload whose readiness fails is retryable: the member is not Broken.
+    // A failure names what recorded it Broken (MobMachine's restore failure).
+    let status = mob
+        .handle
+        .member_status(mob.member(0))
         .await
-        .remove(mob.session(0));
-    mob.service
-        .discard_actor_failures_remaining
-        .store(1, Ordering::Relaxed);
-    let retried = tokio::time::timeout(
-        Duration::from_secs(5),
-        mob.handle.reload_member_registration(mob.member(0)),
-    )
-    .await
-    .expect("readiness retry finishes")
-    .expect("retry");
-    assert_eq!(retried.disposition, MemberReloadDisposition::Discarded);
-    assert_eq!(mob.service.session_counter.load(Ordering::Relaxed), creates);
-    assert_eq!(
+        .expect("member status");
+    assert_ne!(
+        status.status,
+        crate::runtime::handle::MobMemberStatus::Broken,
+        "a reload whose readiness failed left the member Broken: {:?}",
+        status.error
+    );
+    // The provision the reload committed on its Bound verdict is
+    // rolled back with its attempt. Nothing MobMachine does not hold stays
+    // live: the member is Dormant until its next delivery wakes it through
+    // the cold recipe.
+    assert_ne!(
         mob.service.actor_registry.current(mob.session(0)),
         Some(actor)
     );
-    assert_eq!(
+    assert_ne!(
         mob.adapter
             .current_executor_attachment_witness(mob.session(0))
             .await,
         Some(attachment)
     );
     assert_eq!(
-        mob.service
-            .discard_actor_failures_remaining
-            .load(Ordering::Relaxed),
-        1
+        mob.handle
+            .machine_state_watch_rx
+            .borrow()
+            .member_materialization
+            .get(&mob_dsl::AgentIdentity::from_domain(mob.member(0)))
+            .copied(),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant)
     );
-    let restored = mob
-        .service
-        .sessions
-        .read()
-        .await
-        .get(mob.session(0))
-        .cloned()
-        .expect("restored comms");
-    let peer = mob
-        .service
-        .sessions
-        .read()
-        .await
-        .get(mob.session(1))
-        .cloned()
-        .expect("peer comms");
-    assert!(
-        restored
-            .trusted_peers
-            .read()
-            .await
-            .contains_key(&peer.peer_id().expect("peer identity").to_string())
-    );
-    assert!(
-        peer.trusted_peers
-            .read()
-            .await
-            .contains_key(&restored.peer_id().expect("restored identity").to_string())
-    );
-    mob.handle
-        .send_peer_message(
-            mob.member(0).clone(),
-            mob.member(1).clone(),
-            "peer delivery after resumed topology",
-            HandlingMode::Queue,
-        )
-        .await
-        .expect("restored peer delivery");
-    mob.service
-        .discard_actor_failures_remaining
-        .store(0, Ordering::Relaxed);
     peer_progresses(&mob).await;
 }
 
+/// A durability reload of an unwired turn-driven member whose runtime has
+/// no comms binds no comms drain, as its spawn bound none and as its wake
+/// would (one drain rule for every readiness path), so the reload repairs
+/// the registration instead of failing its readiness. A wired member still
+/// requires its drain: see
+/// `readiness_failure_rolls_the_reload_back_and_leaves_the_member_dormant`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stop_waits_for_warm_construction_without_blocking_query_progress() {
+async fn a_reload_of_an_unwired_member_without_comms_repairs_its_registration() {
+    let mob = create_isolation_mob(1).await;
+    mob.service.set_missing_comms_runtime(mob.session(0)).await;
+    mob.degrade_member(0).await;
+    mob.store.fail_commit(mob.session(0), false);
+    let reloaded = tokio::time::timeout(
+        Duration::from_secs(5),
+        mob.handle.reload_member_registration(mob.member(0)),
+    )
+    .await
+    .expect("the reload settles")
+    .expect("the reload repairs the registration without a comms drain");
+    assert_eq!(reloaded.disposition, MemberReloadDisposition::Discarded);
+    assert_eq!(
+        mob.handle
+            .machine_state_watch_rx
+            .borrow()
+            .member_materialization
+            .get(&mob_dsl::AgentIdentity::from_domain(mob.member(0)))
+            .copied(),
+        Some(mob_dsl::MemberMaterializationPhase::Live)
+    );
+}
+
+/// A Stop during a warm reload's held construction is admitted at once: the
+/// reload's steps are wake steps, which a Stop does not wait for. It lands
+/// while the construction is parked and the actor keeps answering queries.
+/// Once the construction is released, the reload's late step fails its
+/// attempt fence (the Stop closed the attempt) and rolls its provision back:
+/// the reload answers NotCurrent or its typed error, the member is Dormant,
+/// and no live actor of its session is left.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_lands_during_a_held_warm_construction_without_blocking_query_progress() {
     let mob = create_isolation_mob(2).await;
     mob.degrade_member(0).await;
     mob.store.fail_commit(mob.session(0), false);
@@ -1368,7 +1359,7 @@ async fn stop_waits_for_warm_construction_without_blocking_query_progress() {
     )
     .await;
     peer_progresses(&mob).await;
-    let mut stop = mob
+    let stop = mob
         .handle
         .enqueue_actor_command_for_test(|reply_tx| MobCommand::Stop {
             leave_runs_running: false,
@@ -1378,21 +1369,51 @@ async fn stop_waits_for_warm_construction_without_blocking_query_progress() {
         .expect("enqueue Stop");
     mob.probe(Duration::from_secs(1))
         .await
-        .expect("lifecycle wait does not own the actor loop");
-    assert!(matches!(
-        stop.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ));
-    drop(release);
+        .expect("the actor answers queries while the construction is held");
     tokio::time::timeout(Duration::from_secs(10), stop)
         .await
-        .expect("Stop settles after construction")
+        .expect("the Stop lands while the warm construction is still parked")
         .expect("Stop reply")
         .expect("Stop");
-    let _ = tokio::time::timeout(Duration::from_secs(5), reload)
+    assert_eq!(
+        mob.handle.status().await.expect("mob status"),
+        MobState::Stopped
+    );
+    mob.probe(Duration::from_secs(1))
         .await
-        .expect("reload observation settles")
+        .expect("the actor answers queries after the Stop");
+
+    drop(release);
+    let answered = tokio::time::timeout(Duration::from_secs(10), reload)
+        .await
+        .expect("the reload answers once its construction is released")
         .expect("reload reply");
+    if let Ok(outcome) = &answered {
+        assert_eq!(
+            outcome.disposition,
+            MemberReloadDisposition::NotCurrent,
+            "a reload the Stop preempted is not current"
+        );
+    }
+    wait_until(
+        "the preempted reload's provision is rolled back",
+        Duration::from_secs(5),
+        || async { mob.service.actor_registry.current(mob.session(0)).is_none() },
+    )
+    .await;
+    assert_eq!(
+        mob.handle
+            .machine_state_watch_rx
+            .borrow()
+            .member_materialization
+            .get(&mob_dsl::AgentIdentity::from_domain(mob.member(0)))
+            .copied(),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant),
+        "the Stop left the reloaded member dormant"
+    );
+    mob.probe(Duration::from_secs(1))
+        .await
+        .expect("the actor answers queries after the rollback");
 }
 
 /// The 2026-09-22 production wedge on the reload path: the member's committed
@@ -1723,4 +1744,77 @@ async fn reload_reports_not_current_for_a_member_absent_from_the_runtime() {
     .expect("reload of an absent registration is an inert outcome");
     assert_eq!(outcome.disposition, MemberReloadDisposition::NotCurrent);
     assert_eq!(&outcome.session_id, mob.session(0));
+}
+
+/// A warm reload whose attempt a stop closes after its
+/// Bound verdict committed the provision gets a stale Ready verdict, and the
+/// provision is rolled back: no materialization outlives the attempt that
+/// made it, the member is Dormant, and the mob stops normally (no
+/// fail-stop).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stale_ready_verdict_after_bound_rolls_the_reload_back() {
+    let mob = create_isolation_mob(2).await;
+    mob.degrade_member(0).await;
+    mob.store.fail_commit(mob.session(0), false);
+    let (entered, release) = crate::runtime::actor::reload_revival::pause_before_readiness_for_test(
+        mob.session(0).clone(),
+    );
+    let reload = mob
+        .handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::ReloadMemberRegistration {
+            agent_identity: mob.member(0).clone(),
+            deadline: Instant::now() + Duration::from_secs(15),
+            reply_tx,
+        })
+        .await
+        .expect("enqueue reload");
+    tokio::time::timeout(Duration::from_secs(5), entered)
+        .await
+        .expect("the reload committed its Bound verdict and reached readiness")
+        .expect("barrier");
+    // The stop closes the reload's open attempt (Waking -> Dormant) while
+    // its readiness is held.
+    let stop = {
+        let handle = mob.handle.clone();
+        tokio::spawn(async move { handle.stop().await })
+    };
+    wait_until(
+        "the stop closed the reload's attempt",
+        Duration::from_secs(5),
+        || async {
+            mob.handle
+                .machine_state_watch_rx
+                .borrow()
+                .member_materialization
+                .get(&mob_dsl::AgentIdentity::from_domain(mob.member(0)))
+                == Some(&mob_dsl::MemberMaterializationPhase::Dormant)
+        },
+    )
+    .await;
+    release.send(()).expect("let readiness run");
+    let answered = tokio::time::timeout(Duration::from_secs(10), reload)
+        .await
+        .expect("the reload answers")
+        .expect("reply");
+    if let Ok(outcome) = &answered {
+        assert_eq!(outcome.disposition, MemberReloadDisposition::NotCurrent);
+    }
+    tokio::time::timeout(Duration::from_secs(10), stop)
+        .await
+        .expect("the stop completes")
+        .expect("stop task")
+        .expect("the mob stops, never fail-stops");
+    assert!(
+        mob.service.actor_registry.current(mob.session(0)).is_none(),
+        "the provision the stale attempt committed must be rolled back"
+    );
+    assert_eq!(
+        mob.handle
+            .machine_state_watch_rx
+            .borrow()
+            .member_materialization
+            .get(&mob_dsl::AgentIdentity::from_domain(mob.member(0)))
+            .copied(),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant)
+    );
 }

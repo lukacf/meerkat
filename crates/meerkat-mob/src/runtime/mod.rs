@@ -206,10 +206,17 @@ mod reconcile_cadence_tests {
 pub(crate) mod actor;
 mod actor_turn_executor;
 mod admission_close;
+mod boot_plan;
 pub mod bridge;
 pub mod bridge_protocol;
 #[cfg(test)]
 mod bridge_request_claim_test_support;
+pub use boot_plan::{
+    MemberRestorePolicy, MobBootSetBasis, MobBootSetUnobservedCause, MobCompositionAuthority,
+};
+mod dormant_seat;
+pub use dormant_seat::DormantSeatOutcome;
+pub(crate) use dormant_seat::{SeatBuild, SeatBuildInputs, SeatLocalBuildInputs};
 mod builder;
 pub mod composition;
 pub mod conditions;
@@ -237,15 +244,19 @@ mod identity_local_services;
 #[cfg(any(test, feature = "test-support"))]
 mod identity_recovery_test_support;
 mod lifecycle_observation;
+mod live_actor_binding;
 #[cfg(feature = "openai-live")]
 mod live_bridge_operation;
+mod member_build_preparer;
 mod member_creation;
+mod member_event_attach;
 #[cfg(any(test, feature = "test-support"))]
 mod member_status_test_support;
+mod member_wake_config;
 mod read_handle;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
-pub use actor::fail_stop_next_actor_start_for_test;
+pub use actor::{explicit_resume_served_bindings_for_test, fail_stop_next_actor_start_for_test};
 #[cfg(any(test, feature = "test-support"))]
 mod restore_fault_test_support;
 pub(crate) use handle::MemberTurnLlmIdentityAppliedSender;
@@ -524,8 +535,13 @@ pub use live_bridge_operation::{
     LiveBridgeOperationStartError, LiveBridgeOperationTerminal, LiveBridgeOperationTerminalError,
     LiveBridgeOperationTerminalFuture, LiveDurableSourceReadinessError,
 };
+pub use member_build_preparer::{
+    MemberBuildPreparation, MemberBuildPreparationRefusal, MemberBuildPrepared,
+    MemberBuildPreparer, MemberBuildReport,
+};
 pub use member_history_proxy::MemberHistoryPageDomain;
 pub use member_live_proxy::MemberLiveStatusDomain;
+pub use member_wake_config::MemberWakeRetryBackoff;
 #[cfg(feature = "runtime-adapter")]
 pub use mobpack_execution::run_mobpack_callable;
 pub use mobpack_execution::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};

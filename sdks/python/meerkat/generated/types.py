@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Generated wire types for Meerkat SDK.
 
-Contract version: 0.9.6
+Contract version: 0.9.7
 """
 
 import sys
@@ -17,7 +17,7 @@ else:
 from .errors import MeerkatError
 
 
-CONTRACT_VERSION = "0.9.6"
+CONTRACT_VERSION = "0.9.7"
 
 
 Value = Any
@@ -7473,7 +7473,7 @@ WireOpenAiPromptCacheMode = Literal['implicit', 'explicit']
 WireOpenAiPromptCacheRetention = Literal['in_memory', '24h']
 
 # Mob RPC helper wire type for WireOpenAiPromptCacheTtl.
-WireOpenAiPromptCacheTtl = Literal['30m']
+WireOpenAiPromptCacheTtl = Literal['30m', '12h']
 
 # Mob RPC helper wire type for WireOpenAiReasoningContext.
 WireOpenAiReasoningContext = Literal['auto', 'current_turn', 'all_turns']
@@ -9443,6 +9443,68 @@ AdmissionDropReason = Literal['untrusted_sender', 'classification_rejected', 'se
 # The caller's next safe move after an ambiguous `comms/send`.
 CommsSendRequiredAction = Literal['reconcile']
 
+# Why a durable session refuses to serve a resume while its content stays
+# intact on disk. Typed companion of
+# [`SessionError::DurableTailHeldForRecovery`],
+# [`SessionError::DurableTailRecoveryRefused`], and
+# [`SessionError::DurableEvidenceQuarantined`] so surfaces route "held,
+# nothing lost" separately from "the service faulted" without parsing prose.
+DurableResumeHold = Literal['tail_held_for_recovery', 'recovery_refused', 'evidence_quarantined', 'audited_endpoint_divergence']
+
+# Why a peer message to a seated member that is not materialized in its
+# process was not delivered: the member's mob refused, or could not finish,
+# the wake the message needed.
+#
+# Every refusal means "not delivered": the envelope was never handed to the
+# recipient's inbox, so a retry cannot duplicate it. Only a peer that is not
+# a member at all is `peer not found`; a seated member is never reported
+# that way, whatever its residency.
+#
+# Closed vocabulary: a new refusal is a breaking change for every SDK that
+# parses it.
+class PeerWakeRefusalMemberBroken(TypedDict, total=False):
+    hold: NotRequired[Optional[DurableResumeHold]]
+    kind: Required[Literal['member_broken']]
+    reason: Required[str]
+
+class PeerWakeRefusalMemberRetiring(TypedDict, total=False):
+    kind: Required[Literal['member_retiring']]
+
+class PeerWakeRefusalMobNotRunning(TypedDict, total=False):
+    kind: Required[Literal['mob_not_running']]
+
+class PeerWakeRefusalAdmissionClosed(TypedDict, total=False):
+    kind: Required[Literal['admission_closed']]
+
+class PeerWakeRefusalWakeTimedOut(TypedDict, total=False):
+    kind: Required[Literal['wake_timed_out']]
+
+class PeerWakeRefusalMobUnavailable(TypedDict, total=False):
+    kind: Required[Literal['mob_unavailable']]
+
+class PeerWakeRefusalMaterializationLost(TypedDict, total=False):
+    kind: Required[Literal['materialization_lost']]
+
+class PeerWakeRefusalNonAuthoritativeComposition(TypedDict, total=False):
+    kind: Required[Literal['non_authoritative_composition']]
+
+class PeerWakeRefusalHostPreparationPending(TypedDict, total=False):
+    kind: Required[Literal['host_preparation_pending']]
+
+class PeerWakeRefusalResumeGateUnavailable(TypedDict, total=False):
+    kind: Required[Literal['resume_gate_unavailable']]
+
+class PeerWakeRefusalHostOwned(TypedDict, total=False):
+    kind: Required[Literal['host_owned']]
+
+class PeerWakeRefusalLifecycleOriginFenced(TypedDict, total=False):
+    kind: Required[Literal['lifecycle_origin_fenced']]
+
+class PeerWakeRefusalSenderWaking(TypedDict, total=False):
+    kind: Required[Literal['sender_waking']]
+
+PeerWakeRefusal = PeerWakeRefusalMemberBroken | PeerWakeRefusalMemberRetiring | PeerWakeRefusalMobNotRunning | PeerWakeRefusalAdmissionClosed | PeerWakeRefusalWakeTimedOut | PeerWakeRefusalMobUnavailable | PeerWakeRefusalMaterializationLost | PeerWakeRefusalNonAuthoritativeComposition | PeerWakeRefusalHostPreparationPending | PeerWakeRefusalResumeGateUnavailable | PeerWakeRefusalHostOwned | PeerWakeRefusalLifecycleOriginFenced | PeerWakeRefusalSenderWaking
+
 # Typed error data for `comms/send` failures.
 #
 # The error taxonomy is owned here (K17): surfaces serialize this contract
@@ -9486,7 +9548,15 @@ class CommsSendErrorDataInvalidCommand(TypedDict, total=False):
     code: Required[Literal['invalid_command']]
     message: Required[str]
 
-CommsSendErrorData = CommsSendErrorDataPeerNotFoundOrNotTrusted | CommsSendErrorDataPeerUnreachable | CommsSendErrorDataPeerAdmissionDropped | CommsSendErrorDataPeerInputRejected | CommsSendErrorDataSendAmbiguous | CommsSendErrorDataSendFailed | CommsSendErrorDataInvalidCommand
+class CommsSendErrorDataPeerWakeRefused(TypedDict, total=False):
+    code: Required[Literal['peer_wake_refused']]
+    envelope_id: Required[str]
+    message: Required[str]
+    peer: Required[str]
+    refusal: Required[PeerWakeRefusal]
+    retryable: Required[bool]
+
+CommsSendErrorData = CommsSendErrorDataPeerNotFoundOrNotTrusted | CommsSendErrorDataPeerUnreachable | CommsSendErrorDataPeerAdmissionDropped | CommsSendErrorDataPeerInputRejected | CommsSendErrorDataSendAmbiguous | CommsSendErrorDataSendFailed | CommsSendErrorDataInvalidCommand | CommsSendErrorDataPeerWakeRefused
 
 # Closed discriminator carried in [`CommsChecksumTokenResult`].
 CommsChecksumTokenResultIntent = Literal['checksum_token']

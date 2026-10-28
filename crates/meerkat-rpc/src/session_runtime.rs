@@ -1489,6 +1489,14 @@ impl SessionServiceHistoryExt for RpcMobSessionService {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for RpcMobSessionService {
+    async fn recorded_auth_binding(
+        &self,
+        auth_binding: &meerkat_core::AuthBindingRef,
+    ) -> Result<Option<meerkat_core::AuthBindingRef>, SessionError> {
+        meerkat_mob::MobSessionService::recorded_auth_binding(self.service.as_ref(), auth_binding)
+            .await
+    }
+
     async fn subscribe_session_activity(
         &self,
         session_id: &SessionId,
@@ -3854,6 +3862,29 @@ impl SessionRuntime {
             return Ok(false);
         }
         Ok(true)
+    }
+
+    /// A session-keyed live operation (a turn, a live channel) on a session
+    /// no runtime registration serves asks the session's owner first: a mob
+    /// that holds the session's member dormant wakes it
+    /// ([`meerkat_core::session_owner_wake`]), so this surface never attaches
+    /// a member's session on its own. A session no owner holds, or one its
+    /// owner no longer binds, proceeds as before. Call it before any session
+    /// lock or turn boundary: the member's wake resumes the session itself.
+    pub(crate) async fn wake_session_owner_if_unserved(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RpcError> {
+        if self.runtime_adapter.contains_session(session_id).await {
+            return Ok(());
+        }
+        match meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+            .wake(session_id)
+            .await
+        {
+            None | Some(Ok(_)) => Ok(()),
+            Some(Err(error)) => Err(session_error_to_rpc(error)),
+        }
     }
 
     /// Resolve a crash-window provisional tail before this host starts or
@@ -9063,6 +9094,9 @@ impl SessionRuntime {
                 data: None,
             });
         }
+        // A dormant mob member's session is woken by its owner before this
+        // surface would attach the session on its own.
+        self.wake_session_owner_if_unserved(session_id).await?;
         self.prepare_cold_attach(session_id).await?;
         self.reject_archived_persisted_session_without_live(session_id)
             .await?;
@@ -16280,6 +16314,8 @@ mod tests {
                 generation: Some(meerkat_runtime::meerkat_machine::dsl::Generation::from(0)),
                 runtime_epoch_id: None,
                 session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(session_id),
+                residency_owner:
+                    meerkat_runtime::meerkat_machine::dsl::SessionResidencyOwner::Session,
             },
             "test::prepare_bindings",
         )
@@ -17998,6 +18034,13 @@ mod tests {
                 ));
             }
             self.inner.delete_ops_lifecycle(runtime_id).await
+        }
+
+        async fn list_runtimes_with_recovery_work(
+            &self,
+        ) -> Result<Vec<meerkat_runtime::LogicalRuntimeId>, meerkat_runtime::RuntimeStoreError>
+        {
+            self.inner.list_runtimes_with_recovery_work().await
         }
     }
 

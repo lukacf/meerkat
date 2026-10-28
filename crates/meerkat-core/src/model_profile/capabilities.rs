@@ -91,14 +91,22 @@ impl OpenAiPromptCacheMode {
 /// Minimum lifetime for GPT-5.6 prompt-cache entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum OpenAiPromptCacheTtl {
+    // OpenAI's default lifetime; a cache write costs 1.25x the uncached
+    // input rate.
     #[serde(rename = "30m")]
     ThirtyMinutes,
+    // At least 12 hours (OpenAI may keep the entry up to 24 hours); a cache
+    // write costs 2.5x the uncached input rate, reads cost the same. Only an
+    // explicit choice: no catalog default selects it.
+    #[serde(rename = "12h")]
+    TwelveHours,
 }
 
 impl OpenAiPromptCacheTtl {
     pub const fn as_wire_str(self) -> &'static str {
         match self {
             Self::ThirtyMinutes => "30m",
+            Self::TwelveHours => "12h",
         }
     }
 }
@@ -721,6 +729,27 @@ mod tests {
         assert_eq!(OpenAiTextVerbosity::High.as_wire_str(), "high");
         assert_eq!(OpenAiPromptCacheMode::Explicit.as_wire_str(), "explicit");
         assert_eq!(OpenAiPromptCacheTtl::ThirtyMinutes.as_wire_str(), "30m");
+        assert_eq!(OpenAiPromptCacheTtl::TwelveHours.as_wire_str(), "12h");
+    }
+
+    /// The serde form of every prompt-cache TTL is the wire string the
+    /// OpenAI lowering and the params schema use, in both directions.
+    #[test]
+    fn openai_prompt_cache_ttl_serde_form_is_its_wire_string() {
+        for ttl in [
+            OpenAiPromptCacheTtl::ThirtyMinutes,
+            OpenAiPromptCacheTtl::TwelveHours,
+        ] {
+            let json = serde_json::to_value(ttl).expect("serialize ttl");
+            assert_eq!(json, serde_json::json!(ttl.as_wire_str()));
+            let parsed: OpenAiPromptCacheTtl =
+                serde_json::from_value(json).expect("deserialize ttl");
+            assert_eq!(parsed, ttl);
+        }
+        assert!(
+            serde_json::from_value::<OpenAiPromptCacheTtl>(serde_json::json!("24h")).is_err(),
+            "24h is prompt_cache_retention, not a prompt_cache_options.ttl value"
+        );
     }
 
     #[test]

@@ -1087,10 +1087,9 @@ pub struct ApprovalService {
     state: Arc<RwLock<ApprovalServiceState>>,
     store: Arc<dyn ApprovalStore>,
     unavailable_reason: Option<Arc<str>>,
-    /// Test-only signal: a reserved review commit passed every pre-check and
-    /// is about to take the commit reservation.
-    /// Review attempt disposals handed over without waiting; settled under
-    /// the owner's next review commit. Never held while waiting for `state`.
+    /// Review inputs handed over without waiting (attempt disposals and the
+    /// finish of an entered effect's step), settled in order by the owner's
+    /// next holder. Never held while waiting for `state`.
     queued_disposals: Arc<parking_lot::Mutex<Vec<QueuedReviewDisposal>>>,
     /// Work associations whose run closed while the owner was held; their
     /// unspent consent is parked or withdrawn by the next lock holder's
@@ -1444,10 +1443,13 @@ impl ApprovalService {
     /// 2. under it, check the attempt's identity binding and run
     ///    `final_check` (deadline and currentness) immediately before the
     ///    conditional commit;
-    /// 3. commit, and for a spend also dispose the attempt in the same
-    ///    reservation, so nothing waits on this owner and no queued report
-    ///    runs between the spend and the leaf's effect; a refusal retires and
-    ///    disposes the attempt in the same reservation.
+    /// 3. commit; a refusal retires and disposes the attempt in the same
+    ///    reservation. A spend leaves the attempt registered as `Used`, the
+    ///    entered state of its effect: the admitting dispatch's end releases
+    ///    it ([`Self::dispose_review`], never waiting), and until then the
+    ///    effect's later steps are admitted against it (the generated
+    ///    `AdmitEnteredStep`). Nothing waits on this owner and no queued
+    ///    report runs between the spend and the leaf's effect.
     ///
     /// On refusal the returned disposal is the owner's settled result, or
     /// `None` when it was queued (`on_queued` then reports it once settled).
@@ -1465,7 +1467,7 @@ impl ApprovalService {
         commit: impl FnOnce(
             &mut ApprovalLifecycleMachineAuthority,
         ) -> Result<ApprovalLifecycleOutcome, ApprovalLifecycleError>,
-        dispose_on_commit: bool,
+        spend: bool,
         retirement: impl FnOnce(&ReservedReviewError<E>) -> ReviewRetirementReason,
         on_queued: impl FnOnce() -> QueuedDisposalReport,
     ) -> Result<(ReviewAttemptStatus, SettledReports), RefusedReviewCommit<E>> {
@@ -1508,18 +1510,10 @@ impl ApprovalService {
         };
         let result = match refused {
             Some(error) => Err(error),
-            None => match review_status_from_outcome(commit(&mut state.authority)) {
-                Ok(status) => {
-                    if dispose_on_commit {
-                        // Same reservation: no second acquisition before the effect.
-                        let _ = review_status_from_outcome(
-                            state.authority.release_review(handle.id().to_owned()),
-                        );
-                    }
-                    Ok(status)
-                }
-                Err(error) => Err(ReservedReviewError::Owner(error)),
-            },
+            // A spend keeps the attempt registered (`Used`) for its effect's
+            // later steps; the admitting dispatch's end releases it.
+            None => review_status_from_outcome(commit(&mut state.authority))
+                .map_err(ReservedReviewError::Owner),
         };
         let result = result.map_err(|error| {
             let reason = retirement(&error);
@@ -1542,7 +1536,7 @@ impl ApprovalService {
             // callback-free retained check runs again here, immediately
             // before the effect handoff. A refusal now has zero effect; the
             // committed spend stays spent (no refund).
-            Ok(status) if dispose_on_commit => match final_check() {
+            Ok(status) if spend => match final_check() {
                 Ok(()) => Ok((status, reports)),
                 Err(failure) => Err(RefusedReviewCommit {
                     error: ReservedReviewError::FinalCheck(failure),
@@ -1613,6 +1607,81 @@ impl ApprovalService {
         Option<Result<ReviewAttemptStatus, ReviewOwnerError>>,
         SettledReports,
     ) {
+        self.settle_review_input(id, QueuedReviewInput::Dispose(retire), on_queued)
+    }
+
+    /// Admit one later step of an entered effect (`AdmitEnteredStep`) under
+    /// the owner's non-waiting reservation: a held owner is `Unavailable` at
+    /// once. Under that same reservation every review input queued behind
+    /// an earlier holder (a dispatch end's hand-back, a step's finish) is
+    /// settled into the owner first, so the generated owner alone decides
+    /// the admission: a step is admitted only while the attempt, spent once
+    /// at the effect's entry, is registered as `Used` and its effect is
+    /// open. Admitting spends nothing. `handle` must be bound to exactly
+    /// `binding` and `work`. The returned reports run once the caller is
+    /// outside every lock and outside the step.
+    pub(crate) fn admit_entered_step(
+        &self,
+        handle: &ReviewAttemptHandle,
+        binding: &crate::authorization::PreparedAuthorizationBinding,
+        work: &crate::authorization::WorkAuthorizationContext,
+    ) -> (Result<(), ReviewOwnerError>, SettledReports) {
+        if self.ensure_available().is_err() {
+            return (
+                Err(ReviewOwnerError::Unavailable),
+                SettledReports::default(),
+            );
+        }
+        let Some(mut state) = self.state.try_write() else {
+            return (
+                Err(ReviewOwnerError::Unavailable),
+                SettledReports::default(),
+            );
+        };
+        self.count_review_lock();
+        let mut reports = self.settle_queued_locked(&mut state);
+        let result = if handle.bound_to(binding, work) {
+            match review_status_from_outcome(
+                state.authority.admit_entered_step(handle.id().to_owned()),
+            ) {
+                Ok(ReviewAttemptStatus::Used) => Ok(()),
+                Ok(_) => Err(ReviewOwnerError::Unavailable),
+                Err(error) => Err(error),
+            }
+        } else {
+            Err(ReviewOwnerError::Mismatch)
+        };
+        reports.absorb(self.release_review_state(state));
+        (result, reports)
+    }
+
+    /// One admitted step of an entered effect finished (`FinishEnteredStep`),
+    /// WITHOUT waiting for the owner: applied now when the owner is free,
+    /// otherwise queued for its next holder through the same protocol as a
+    /// disposal, so a finish is never lost. The last finish of a closing
+    /// effect releases its attempt. The returned reports run once the caller
+    /// is outside every lock and outside the step.
+    pub(crate) fn finish_entered_step(&self, id: &str) -> SettledReports {
+        let (_, reports) =
+            self.settle_review_input(id, QueuedReviewInput::FinishEnteredStep, || {
+                Box::new(|_: Result<ReviewAttemptStatus, ReviewOwnerError>| {})
+            });
+        reports
+    }
+
+    /// Apply one review input WITHOUT waiting for the owner: now when the
+    /// state lock is free (the result is returned), otherwise queued for the
+    /// owner's next holder and reported through `on_queued` once settled
+    /// (`None` is returned).
+    fn settle_review_input(
+        &self,
+        id: &str,
+        input: QueuedReviewInput,
+        on_queued: impl FnOnce() -> QueuedDisposalReport,
+    ) -> (
+        Option<Result<ReviewAttemptStatus, ReviewOwnerError>>,
+        SettledReports,
+    ) {
         if self.ensure_available().is_err() {
             return (
                 Some(Err(ReviewOwnerError::Unavailable)),
@@ -1621,12 +1690,12 @@ impl ApprovalService {
         }
         if let Some(mut state) = self.state.try_write() {
             self.count_review_lock();
-            let result = dispose_locked(&mut state.authority, id, retire);
+            let result = apply_queued_locked(&mut state.authority, id, input);
             return (Some(result), self.release_review_state(state));
         }
         self.queued_disposals.lock().push(QueuedReviewDisposal {
             id: id.to_owned(),
-            retire,
+            input,
             report: on_queued(),
         });
         // Every lock holder settles the queue as it releases (writers under
@@ -1685,10 +1754,10 @@ impl ApprovalService {
                 let mut queue = self.queued_disposals.lock();
                 let settled = std::mem::take(&mut *queue)
                     .into_iter()
-                    .map(|disposal| {
+                    .map(|queued| {
                         let result =
-                            dispose_locked(&mut state.authority, &disposal.id, disposal.retire);
-                        (disposal.report, result)
+                            apply_queued_locked(&mut state.authority, &queued.id, queued.input);
+                        (queued.report, result)
                     })
                     .collect();
                 // A store-free release never drops a pending durable record:
@@ -1711,6 +1780,23 @@ impl ApprovalService {
                 self.retire_work_custody_locked(&mut state, &work);
             }
         }
+    }
+
+    /// Settle every queued review input into the owner now, in queue order,
+    /// under the reservation the caller holds (the state lock stays held).
+    /// Their reports run later, outside every lock.
+    fn settle_queued_locked(&self, state: &mut ApprovalServiceState) -> SettledReports {
+        let queued = std::mem::take(&mut *self.queued_disposals.lock());
+        SettledReports(
+            queued
+                .into_iter()
+                .map(|queued| {
+                    let result =
+                        apply_queued_locked(&mut state.authority, &queued.id, queued.input);
+                    (queued.report, result)
+                })
+                .collect(),
+        )
     }
 
     #[inline]
@@ -1820,8 +1906,11 @@ impl ApprovalService {
     }
 
     /// Spend the allow once, only for the exact operation binding and work
-    /// association the attempt was issued for, and dispose the attempt, all
-    /// under the single commit reservation after `final_check`.
+    /// association the attempt was issued for, under the single commit
+    /// reservation after `final_check`. The attempt stays registered as
+    /// `Used`, the entered state of its effect, until its admitting dispatch
+    /// ends; a spend refused by its final check after the commit is released
+    /// by the caller at once, since nothing entered.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn consume_review_for_entry<E>(
         &self,
@@ -2088,11 +2177,23 @@ type SettledReviewDisposal = (
     Result<ReviewAttemptStatus, ReviewOwnerError>,
 );
 
-/// A review attempt disposal handed to the owner without waiting for it.
+/// A review input handed to the owner without waiting for it.
 struct QueuedReviewDisposal {
     id: String,
-    retire: Option<ReviewRetirementReason>,
+    input: QueuedReviewInput,
     report: QueuedDisposalReport,
+}
+
+/// What a queued review input applies once the owner settles it.
+#[derive(Debug, Clone, Copy)]
+enum QueuedReviewInput {
+    /// Retire the attempt (when a reason is set), then hand it back
+    /// (`ReleaseReview`): released, or its entered effect closed while a
+    /// step admitted under it is in flight.
+    Dispose(Option<ReviewRetirementReason>),
+    /// One admitted step of the attempt's entered effect finished
+    /// (`FinishEnteredStep`).
+    FinishEnteredStep,
 }
 
 /// A refused reserved review commit: the typed refusal and the attempt's
@@ -2106,6 +2207,20 @@ pub(crate) struct RefusedReviewCommit<E> {
     /// The commit already happened (a spend refused by its final check after
     /// the owner exit): its status stays committed and nothing refunds.
     pub(crate) committed: Option<ReviewAttemptStatus>,
+}
+
+/// Apply one queued review input under a reservation already held.
+fn apply_queued_locked(
+    authority: &mut ApprovalLifecycleMachineAuthority,
+    id: &str,
+    input: QueuedReviewInput,
+) -> Result<ReviewAttemptStatus, ReviewOwnerError> {
+    match input {
+        QueuedReviewInput::Dispose(retire) => dispose_locked(authority, id, retire),
+        QueuedReviewInput::FinishEnteredStep => {
+            review_status_from_outcome(authority.finish_entered_step(id.to_owned()))
+        }
+    }
 }
 
 /// Retire (when set) and release one attempt under a reservation already
@@ -2905,6 +3020,176 @@ mod review_owner_tests {
         store
             .put_if_current(None, &record)
             .expect("a free store commits");
+    }
+
+    /// The generated owner keeps a spent attempt `Used` while its effect is
+    /// entered: later steps are admitted and finished without spending; the
+    /// dispatch end releases it with no step in flight, or closes it so that
+    /// no new step begins and the last admitted step's finish releases it;
+    /// an unspent, retired or consent-linked attempt enters nothing, and a
+    /// consent spend opens the same entered state.
+    #[test]
+    fn the_generated_owner_keeps_an_entered_attempt_until_its_last_step() {
+        use ApprovalLifecycleOutcome::{Rejected, ReviewStatus, Status};
+        use ApprovalLifecycleRejectionReason as Reason;
+        let mut owner = ApprovalLifecycleMachineAuthority::new();
+        let s = |value: &str| value.to_owned();
+        let used = || Ok(ReviewStatus(ReviewAttemptStatus::Used));
+
+        assert_eq!(
+            owner.begin_review(s("r1")),
+            Ok(ReviewStatus(ReviewAttemptStatus::Pending))
+        );
+        assert_eq!(
+            owner.admit_entered_step(s("r1")),
+            Ok(Rejected(Reason::ReviewNotSatisfied))
+        );
+        assert_eq!(
+            owner.record_review_verdict(s("r1"), ReviewVerdict::Allow),
+            Ok(ReviewStatus(ReviewAttemptStatus::Allowed))
+        );
+        assert_eq!(
+            owner.admit_entered_step(s("r1")),
+            Ok(Rejected(Reason::ReviewNotSatisfied)),
+            "an allowed but unspent review enters nothing"
+        );
+        assert_eq!(
+            owner.finish_entered_step(s("r1")),
+            Ok(Rejected(Reason::AlreadyDecided)),
+            "no step in flight to finish"
+        );
+        assert_eq!(owner.consume_review_for_entry(s("r1")), used());
+        assert_eq!(owner.admit_entered_step(s("r1")), used());
+        assert_eq!(
+            owner.admit_entered_step(s("r1")),
+            used(),
+            "two steps in flight, no second spend"
+        );
+        assert_eq!(
+            owner.consume_review_for_entry(s("r1")),
+            Ok(Rejected(Reason::AlreadyDecided)),
+            "a second spend is refused while entered"
+        );
+        assert_eq!(
+            owner.release_review(s("r1")),
+            used(),
+            "the dispatch ends with steps in flight: still Used, closing"
+        );
+        assert_eq!(
+            owner.admit_entered_step(s("r1")),
+            Ok(Rejected(Reason::Expired)),
+            "no step begins after the dispatch end"
+        );
+        assert_eq!(
+            owner.release_review(s("r1")),
+            Ok(Rejected(Reason::AlreadyDecided)),
+            "the dispatch hands its attempt back once"
+        );
+        assert_eq!(
+            owner.retire_review(s("r1"), ReviewRetirementReason::Abandoned),
+            Ok(Rejected(Reason::AlreadyDecided)),
+            "an entered attempt is never retired"
+        );
+        assert_eq!(
+            owner.finish_entered_step(s("r1")),
+            used(),
+            "one step finished, one still in flight"
+        );
+        assert_eq!(
+            owner.consume_review_for_entry(s("r1")),
+            Ok(Rejected(Reason::AlreadyDecided)),
+            "still registered while a step is in flight"
+        );
+        assert_eq!(
+            owner.finish_entered_step(s("r1")),
+            used(),
+            "the last finish releases the attempt"
+        );
+        for (input, answer) in [
+            (
+                owner.admit_entered_step(s("r1")),
+                Rejected(Reason::NotFound),
+            ),
+            (
+                owner.finish_entered_step(s("r1")),
+                Rejected(Reason::NotFound),
+            ),
+            (owner.release_review(s("r1")), Rejected(Reason::NotFound)),
+            (
+                owner.consume_review_for_entry(s("r1")),
+                Rejected(Reason::NotFound),
+            ),
+        ] {
+            assert_eq!(input, Ok(answer), "released: unknown to the owner");
+        }
+
+        // With no step in flight the dispatch end releases at once.
+        assert_eq!(
+            owner.begin_review(s("r2")),
+            Ok(ReviewStatus(ReviewAttemptStatus::Pending))
+        );
+        assert_eq!(
+            owner.record_review_verdict(s("r2"), ReviewVerdict::Allow),
+            Ok(ReviewStatus(ReviewAttemptStatus::Allowed))
+        );
+        assert_eq!(owner.consume_review_for_entry(s("r2")), used());
+        assert_eq!(owner.admit_entered_step(s("r2")), used());
+        assert_eq!(
+            owner.finish_entered_step(s("r2")),
+            used(),
+            "a step that ends while the dispatch is live"
+        );
+        assert_eq!(owner.release_review(s("r2")), used());
+        assert_eq!(
+            owner.admit_entered_step(s("r2")),
+            Ok(Rejected(Reason::NotFound))
+        );
+
+        // A retired attempt enters nothing.
+        assert_eq!(
+            owner.begin_review(s("r3")),
+            Ok(ReviewStatus(ReviewAttemptStatus::Pending))
+        );
+        assert_eq!(
+            owner.retire_review(s("r3"), ReviewRetirementReason::ContextChanged),
+            Ok(ReviewStatus(ReviewAttemptStatus::Retired))
+        );
+        assert_eq!(
+            owner.admit_entered_step(s("r3")),
+            Ok(Rejected(Reason::ReviewRetired))
+        );
+
+        // A consent-linked attempt enters nothing until its consent is spent,
+        // and the consent spend opens the same entered state.
+        assert_eq!(
+            owner.create_consent_approval(s("a1"), s("r4"), true, true, true),
+            Ok(Status(ApprovalLifecycleStatus::Pending))
+        );
+        assert_eq!(
+            owner.admit_entered_step(s("r4")),
+            Ok(Rejected(Reason::ConsentLinked))
+        );
+        assert_eq!(
+            owner.decide_consent(s("a1"), s("r4"), ApprovalLifecycleDecision::Approve, true),
+            Ok(Status(ApprovalLifecycleStatus::Approved))
+        );
+        assert_eq!(
+            owner.admit_entered_step(s("r4")),
+            Ok(Rejected(Reason::ConsentLinked)),
+            "approved but unspent consent enters nothing"
+        );
+        assert_eq!(owner.consume_consent_for_entry(s("a1"), s("r4")), used());
+        assert_eq!(owner.admit_entered_step(s("r4")), used());
+        assert_eq!(
+            owner.consume_consent_for_entry(s("a1"), s("r4")),
+            Ok(Rejected(Reason::AlreadyConsumed))
+        );
+        assert_eq!(owner.release_review(s("r4")), used());
+        assert_eq!(owner.finish_entered_step(s("r4")), used());
+        assert_eq!(
+            owner.admit_entered_step(s("r4")),
+            Ok(Rejected(Reason::NotFound))
+        );
     }
 
     /// The generated owner holds the consent link and its one-use legality:

@@ -1428,6 +1428,12 @@ impl RuntimeStore for CountingRuntimeStore {
     ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
         self.inner.delete_ops_lifecycle(runtime_id).await
     }
+
+    async fn list_runtimes_with_recovery_work(
+        &self,
+    ) -> Result<Vec<LogicalRuntimeId>, meerkat_runtime::store::RuntimeStoreError> {
+        self.inner.list_runtimes_with_recovery_work().await
+    }
 }
 
 #[tokio::test]

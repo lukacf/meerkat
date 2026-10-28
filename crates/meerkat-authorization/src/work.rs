@@ -375,6 +375,38 @@ impl LocalWorkAuthorization {
         Ok(validity)
     }
 
+    /// Run `operation` once while the complete current decision for
+    /// `binding`, with `further` conjoined, holds inside `prepared` and
+    /// requires no more review than `max_tier`, under this work's publication
+    /// reservation held through `operation` (never published: every owner
+    /// change on this publication is excluded, and contention refuses).
+    fn run_current_within_tier(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+        prepared: Option<&meerkat_core::authorization::OperationValidity>,
+        further: &(dyn std::any::Any + Send + Sync),
+        operation: &mut dyn FnMut(),
+        max_tier: OperationReviewTier,
+    ) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        let further = further
+            .downcast_ref::<FurtherOriginals>()
+            .ok_or(meerkat_core::OperationAuthorizationError::Unavailable)?;
+        let policy = Arc::clone(&self.policy)
+            .grant_backed()
+            .ok_or(meerkat_core::OperationAuthorizationError::Unavailable)?;
+        let _reservation = self
+            .publication
+            .try_reserve_owner_change()
+            .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
+        let decision = self.current_decision_within(binding, further, &policy)?;
+        self.within_prepared(&decision, prepared)?;
+        if decision.review_tier > max_tier {
+            return Err(denied().into());
+        }
+        operation();
+        Ok(())
+    }
+
     /// The complete current prepared-entry decision for `binding`, with
     /// each relevant original's own grant for the operation conjoined. The
     /// caller holds this work's publication reservation.
@@ -495,26 +527,28 @@ impl WorkAuthorization for LocalWorkAuthorization {
         further: &(dyn std::any::Any + Send + Sync),
         operation: &mut dyn FnMut(),
     ) -> Result<(), meerkat_core::OperationAuthorizationError> {
-        let further = further
-            .downcast_ref::<FurtherOriginals>()
-            .ok_or(meerkat_core::OperationAuthorizationError::Unavailable)?;
-        let policy = Arc::clone(&self.policy)
-            .grant_backed()
-            .ok_or(meerkat_core::OperationAuthorizationError::Unavailable)?;
-        // Held through `operation`, never published: every owner change on
-        // this publication is excluded and contention refuses.
-        let _reservation = self
-            .publication
-            .try_reserve_owner_change()
-            .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)?;
-        let decision = self.current_decision_within(binding, further, &policy)?;
-        self.within_prepared(&decision, prepared)?;
         // No review can run here: only an R1 entry runs the operation.
-        if decision.review_tier != OperationReviewTier::R1 {
-            return Err(denied().into());
-        }
-        operation();
-        Ok(())
+        self.run_current_within_tier(
+            binding,
+            prepared,
+            further,
+            operation,
+            OperationReviewTier::R1,
+        )
+    }
+
+    fn run_entered_if_current_within(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+        prepared: Option<&meerkat_core::authorization::OperationValidity>,
+        further: &(dyn std::any::Any + Send + Sync),
+        operation: &mut dyn FnMut(),
+        entered_tier: OperationReviewTier,
+    ) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        // A further step of an entered effect: no review runs here, and the
+        // decision may require no more review than the dispatch entered (the
+        // issuance's rule).
+        self.run_current_within_tier(binding, prepared, further, operation, entered_tier)
     }
 
     fn validate_child_issuance(

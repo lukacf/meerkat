@@ -670,6 +670,16 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::SettleExplicitResumeTopology { .. }
             | mob_dsl::MobMachineInput::BeginExplicitResumeCleanup { .. }
             | mob_dsl::MobMachineInput::SettleExplicitResumeCleanup { .. }
+            | mob_dsl::MobMachineInput::SeedMemberResidency { .. }
+            | mob_dsl::MobMachineInput::WakeMember { .. }
+            | mob_dsl::MobMachineInput::PlanBootMaterialization { .. }
+            | mob_dsl::MobMachineInput::SealBootMaterializationPlan
+            | mob_dsl::MobMachineInput::ClassifyPeerNotice { .. }
+            | mob_dsl::MobMachineInput::CommitDormantSeat { .. }
+            | mob_dsl::MobMachineInput::ResolveMemberHostPreparation { .. }
+            | mob_dsl::MobMachineInput::BeginMemberRotation { .. }
+            | mob_dsl::MobMachineInput::CommitMemberRotation { .. }
+            | mob_dsl::MobMachineInput::ClassifyMemberRelease { .. }
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
             | mob_dsl::MobMachineInput::Complete
             | mob_dsl::MobMachineInput::Reset
@@ -1948,6 +1958,16 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::SettleExplicitResumeTopology { .. }
             | mob_dsl::MobMachineInput::BeginExplicitResumeCleanup { .. }
             | mob_dsl::MobMachineInput::SettleExplicitResumeCleanup { .. }
+            | mob_dsl::MobMachineInput::SeedMemberResidency { .. }
+            | mob_dsl::MobMachineInput::WakeMember { .. }
+            | mob_dsl::MobMachineInput::PlanBootMaterialization { .. }
+            | mob_dsl::MobMachineInput::SealBootMaterializationPlan
+            | mob_dsl::MobMachineInput::ClassifyPeerNotice { .. }
+            | mob_dsl::MobMachineInput::CommitDormantSeat { .. }
+            | mob_dsl::MobMachineInput::ResolveMemberHostPreparation { .. }
+            | mob_dsl::MobMachineInput::BeginMemberRotation { .. }
+            | mob_dsl::MobMachineInput::CommitMemberRotation { .. }
+            | mob_dsl::MobMachineInput::ClassifyMemberRelease { .. }
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
             | mob_dsl::MobMachineInput::Complete
             | mob_dsl::MobMachineInput::Reset

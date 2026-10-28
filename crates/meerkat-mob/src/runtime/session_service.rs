@@ -132,6 +132,17 @@ pub struct SessionResumeRejection {
 }
 
 impl SessionResumeRejection {
+    /// meerkat's typed durable resume hold this rejection reports: an
+    /// unprovable committed boundary withholds the durable tail from resume
+    /// (held for, or refused by, its recovery) and keeps it intact, as
+    /// [`MobError::durable_resume_hold`] reports it for the error this
+    /// rejection becomes.
+    #[must_use]
+    pub fn durable_resume_hold(&self) -> Option<meerkat_core::service::DurableResumeHold> {
+        (self.kind == ResumeRejectionKind::CommittedBoundaryUnprovable)
+            .then_some(meerkat_core::service::DurableResumeHold::TailHeldForRecovery)
+    }
+
     #[must_use]
     pub fn into_mob_error(self) -> MobError {
         let reason = match self.kind {
@@ -519,18 +530,12 @@ impl SessionResumeVerdict {
                         "archived refusal runtime state disagrees with atomic durable authority",
                     ));
                 }
-                let state = runtime_state.map_or_else(
-                    || "<no runtime record>".to_string(),
-                    |state| state.to_string(),
-                );
                 Ok(Self::Rejected(SessionResumeRejection {
                     session_id: session_id.clone(),
                     lifecycle,
                     authority: Box::new(authority),
                     kind: ResumeRejectionKind::ArchivedNotRevivable,
-                    detail: format!(
-                        "durable session '{session_id}' is archived and not revivable from runtime state {state}; the transcript is intact and preserved"
-                    ),
+                    detail: archived_not_revivable_detail(session_id, runtime_state),
                     runtime_state,
                     terminality: if runtime_state == Some(meerkat_runtime::RuntimeState::Destroyed)
                     {
@@ -557,9 +562,7 @@ impl SessionResumeVerdict {
                         runtime_state: authority.runtime_state(),
                         authority: Box::new(authority),
                         kind: ResumeRejectionKind::ContradictoryDurableAuthority,
-                        detail: format!(
-                            "session '{session_id}' has durable authority or lifecycle rows but no materializable body"
-                        ),
+                        detail: bodiless_durable_authority_detail(session_id),
                         terminality: ResumeVerdictTerminality::StableParkable,
                     }))
                 } else {
@@ -689,6 +692,73 @@ impl SessionResumeVerdict {
             runtime_state,
             terminality: ResumeVerdictTerminality::TransientRetryable,
         })
+    }
+}
+
+/// The refusal detail of an archived session that cannot be revived from
+/// `runtime_state`: shared by the materializing verdict and the read-only one.
+fn archived_not_revivable_detail(
+    session_id: &SessionId,
+    runtime_state: Option<meerkat_runtime::RuntimeState>,
+) -> String {
+    let state = runtime_state.map_or_else(
+        || "<no runtime record>".to_string(),
+        |state| state.to_string(),
+    );
+    format!(
+        "durable session '{session_id}' is archived and not revivable from runtime state {state}; the transcript is intact and preserved"
+    )
+}
+
+/// The refusal detail of a session whose durable authority or lifecycle rows
+/// exist with no materializable body: shared by the materializing verdict
+/// and the read-only one.
+fn bodiless_durable_authority_detail(session_id: &SessionId) -> String {
+    format!(
+        "session '{session_id}' has durable authority or lifecycle rows but no materializable body"
+    )
+}
+
+/// What a read-only observation of a session's durable resume authority says
+/// a cold resume of the session would meet. It decodes no session, settles
+/// no durable tail and takes no hosting claim, so what only a
+/// materialization can find (an unprovable committed boundary, a session
+/// another runtime owner hosts) is not visible here. On a host store the
+/// runtime store answers the observation by loading the session's stored
+/// rows (the authority is one of its row entries); a SQLite store reads the
+/// authority, catalog and lifecycle rows only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ObservedResumeVerdict {
+    /// Active, or archived and revivable: a resume materializes it.
+    Resumable,
+    /// No durable session: a resume searches for a persisted successor.
+    Absent,
+    /// The typed refusal a resume records, with its detail.
+    Refused(String),
+}
+
+/// Classify one read-only resume observation (see [`ObservedResumeVerdict`])
+/// exactly as the materializing verdict classifies the same lifecycle.
+pub(crate) fn observed_resume_verdict(
+    session_id: &SessionId,
+    authority: &SessionResumeAuthority,
+) -> ObservedResumeVerdict {
+    match authority.lifecycle() {
+        SessionResumeLifecycle::Active { .. }
+        | SessionResumeLifecycle::Archived {
+            revivable: true, ..
+        } => ObservedResumeVerdict::Resumable,
+        SessionResumeLifecycle::Archived {
+            revivable: false,
+            runtime_state,
+            ..
+        } => {
+            ObservedResumeVerdict::Refused(archived_not_revivable_detail(session_id, runtime_state))
+        }
+        SessionResumeLifecycle::ContradictoryDurableAuthority { .. } => {
+            ObservedResumeVerdict::Refused(bodiless_durable_authority_detail(session_id))
+        }
+        SessionResumeLifecycle::NoCurrentDurableAuthority => ObservedResumeVerdict::Absent,
     }
 }
 
@@ -1054,17 +1124,32 @@ pub(crate) fn durable_fork_unsupported() -> SessionError {
 /// A known actor's stream ends when that actor ends, and its witness is
 /// revoked before the actor is removed or replaced, so a host can hold a
 /// successor's stream back until a revoked predecessor's stream drained.
+///
+/// A subscription opened while its member was not materialized in this
+/// process (dormant, or waking) attaches at the member's wake: `actor` and
+/// `epoch` are `None`, and `attached_epoch` is set once the stream attached,
+/// to the sequence space the woken actor's stream names.
 #[non_exhaustive]
 pub struct AgentEventSubscription {
     /// The member's events.
     pub stream: EventStream,
     /// The actor incarnation `stream` belongs to. `None` when the service
-    /// cannot name it (for example a placed member's pump-tap stream).
+    /// cannot name it (for example a placed member's pump-tap stream), and
+    /// for a subscription that attaches at its member's wake.
     pub actor: Option<meerkat_session::LiveSessionActorWitness>,
     /// Sequence space of the stream's envelope sequences, to be carried in
     /// a later [`meerkat_core::comms::SessionEventCursor::After`]. `None`
-    /// when the service cannot name one (a live-only service).
+    /// when the service cannot name one (a live-only service), and for a
+    /// subscription that attaches at its member's wake (see
+    /// `attached_epoch`).
     pub epoch: Option<meerkat_core::comms::SessionEventEpoch>,
+    /// For a subscription that attaches at its member's wake: set once the
+    /// stream attached and before its first event, to the sequence space of
+    /// the woken actor's stream (`None` inside when the service cannot name
+    /// one); unset while the stream waits. `None` for a subscription that
+    /// attached when it was opened.
+    pub attached_epoch:
+        Option<Arc<std::sync::OnceLock<Option<meerkat_core::comms::SessionEventEpoch>>>>,
 }
 
 impl AgentEventSubscription {
@@ -1077,6 +1162,21 @@ impl AgentEventSubscription {
             stream,
             actor: None,
             epoch,
+            attached_epoch: None,
+        }
+    }
+
+    /// A subscription of a member that is not materialized yet, whose
+    /// `stream` attaches at the member's wake and sets `attached_epoch`.
+    pub(crate) fn attaching_at_wake(
+        stream: EventStream,
+        attached_epoch: Arc<std::sync::OnceLock<Option<meerkat_core::comms::SessionEventEpoch>>>,
+    ) -> Self {
+        Self {
+            stream,
+            actor: None,
+            epoch: None,
+            attached_epoch: Some(attached_epoch),
         }
     }
 }
@@ -1087,6 +1187,7 @@ impl From<meerkat_session::LiveActorEventSubscription> for AgentEventSubscriptio
             stream: subscription.stream,
             actor: Some(subscription.actor),
             epoch: Some(subscription.epoch),
+            attached_epoch: None,
         }
     }
 }
@@ -1245,6 +1346,15 @@ pub(crate) fn provisional_tail_stands_unforwarded(
 pub trait MobSessionService:
     SessionServiceCommsExt + SessionServiceControlExt + SessionServiceHistoryExt
 {
+    /// Test seam: the root of the members' session-scoped comms identities
+    /// the mob seats with ([`super::MobBuilder::with_member_comms_identity_root`]).
+    /// A test double that builds members' comms runtimes keys each one from
+    /// its session's key pair there, as the agent factory does, so a seat's
+    /// recorded endpoint and its member's first build agree. Every other
+    /// service ignores it.
+    #[cfg(test)]
+    fn bind_member_comms_identity_root_for_test(&self, _identity_root: &std::path::Path) {}
+
     /// Wait until every actor removed for `session_id` has exited. An
     /// ordinary removed-actor exit joins the release of what its agent owned
     /// (its MCP router's own surface lineages); an aborted or panicked one
@@ -1555,7 +1665,15 @@ pub trait MobSessionService:
     /// Mechanical presence of the live session actor, without exporting its
     /// document or reconciling durable authority. Health/revival uses this
     /// process-carrier witness so an actor busy inside a provider turn cannot
-    /// block observation or be mistaken for dead state.
+    /// block observation or be mistaken for dead state, and the lift of a
+    /// stopped mob reads it to bind a member whose registration already
+    /// serves its binding without the lanes the member's run holds.
+    ///
+    /// The default answers from [`SessionService::has_live_session`], which
+    /// classifies durable authority instead. Both stock services override it
+    /// with the mechanical witness; a host's own `MobSessionService` wrapper
+    /// should forward it to the service it wraps, or those callers fall back
+    /// to that classification.
     async fn live_session_actor_registered(
         &self,
         session_id: &SessionId,
@@ -2129,6 +2247,19 @@ pub trait MobSessionService:
             })
     }
 
+    /// The auth binding a build of this service that names `auth_binding`
+    /// records in its session's metadata: the same binding stamped with the
+    /// realm that declares it. `Ok(None)` when this service does not resolve
+    /// bindings, so a caller compares the named form alone (the default). A
+    /// wrapper over a builder-backed service forwards it.
+    async fn recorded_auth_binding(
+        &self,
+        auth_binding: &meerkat_core::AuthBindingRef,
+    ) -> Result<Option<meerkat_core::AuthBindingRef>, SessionError> {
+        let _ = auth_binding;
+        Ok(None)
+    }
+
     /// Read the latest committed retained metadata for this exact session id.
     ///
     /// Archived sessions remain observable through this metadata-only seam.
@@ -2587,6 +2718,14 @@ where
             .await;
         #[cfg(target_arch = "wasm32")]
         let _ = session_id;
+    }
+
+    async fn recorded_auth_binding(
+        &self,
+        auth_binding: &meerkat_core::AuthBindingRef,
+    ) -> Result<Option<meerkat_core::AuthBindingRef>, SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::recorded_auth_binding(self, auth_binding)
+            .await
     }
 
     async fn predecessor_tool_restrictions(
@@ -3371,6 +3510,14 @@ where
         let _ = session_id;
     }
 
+    async fn recorded_auth_binding(
+        &self,
+        auth_binding: &meerkat_core::AuthBindingRef,
+    ) -> Result<Option<meerkat_core::AuthBindingRef>, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::recorded_auth_binding(self, auth_binding)
+            .await
+    }
+
     async fn append_system_notice_under_runtime_turn_boundary(
         &self,
         session_id: &SessionId,
@@ -3569,7 +3716,9 @@ where
         // session another runtime owner hosts is refused here, typed, before
         // any recovery.
         let claim = self.grant_session_hosting(session_id)?;
-        self.prepare_cold_attach(session_id, claim).await
+        // The mob settles its own member's session: it is that session's
+        // owner, so the settle never asks the owner to wake it.
+        self.prepare_cold_attach_as_owner(session_id, claim).await
     }
 
     async fn settle_durable_tail_before_cold_start_reporting(
@@ -3580,7 +3729,7 @@ where
         let claim = self.grant_session_hosting(session_id)?;
         Ok(
             match self
-                .prepare_cold_attach_reporting(session_id, claim)
+                .prepare_cold_attach_reporting_as_owner(session_id, claim)
                 .await?
             {
                 meerkat_session::ColdAttachSettlement::ContinuesOpenRun { run_id, committed } => {

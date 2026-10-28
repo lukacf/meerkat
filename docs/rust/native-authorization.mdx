@@ -811,6 +811,74 @@ bounds.
   `web_search_delegate`), `operation_id`, `waited_ms` and `settled`. Each
   refused attempt keeps its own audit record.
 
+## Continue a reviewed call with governed helper steps
+
+A governed tool call whose operation requires review (R2, a model review; R3,
+human consent) spends that review once, at the entry of its effect. A call that
+then takes further governed steps of the same operation (a governed helper
+WorkGraph admission, governed helper child grant issuances) makes that entry
+with `ToolDispatchContext::enter_governed_operation(call)`, which returns the
+typed witness `EnteredDispatchOperation`. A leaf that already entered with
+`enter_reviewed_effect_held` or `ReviewedEntryTicket::enter` (for example on a
+worker) mints it with `GovernedDispatchOperation::into_entered(custody)`,
+passing the custody its own entry returned. The operation may come from the
+dispatch's context or from the refreshed context the entry returned (when its
+staging re-prepared the decision): every clone of a dispatch context shares
+the dispatch's one review entry, so both convert the same custody, and the
+witness's entered tier and window are those of the decision the entry spent.
+Each step decides against the operation's current decision, re-prepared from
+current owners when the one it starts from is stale.
+
+```rust
+let entered = context.enter_governed_operation(call)?;
+let fence = GovernedHelperAdmissionFence::from_entered(
+    &entered, originals.clone(), contributors.clone(), realm_id, namespace, admission,
+);
+let created = graph.create_idempotent_with_fence(key, request, fence.clone()).await;
+for intent in intents {
+    let child = GovernedHelperChildIssuance::from_entered(
+        &entered, originals.clone(), contributors.clone(), intent,
+    )
+    .issue_or_recover();
+}
+```
+
+- One witness serves the fence and every issuance of the call. Each step is
+  decided afresh by the dispatch's own work owners under their single
+  non-waiting exclusion, with every own, named and further original re-read;
+  none spends again, runs a review or requests consent, so a step may run
+  inside the WorkGraph store callback. Retrying an issued intent answers
+  `Recovered`.
+- A step runs only while the current decision requires no more review than
+  the call entered (`EnteredDispatchOperation::entered_tier`), within the
+  entered decision's validity window. A decision re-prepared since the entry
+  runs at the same or a lower tier.
+- For a reviewed entry the review owner admits a step only while the admitting
+  dispatch is live. A step admitted before the dispatch ended (returned,
+  cancelled or timed out) runs to completion, and the review stays in use until
+  the last such step has finished; a step that starts later is refused. An
+  unreviewed (R1) entry spends nothing and, like the plain R1 path, is bounded
+  by its run, not its dispatch.
+- A refused step answers `Denied` (an ended dispatch, a source cancelled,
+  revoked or no longer retained, a decision needing more review than was
+  entered, an expired window) or `Unavailable` (contention, a rebuild request,
+  owners that cannot answer now), and speaks only for its own step: earlier
+  steps keep their effects, and the call's result is the host's to compose. In
+  core a step answers `AuthorizationRefused` with no not-dispatched
+  certificate, or `OperationAuthorizationUnavailable`, never a review
+  settlement.
+- The witness is the capability of exactly the call that entered; use it only
+  for that call's own steps. `WorkAuthorization::run_entered_if_current_within`
+  is a provided method whose default answers unavailable: a work owner, or a
+  wrapper, that does not implement or forward it refuses every entered step.
+  The native owner and its audit and run-custody wrappers do.
+- The plain dispatch paths are unchanged:
+  `GovernedHelperAdmissionFence::from_dispatch` stays R1-only (no review runs
+  under the graph lock), and `GovernedHelperChildIssuance::from_dispatch` is
+  the dispatch's single consuming entry, so a reviewed call issues one child
+  there. Both answer `Denied` when the dispatch's review settles the step,
+  since 0.9.7 (before, `Unavailable`).
+
 ## Refusal observation and dispatch types
 
 [What the model reads on a refused tool call](#what-the-model-reads-on-a-refused-tool-call)

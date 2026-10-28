@@ -648,10 +648,13 @@ async fn run_cold_restart_scenario(reuse_runtime_store: bool, lead_mode: MobRunt
         "restoration must start from an unregistered runtime, not a warm binding"
     );
     let storage_2 = MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage");
+    // The scenario reads the restore's runtime bindings and Broken verdicts
+    // right after the resume, so the start materializes every member.
     let handle_2 = MobBuilder::for_resume(storage_2)
         .with_session_service(service_2.clone())
         .with_default_llm_client(openai_test_client())
         .notify_orchestrator_on_resume(false)
+        .with_member_restore_policy(meerkat_mob::MemberRestorePolicy::Eager)
         .resume()
         .await
         .expect("mob resume after cold restart");
@@ -1178,6 +1181,173 @@ async fn restored_member_first_run_replays_to_a_late_subscriber() {
     assert!(not_live.is_missing_target());
 }
 
+/// A mob-wide event subscription carries a member a cold restart left
+/// dormant, from its wake: the subscription opens with the member not
+/// materialized and wakes nothing, the member's next delivery wakes it, and
+/// the run that delivery starts reaches the subscription from `RunStarted`.
+/// After the member is released and woken again, its new actor's run
+/// reaches the same subscription.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mob_event_router_carries_a_dormant_member_from_its_wake_and_after_a_rewake() {
+    use meerkat_mob::machines::mob_machine::MemberMaterializationPhase;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let worker = AgentIdentity::from("w-1");
+    let mut definition = mob_definition(MobRuntimeMode::TurnDriven);
+    definition.orchestrator = None;
+    definition.wiring = WiringRules {
+        auto_wire_orchestrator: false,
+        role_wiring: vec![],
+    };
+
+    // ---------------- Lifetime 1: one turn, then the process stops ----------
+    let runtime_store_1: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new_whole_blob(&paths.realm_db_path)
+            .expect("open durable runtime store"),
+    );
+    let (service_1, _store_1) = persistent_service(&paths, runtime_store_1.clone());
+    let handle_1 = MobBuilder::new(
+        definition,
+        MobStorage::persistent(&paths.mob_db_path).expect("persistent mob storage"),
+    )
+    .with_session_service(service_1.clone())
+    .with_default_llm_client(openai_test_client())
+    .create()
+    .await
+    .expect("create persistent mob");
+    handle_1
+        .spawn_spec(SpawnMemberSpec::new("worker", worker.clone()))
+        .await
+        .expect("spawn worker");
+    let w1_sid = handle_1
+        .resolve_bridge_session_id(&worker)
+        .await
+        .expect("worker session id");
+    send_and_wait(
+        &handle_1,
+        service_1.as_ref(),
+        "w-1",
+        "PRE_RESTART_ROUTER_TURN",
+        "lifetime1",
+    )
+    .await;
+    handle_1
+        .shutdown()
+        .await
+        .expect("shutdown mob before restart");
+    service_1
+        .discard_live_session(&w1_sid)
+        .await
+        .expect("discard live session before restart");
+    drop(handle_1);
+    drop(service_1);
+    drop(runtime_store_1);
+
+    // ---------------- Lifetime 2: the member starts dormant -----------------
+    let runtime_store_2: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new_whole_blob(&paths.realm_db_path)
+            .expect("reopen durable runtime store"),
+    );
+    let (service_2, _store_2) = persistent_service(&paths, runtime_store_2);
+    let handle_2 = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(service_2.clone())
+    .with_default_llm_client(openai_test_client())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .expect("mob resume after cold restart");
+    assert_eq!(
+        handle_2.member_materialization_for_test(&worker),
+        Some(MemberMaterializationPhase::Dormant),
+        "the start leaves the member dormant"
+    );
+    let mut router = handle_2
+        .subscribe_mob_events()
+        .await
+        .expect("the mob event subscription opens");
+    assert_eq!(
+        handle_2.member_materialization_for_test(&worker),
+        Some(MemberMaterializationPhase::Dormant),
+        "the subscription wakes nothing"
+    );
+
+    send_and_wait(
+        &handle_2,
+        service_2.as_ref(),
+        "w-1",
+        "ROUTER_FIRST_WAKE_TURN",
+        "first wake",
+    )
+    .await;
+    wait_for_routed_run_started(&mut router.event_rx, &worker, "first wake").await;
+
+    // ---------------- Released, then woken again -----------------------------
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match handle_2.release_member(&worker).await {
+            Ok(()) => break,
+            Err(meerkat_mob::MobError::LifecycleOperationPending { .. })
+                if Instant::now() < deadline =>
+            {
+                sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => panic!("release the woken member: {error}"),
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while handle_2.member_materialization_for_test(&worker)
+        != Some(MemberMaterializationPhase::Dormant)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the released member never reads dormant: {:?}",
+            handle_2.member_materialization_for_test(&worker)
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+    send_and_wait(
+        &handle_2,
+        service_2.as_ref(),
+        "w-1",
+        "ROUTER_REWAKE_TURN",
+        "rewake",
+    )
+    .await;
+    wait_for_routed_run_started(&mut router.event_rx, &worker, "rewake").await;
+    handle_2.shutdown().await.expect("shutdown mob");
+}
+
+/// Wait until `router` delivers a `RunStarted` of `member`.
+#[cfg(feature = "test-support")]
+async fn wait_for_routed_run_started(
+    router: &mut tokio::sync::mpsc::Receiver<meerkat_mob::AttributedEvent>,
+    member: &AgentIdentity,
+    context: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let attributed = router
+                .recv()
+                .await
+                .unwrap_or_else(|| panic!("[{context}] the mob event subscription ended"));
+            if attributed.source.identity == *member
+                && matches!(
+                    attributed.envelope.payload,
+                    meerkat_core::AgentEvent::RunStarted { .. }
+                )
+            {
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("[{context}] the member's run never reached the subscription"));
+}
+
 /// RuntimeStore is the singular committed body/catalog authority. Replacing it
 /// with a blank store is durable data loss, so stale non-authoritative
 /// SessionStore projections must not resurrect either member.
@@ -1486,6 +1656,413 @@ async fn mob_cold_restart_explicit_resume_revives_archived_retired_session_in_pl
             .is_some(),
         "the first revived turn must leave the session visible through the active read seam"
     );
+
+    handle_2.shutdown().await.expect("final shutdown");
+}
+
+/// The same explicit revival over a durable SQLite runtime store that the
+/// restart reopens, so the restart's recovery scan runs over the archived
+/// worker's runtime: the scan lists no recovery work for it, and a resume
+/// that names its session still revives it in place, with its transcript.
+#[tokio::test(flavor = "multi_thread")]
+async fn mob_cold_restart_explicit_resume_revives_archived_session_over_reopened_sqlite_store() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let open_runtime_store = || -> Arc<dyn meerkat_runtime::RuntimeStore> {
+        Arc::new(
+            meerkat_runtime::store::SqliteRuntimeStore::new_whole_blob(&paths.realm_db_path)
+                .expect("open durable runtime store"),
+        )
+    };
+
+    let mut definition = mob_definition(MobRuntimeMode::TurnDriven);
+    definition.id = MobId::from("retired-revival-sqlite-mob");
+    definition.orchestrator = None;
+    definition.wiring = WiringRules {
+        auto_wire_orchestrator: false,
+        role_wiring: vec![],
+    };
+
+    // ---------------- Lifetime 1: create, use, then retire ----------------
+    let runtime_store_1 = open_runtime_store();
+    let (service_1, _store_1) = persistent_service(&paths, runtime_store_1.clone());
+    let storage_1 = MobStorage::persistent(&paths.mob_db_path).expect("persistent mob storage");
+    let handle_1 = MobBuilder::new(definition, storage_1)
+        .with_session_service(service_1.clone())
+        .with_default_llm_client(openai_test_client())
+        .create()
+        .await
+        .expect("create persistent mob");
+
+    let worker = AgentIdentity::from("w-1");
+    handle_1
+        .spawn_spec(SpawnMemberSpec::new("worker", worker.clone()))
+        .await
+        .expect("spawn worker before retirement");
+    let original_session_id = handle_1
+        .resolve_bridge_session_id(&worker)
+        .await
+        .expect("worker session id before retirement");
+    send_and_wait(
+        &handle_1,
+        service_1.as_ref(),
+        "w-1",
+        "PRE_RETIRE_SQLITE_REVIVAL_TOKEN alpha",
+        "before-retirement",
+    )
+    .await;
+    handle_1
+        .retire(worker.clone())
+        .await
+        .expect("retire worker before cold restart");
+
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&original_session_id);
+    assert_eq!(
+        meerkat_runtime::store::load_runtime_state(runtime_store_1.as_ref(), &runtime_id)
+            .await
+            .expect("load runtime state after retirement"),
+        Some(meerkat_runtime::RuntimeState::Retired),
+        "retirement must durably retire runtime authority"
+    );
+    assert!(
+        service_1
+            .load_persisted_session(&original_session_id)
+            .await
+            .expect("ordinary persisted-session read after retirement")
+            .is_none(),
+        "ordinary reads must hide the archived session"
+    );
+
+    handle_1
+        .shutdown()
+        .await
+        .expect("shutdown mob before cold restart");
+    drop(handle_1);
+    drop(service_1);
+    drop(runtime_store_1);
+
+    // ---------------- Lifetime 2: reopen the store, then explicitly revive ----
+    let runtime_store_2 = open_runtime_store();
+    let scanned =
+        meerkat_runtime::RuntimeStore::list_runtimes_with_recovery_work(runtime_store_2.as_ref())
+            .await
+            .expect("the reopened store's recovery scan");
+    assert!(
+        !scanned.contains(&runtime_id),
+        "an archived runtime holds no recovery work: {scanned:?}"
+    );
+    let (service_2, _store_2) = persistent_service(&paths, runtime_store_2.clone());
+    let storage_2 = MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage");
+    let handle_2 = MobBuilder::for_resume(storage_2)
+        .with_session_service(service_2.clone())
+        .with_default_llm_client(openai_test_client())
+        .notify_orchestrator_on_resume(false)
+        .resume()
+        .await
+        .expect("resume mob after cold restart");
+
+    handle_2
+        .spawn_spec(
+            SpawnMemberSpec::new("worker", worker.clone())
+                .with_resume_bridge_session_id(original_session_id.clone()),
+        )
+        .await
+        .expect("explicitly revive the archived worker session");
+    assert_eq!(
+        handle_2.resolve_bridge_session_id(&worker).await,
+        Some(original_session_id.clone()),
+        "revival must preserve the exact bridge-session id"
+    );
+    assert_member_active(&member_entry(&handle_2, "w-1").await, "after revival");
+    assert_ne!(
+        meerkat_runtime::store::load_runtime_state(runtime_store_2.as_ref(), &runtime_id)
+            .await
+            .expect("load runtime state after revival"),
+        Some(meerkat_runtime::RuntimeState::Retired),
+        "revival must reactivate runtime authority"
+    );
+
+    wait_for_history_contains_all(
+        service_2.as_ref(),
+        &original_session_id,
+        &["PRE_RETIRE_SQLITE_REVIVAL_TOKEN alpha"],
+        "after-revival-history",
+    )
+    .await;
+    send_and_wait(
+        &handle_2,
+        service_2.as_ref(),
+        "w-1",
+        "POST_REVIVAL_SQLITE_TOKEN omega",
+        "after-revival-turn",
+    )
+    .await;
+    wait_for_history_contains_all(
+        service_2.as_ref(),
+        &original_session_id,
+        &[
+            "PRE_RETIRE_SQLITE_REVIVAL_TOKEN alpha",
+            "POST_REVIVAL_SQLITE_TOKEN omega",
+        ],
+        "final-revival-history",
+    )
+    .await;
+
+    handle_2.shutdown().await.expect("final shutdown");
+}
+
+/// The ops lifecycle snapshot of a runtime whose session `owner` ran one
+/// background tool operation to completion, its completion taken by no
+/// consumer: work the runtime still owes the session.
+#[cfg(feature = "test-support")]
+fn undelivered_background_completion(
+    owner: &meerkat::SessionId,
+) -> meerkat_runtime::PersistedOpsSnapshot {
+    use meerkat_core::ops_lifecycle::{
+        OperationId, OperationKind, OperationResult, OperationSpec, OpsLifecycleRegistry as _,
+    };
+
+    let registry = meerkat_runtime::RuntimeOpsLifecycleRegistry::new();
+    let operation_id = OperationId::new();
+    registry
+        .register_operation(OperationSpec {
+            id: operation_id.clone(),
+            kind: OperationKind::BackgroundToolOp,
+            owner_session_id: owner.clone(),
+            display_name: "background operation".into(),
+            source_label: "cold-restart-mob-resume".into(),
+            operation_source: None,
+            child_session_id: None,
+            expect_peer_channel: false,
+        })
+        .expect("register the operation");
+    registry
+        .provisioning_succeeded(&operation_id)
+        .expect("start the operation");
+    registry
+        .complete_operation(
+            &operation_id,
+            OperationResult {
+                id: operation_id.clone(),
+                content: "done".into(),
+                is_error: false,
+                duration_ms: 1,
+                tokens_used: 0,
+            },
+        )
+        .expect("complete the operation");
+    registry
+        .capture_persistence_snapshot(
+            meerkat_core::RuntimeEpochId::new(),
+            &meerkat_core::EpochCursorState::new(),
+        )
+        .expect("the ops lifecycle snapshot")
+}
+
+/// How many assistant messages the history of `session_id` holds.
+#[cfg(feature = "test-support")]
+async fn assistant_message_count(
+    service: &dyn MobSessionService,
+    session_id: &meerkat::SessionId,
+) -> usize {
+    service
+        .read_history(
+            session_id,
+            SessionHistoryQuery {
+                offset: 0,
+                limit: None,
+            },
+        )
+        .await
+        .expect("read history")
+        .messages
+        .iter()
+        .filter(|message| matches!(message, meerkat_core::Message::BlockAssistant(_)))
+        .count()
+}
+
+/// A member's runtime retired outside the mob (`RuntimeControlPlane::retire`
+/// on the session service's machine) while the member stays seated: the
+/// session owner reads a retired runtime as archived. A crash-path start
+/// then leaves the member Dormant and does not revive its session, although
+/// the runtime's kept state still owes a background operation completion;
+/// the store's recovery scan does not list an archived runtime. The
+/// member's next wake revives the session and delivers that work: the
+/// revived runtime injects the completion as a continuation and records its
+/// injected cursor durably. The transcript ends with the first turn's
+/// answer, so the continuation has no pending boundary and asks the model
+/// nothing; the model sees the completion at the member's next turn.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_retired_outside_the_mob_stays_dormant_at_a_start_until_its_next_wake() {
+    use meerkat_mob::machines::mob_machine::MemberMaterializationPhase;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let open_runtime_store = || -> Arc<dyn meerkat_runtime::RuntimeStore> {
+        Arc::new(
+            meerkat_runtime::store::SqliteRuntimeStore::new_whole_blob(&paths.realm_db_path)
+                .expect("open durable runtime store"),
+        )
+    };
+    let mut definition = mob_definition(MobRuntimeMode::TurnDriven);
+    definition.orchestrator = None;
+    definition.wiring = WiringRules {
+        auto_wire_orchestrator: false,
+        role_wiring: vec![],
+    };
+
+    // ---------------- Lifetime 1: a turn, then a retire outside the mob ----
+    let runtime_store_1 = open_runtime_store();
+    let (service_1, _store_1) = persistent_service(&paths, runtime_store_1.clone());
+    let handle_1 = MobBuilder::new(
+        definition,
+        MobStorage::persistent(&paths.mob_db_path).expect("persistent mob storage"),
+    )
+    .with_session_service(service_1.clone())
+    .with_default_llm_client(openai_test_client())
+    .create()
+    .await
+    .expect("create persistent mob");
+    let worker = AgentIdentity::from("w-1");
+    handle_1
+        .spawn_spec(SpawnMemberSpec::new("worker", worker.clone()))
+        .await
+        .expect("spawn the worker");
+    let session_id = handle_1
+        .resolve_bridge_session_id(&worker)
+        .await
+        .expect("the worker's session");
+    send_and_wait(
+        &handle_1,
+        service_1.as_ref(),
+        "w-1",
+        "BEFORE_OUTSIDE_RETIRE_TOKEN",
+        "before-outside-retire",
+    )
+    .await;
+    // The turn's answer is in the history too before the runtime is retired.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while assistant_message_count(service_1.as_ref(), &session_id).await == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the first turn's answer reaches the history"
+        );
+        sleep(Duration::from_millis(200)).await;
+    }
+
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+    let adapter = service_1
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime authority")
+        .expect("real session runtime");
+    meerkat_runtime::RuntimeControlPlane::retire(adapter.as_ref(), &runtime_id)
+        .await
+        .expect("retire the worker's runtime outside the mob");
+    assert_eq!(
+        meerkat_runtime::store::load_runtime_state(runtime_store_1.as_ref(), &runtime_id)
+            .await
+            .expect("load runtime state after the retire"),
+        Some(meerkat_runtime::RuntimeState::Retired),
+        "the retire is durable"
+    );
+    handle_1
+        .shutdown()
+        .await
+        .expect("shutdown mob before cold restart");
+    drop(adapter);
+    drop(handle_1);
+    drop(service_1);
+    drop(runtime_store_1);
+
+    // ---------------- Lifetime 2: the kept state owes a completion ----------
+    let runtime_store_2 = open_runtime_store();
+    let owed = undelivered_background_completion(&session_id);
+    let owed_seq = owed
+        .completion_entries
+        .iter()
+        .map(|entry| entry.seq)
+        .max()
+        .expect("the owed completion's sequence");
+    meerkat_runtime::RuntimeStore::persist_ops_lifecycle(
+        runtime_store_2.as_ref(),
+        &runtime_id,
+        &owed,
+    )
+    .await
+    .expect("the owed completion is durable");
+    let scanned =
+        meerkat_runtime::RuntimeStore::list_runtimes_with_recovery_work(runtime_store_2.as_ref())
+            .await
+            .expect("the reopened store's recovery scan");
+    assert!(
+        !scanned.contains(&runtime_id),
+        "a retired runtime holds no recovery work, whatever it owes: {scanned:?}"
+    );
+    let (service_2, _store_2) = persistent_service(&paths, runtime_store_2.clone());
+    let handle_2 = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(service_2.clone())
+    .with_default_llm_client(openai_test_client())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .expect("resume mob after cold restart");
+    assert_eq!(
+        handle_2.member_materialization_for_test(&worker),
+        Some(MemberMaterializationPhase::Dormant),
+        "the start leaves the member Dormant"
+    );
+    assert_eq!(
+        meerkat_runtime::store::load_runtime_state(runtime_store_2.as_ref(), &runtime_id)
+            .await
+            .expect("load runtime state after the start"),
+        Some(meerkat_runtime::RuntimeState::Retired),
+        "the start does not revive the archived session"
+    );
+
+    // ---------------- The next wake revives it and runs the work ------------
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        handle_2.ensure_member_live(&worker),
+    )
+    .await
+    .expect("the wake answers")
+    .expect("the wake revives the member's session");
+    assert_eq!(
+        handle_2.member_materialization_for_test(&worker),
+        Some(MemberMaterializationPhase::Live),
+        "the wake leaves the member Live"
+    );
+    assert_ne!(
+        meerkat_runtime::store::load_runtime_state(runtime_store_2.as_ref(), &runtime_id)
+            .await
+            .expect("load runtime state after the wake"),
+        Some(meerkat_runtime::RuntimeState::Retired),
+        "the wake revives the runtime"
+    );
+    // The revived runtime delivers the owed completion: it injects it as a
+    // continuation, and records the injected cursor with its ops lifecycle.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let injected = meerkat_runtime::RuntimeStore::load_ops_lifecycle(
+            runtime_store_2.as_ref(),
+            &runtime_id,
+        )
+        .await
+        .expect("load the revived runtime's ops lifecycle")
+        .map(|snapshot| snapshot.cursors.runtime_last_injected_seq);
+        if injected.is_some_and(|seq| seq >= owed_seq) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the revived runtime delivers the owed completion (injected through {injected:?}, \
+             owed {owed_seq})"
+        );
+        sleep(Duration::from_millis(200)).await;
+    }
 
     handle_2.shutdown().await.expect("final shutdown");
 }
@@ -1873,10 +2450,13 @@ async fn mob_cold_restart_resume_surviving_member_respawn_scenario() {
 
     let (service_2, _store_2) = persistent_service(&paths, runtime_store_1);
     let storage_2 = MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage");
+    // The scenario reads the lead's live comms runtime right after the
+    // resume, so the start materializes every member.
     let handle_2 = MobBuilder::for_resume(storage_2)
         .with_session_service(service_2.clone())
         .with_default_llm_client(openai_test_client())
         .notify_orchestrator_on_resume(false)
+        .with_member_restore_policy(meerkat_mob::MemberRestorePolicy::Eager)
         .resume()
         .await
         .expect("resume after cold restart");
@@ -1999,10 +2579,14 @@ async fn mob_cold_restart_partial_resume_lost_member_scenario() {
 
     let (service_2, _store_2) = persistent_service(&paths, runtime_store_1);
     let storage_2 = MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage");
+    // The scenario reads the restore's Broken verdict and the lead's live
+    // comms runtime right after the resume, so the start materializes every
+    // member.
     let handle_2 = MobBuilder::for_resume(storage_2)
         .with_session_service(service_2.clone())
         .with_default_llm_client(openai_test_client())
         .notify_orchestrator_on_resume(false)
+        .with_member_restore_policy(meerkat_mob::MemberRestorePolicy::Eager)
         .resume()
         .await
         .expect("partial resume after cold restart");
@@ -2296,6 +2880,15 @@ impl PowerCutRuntimeStore {
 impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
     fn session_authority_ops(&self) -> &dyn meerkat_runtime::store::RuntimeSessionAuthorityOps {
         self.inner.session_authority_ops()
+    }
+
+    // A mob boot over this store plans its members from the wrapped store's
+    // obligation scan, as over the store itself.
+    async fn list_runtimes_with_recovery_work(
+        &self,
+    ) -> Result<Vec<meerkat_runtime::LogicalRuntimeId>, meerkat_runtime::store::RuntimeStoreError>
+    {
+        meerkat_runtime::RuntimeStore::list_runtimes_with_recovery_work(&self.inner).await
     }
 
     fn hosting_capability(&self) -> meerkat_runtime::HostingCapability {
@@ -11412,6 +12005,519 @@ async fn a_mob_start_after_a_graceful_stop_resumes_a_members_open_run_head_canon
     let _ = handle.shutdown().await;
 }
 
+/// [`HoldingToolLoopClient`] whose orchestrator answers a resume notification
+/// turn only after it spawned a worker through the mob's handle, as a lead's
+/// spawn tool call waits on its spawn's receipt. Each armed notification
+/// turn spawns its own worker, bounded so that a spawn the mob withholds
+/// fails the row instead of hanging it.
+#[cfg(feature = "test-support")]
+struct SpawningResumeNotificationClient {
+    inner: HoldingToolLoopClient,
+    handle: std::sync::Mutex<Option<MobHandle>>,
+    spawned: std::sync::atomic::AtomicUsize,
+    spawns: std::sync::Mutex<Vec<Result<AgentIdentity, String>>>,
+}
+
+#[cfg(feature = "test-support")]
+impl SpawningResumeNotificationClient {
+    /// The tail of the orchestrator's resume notification prompt.
+    const RESUME_NOTIFICATION: &'static str = "continue orchestration";
+    /// How long one notification turn waits for its spawn's receipt.
+    const SPAWN_BOUND: Duration = Duration::from_secs(20);
+
+    fn new() -> Self {
+        Self {
+            inner: HoldingToolLoopClient::new(0),
+            handle: std::sync::Mutex::new(None),
+            spawned: std::sync::atomic::AtomicUsize::new(0),
+            spawns: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn arm(&self, handle: MobHandle) {
+        *self.handle.lock().expect("armed handle") = Some(handle);
+    }
+
+    /// Drop the armed handle: the client is owned by the mob's session
+    /// service, so holding the handle would keep the mob alive.
+    fn disarm(&self) {
+        self.handle.lock().expect("armed handle").take();
+    }
+
+    fn spawns(&self) -> Vec<Result<AgentIdentity, String>> {
+        self.spawns.lock().expect("recorded spawns").clone()
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[async_trait::async_trait]
+impl meerkat_client::LlmClient for SpawningResumeNotificationClient {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a meerkat_client::LlmRequest,
+    ) -> meerkat_client::types::LlmStream<'a> {
+        let last_user = request
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                meerkat_core::Message::User(user) => Some(user.text_content()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if !last_user.contains(Self::RESUME_NOTIFICATION) {
+            return self.inner.stream(request);
+        }
+        let handle = self.handle.lock().expect("armed handle").clone();
+        Box::pin(async_stream::stream! {
+            if let Some(handle) = handle {
+                let index = self
+                    .spawned
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    + 1;
+                let identity = AgentIdentity::from(format!("w-spawned-{index}"));
+                let spawned = tokio::time::timeout(
+                    Self::SPAWN_BOUND,
+                    handle.spawn_spec(SpawnMemberSpec::new("worker", identity.clone())),
+                )
+                .await;
+                let outcome = match spawned {
+                    Ok(Ok(_)) => Ok(identity),
+                    Ok(Err(error)) => Err(format!("{identity}: {error}")),
+                    Err(_) => Err(format!(
+                        "{identity}: no spawn receipt within {:?}",
+                        Self::SPAWN_BOUND
+                    )),
+                };
+                self.spawns.lock().expect("recorded spawns").push(outcome);
+            }
+            for event in
+                HoldingToolLoopClient::reply(request, "ok", meerkat_core::StopReason::EndTurn)
+            {
+                yield Ok::<_, meerkat_client::LlmError>(event);
+            }
+        })
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::OpenAI
+    }
+
+    async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+        Ok(())
+    }
+}
+
+/// The model request a [`GatedRequestClient`] holds.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GatedRequest {
+    /// The member loop's next request: the resumed open run's.
+    ResumedRunLoop,
+    /// The orchestrator's resume notification turn.
+    ResumeNotification,
+}
+
+/// [`HoldingToolLoopClient`] that holds the first model request of the
+/// selected kind until the row releases it, then answers it as the inner
+/// client does. The held request stands for a long model call or a long
+/// gated tool: the run's turn stays in flight, holding everything a running
+/// turn holds, until the row releases it.
+#[cfg(feature = "test-support")]
+struct GatedRequestClient {
+    inner: HoldingToolLoopClient,
+    gated: GatedRequest,
+    taken: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::watch::Sender<bool>,
+    released: tokio::sync::watch::Sender<bool>,
+    answered: tokio::sync::watch::Sender<bool>,
+}
+
+#[cfg(feature = "test-support")]
+impl GatedRequestClient {
+    fn new(gated: GatedRequest) -> Self {
+        Self {
+            inner: HoldingToolLoopClient::new(0),
+            gated,
+            taken: std::sync::atomic::AtomicBool::new(false),
+            entered: tokio::sync::watch::channel(false).0,
+            released: tokio::sync::watch::channel(false).0,
+            answered: tokio::sync::watch::channel(false).0,
+        }
+    }
+
+    fn selects(&self, request: &meerkat_client::LlmRequest) -> bool {
+        match self.gated {
+            GatedRequest::ResumedRunLoop => request.messages.iter().any(|message| {
+                matches!(
+                    message,
+                    meerkat_core::Message::User(user)
+                        if user.text_content().contains(HoldingToolLoopClient::LOOP_MARKER)
+                )
+            }),
+            GatedRequest::ResumeNotification => request
+                .messages
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    meerkat_core::Message::User(user) => Some(user.text_content()),
+                    _ => None,
+                })
+                .is_some_and(|text| {
+                    text.contains(SpawningResumeNotificationClient::RESUME_NOTIFICATION)
+                }),
+        }
+    }
+
+    /// Wait until the held request has been made, bounded.
+    async fn wait_until_held(&self, context: &str) {
+        let mut entered = self.entered.subscribe();
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            entered.wait_for(|entered| *entered),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("[{context}] the gated model request was never made"))
+        .expect("entered signal");
+    }
+
+    fn release(&self) {
+        self.released.send_replace(true);
+    }
+
+    fn answered(&self) -> bool {
+        *self.answered.borrow()
+    }
+
+    /// Wait until the held request has been answered, bounded.
+    async fn wait_until_answered(&self, context: &str) {
+        let mut answered = self.answered.subscribe();
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            answered.wait_for(|answered| *answered),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("[{context}] the released request was never answered"))
+        .expect("answered signal");
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[async_trait::async_trait]
+impl meerkat_client::LlmClient for GatedRequestClient {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a meerkat_client::LlmRequest,
+    ) -> meerkat_client::types::LlmStream<'a> {
+        if !self.selects(request) || self.taken.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return self.inner.stream(request);
+        }
+        Box::pin(async_stream::stream! {
+            use futures::StreamExt as _;
+            self.entered.send_replace(true);
+            let mut released = self.released.subscribe();
+            let _ = released.wait_for(|released| *released).await;
+            let mut answer = self.inner.stream(request);
+            while let Some(event) = answer.next().await {
+                yield event;
+            }
+            self.answered.send_replace(true);
+        })
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::OpenAI
+    }
+
+    async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+        Ok(())
+    }
+}
+
+/// How long a row lets a lift take while a member's run or the
+/// orchestrator's turn is held. A lift that waits on held member work
+/// reports a stall (`LifecycleOperationProgressStalled`) once its own stall
+/// budget (`EXPLICIT_RESUME_PROGRESS_TIMEOUT`, 30 s) passes without
+/// progress; the bound sits above that budget, so a lift that still waits
+/// names the stage and member it waits at instead of only timing out.
+#[cfg(feature = "test-support")]
+const LIFT_WHILE_HELD_BOUND: Duration = Duration::from_secs(45);
+
+/// A host's graceful shutdown suspends a member's open run; the next start
+/// finds the mob stopped. Its lift resumes the run, whose next model request
+/// is held (a long model call or a long gated tool, held well past the
+/// lift): the lift reaches ready within its stall budget while the run is
+/// still in flight, and the run continues afterwards, resumes once and
+/// completes once, and the lift bound w-1 through the serving-binding path.
+/// A guard row: the run is held mid-apply, where the session mutation gate
+/// is free, so by code reading the full restore also completes here (the
+/// row likely passes before that path existed, except for its path
+/// assertion). The deterministic RED for the path is
+/// `a_lift_binds_a_member_whose_session_mutation_gate_is_held` in the
+/// runtime tests. A lift that still waits on the held run reports a stall,
+/// and the row then names its stage and member.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lift_with_a_long_resumed_member_run_reaches_ready_and_the_run_continues() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+
+    let client_2 = Arc::new(GatedRequestClient::new(GatedRequest::ResumedRunLoop));
+    let (service_2, _store_2) = persistent_head_canonical_service_with(
+        &paths,
+        runtime_store.clone(),
+        Config::default(),
+        client_2.clone(),
+    );
+    let handle = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(service_2.clone())
+    .with_default_llm_client(client_2.clone())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .unwrap_or_else(|error| panic!("the start restores the member over its open run: {error}"));
+    let status = handle.status().await;
+    assert!(
+        matches!(status, Ok(meerkat_mob::MobState::Stopped)),
+        "the mob starts as it was left, stopped: {status:?}"
+    );
+
+    let w1 = AgentIdentity::from("w-1");
+    let served_before = meerkat_mob::explicit_resume_served_bindings_for_test(handle.mob_id(), &w1);
+    let lifted = tokio::time::timeout(LIFT_WHILE_HELD_BOUND, handle.resume()).await;
+    // Released whatever the lift did, so a RED run ends instead of hanging.
+    let held_through_the_lift = !client_2.answered();
+    client_2.release();
+    match lifted {
+        Ok(Ok(())) => {}
+        Ok(Err(meerkat_mob::MobError::LifecycleOperationProgressStalled {
+            stage,
+            member_id,
+            ..
+        })) => {
+            assert_eq!(
+                (stage, member_id.as_ref().map(AgentIdentity::as_str)),
+                ("resume_operation_bindings", Some("w-1")),
+                "the lift stalled while w-1's resumed run was held, outside its binding of w-1"
+            );
+            panic!("the lift waited at its operation binding of w-1 for w-1's held run");
+        }
+        Ok(Err(error)) => panic!("the lift failed: {error}"),
+        Err(elapsed) => panic!(
+            "the lift neither reached ready nor reported a stall while w-1's resumed run was held: {elapsed}"
+        ),
+    }
+    client_2.wait_until_held("long-resumed-run").await;
+    assert!(
+        held_through_the_lift,
+        "the member's resumed run was still in flight when the lift answered"
+    );
+    assert_eq!(
+        meerkat_mob::explicit_resume_served_bindings_for_test(handle.mob_id(), &w1),
+        served_before + 1,
+        "the lift bound w-1 through the serving-binding path, not the full restore"
+    );
+    let status = handle.status().await;
+    assert!(
+        matches!(status, Ok(meerkat_mob::MobState::Running)),
+        "the lift reached ready: {status:?}"
+    );
+    client_2.wait_until_answered("long-resumed-run").await;
+    assert_the_open_run_resumes_once_and_completes(
+        service_2.as_ref(),
+        runtime_store.as_ref(),
+        &client_2.inner,
+        &run,
+        true,
+        "long-resumed-run",
+    )
+    .await;
+    let _ = handle.shutdown().await;
+}
+
+/// The same lift with the orchestrator's resume notification turn held at its
+/// model request (a long turn): the lift reaches ready within its stall budget
+/// while that turn is still in flight, and the turn is answered once
+/// released. RED before: the lift awaited the notification turn, so it held
+/// its readiness for the whole turn (the row's bound expires with the turn
+/// still held).
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lift_whose_resume_notification_turn_is_long_reaches_ready() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+
+    let client_2 = Arc::new(GatedRequestClient::new(GatedRequest::ResumeNotification));
+    let (service_2, _store_2) = persistent_head_canonical_service_with(
+        &paths,
+        runtime_store.clone(),
+        Config::default(),
+        client_2.clone(),
+    );
+    let handle = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(service_2.clone())
+    .with_default_llm_client(client_2.clone())
+    .notify_orchestrator_on_resume(true)
+    .resume()
+    .await
+    .unwrap_or_else(|error| panic!("the start restores the member over its open run: {error}"));
+    let status = handle.status().await;
+    assert!(
+        matches!(status, Ok(meerkat_mob::MobState::Stopped)),
+        "the mob starts as it was left, stopped: {status:?}"
+    );
+
+    let lifted = tokio::time::timeout(LIFT_WHILE_HELD_BOUND, handle.resume()).await;
+    let held_through_the_lift = !client_2.answered();
+    client_2.release();
+    // The notification stage reports no stall (the turn is the host's own
+    // work), so a lift that awaits the held turn only times out here.
+    lifted
+        .expect("the lift reaches ready while the notification turn is still in flight")
+        .expect("the lift succeeds");
+    client_2.wait_until_held("long-notification-turn").await;
+    assert!(
+        held_through_the_lift,
+        "the notification turn was still in flight when the lift answered"
+    );
+    let status = handle.status().await;
+    assert!(
+        matches!(status, Ok(meerkat_mob::MobState::Running)),
+        "the lift reached ready: {status:?}"
+    );
+    client_2.wait_until_answered("long-notification-turn").await;
+    assert_the_open_run_resumes_once_and_completes(
+        service_2.as_ref(),
+        runtime_store.as_ref(),
+        &client_2.inner,
+        &run,
+        true,
+        "long-notification-turn",
+    )
+    .await;
+    let _ = handle.shutdown().await;
+}
+
+/// A host's graceful shutdown suspends a member's short open run; the next
+/// start finds the mob stopped. Its lift resumes that run, which finishes
+/// during the lift, and hands the orchestrator's resume notification turn to
+/// the mob's lifecycle owner. That turn spawns a worker through the mob and
+/// waits for the receipt, as a lead's spawn tool call does: the lift reaches
+/// ready, the spawn is admitted, the worker is a member, and the open run
+/// resumed once. RED before: the lift awaited the notification turn, and its
+/// topology fence stayed up until its post-commit work finished and deferred
+/// every spawn until then, so the turn waited on a spawn the lift withheld
+/// while the lift waited on the turn. The spawn got no receipt until the
+/// client's 20 s spawn bound gave up on it; only then did the turn, and the
+/// lift, answer, with the spawn failed.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lift_whose_resume_notification_turn_spawns_a_member_reaches_ready() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+
+    let client_2 = Arc::new(SpawningResumeNotificationClient::new());
+    let (service_2, _store_2) = persistent_head_canonical_service_with(
+        &paths,
+        runtime_store.clone(),
+        Config::default(),
+        client_2.clone(),
+    );
+    let handle = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(service_2.clone())
+    .with_default_llm_client(client_2.clone())
+    .notify_orchestrator_on_resume(true)
+    .resume()
+    .await
+    .unwrap_or_else(|error| panic!("the start restores the member over its open run: {error}"));
+    let status = handle.status().await;
+    assert!(
+        matches!(status, Ok(meerkat_mob::MobState::Stopped)),
+        "the mob starts as it was left, stopped: {status:?}"
+    );
+    client_2.arm(handle.clone());
+
+    let lifted = tokio::time::timeout(Duration::from_secs(120), handle.resume()).await;
+    let spawns = match &lifted {
+        // The notification turn runs under the mob's lifecycle owner, so it
+        // may still be on its way when the lift answers.
+        Ok(Ok(())) => tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let spawns = client_2.spawns();
+                if !spawns.is_empty() {
+                    break spawns;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_default(),
+        _ => client_2.spawns(),
+    };
+    client_2.disarm();
+    lifted
+        .expect("the lift answers")
+        .expect("the lift succeeds");
+    assert!(
+        !spawns.is_empty(),
+        "the orchestrator's resume notification turn ran"
+    );
+    assert!(
+        spawns.iter().all(Result::is_ok),
+        "the spawn the notification turn made was admitted: {spawns:?}"
+    );
+    for spawned in spawns.into_iter().filter_map(Result::ok) {
+        handle
+            .resolve_bridge_session_id(&spawned)
+            .await
+            .unwrap_or_else(|| panic!("{spawned} is a session-backed member"));
+    }
+    let status = handle.status().await;
+    assert!(
+        matches!(status, Ok(meerkat_mob::MobState::Running)),
+        "the lift reached ready: {status:?}"
+    );
+    assert_the_open_run_resumes_once_and_completes(
+        service_2.as_ref(),
+        runtime_store.as_ref(),
+        &client_2.inner,
+        &run,
+        true,
+        "spawn-during-lift",
+    )
+    .await;
+    let _ = handle.shutdown().await;
+}
+
 /// A host that holds a restored member's run starts until it is ready (for
 /// example until it has published the member's tools) releases the hold after
 /// the member's runtime registered. The registration's own wake for the kept
@@ -11724,65 +12830,69 @@ async fn a_mob_start_after_a_graceful_stop_resumes_a_members_open_run_whole_blob
     let _ = handle.shutdown().await;
 }
 
-/// The typed refusal a start that cannot prove a member's tail fails with,
-/// through any shared-failure wrapper.
-#[cfg(feature = "test-support")]
-fn is_unprovable_tail_start_failure(
-    error: &meerkat_mob::MobError,
-    member: &AgentIdentity,
-    session: &meerkat_core::types::SessionId,
-) -> bool {
-    match error {
-        meerkat_mob::MobError::SharedLifecycleFailure(inner) => {
-            is_unprovable_tail_start_failure(inner, member, session)
-        }
-        meerkat_mob::MobError::MemberStartupRecoveryFailed {
-            member_id,
-            session_id,
-            cause,
-        } => {
-            member_id == member
-                && session_id == session
-                && matches!(
-                    cause.as_ref(),
-                    meerkat_mob::MobError::MemberDurableTailUnprovable { member_id, session_id }
-                        if member_id == member && session_id == session
-                )
-        }
-        _ => false,
-    }
-}
-
 /// Unprovable still means unprovable: over the same suspended run, a store
 /// whose durable-tail recovery HOLDS the tail (it cannot produce exact
-/// recovery evidence) gives the settle no continuation to report, so the
-/// start still refuses, typed, and leaves the tail as it was.
+/// recovery evidence) never lets the member resume over it, and the tail
+/// stays as it was. The start of the stopped mob reads no member session, so
+/// it starts the mob Stopped with the member Dormant. The lift wakes the
+/// member for the work its tail owes; the store refuses its resume at the
+/// unprovable boundary, so the member is Broken and the lift answers Ok (a
+/// member's restore failure is its own outcome). A wake of the member then
+/// answers its typed restore failure, carrying the durable resume hold a host
+/// reads (`TailHeldForRecovery`, as the start's refusal reported it before
+/// the start read no member session), and nothing resumes the run.
 #[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_mob_start_over_a_held_member_tail_still_refuses_typed() {
+async fn a_held_member_tail_is_refused_typed_at_the_members_wake() {
+    use meerkat_mob::machines::mob_machine::MemberMaterializationPhase;
+
     let temp = tempfile::tempdir().expect("temp dir");
     let paths = Paths::new(temp.path());
     let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
     let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
     let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+    let member = AgentIdentity::from("w-1");
 
     power_store.hold_durable_tail_recovery(true);
     let client_2 = Arc::new(HoldingToolLoopClient::new(0));
     let service_2 = requeue_service(&paths, runtime_store.clone(), true, client_2.clone());
-    // The start fails in the mob's actor before it admits a command: the
-    // builder may hand back the handle, whose status then carries the
-    // fail-stop.
-    let error = match start_again(&paths, service_2.clone(), client_2.clone()).await {
-        Err(error) => error,
-        Ok(handle) => handle
-            .status()
-            .await
-            .expect_err("a start over a held tail fail-stops the mob"),
-    };
-    assert!(
-        is_unprovable_tail_start_failure(&error, &AgentIdentity::from("w-1"), &run.w1_sid),
-        "the start refuses with the member's typed unprovable tail: {error:?}"
+    let handle = start_again(&paths, service_2.clone(), client_2.clone())
+        .await
+        .expect("the start of a stopped mob reads no member session");
+    assert_eq!(
+        handle.status().await.expect("the started mob answers"),
+        meerkat_mob::MobState::Stopped,
+        "the start keeps the mob Stopped"
     );
+    assert_eq!(
+        handle.member_materialization_for_test(&member),
+        Some(MemberMaterializationPhase::Dormant),
+        "the start leaves the member Dormant"
+    );
+    assert_eq!(
+        provisional_tail_run(runtime_store.as_ref(), &run.w1_sid, true).await,
+        Some(run.run_id.clone()),
+        "the start leaves the held tail as the shutdown left it"
+    );
+
+    tokio::time::timeout(Duration::from_secs(60), handle.resume())
+        .await
+        .expect("the lift answers")
+        .expect("the lift resumes the mob: the member's refused restore is its own outcome");
+    let refused = tokio::time::timeout(Duration::from_secs(30), handle.ensure_member_live(&member))
+        .await
+        .expect("the wake answers");
+    match &refused {
+        Err(error @ meerkat_mob::MobError::MemberRestoreFailed { member_id, .. }) => {
+            assert_eq!(member_id, &member);
+            assert_eq!(
+                error.durable_resume_hold(),
+                Some(meerkat_core::service::DurableResumeHold::TailHeldForRecovery),
+                "the Broken member carries the typed hold: {error:?}"
+            );
+        }
+        other => panic!("the member's wake answers its typed restore failure: {other:?}"),
+    }
     assert_eq!(
         provisional_tail_run(runtime_store.as_ref(), &run.w1_sid, true).await,
         Some(run.run_id.clone()),
@@ -11795,6 +12905,7 @@ async fn a_mob_start_over_a_held_member_tail_still_refuses_typed() {
         0,
         "nothing resumed the run"
     );
+    let _ = handle.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------

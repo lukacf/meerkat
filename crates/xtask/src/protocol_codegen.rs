@@ -3859,6 +3859,7 @@ const APPROVAL_LIFECYCLE_NAMED_ENUMS: &[(&str, &str)] = &[
     ("ReviewAttemptStatus", "Pending"),
     ("ReviewVerdict", "Allow"),
     ("ReviewRetirementReason", "ContextChanged"),
+    ("EnteredEffectPhase", "Open"),
 ];
 
 fn generate_approval_lifecycle_authority(machine: &MachineSchema) -> Result<String> {
@@ -4665,6 +4666,18 @@ fn render_approval_expr(
             rust_operand(left, render_approval_expr(left, binding_types, machine)?),
             rust_operand(right, render_approval_expr(right, binding_types, machine)?)
         )),
+        // Counter arithmetic (an entered effect's steps in flight); every
+        // decrement is guarded on a non-zero count.
+        Expr::Add(left, right) => Ok(format!(
+            "{} + {}",
+            rust_operand(left, render_approval_expr(left, binding_types, machine)?),
+            rust_operand(right, render_approval_expr(right, binding_types, machine)?)
+        )),
+        Expr::Sub(left, right) => Ok(format!(
+            "{} - {}",
+            rust_operand(left, render_approval_expr(left, binding_types, machine)?),
+            rust_operand(right, render_approval_expr(right, binding_types, machine)?)
+        )),
         Expr::Contains { collection, value } => Ok(format!(
             "{}.contains({})",
             render_approval_collection_expr(collection)?,
@@ -4865,6 +4878,7 @@ fn approval_type_is_copy(type_name: &str) -> bool {
             | "ReviewAttemptStatus"
             | "ReviewVerdict"
             | "ReviewRetirementReason"
+            | "EnteredEffectPhase"
     )
 }
 

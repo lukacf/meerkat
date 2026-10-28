@@ -155,6 +155,7 @@ Mob runtime APIs live primarily in:
 | `with_session_service(Arc<dyn MobSessionService>)` | Attach required session bridge |
 | `allow_ephemeral_sessions(bool)` | Allow non-persistent session services (dev/test) |
 | `notify_orchestrator_on_resume(bool)` | Control resume notification behavior |
+| `with_resume_restore_concurrency(usize)` | How many members `resume()` restores at once, and how many members a lift of the stopped mob (`MobHandle::resume`) wakes at once for its plan, or observes at once while it rebuilds them (default 16; `1` restores one at a time) |
 | `register_tool_bundle(name, dispatcher)` | Register named Rust tool bundle |
 | `create().await` | Validate + create runtime |
 | `resume().await` | Rehydrate runtime from store |

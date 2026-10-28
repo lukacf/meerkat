@@ -513,6 +513,7 @@ mod live_context_mirror_tests {
                     generation: Some(crate::meerkat_machine::dsl::Generation(0)),
                     runtime_epoch_id: registered.active_runtime_epoch_id,
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+                    residency_owner: crate::meerkat_machine::dsl::SessionResidencyOwner::Session,
                 },
                 "test:PrepareBindings",
             )
@@ -2612,6 +2613,7 @@ mod live_context_mirror_tests {
                     generation: Some(crate::meerkat_machine::dsl::Generation(0)),
                     runtime_epoch_id: registered.active_runtime_epoch_id,
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+                    residency_owner: crate::meerkat_machine::dsl::SessionResidencyOwner::Session,
                 },
                 "test:PrepareBindings",
             )
@@ -5864,6 +5866,7 @@ mod live_context_mirror_tests {
                     generation: Some(crate::meerkat_machine::dsl::Generation(0)),
                     runtime_epoch_id: registered.active_runtime_epoch_id,
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+                    residency_owner: crate::meerkat_machine::dsl::SessionResidencyOwner::Session,
                 },
                 "test:PrepareBindings",
             )
@@ -18525,7 +18528,8 @@ impl MeerkatMachine {
     /// controller already supplied the canonical member incarnation, so the
     /// host must commit those exact facts through generated
     /// `PrepareBindings` authority before attaching an executor or accepting a
-    /// turn.
+    /// turn. The placement is a mob member's, so the composition owns the
+    /// registration's residency: an empty resume keeps it serving.
     pub async fn prepare_runtime_placement_binding(
         &self,
         session_id: SessionId,
@@ -18556,6 +18560,7 @@ impl MeerkatMachine {
             agent_runtime_id,
             fence_token,
             generation,
+            crate::meerkat_machine::dsl::SessionResidencyOwner::Composition,
         )
         .await
         .map_err(|error| RuntimeBindingsError::PrepareFailed(session_id, error.to_string()))

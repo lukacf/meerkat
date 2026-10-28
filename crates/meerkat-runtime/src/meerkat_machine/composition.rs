@@ -59,16 +59,19 @@ use crate::meerkat_machine::{MeerkatMachine, dsl as mm_dsl};
 /// An unpinned surface refuses a routed input that projects none instead of
 /// inferring the session from another projected field.
 ///
-/// Runtime epoch: the seam projects MobMachine-owned facts only, and the
-/// entry runtime epoch is a meerkat-owned REGISTRATION fact, so no routed
-/// variant carries it and MobMachine must never learn it. The variants that
-/// declare the field are built here with `None` and resolved against the
+/// Runtime epoch: the entry runtime epoch is a meerkat-owned REGISTRATION
+/// fact, so no routed INPUT (mob to meerkat) carries it. The input variants
+/// that declare the field are built here with `None` and resolved against the
 /// target session entry inside
 /// `MeerkatMachine::apply_routed_session_dsl_input`, under the same guard
 /// that resolved that entry. Resolving it in this surface instead would be
 /// either a peek that goes stale before the apply, or a self-deadlock on the
 /// non-reentrant per-session mutation gate the routed dispatch already
-/// holds.
+/// holds. The routed SIGNALS (meerkat to mob) do carry the epoch, as a
+/// fence: `RuntimeBound` tells MobMachine which registration epoch its member
+/// is bound to, and `RuntimeRegistrationReleased` names the epoch that was
+/// released, so a release demotes exactly the materialization MobMachine
+/// recorded and a stale one is an accepted no-op.
 ///
 /// The exact materialization claim installs this surface's reverse endpoint
 /// before any placement route is admitted. A routed input cannot acquire that
@@ -89,11 +92,22 @@ pub struct MeerkatConsumerSurface {
 
 /// Producer-side signal source sum for MeerkatMachine lifecycle effects
 /// routed through the `meerkat_mob_seam` signal surface.
+///
+/// Every `Option` field is projected as an opaque `Option<String>` (runtime
+/// id, epoch) or `Option<u64>` (fence), so an absent value reaches the
+/// consumer as `None` instead of a missing producer field: the signal
+/// dispatcher refuses a route whose bound field the producer does not
+/// project, and a release must never be dropped (an absent or stale fact
+/// lands on MobMachine's `Stale` arm, an accepted no-op).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeerkatSeamSignal {
     RuntimeBound {
         agent_runtime_id: mm_dsl::AgentRuntimeId,
         fence_token: mm_dsl::FenceToken,
+        /// The bound registration's epoch. MobMachine records it for the
+        /// member, so a later release is honoured only for this
+        /// registration.
+        runtime_epoch_id: Option<mm_dsl::RuntimeEpochId>,
     },
     RuntimeRetired {
         agent_runtime_id: mm_dsl::AgentRuntimeId,
@@ -103,6 +117,24 @@ pub enum MeerkatSeamSignal {
         agent_runtime_id: mm_dsl::AgentRuntimeId,
         fence_token: mm_dsl::FenceToken,
     },
+    /// A runtime registration was released (its final unregister), with the
+    /// released registration's own runtime id, fence and epoch, each absent
+    /// when it held none.
+    RuntimeRegistrationReleased {
+        agent_runtime_id: Option<mm_dsl::AgentRuntimeId>,
+        fence_token: Option<mm_dsl::FenceToken>,
+        runtime_epoch_id: Option<mm_dsl::RuntimeEpochId>,
+    },
+}
+
+/// The opaque projection of an optional runtime id or epoch.
+fn optional_str_field(value: Option<&str>) -> FieldValue<'static> {
+    FieldValue::Opaque(Arc::new(value.map(str::to_owned)))
+}
+
+/// The opaque projection of an optional fence.
+fn optional_u64_field(value: Option<u64>) -> FieldValue<'static> {
+    FieldValue::Opaque(Arc::new(value))
 }
 
 impl MeerkatSeamSignal {
@@ -111,6 +143,9 @@ impl MeerkatSeamSignal {
             Self::RuntimeBound { .. } => seam_facts::effects::meerkat::runtime_bound(),
             Self::RuntimeRetired { .. } => seam_facts::effects::meerkat::runtime_retired(),
             Self::RuntimeDestroyed { .. } => seam_facts::effects::meerkat::runtime_destroyed(),
+            Self::RuntimeRegistrationReleased { .. } => {
+                seam_facts::effects::meerkat::runtime_registration_released()
+            }
         }
     }
 
@@ -123,9 +158,38 @@ impl MeerkatSeamSignal {
 
     fn field(&self, id: &FieldId) -> Option<FieldValue<'_>> {
         let (agent_runtime_id, fence_token) = match self {
+            Self::RuntimeRegistrationReleased {
+                agent_runtime_id,
+                fence_token,
+                runtime_epoch_id,
+            } => {
+                return if id == &seam_facts::fields::agent_runtime_id() {
+                    Some(optional_str_field(
+                        agent_runtime_id
+                            .as_ref()
+                            .map(|runtime_id| runtime_id.0.as_str()),
+                    ))
+                } else if id == &seam_facts::fields::fence_token() {
+                    Some(optional_u64_field(fence_token.map(|fence| fence.0)))
+                } else if id == &seam_facts::fields::runtime_epoch_id() {
+                    Some(optional_str_field(
+                        runtime_epoch_id.as_ref().map(|epoch| epoch.0.as_str()),
+                    ))
+                } else {
+                    None
+                };
+            }
+            Self::RuntimeBound {
+                runtime_epoch_id, ..
+            } if id == &seam_facts::fields::runtime_epoch_id() => {
+                return Some(optional_str_field(
+                    runtime_epoch_id.as_ref().map(|epoch| epoch.0.as_str()),
+                ));
+            }
             Self::RuntimeBound {
                 agent_runtime_id,
                 fence_token,
+                ..
             }
             | Self::RuntimeRetired {
                 agent_runtime_id,
@@ -173,9 +237,11 @@ pub fn lift_routed_signal(effect: &mm_dsl::MeerkatMachineEffect) -> Option<Meerk
         mm_dsl::MeerkatMachineEffect::RuntimeBound {
             agent_runtime_id,
             fence_token,
+            runtime_epoch_id,
         } => Some(MeerkatSeamSignal::RuntimeBound {
             agent_runtime_id: agent_runtime_id.clone(),
             fence_token: *fence_token,
+            runtime_epoch_id: runtime_epoch_id.clone(),
         }),
         mm_dsl::MeerkatMachineEffect::RuntimeRetired {
             agent_runtime_id,
@@ -190,6 +256,15 @@ pub fn lift_routed_signal(effect: &mm_dsl::MeerkatMachineEffect) -> Option<Meerk
         } => Some(MeerkatSeamSignal::RuntimeDestroyed {
             agent_runtime_id: agent_runtime_id.clone(),
             fence_token: *fence_token,
+        }),
+        mm_dsl::MeerkatMachineEffect::RuntimeRegistrationReleased {
+            agent_runtime_id,
+            fence_token,
+            runtime_epoch_id,
+        } => Some(MeerkatSeamSignal::RuntimeRegistrationReleased {
+            agent_runtime_id: agent_runtime_id.clone(),
+            fence_token: *fence_token,
+            runtime_epoch_id: runtime_epoch_id.clone(),
         }),
         _ => None,
     }
@@ -402,6 +477,12 @@ impl ConsumerSurface for MeerkatConsumerSurface {
                 // the epoch".
                 runtime_epoch_id: None,
                 session_id: mm_dsl::SessionId::from(sid.to_string()),
+                // The route binds Composition as a literal, which is not
+                // projected: every routed placement is the composition's own
+                // (a mob member's binding request), so the composition owns
+                // the registration's residency and an empty resume keeps it
+                // serving.
+                residency_owner: mm_dsl::SessionResidencyOwner::Composition,
             }
         } else if variant == seam_facts::inputs::ingest() {
             // Route binding `work_request_reaches_meerkat` delivers
@@ -1038,6 +1119,7 @@ mod tests {
                     generation: Some(mm_dsl::Generation(0)),
                     runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("stale-epoch".into())),
                     session_id: mm_dsl::SessionId(session_id.to_string()),
+                    residency_owner: mm_dsl::SessionResidencyOwner::Composition,
                 },
             )
             .await
@@ -1088,6 +1170,88 @@ mod tests {
             .await
             .expect_err("work stated against a stale epoch must not be admitted");
         assert_eq!(refusal.error_code, "dsl_guard_rejected", "{refusal}");
+    }
+
+    /// ABA: a placement stating the entry epoch of an EARLIER registration of
+    /// the same session is refused against the newer registration, and
+    /// nothing binds; the routed placement that states no epoch takes the
+    /// newer entry's epoch and binds. Every routed placement therefore carries
+    /// the current registration's epoch, so the registration release's epoch
+    /// fence compares Some epochs in production.
+    #[tokio::test]
+    async fn routed_placement_stating_an_earlier_registrations_epoch_is_refused() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let surface = MeerkatConsumerSurface::unobserved_for_test(Arc::clone(&machine));
+        let session_id = SessionId::new();
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+        let first_epoch = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("registered authority exists")
+            .active_runtime_epoch_id
+            .expect("a registration owns an entry epoch");
+        machine
+            .unregister_session(&session_id)
+            .await
+            .expect("unregister the first registration");
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register the session again");
+        let second_epoch = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("registered authority exists")
+            .active_runtime_epoch_id
+            .expect("the newer registration owns an entry epoch");
+        assert_ne!(
+            first_epoch, second_epoch,
+            "each registration mints its own entry epoch"
+        );
+
+        let refusal = machine
+            .apply_routed_meerkat_input(
+                &session_id,
+                mm_dsl::MeerkatMachineInput::PrepareBindings {
+                    agent_runtime_id: mm_dsl::AgentRuntimeId("mob-runtime".into()),
+                    fence_token: mm_dsl::FenceToken(1),
+                    generation: Some(mm_dsl::Generation(0)),
+                    runtime_epoch_id: Some(first_epoch),
+                    session_id: mm_dsl::SessionId(session_id.to_string()),
+                    residency_owner: mm_dsl::SessionResidencyOwner::Composition,
+                },
+            )
+            .await
+            .expect_err("a placement stating an earlier registration's epoch must be refused");
+        assert_eq!(refusal.error_code, "dsl_guard_rejected", "{refusal}");
+        let state = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("authority remains available");
+        assert_eq!(
+            state.active_runtime_id, None,
+            "a refused placement binds nothing"
+        );
+        assert_eq!(state.active_runtime_epoch_id, Some(second_epoch.clone()));
+
+        bind_runtime(&surface, &session_id, "mob-runtime").await;
+        let state = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("authority remains available");
+        assert_eq!(
+            state.active_runtime_id,
+            Some(mm_dsl::AgentRuntimeId("mob-runtime".into())),
+            "the epochless routed placement binds"
+        );
+        assert_eq!(
+            state.active_runtime_epoch_id,
+            Some(second_epoch),
+            "the routed placement asserts the newer registration's epoch"
+        );
     }
 
     #[tokio::test]
@@ -1816,6 +1980,53 @@ mod tests {
         ]
     }
 
+    /// A composition placement that names the exact binding its registration
+    /// already holds (a wake that keeps a live session asks for its binding
+    /// again) is accepted idempotently: the registration keeps its binding,
+    /// is still composition-owned, and no second `RuntimeBound` reaches the
+    /// composition.
+    #[tokio::test]
+    async fn an_exact_repeat_placement_is_idempotent_and_signals_nothing() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let surface = Arc::new(RecordingSignalSurface::default());
+        let dispatcher = recording_dispatcher(surface.clone());
+        let _prepared = prepare_composed_session(&machine, &session_id, &dispatcher).await;
+        bind_composed_session(&machine, &session_id, &dispatcher, "kept:0").await;
+        assert_eq!(
+            surface.log.lock().await.len(),
+            1,
+            "precondition: the first placement signals its binding"
+        );
+        let bound = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("the bound state");
+
+        bind_composed_session(&machine, &session_id, &dispatcher, "kept:0").await;
+
+        assert_eq!(
+            surface.log.lock().await.len(),
+            1,
+            "an exact repeat placement signals nothing"
+        );
+        let repeated = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("the state after the repeat");
+        assert_eq!(repeated.active_runtime_id, bound.active_runtime_id);
+        assert_eq!(repeated.active_fence_token, bound.active_fence_token);
+        assert_eq!(
+            repeated.active_runtime_generation,
+            bound.active_runtime_generation
+        );
+        assert_eq!(
+            repeated.residency_owner,
+            mm_dsl::SessionResidencyOwner::Composition,
+            "a composition placement owns the registration's residency"
+        );
+    }
+
     #[tokio::test]
     async fn shared_machine_routes_signals_to_exact_composition_registration() {
         use crate::traits::RuntimeControlPlane;
@@ -1928,7 +2139,24 @@ mod tests {
             .commit_session_dsl_transition(&id, staged, "test delayed retirement dispatch")
             .await
             .expect("dispatch captured old endpoint");
-        assert_eq!(old_surface.log.lock().await.len(), 2);
+        // The old endpoint saw its own binding, its registration's release
+        // (the final unregister publishes it to the owning composition) and
+        // the delayed retirement captured for it, in that order.
+        let old_signals: Vec<String> = old_surface
+            .log
+            .lock()
+            .await
+            .iter()
+            .map(|(variant, _)| variant.as_str().to_string())
+            .collect();
+        assert_eq!(
+            old_signals,
+            [
+                "ObserveRuntimeReady",
+                "ReleaseMemberMaterialization",
+                "ObserveRuntimeRetired"
+            ]
+        );
         assert_eq!(
             new_surface.log.lock().await.len(),
             1,
@@ -2017,6 +2245,7 @@ mod tests {
                     generation: Some(mm_dsl::Generation(0)),
                     runtime_epoch_id: None,
                     session_id: mm_dsl::SessionId(session_id.to_string()),
+                    residency_owner: mm_dsl::SessionResidencyOwner::Composition,
                 },
             )
             .await
@@ -2051,6 +2280,7 @@ mod tests {
             mm_dsl::MeerkatMachineEffect::RuntimeBound {
                 agent_runtime_id: mm_dsl::AgentRuntimeId("rt-1".into()),
                 fence_token: mm_dsl::FenceToken(1),
+                runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("epoch-1".into())),
             },
             mm_dsl::MeerkatMachineEffect::RuntimeRetired {
                 agent_runtime_id: mm_dsl::AgentRuntimeId("rt-1".into()),
@@ -2059,6 +2289,11 @@ mod tests {
             mm_dsl::MeerkatMachineEffect::RuntimeDestroyed {
                 agent_runtime_id: mm_dsl::AgentRuntimeId("rt-1".into()),
                 fence_token: mm_dsl::FenceToken(1),
+            },
+            mm_dsl::MeerkatMachineEffect::RuntimeRegistrationReleased {
+                agent_runtime_id: Some(mm_dsl::AgentRuntimeId("rt-1".into())),
+                fence_token: Some(mm_dsl::FenceToken(1)),
+                runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("epoch-1".into())),
             },
         ];
         let liftable: BTreeSet<String> = liftable_bodies
@@ -2089,6 +2324,7 @@ mod tests {
                 MeerkatSeamSignal::RuntimeBound {
                     agent_runtime_id: mm_dsl::AgentRuntimeId("rt-bound".into()),
                     fence_token: mm_dsl::FenceToken(11),
+                    runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("epoch-bound".into())),
                 },
                 seam_facts::route_runtime_bound_reaches_mob(),
             ),
@@ -2106,6 +2342,14 @@ mod tests {
                 },
                 seam_facts::route_runtime_destroyed_reaches_mob(),
             ),
+            (
+                MeerkatSeamSignal::RuntimeRegistrationReleased {
+                    agent_runtime_id: Some(mm_dsl::AgentRuntimeId("rt-released".into())),
+                    fence_token: Some(mm_dsl::FenceToken(14)),
+                    runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("epoch-released".into())),
+                },
+                seam_facts::route_runtime_registration_released_reaches_mob(),
+            ),
         ];
 
         for (signal, expected_route) in cases {
@@ -2119,6 +2363,67 @@ mod tests {
                     producer_field.as_str()
                 );
             }
+        }
+    }
+
+    /// A release that names no runtime id, fence or epoch (a registration
+    /// that held none of them) still projects every field its route binds:
+    /// the absent values reach the mob as `None` and land on MobMachine's
+    /// `Stale` arm, instead of the dispatcher refusing the route for a
+    /// missing producer field and dropping the release.
+    #[test]
+    fn registration_release_without_facts_projects_every_bound_field_as_none() {
+        use crate::generated::meerkat_mob_seam as seam_facts;
+
+        let signal = MeerkatSeamSignal::RuntimeRegistrationReleased {
+            agent_runtime_id: None,
+            fence_token: None,
+            runtime_epoch_id: None,
+        };
+        let route = signal.generated_signal_route().expect("generated route");
+        assert_eq!(
+            route,
+            seam_facts::route_runtime_registration_released_reaches_mob()
+        );
+        assert!(!route.bindings.is_empty());
+        for (producer_field, _) in &route.bindings {
+            let projected = signal
+                .field(producer_field)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "release must project bound field `{}`",
+                        producer_field.as_str()
+                    )
+                })
+                .to_owned_value();
+            let value = match projected {
+                OwnedFieldValue::Opaque(value) => value,
+                other => panic!(
+                    "release field `{}` must be opaque, got {other:?}",
+                    producer_field.as_str()
+                ),
+            };
+            if producer_field == &seam_facts::fields::fence_token() {
+                assert_eq!(value.downcast_ref::<Option<u64>>(), Some(&None));
+            } else {
+                assert_eq!(value.downcast_ref::<Option<String>>(), Some(&None));
+            }
+        }
+
+        let bound = MeerkatSeamSignal::RuntimeBound {
+            agent_runtime_id: mm_dsl::AgentRuntimeId("rt-bound".into()),
+            fence_token: mm_dsl::FenceToken(3),
+            runtime_epoch_id: None,
+        };
+        match bound
+            .field(&seam_facts::fields::runtime_epoch_id())
+            .expect("bound epoch is projected")
+            .to_owned_value()
+        {
+            OwnedFieldValue::Opaque(epoch) => {
+                assert_eq!(epoch.downcast_ref::<Option<String>>(), Some(&None));
+            }
+            other => panic!("bound epoch must be opaque, got {other:?}"),
         }
     }
 
@@ -2604,6 +2909,7 @@ mod tests {
                     // typed rejection).
                     runtime_epoch_id: Some(mm_dsl::RuntimeEpochId::from_domain(&epoch_before)),
                     session_id: mm_dsl::SessionId(session_id.to_string()),
+                    residency_owner: mm_dsl::SessionResidencyOwner::Composition,
                 },
                 "OwnerlessAttachedRegressionBinding",
             )
@@ -2914,6 +3220,7 @@ mod tests {
                     generation: Some(mm_dsl::Generation(0)),
                     runtime_epoch_id: None,
                     session_id: mm_dsl::SessionId(session_id.to_string()),
+                    residency_owner: mm_dsl::SessionResidencyOwner::Composition,
                 },
             )
             .await

@@ -179,6 +179,11 @@ successor session does not strand them. A member respawned under the same
 identity is a new generation and never receives an earlier generation's rows.
 Jobs submitted before 0.9.3 keep their session's address.
 
+A delivery to a dormant member wakes it first. When the wake is refused, the
+row is never settled: it stays pending, in order, and is retried on later
+wakes, also when the member is broken, so an operator who repairs the member
+still gets every delivery.
+
 ## Script Monitors
 
 `monitors/start` is a convenience submission surface over the same durable job

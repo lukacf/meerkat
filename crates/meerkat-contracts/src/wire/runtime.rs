@@ -935,16 +935,18 @@ impl From<WireOpenAiPromptCacheMode>
 pub enum WireOpenAiPromptCacheTtl {
     #[serde(rename = "30m")]
     ThirtyMinutes,
+    #[serde(rename = "12h")]
+    TwelveHours,
 }
 
 impl From<meerkat_core::model_profile::capabilities::OpenAiPromptCacheTtl>
     for WireOpenAiPromptCacheTtl
 {
     fn from(value: meerkat_core::model_profile::capabilities::OpenAiPromptCacheTtl) -> Self {
+        use meerkat_core::model_profile::capabilities::OpenAiPromptCacheTtl as Core;
         match value {
-            meerkat_core::model_profile::capabilities::OpenAiPromptCacheTtl::ThirtyMinutes => {
-                Self::ThirtyMinutes
-            }
+            Core::ThirtyMinutes => Self::ThirtyMinutes,
+            Core::TwelveHours => Self::TwelveHours,
         }
     }
 }
@@ -955,6 +957,7 @@ impl From<WireOpenAiPromptCacheTtl>
     fn from(value: WireOpenAiPromptCacheTtl) -> Self {
         match value {
             WireOpenAiPromptCacheTtl::ThirtyMinutes => Self::ThirtyMinutes,
+            WireOpenAiPromptCacheTtl::TwelveHours => Self::TwelveHours,
         }
     }
 }

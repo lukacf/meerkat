@@ -768,6 +768,14 @@ impl CoreCommsRuntime for CommsRuntime {
         self.inbox_notify.clone()
     }
 
+    fn close_inproc_route(&self) -> bool {
+        CommsRuntime::close_inproc_route(self)
+    }
+
+    fn reopen_inproc_route(&self) -> bool {
+        CommsRuntime::reopen_inproc_route(self)
+    }
+
     fn retire_inproc_route(&self) -> bool {
         CommsRuntime::retire_inproc_route(self)
     }
@@ -3181,6 +3189,16 @@ impl CommsRuntime {
             Err(crate::router::SendError::DurableAdmissionRejected { envelope_id }) => {
                 Err(SendError::DurableAdmissionRejected { envelope_id })
             }
+            // A seated member that was not woken: not delivered, typed. Never
+            // `PeerNotFound`, which is left for peers that are not members.
+            Err(crate::router::SendError::PeerWakeRefused {
+                envelope_id,
+                refusal,
+            }) => Err(SendError::PeerWakeRefused {
+                peer: route.label(),
+                envelope_id,
+                refusal,
+            }),
             // Admitted to the in-process receiver's queue, never drained inside
             // the bound. This is exactly the canonical ambiguous-delivery fact:
             // the caller must reconcile against durable work truth, and no
@@ -4011,6 +4029,39 @@ impl CommsRuntime {
             return false;
         };
         InprocRegistry::global().unregister_sender_in_namespace(
+            self.inproc_namespace().unwrap_or(""),
+            &self.public_key,
+            sender,
+        )
+    }
+
+    /// Close this runtime's published inproc route for peer ingress while the
+    /// runtime lives on: peers no longer reach this inbox, and a peer send
+    /// meets the route's wake owner instead (a stopped mob refuses it typed,
+    /// rather than leaving it on a queue no drain claims). The closed route
+    /// occupies no name and keeps its metadata for [`Self::reopen_inproc_route`].
+    /// Generation-exact, like [`Self::retire_inproc_route`]. Returns whether
+    /// this call closed the route.
+    pub fn close_inproc_route(&self) -> bool {
+        let Some(sender) = self.inproc_sender.as_ref() else {
+            return false;
+        };
+        InprocRegistry::global().close_sender_in_namespace(
+            self.inproc_namespace().unwrap_or(""),
+            &self.public_key,
+            sender,
+        )
+    }
+
+    /// Reopen the route [`Self::close_inproc_route`] closed. The ordinary
+    /// claim rule applies: the name must still be unbound, so a successor
+    /// that claimed it meanwhile keeps it. Returns whether this call reopened
+    /// the route.
+    pub fn reopen_inproc_route(&self) -> bool {
+        let Some(sender) = self.inproc_sender.as_ref() else {
+            return false;
+        };
+        InprocRegistry::global().reopen_sender_in_namespace(
             self.inproc_namespace().unwrap_or(""),
             &self.public_key,
             sender,
@@ -5019,6 +5070,8 @@ mod tests {
                 session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
                     "meerkat-comms-runtime-test-projection",
                 ),
+                residency_owner:
+                    meerkat_runtime::meerkat_machine::dsl::SessionResidencyOwner::Session,
             },
             "test_projection_add_authority::prepare_bindings",
         )
@@ -5145,6 +5198,8 @@ mod tests {
                 session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
                     "meerkat-comms-runtime-test-projection",
                 ),
+                residency_owner:
+                    meerkat_runtime::meerkat_machine::dsl::SessionResidencyOwner::Session,
             },
             "test_projection_remove_authority::prepare_bindings",
         )

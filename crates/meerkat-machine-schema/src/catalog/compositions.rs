@@ -878,6 +878,10 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
             },
         ],
         routes: vec![
+            // The composition's routed placement owns a mob member's
+            // residency: it marks the registration Composition-owned, so an
+            // empty resume keeps the member serving (a mob member, once
+            // loaded, stays loaded until its mob releases it).
             route(
                 "binding_request_reaches_meerkat",
                 "mob",
@@ -890,6 +894,13 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                     bind("fence_token", "fence_token"),
                     bind("generation", "generation"),
                     bind("session_id", "session_id"),
+                    RouteFieldBinding {
+                        to_field: fld_id("residency_owner"),
+                        source: RouteBindingSource::Literal(named_variant(
+                            "SessionResidencyOwner",
+                            "Composition",
+                        )),
+                    },
                 ],
             ),
             route(
@@ -935,6 +946,8 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                     &[bind("session_id", "session_id")],
                 )
             },
+            // The bound registration's epoch reaches the mob with the binding
+            // so that a later release is honoured only for that epoch.
             route(
                 "runtime_bound_reaches_mob",
                 "meerkat",
@@ -945,8 +958,37 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 &[
                     bind("agent_runtime_id", "agent_runtime_id"),
                     bind("fence_token", "fence_token"),
+                    bind("runtime_epoch_id", "runtime_epoch_id"),
                 ],
             ),
+            // Every released registration (each UnregisterSession arm)
+            // reaches the owning mob, which demotes exactly that Live
+            // materialization to Dormant. A stale release is an accepted no-op
+            // on the mob side. A mob member's empty resume never unregisters
+            // (its registration is Composition-owned), so it releases nothing.
+            Route {
+                name: route_id("runtime_registration_released_reaches_mob"),
+                from_machine: mi_id("meerkat"),
+                effect_variant: ev_id("RuntimeRegistrationReleased"),
+                to: RouteTarget::new(
+                    mi_id("mob"),
+                    rv(RouteTargetKind::Signal, "ReleaseMemberMaterialization"),
+                ),
+                bindings: vec![
+                    bind("agent_runtime_id", "agent_runtime_id"),
+                    bind("fence_token", "fence_token"),
+                    bind("runtime_epoch_id", "runtime_epoch_id"),
+                    RouteFieldBinding {
+                        to_field: fld_id("cause"),
+                        source: RouteBindingSource::Literal(named_variant(
+                            "MemberMaterializationLossCause",
+                            "RegistrationReleased",
+                        )),
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+                teardown: None,
+            },
             route(
                 "runtime_retired_reaches_mob",
                 "meerkat",
@@ -1054,6 +1096,9 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                         refusal_effect_bind("session_id", "session_id"),
                         refusal_code_bind("refusal_code"),
                         refusal_message_bind("reason"),
+                        // The wake attempt the refused request belongs to, so
+                        // a late refusal is fenced like every wake feedback.
+                        refusal_effect_bind("attempt", "attempt"),
                     ],
                 },
                 DriverRefusalClosure {
@@ -1098,6 +1143,8 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
             retire_at_scope_stale_fence_token_witness(),
             retire_at_scope_stale_session_binding_witness(),
             retire_at_scope_mob_not_running_witness(),
+            registration_release_leaves_member_dormant_witness(),
+            empty_resume_keeps_member_live_witness(),
         ],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
@@ -2464,6 +2511,154 @@ fn seam_destroy_mob_signal() -> CompositionWitnessInput {
             Expr::String("sessionid_1".into()),
         )],
     )
+}
+
+/// Unregistering a mob-bound registration leaves its member Dormant,
+/// never Live. The spawned member is Live and records the bound registration's
+/// epoch (runtime_bound_reaches_mob); the runtime's unregister saga ends in
+/// UnregisterSessionAttached, whose RuntimeRegistrationReleased reaches the mob
+/// as ReleaseMemberMaterialization and takes the Released arm (Live -> Dormant,
+/// epoch cleared), after the unregister.
+fn registration_release_leaves_member_dormant_witness() -> CompositionWitness {
+    let unregister_identity = || {
+        vec![
+            witness_field("session_id", Expr::String("sessionid_1".into())),
+            witness_field("agent_runtime_id", some_string("agentruntimeid_1")),
+            witness_field("fence_token", Expr::Some(Box::new(Expr::U64(1)))),
+            witness_field("generation", Expr::Some(Box::new(Expr::U64(0)))),
+            witness_field("runtime_epoch_id", Expr::None),
+        ]
+    };
+    let mut begin_unregister = unregister_identity();
+    begin_unregister.push(witness_field(
+        "queued_inputs",
+        named_variant("UnregisterQueuedInputsDisposition", "Stop"),
+    ));
+    begin_unregister.push(witness_field("requeue_max_age_ms", Expr::U64(0)));
+    let drain_closed = |input: &str| {
+        witness_input(
+            "meerkat",
+            input,
+            vec![
+                witness_field("session_id", Expr::String("sessionid_1".into())),
+                witness_field("forced_abort", Expr::Bool(false)),
+            ],
+        )
+    };
+    CompositionWitness {
+        name: witness_id("registration_release_leaves_member_dormant"),
+        preload_inputs: vec![
+            witness_input("meerkat", "Initialize", vec![]),
+            seam_runtime_session_registration_input(),
+            seam_authorize_spawn_profile_input(),
+            seam_begin_spawn_exec_input(),
+            seam_commit_spawn_membership_input(),
+            witness_input("meerkat", "BeginUnregisterSession", begin_unregister),
+            drain_closed("RuntimeLoopStoppedForUnregister"),
+            drain_closed("CommsDrainExitedForUnregister"),
+            witness_input(
+                "meerkat",
+                "CompletionWaitersResolvedForUnregister",
+                vec![witness_field(
+                    "session_id",
+                    Expr::String("sessionid_1".into()),
+                )],
+            ),
+            witness_input("meerkat", "UnregisterSession", unregister_identity()),
+        ],
+        expected_routes: vec![
+            route_id("binding_request_reaches_meerkat"),
+            route_id("runtime_bound_reaches_mob"),
+            route_id("runtime_registration_released_reaches_mob"),
+        ],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![
+            witness_transition("meerkat", "Initialize"),
+            witness_transition("meerkat", "RegisterSessionIdle"),
+            witness_transition("mob", "AuthorizeSpawnProfileRunning"),
+            witness_transition("mob", "BeginSpawnExecFresh"),
+            witness_transition("mob", "CommitSpawnMembershipFresh"),
+            witness_transition("meerkat", "PrepareBindingsIdle"),
+            witness_transition("mob", "ObserveRuntimeReady"),
+            witness_transition("meerkat", "BeginUnregisterSessionAttached"),
+            witness_transition("meerkat", "RuntimeLoopStoppedForUnregisterAttached"),
+            witness_transition("meerkat", "CommsDrainExitedForUnregisterAttached"),
+            witness_transition("meerkat", "CompletionWaitersResolvedForUnregisterAttached"),
+            witness_transition("meerkat", "UnregisterSessionAttached"),
+            witness_transition("mob", "ReleaseMemberMaterializationReleasedRunning"),
+        ],
+        expected_transition_order: vec![
+            CompositionWitnessTransitionOrder {
+                earlier: witness_transition("mob", "ObserveRuntimeReady"),
+                later: witness_transition("meerkat", "UnregisterSessionAttached"),
+            },
+            CompositionWitnessTransitionOrder {
+                earlier: witness_transition("meerkat", "UnregisterSessionAttached"),
+                later: witness_transition("mob", "ReleaseMemberMaterializationReleasedRunning"),
+            },
+        ],
+        // 10 injects + 13 transitions + 3 route deliveries. The script
+        // observes 13 inputs (10 injected, 3 routed), above the seam default's
+        // bound of pending inputs + delivered routes + 2.
+        state_limits: CompositionStateLimits {
+            pending_input_limit: 8,
+            ..meerkat_mob_seam_witness_limits(28, 3, 26)
+        },
+    }
+}
+
+/// A mob member's registration is Composition-owned (its binding request is
+/// the composition's routed placement), so an empty resume keeps it serving:
+/// the KeepServing verdict, never the standalone teardown, and the
+/// registration stays Attached with no release for the mob.
+fn empty_resume_keeps_member_live_witness() -> CompositionWitness {
+    let keep_serving =
+        || witness_transition("meerkat", "ResolveEmptyResumeRetirementKeepServingAttached");
+    CompositionWitness {
+        name: witness_id("empty_resume_keeps_member_live"),
+        preload_inputs: vec![
+            witness_input("meerkat", "Initialize", vec![]),
+            seam_runtime_session_registration_input(),
+            seam_authorize_spawn_profile_input(),
+            seam_begin_spawn_exec_input(),
+            seam_commit_spawn_membership_input(),
+            witness_input(
+                "meerkat",
+                "ResolveEmptyResumeRetirement",
+                vec![witness_field("queued_input_present", Expr::Bool(false))],
+            ),
+        ],
+        expected_routes: vec![
+            route_id("binding_request_reaches_meerkat"),
+            route_id("runtime_bound_reaches_mob"),
+        ],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![CompositionWitnessState {
+            machine: mi_id("meerkat"),
+            phase: Some(phase_id("Attached")),
+            fields: vec![witness_field(
+                "residency_owner",
+                named_variant("SessionResidencyOwner", "Composition"),
+            )],
+        }],
+        expected_transitions: vec![
+            witness_transition("meerkat", "Initialize"),
+            witness_transition("meerkat", "RegisterSessionIdle"),
+            witness_transition("mob", "AuthorizeSpawnProfileRunning"),
+            witness_transition("mob", "BeginSpawnExecFresh"),
+            witness_transition("mob", "CommitSpawnMembershipFresh"),
+            witness_transition("meerkat", "PrepareBindingsIdle"),
+            witness_transition("mob", "ObserveRuntimeReady"),
+            keep_serving(),
+        ],
+        expected_transition_order: vec![CompositionWitnessTransitionOrder {
+            earlier: witness_transition("meerkat", "PrepareBindingsIdle"),
+            later: keep_serving(),
+        }],
+        // 6 injects + 8 transitions + 2 route deliveries.
+        state_limits: meerkat_mob_seam_witness_limits(20, 2, 16),
+    }
 }
 
 fn basic_round_trip_witness() -> CompositionWitness {

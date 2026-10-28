@@ -7,31 +7,64 @@ pub(in crate::runtime) struct RetainedResumeTopologyEffect {
 }
 
 impl MobActor {
+    /// Whether the explicit resume owns its topology reconciliation: MobMachine
+    /// holds its topology pending, or an effect of that reconciliation is
+    /// still in custody. The graph fence: nothing else mutates the graph
+    /// meanwhile.
     pub(super) fn resume_topology_mutation_pending(&self) -> bool {
         self.dsl_authority.state().explicit_resume_topology_pending
             || !self.resume_topology_effect_custody.is_empty()
     }
 
+    /// Whether the explicit resume is past its topology reconciliation and
+    /// still owns its post-commit work (the members' operation-binding
+    /// restore, and an AutonomousHost orchestrator's queued resume
+    /// notification): MobMachine holds the attempt open with its topology
+    /// settled.
+    pub(super) fn explicit_resume_post_commit_pending(&self) -> bool {
+        let state = self.dsl_authority.state();
+        state.explicit_resume_attempt.is_some() && state.explicit_resume_topology_settled
+    }
+
+    /// The explicit resume's fence for host repair and lifecycle work, which
+    /// waits for its whole member work: the topology reconciliation and the
+    /// post-commit work after it.
+    pub(super) fn explicit_resume_member_work_fenced(&self) -> bool {
+        self.resume_topology_mutation_pending() || self.explicit_resume_post_commit_pending()
+    }
+
     pub(super) fn resume_topology_control_is_pending(&self, command: &MobCommand) -> bool {
-        if !self.resume_topology_mutation_pending() {
-            return false;
-        }
-        matches!(
-            command,
+        match command {
+            // Graph work a member's run can wait on (its spawn, wire or
+            // retire tool call): it waits only for the topology
+            // reconciliation. The post-commit work waits on no member run (a
+            // member whose registration already serves its binding is bound
+            // without the lanes a run holds, and a notification that runs the
+            // orchestrator's turn is handed to the lifecycle owner), so this
+            // early fence drop is defence in depth: were post-commit work ever
+            // to wait on a run again, deferring this work behind it would let
+            // a run that spawns, wires or retires hold the resume, and the
+            // resume hold the run, forever. A member whose own post-commit
+            // work is in flight still keeps its retire and respawn behind that
+            // work (see `resume_member_control_is_pending`).
             MobCommand::Spawn { .. }
-                | MobCommand::SpawnProvisioned { .. }
-                | MobCommand::SpawnAttachedForkedParticipant { .. }
-                | MobCommand::Retire { .. }
-                | MobCommand::Respawn { .. }
-                | MobCommand::ReloadMemberRegistration { .. }
-                | MobCommand::ReviveMemberLiveMaterialization { .. }
-                | MobCommand::RevivePlacedMember { .. }
-                | MobCommand::Wire { .. }
-                | MobCommand::Unwire { .. }
-                | MobCommand::WireMembersBatch { .. }
-                | MobCommand::RotateSupervisor { .. }
-                | MobCommand::BindHost { .. }
-        )
+            | MobCommand::SpawnProvisioned { .. }
+            | MobCommand::SpawnAttachedForkedParticipant { .. }
+            | MobCommand::Retire { .. }
+            | MobCommand::Respawn { .. }
+            | MobCommand::Wire { .. }
+            | MobCommand::Unwire { .. }
+            | MobCommand::WireMembersBatch { .. } => self.resume_topology_mutation_pending(),
+            // Host repair and supervisor work waits for the resume's whole
+            // member work, as before.
+            MobCommand::ReloadMemberRegistration { .. }
+            | MobCommand::ReviveMemberLiveMaterialization { .. }
+            | MobCommand::ReleaseMember { .. }
+            | MobCommand::RevivePlacedMember { .. }
+            | MobCommand::RotateSupervisor { .. }
+            | MobCommand::BindHost { .. } => self.explicit_resume_member_work_fenced(),
+            _ => false,
+        }
     }
 
     fn owns_resume_topology_effect(&self, effect: &ResumeTopologyPendingEffect) -> bool {

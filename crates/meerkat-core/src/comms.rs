@@ -2360,6 +2360,119 @@ impl AdmissionDropReason {
     }
 }
 
+/// Why a peer message to a seated member that is not materialized in its
+/// process was not delivered: the member's mob refused, or could not finish,
+/// the wake the message needed.
+///
+/// Every refusal means "not delivered": the envelope was never handed to the
+/// recipient's inbox, so a retry cannot duplicate it. Only a peer that is not
+/// a member at all is `peer not found`; a seated member is never reported
+/// that way, whatever its residency.
+///
+/// Closed vocabulary: a new refusal is a breaking change for every SDK that
+/// parses it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerWakeRefusal {
+    /// The member's restore failed, now or earlier: it is Broken. `reason` is
+    /// the failure its restore recorded; `hold` is set when its durable
+    /// session is intact but withheld (a held tail, quarantined evidence),
+    /// and names what clears it.
+    MemberBroken {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hold: Option<crate::service::DurableResumeHold>,
+    },
+    /// The member is being retired.
+    MemberRetiring,
+    /// The member's mob is not running (stopped, completed or destroyed).
+    /// A Live member of a stopped mob refuses the same way as a dormant one.
+    MobNotRunning,
+    /// The member's mob is shutting down and admits no new work.
+    AdmissionClosed,
+    /// The sender's own send budget (`ack_timeout_secs`) ended, or the
+    /// mob's wake bound did, before the member was ready. The wake itself
+    /// may still finish; nothing was handed off.
+    WakeTimedOut,
+    /// The member's mob actor is gone (it exited while the wake waited).
+    MobUnavailable,
+    /// The member was woken, but its inbox was gone again before the hand-off
+    /// (twice within the sender's budget).
+    MaterializationLost,
+    /// The member belongs to a candidate composition, which never
+    /// materializes members.
+    NonAuthoritativeComposition,
+    /// The member's host has preparation pending for it (a first-boot row, or
+    /// its build preparation asked to be retried).
+    HostPreparationPending,
+    /// The member's durable resume gate was unavailable at the wake.
+    ResumeGateUnavailable,
+    /// The member is placed on a member host, which owns its materialization.
+    HostOwned,
+    /// The member's mob is quiescing its lifecycle (completion or destroy).
+    LifecycleOriginFenced,
+    /// The sender is itself still being woken (the send came from inside its
+    /// own build) and the recipient was not live: the send would have waited
+    /// on another wake, so it is refused instead of risking a wait cycle.
+    SenderWaking,
+}
+
+impl PeerWakeRefusal {
+    /// Stable wire token of the refusal kind (the `kind` tag).
+    pub fn as_code(&self) -> &'static str {
+        match self {
+            Self::MemberBroken { .. } => "member_broken",
+            Self::MemberRetiring => "member_retiring",
+            Self::MobNotRunning => "mob_not_running",
+            Self::AdmissionClosed => "admission_closed",
+            Self::WakeTimedOut => "wake_timed_out",
+            Self::MobUnavailable => "mob_unavailable",
+            Self::MaterializationLost => "materialization_lost",
+            Self::NonAuthoritativeComposition => "non_authoritative_composition",
+            Self::HostPreparationPending => "host_preparation_pending",
+            Self::ResumeGateUnavailable => "resume_gate_unavailable",
+            Self::HostOwned => "host_owned",
+            Self::LifecycleOriginFenced => "lifecycle_origin_fenced",
+            Self::SenderWaking => "sender_waking",
+        }
+    }
+
+    /// Whether the same send can succeed later without an operator action.
+    /// Every refusal is safe to retry (nothing was handed off); this says
+    /// whether retrying is useful.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::MobNotRunning
+            | Self::AdmissionClosed
+            | Self::WakeTimedOut
+            | Self::MobUnavailable
+            | Self::MaterializationLost
+            | Self::HostPreparationPending
+            | Self::ResumeGateUnavailable
+            | Self::SenderWaking => true,
+            Self::MemberBroken { .. }
+            | Self::MemberRetiring
+            | Self::NonAuthoritativeComposition
+            | Self::HostOwned
+            | Self::LifecycleOriginFenced => false,
+        }
+    }
+}
+
+impl std::fmt::Display for PeerWakeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MemberBroken {
+                reason,
+                hold: Some(hold),
+            } => write!(f, "member_broken ({}): {reason}", hold.as_str()),
+            Self::MemberBroken { reason, hold: None } => write!(f, "member_broken: {reason}"),
+            other => f.write_str(other.as_code()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum SendError {
@@ -2422,6 +2535,17 @@ pub enum SendError {
     /// policy refused.
     #[error("peer dropped at admission: {reason:?}")]
     AdmissionDropped { reason: AdmissionDropReason },
+    /// The peer is a seated member that is not materialized in its process,
+    /// and the wake the message needed was refused or did not finish. Not
+    /// delivered: nothing was handed to the recipient, so a retry cannot
+    /// duplicate it. Distinct from [`Self::PeerNotFound`], which is only for
+    /// a peer that is not a member.
+    #[error("peer {peer} was not woken for envelope {envelope_id}: {refusal}")]
+    PeerWakeRefused {
+        peer: String,
+        envelope_id: uuid::Uuid,
+        refusal: PeerWakeRefusal,
+    },
     /// A peer response, progress or terminal, was addressed to a peer that
     /// did not send the request it answers. A response goes only to the
     /// request's verified requester, so it is refused before any transport:

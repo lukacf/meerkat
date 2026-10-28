@@ -210,10 +210,14 @@ pub(crate) struct MobDslT2Snapshot {
         std::collections::BTreeSet<crate::machines::mob_machine::AgentRuntimeId>,
     pub remote_supervisor_revoked_ids:
         std::collections::BTreeSet<crate::machines::mob_machine::AgentRuntimeId>,
-    // #37: machine-owned revival obligation for members whose live
-    // materialization is gone while a durable snapshot remains.
-    pub member_revival_pending:
-        std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
+    // Machine-owned member residency (Dormant, Waking, Live) and each Waking
+    // member's open wake attempt.
+    pub member_materialization: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::MemberMaterializationPhase,
+    >,
+    pub member_wake_attempts:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, u64>,
     pub member_kickoff_objective_ids:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
     pub objective_owner_ids:
@@ -526,6 +530,10 @@ pub(super) enum LifecycleProgressStage {
     MemberCommsReadiness,
     AutonomousRuntimeReadiness,
     DurableResumeTransition,
+    /// The lift's runtime obligation scan: two store-wide reads of the
+    /// runtime store before its member plan.
+    #[cfg_attr(not(feature = "runtime-adapter"), allow(dead_code))]
+    BootObligationScan,
     PostRebuildReadiness,
     ResumeTopologyReconciliation,
     ResumeRollback,
@@ -544,6 +552,7 @@ impl LifecycleProgressStage {
             Self::MemberCommsReadiness => "member_comms_readiness",
             Self::AutonomousRuntimeReadiness => "autonomous_runtime_readiness",
             Self::DurableResumeTransition => "durable_resume_transition",
+            Self::BootObligationScan => "boot_obligation_scan",
             Self::PostRebuildReadiness => "post_rebuild_readiness",
             Self::ResumeTopologyReconciliation => "resume_topology_reconciliation",
             Self::ResumeRollback => "resume_rollback",
@@ -567,6 +576,9 @@ impl LifecycleProgressStage {
 pub(super) struct LifecycleProgressObservation {
     pub(super) epoch: u64,
     pub(super) member_id: Option<AgentIdentity>,
+    /// How many members a stage that owes work for a set of members still
+    /// owes (`member_id` names one of them); `None` for every other stage.
+    pub(super) members_owed: Option<usize>,
     pub(super) stage: LifecycleProgressStage,
     pub(super) observed_at: meerkat_core::time_compat::Instant,
 }
@@ -584,6 +596,7 @@ impl LifecycleProgressSignal {
         let (sender, receiver) = tokio::sync::watch::channel(LifecycleProgressObservation {
             epoch: 0,
             member_id: None,
+            members_owed: None,
             stage: LifecycleProgressStage::LifecycleAuthorityAdmission,
             observed_at: meerkat_core::time_compat::Instant::now(),
         });
@@ -594,11 +607,36 @@ impl LifecycleProgressSignal {
         let now = meerkat_core::time_compat::Instant::now();
         self.sender.send_modify(|observation| {
             observation.member_id = Some(member_id.clone());
+            observation.members_owed = None;
             observation.stage = stage;
             observation.observed_at = now;
         });
         tracing::debug!(
             agent_identity = %member_id,
+            stage = stage.as_str(),
+            "explicit resume awaiting lifecycle work"
+        );
+    }
+
+    /// [`Self::awaiting_member`] for a stage that owes work for a set of
+    /// members: names one member still owed and how many are owed in all, so
+    /// a stall reports the whole debt, not only one member of it.
+    pub(super) fn awaiting_owed_members(
+        &self,
+        member_id: &AgentIdentity,
+        members_owed: usize,
+        stage: LifecycleProgressStage,
+    ) {
+        let now = meerkat_core::time_compat::Instant::now();
+        self.sender.send_modify(|observation| {
+            observation.member_id = Some(member_id.clone());
+            observation.members_owed = Some(members_owed);
+            observation.stage = stage;
+            observation.observed_at = now;
+        });
+        tracing::debug!(
+            agent_identity = %member_id,
+            members_owed,
             stage = stage.as_str(),
             "explicit resume awaiting lifecycle work"
         );
@@ -611,6 +649,7 @@ impl LifecycleProgressSignal {
             elapsed = now.saturating_duration_since(observation.observed_at);
             observation.epoch = observation.epoch.wrapping_add(1);
             observation.member_id = Some(member_id.clone());
+            observation.members_owed = None;
             observation.stage = stage;
             observation.observed_at = now;
         });
@@ -622,10 +661,33 @@ impl LifecycleProgressSignal {
         );
     }
 
+    /// Progress of a unit of work that belongs to no member (`stage`): the
+    /// caller's inactivity budget starts again, as after a member's
+    /// progress.
+    #[cfg_attr(not(feature = "runtime-adapter"), allow(dead_code))]
+    pub(super) fn stage_progress(&self, stage: LifecycleProgressStage) {
+        let now = meerkat_core::time_compat::Instant::now();
+        let mut elapsed = meerkat_core::time_compat::Duration::ZERO;
+        self.sender.send_modify(|observation| {
+            elapsed = now.saturating_duration_since(observation.observed_at);
+            observation.epoch = observation.epoch.wrapping_add(1);
+            observation.member_id = None;
+            observation.members_owed = None;
+            observation.stage = stage;
+            observation.observed_at = now;
+        });
+        tracing::debug!(
+            stage = stage.as_str(),
+            elapsed_ms = elapsed.as_millis(),
+            "explicit resume lifecycle work progressed"
+        );
+    }
+
     pub(super) fn awaiting_stage(&self, stage: LifecycleProgressStage) {
         let now = meerkat_core::time_compat::Instant::now();
         self.sender.send_modify(|observation| {
             observation.member_id = None;
+            observation.members_owed = None;
             observation.stage = stage;
             observation.observed_at = now;
         });
@@ -656,6 +718,17 @@ pub(super) struct MemberStatusProjectionTarget {
     pub(super) include_local_session_details: bool,
     pub(super) agent_runtime_id: Option<AgentRuntimeId>,
     pub(super) fence_token: Option<FenceToken>,
+    /// MobMachine holds the member Dormant: seated and not materialized in
+    /// this process, so no run of it is open here. Its progress is answered
+    /// from that fact. A wake between the observation and its completion
+    /// changes the target, and the observation is driven again.
+    pub(super) dormant: bool,
+    /// MobMachine holds the member's seat session unborn: its seat created
+    /// nothing, and its first wake creates the session. There is nothing to
+    /// read, and its view is an empty session's, as an eagerly created
+    /// session shows before its first turn. The born row changes the
+    /// target.
+    pub(super) unborn_seat: bool,
 }
 
 /// Which internal-error site of the explicit resume's readiness fan-out a
@@ -703,7 +776,7 @@ pub(super) enum MobCommand {
     /// unhealthy/missing. The actor feeds the raw observation to the
     /// machine's `ClassifyMemberLiveMaterialization` ladder; there is no
     /// public caller and no reply — the outcome lands in machine state
-    /// (`member_revival_pending`/Broken) and the restore diagnostics.
+    /// (`member_materialization`/Broken) and the restore diagnostics.
     RevivePlacedMember {
         agent_identity: AgentIdentity,
         reason: String,
@@ -873,6 +946,36 @@ pub(super) enum MobCommand {
         scope: super::actor::MemberLiveRevivalScope,
         reply_tx: oneshot::Sender<Result<super::actor::MemberLiveRevivalOutcome, MobError>>,
     },
+    /// A wake of a seated member that a delivery needs: MobMachine's
+    /// `WakeMember` verdict, then, when the wake is authorized or joined, an
+    /// answer once the member is ready. Peer sends reach it through the
+    /// mob's inproc wake routes; host deliveries and operators wake on the
+    /// actor directly.
+    WakeMember {
+        agent_identity: AgentIdentity,
+        cause: mob_dsl::MemberWakeCause,
+        observed_missing: bool,
+        input_class: mob_dsl::PeerInputClass,
+        sender_waking: bool,
+        reply_tx: super::actor::member_wake::MemberWakeReply,
+    },
+    /// Internal: the mob's wake bound for one wake attempt ended.
+    MemberWakeTimedOut {
+        agent_identity: AgentIdentity,
+        attempt: u64,
+    },
+    /// Internal: the retry of a member whose boot work is still owed is due.
+    RetryOwedMemberWake { agent_identity: AgentIdentity },
+    /// An owed edge repair's timer fired (the actor's own self-send).
+    RepairOwedEdge {
+        edge: super::actor::member_wake::MemberWiringEdge,
+    },
+    /// Release a live member's materialization, keeping it seated
+    /// ([`super::handle::MobHandle::release_member`]).
+    ReleaseMember {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     /// Internal re-entry carrying the settled recovery, and the readiness
     /// step, of one member a Running start left out (a stopped registration
     /// it took over, or one that needed a durability reload). Boxed so the
@@ -935,6 +1038,13 @@ pub(super) enum MobCommand {
         work: std::sync::Arc<super::actor::ExplicitResumeMemberWork>,
         completion: super::actor::ExplicitResumeMemberCompletion,
     },
+    /// The readiness of one explicit resume member held Waking after its
+    /// acceptance resolved; its work settles once MobMachine holds the
+    /// member Live, or Broken with the failure.
+    ResumeLifecycleMemberReadinessResolved {
+        work: std::sync::Arc<super::actor::ExplicitResumeMemberWork>,
+        outcomes: Vec<super::actor::MemberReadinessOutcome>,
+    },
     ResumeLifecycleMemberCleanupHeld {
         work: std::sync::Arc<super::actor::ExplicitResumeMemberWork>,
         retry_tx: oneshot::Sender<()>,
@@ -946,6 +1056,23 @@ pub(super) enum MobCommand {
         work: std::sync::Arc<super::actor::ExplicitResumeMemberWork>,
         failure: super::provisioner::ProvisionAttemptFailure,
         stage: super::actor::UnprovenResumeCustodyStage,
+    },
+    /// A member the clean-stop lift's plan materializes closed its wake
+    /// attempt (`failure`: the wake's typed answer when it did not end Live);
+    /// the lift dispatches the next members of its plan and settles the
+    /// member's resume work.
+    ResumeLifecycleBootMemberSettled {
+        member: Box<super::actor::boot_lift::ExplicitResumeBootMember>,
+        failure: Option<MobError>,
+    },
+    /// The rebuild of a member the clean-stop lift's plan materializes
+    /// through the explicit-resume work path (with the forks of its round
+    /// that follow its overlay) was prepared off the actor (`resume_attempt`
+    /// is the lift's); the explicit resume reserves and rebuilds each, and
+    /// the plan goes on.
+    ResumeLifecycleBootMembersPrepared {
+        resume_attempt: mob_dsl::ResumeAttemptId,
+        prepared: Vec<super::actor::boot_lift::ExplicitResumeBootMemberPrepared>,
     },
     ResumeLifecycleRollbackStep {
         attempt: mob_dsl::ResumeAttemptId,
@@ -1304,6 +1431,14 @@ pub(super) enum MobCommand {
         effect: super::composition::MobSeamEffect,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Apply an operator wake of `agent_identity` from a member-effect
+    /// completion rather than from a command, so a row can show that a wake
+    /// queued there starts with no further command.
+    #[cfg(test)]
+    WakeMemberFromEffectForTest {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     /// Snapshot the T2 DSL field projections (member state markers, wiring
     /// edges, identity→runtime map, tasks + task id sets) directly from the
     /// DSL authority. Test-only read seam used by the runtime-parity
@@ -1329,6 +1464,32 @@ pub(super) enum MobCommand {
         agent_identity: crate::ids::AgentIdentity,
         reason: super::stop_report::HostRunStartHoldReason,
         reply_tx: oneshot::Sender<Result<(), crate::MobError>>,
+    },
+    /// Plan one chunk of a dormant seat: each spec's
+    /// typed answer, the spawn of a fresh spec that owes a kickoff, or what
+    /// its seat needs. Reads nothing durable beyond profile resolution.
+    PlanDormantSeats {
+        specs: Vec<super::handle::SpawnMemberSpec>,
+        reply_tx: oneshot::Sender<Result<super::dormant_seat::DormantSeatPlan, crate::MobError>>,
+    },
+    /// Plan a rotation (`rotate_member`): the next incarnation's seat.
+    PlanMemberRotation {
+        spec: Box<super::handle::SpawnMemberSpec>,
+        reply_tx: oneshot::Sender<Result<super::dormant_seat::MemberRotationPlan, crate::MobError>>,
+    },
+    /// Start a prepared rotation of a seated member: its retirement, which
+    /// seats the next incarnation in its terminal step.
+    StartMemberRotation {
+        candidate: Box<super::dormant_seat::DormantSeatCandidate>,
+        endpoint: Option<meerkat_core::comms::TrustedPeerDescriptor>,
+        reply_tx: oneshot::Sender<Result<SessionId, crate::MobError>>,
+    },
+    /// Commit one prepared chunk of a dormant seat in one actor step.
+    CommitDormantSeats {
+        entries: Vec<super::dormant_seat::DormantSeatCommitEntry>,
+        reply_tx: oneshot::Sender<
+            Result<Vec<super::dormant_seat::DormantSeatOutcome>, crate::MobError>,
+        >,
     },
     /// An off-actor member-status observation returning to the actor, with
     /// every caller that joined it.
@@ -1952,8 +2113,13 @@ impl MobCommand {
             Self::ResumeLifecycleMemberObserved { .. } => ShutdownAnswerClass::ActorCompletion,
             Self::ResumeLifecycleMemberReady { .. } => ShutdownAnswerClass::ActorCompletion,
             Self::ResumeLifecycleMemberSettled { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ResumeLifecycleMemberReadinessResolved { .. } => {
+                ShutdownAnswerClass::ActorCompletion
+            }
             Self::ResumeLifecycleMemberCleanupHeld { .. } => ShutdownAnswerClass::ActorCompletion,
             Self::ResumeLifecycleMemberUnproven { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ResumeLifecycleBootMemberSettled { .. } => ShutdownAnswerClass::ActorCompletion,
+            Self::ResumeLifecycleBootMembersPrepared { .. } => ShutdownAnswerClass::ActorCompletion,
             Self::ResumeLifecycleRollbackStep { .. } => ShutdownAnswerClass::ActorCompletion,
             Self::ResumeLifecycleRollbackFinalized { .. } => ShutdownAnswerClass::ActorCompletion,
             Self::ResumePostCommitMemberCompleted { .. } => ShutdownAnswerClass::ActorCompletion,
@@ -1989,6 +2155,11 @@ impl MobCommand {
             #[cfg(test)]
             Self::MemberStatusLaneProbe { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ReviveMemberLiveMaterialization { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::WakeMember { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ReleaseMember { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::MemberWakeTimedOut { .. }
+            | Self::RetryOwedMemberWake { .. }
+            | Self::RepairOwedEdge { .. } => ShutdownAnswerClass::ActorCompletion,
             Self::ReloadMemberRegistration { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(feature = "openai-live")]
             Self::StartLiveBridgeOperation { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2059,11 +2230,17 @@ impl MobCommand {
             #[cfg(test)]
             Self::QueueRoutedEffectForTest { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(test)]
+            Self::WakeMemberFromEffectForTest { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
             Self::DslT2Snapshot { .. } => ShutdownAnswerClass::CallerRequest,
             Self::StartupKickoffSnapshot { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ProjectMemberList { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ProjectMemberStatus { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ReleaseMemberRunStarts { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::PlanDormantSeats { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::PlanMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::StartMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::CommitDormantSeats { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityIntent { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityConvergenceStatus { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdoptMemberIdentityDeclaration { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2171,6 +2348,11 @@ impl MobCommand {
             Self::PolicySpawnSettled { .. } => "PolicySpawnSettled",
             Self::MemberTurnAdmissionSettled { .. } => "MemberTurnAdmissionSettled",
             Self::ReviveMemberLiveMaterialization { .. } => "ReviveMemberLiveMaterialization",
+            Self::WakeMember { .. } => "WakeMember",
+            Self::MemberWakeTimedOut { .. } => "MemberWakeTimedOut",
+            Self::RetryOwedMemberWake { .. } => "RetryOwedMemberWake",
+            Self::RepairOwedEdge { .. } => "RepairOwedEdge",
+            Self::ReleaseMember { .. } => "ReleaseMember",
             Self::StartupMemberRecovered { .. } => "StartupMemberRecovered",
             Self::ReloadMemberRegistration { .. } => "ReloadMemberRegistration",
             Self::ResumeLifecycleReadinessResolved { .. } => "ResumeLifecycleReadinessResolved",
@@ -2181,8 +2363,13 @@ impl MobCommand {
             Self::ResumeLifecycleMemberObserved { .. } => "ResumeLifecycleMemberObserved",
             Self::ResumeLifecycleMemberReady { .. } => "ResumeLifecycleMemberReady",
             Self::ResumeLifecycleMemberSettled { .. } => "ResumeLifecycleMemberSettled",
+            Self::ResumeLifecycleMemberReadinessResolved { .. } => {
+                "ResumeLifecycleMemberReadinessResolved"
+            }
             Self::ResumeLifecycleMemberCleanupHeld { .. } => "ResumeLifecycleMemberCleanupHeld",
             Self::ResumeLifecycleMemberUnproven { .. } => "ResumeLifecycleMemberUnproven",
+            Self::ResumeLifecycleBootMemberSettled { .. } => "ResumeLifecycleBootMemberSettled",
+            Self::ResumeLifecycleBootMembersPrepared { .. } => "ResumeLifecycleBootMembersPrepared",
             Self::ResumeLifecycleRollbackStep { .. } => "ResumeLifecycleRollbackStep",
             Self::ResumeLifecycleRollbackFinalized { .. } => "ResumeLifecycleRollbackFinalized",
             Self::ResumePostCommitMemberCompleted { .. } => "ResumePostCommitMemberCompleted",
@@ -2262,6 +2449,8 @@ impl MobCommand {
             #[cfg(test)]
             Self::QueueRoutedEffectForTest { .. } => "QueueRoutedEffectForTest",
             #[cfg(test)]
+            Self::WakeMemberFromEffectForTest { .. } => "WakeMemberFromEffectForTest",
+            #[cfg(test)]
             Self::SpawnLiveMutationAwaitingActorForTest { .. } => {
                 "SpawnLiveMutationAwaitingActorForTest"
             }
@@ -2279,6 +2468,10 @@ impl MobCommand {
             Self::ProjectMemberList { .. } => "ProjectMemberList",
             Self::ProjectMemberStatus { .. } => "ProjectMemberStatus",
             Self::ReleaseMemberRunStarts { .. } => "ReleaseMemberRunStarts",
+            Self::PlanDormantSeats { .. } => "PlanDormantSeats",
+            Self::PlanMemberRotation { .. } => "PlanMemberRotation",
+            Self::StartMemberRotation { .. } => "StartMemberRotation",
+            Self::CommitDormantSeats { .. } => "CommitDormantSeats",
             Self::ProjectMemberStatusObserved { .. } => "ProjectMemberStatusObserved",
             Self::GetIdentityIntent { .. } => "GetIdentityIntent",
             Self::GetIdentityConvergenceStatus { .. } => "GetIdentityConvergenceStatus",

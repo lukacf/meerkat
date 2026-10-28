@@ -520,7 +520,7 @@ export type OpenAiPromptCacheOptions = {
 
 export type OpenAiPromptCacheRetention = "in_memory" | "24h";
 
-export type OpenAiPromptCacheTtl = "30m";
+export type OpenAiPromptCacheTtl = "30m" | "12h";
 
 export type OpenAiReasoningContext = "auto" | "current_turn" | "all_turns";
 

@@ -2461,6 +2461,7 @@ fn prepare_bindings_input(
         generation: Some(dsl::Generation(0)),
         runtime_epoch_id: Some(runtime_epoch_id),
         session_id: dsl::SessionId::from_domain(session_id),
+        residency_owner: dsl::SessionResidencyOwner::Session,
     }
 }
 
@@ -12656,6 +12657,7 @@ fn revival_arms_preserve_identity_reset_placement_and_refuse_while_draining() {
         generation: None,
         runtime_epoch_id: Some(mm_dsl::RuntimeEpochId(registered_epoch.to_string())),
         session_id: mm_dsl::SessionId("session-revive".to_string()),
+        residency_owner: mm_dsl::SessionResidencyOwner::Session,
     };
 
     // RegisterSession revival: Stopped → Idle preserving identity, clearing the
@@ -12948,6 +12950,7 @@ fn readmitted_session_admits_routed_work_under_the_registered_epoch() {
             generation: replacement_generation,
             runtime_epoch_id: Some(epoch.clone()),
             session_id: session_id.clone(),
+            residency_owner: mm_dsl::SessionResidencyOwner::Session,
         },
     )
     .expect("the re-emitted binding must place the revived session");
@@ -13005,6 +13008,7 @@ fn placement_epoch_must_assert_the_registration_in_both_directions() {
             generation: Some(mm_dsl::Generation(1)),
             runtime_epoch_id,
             session_id: session_id.clone(),
+            residency_owner: mm_dsl::SessionResidencyOwner::Session,
         }
     };
 
@@ -13117,6 +13121,7 @@ fn epochless_placement_without_a_typed_generation_is_refused() {
             generation,
             runtime_epoch_id: None,
             session_id: session_id.clone(),
+            residency_owner: mm_dsl::SessionResidencyOwner::Session,
         };
 
     let refusal = mm_dsl::MeerkatMachineMutator::apply(&mut authority, placement(None)).expect_err(
@@ -13212,6 +13217,7 @@ fn registered_unplaced_epoch_is_legal_on_apply_and_on_recovery() {
             generation: Some(mm_dsl::Generation(1)),
             runtime_epoch_id: Some(epoch.clone()),
             session_id: session_id.clone(),
+            residency_owner: mm_dsl::SessionResidencyOwner::Session,
         },
     )
     .expect("placement asserting the registered epoch must bind");
@@ -13436,6 +13442,7 @@ fn recovered_idle_exact_binding_survives_authoritative_prepare_then_executor_att
             generation: Some(generation),
             runtime_epoch_id: Some(epoch.clone()),
             session_id: session_id.clone(),
+            residency_owner: mm_dsl::SessionResidencyOwner::Session,
         },
     )
     .expect("exact authoritative binding reassertion must be idempotent");
@@ -15215,6 +15222,12 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
 
         fn supports_compaction_projection_outbox(&self) -> bool {
             self.inner.supports_compaction_projection_outbox()
+        }
+
+        async fn list_runtimes_with_recovery_work(
+            &self,
+        ) -> Result<Vec<LogicalRuntimeId>, crate::store::RuntimeStoreError> {
+            self.inner.list_runtimes_with_recovery_work().await
         }
 
         async fn observe_machine_lifecycle(
@@ -35896,6 +35909,12 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         declared.or_else(|| RuntimeStore::commit_outcome_deadline(self.inner.as_ref()))
+    }
+
+    async fn list_runtimes_with_recovery_work(
+        &self,
+    ) -> Result<Vec<LogicalRuntimeId>, crate::store::RuntimeStoreError> {
+        self.inner.list_runtimes_with_recovery_work().await
     }
 
     async fn commit_prepared_session_boundary(
@@ -57479,6 +57498,7 @@ fn unregister_completes_after_normal_close_of_a_staged_live_channel() {
             generation: Some(mm_dsl::Generation(1)),
             runtime_epoch_id: None,
             session_id: session.clone(),
+            residency_owner: mm_dsl::SessionResidencyOwner::Session,
         },
         "prepare bindings",
     );

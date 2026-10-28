@@ -21,9 +21,11 @@
 //! - the in-process originals ledger ([`originals::StockOriginalLedger`]);
 //! - one invocation, admitted-work and operation policy object
 //!   ([`policy::StockInvocationPolicy`]) used for both faces of
-//!   [`ScopedInvocation::from_policy`] and as the operation owner;
+//!   [`ScopedInvocation::from_policy`], as the operation owner and for
+//!   retained resume;
 //! - the session's canonical destination ([`destination`]) and the actual
-//!   pinned controller ([`controller::StockControllerPin`]).
+//!   pinned controller ([`controller::StockControllerPin`]), which also
+//!   serves the retained resume of that session's work.
 //!
 //! A prompt of the local operator (from the CLI or a governed JSONL
 //! connection) reaches the governed runtime only through
@@ -36,9 +38,24 @@
 //! input is bound to it with [`bind_scoped_original`]. Every failure there
 //! is a typed local refusal before the input is submitted.
 //!
-//! Bounded checkpoint: the originals ledger is process memory and the stock
-//! composition offers no retained-work resume. Work admitted by an earlier
-//! process is refused, never re-submitted as if it were recovered.
+//! Retained work resumes through the scoped original composition's
+//! retained-resume check, built from the owners that admitted the work. A
+//! continuation of an earlier run of a session (the approved notice of
+//! consent parked at that run's close, or a host producer's completion) is
+//! admitted while this process's ledger still holds the run's originals, the
+//! stock requester rule still admits their requester, the restored grant
+//! owner still resolves their grants, and the session keeps the registration
+//! that ran it, whose newest pinned controller has the run's exact
+//! selection. The originals ledger is process memory: work admitted by an
+//! earlier process is not held by it, so its resume is refused, never
+//! re-submitted as if it were recovered. Every governed binding of a session
+//! advances its destination, and a resume is admitted only at the
+//! destination its run was admitted under: after a later prompt in the same
+//! session, whichever controller that prompt used, the earlier run's resume
+//! is refused for good. After the session is closed and reopened in the
+//! same process, the earlier run's resume is not ready (its new registration
+//! has no pin for it) until the session's destination is next bound, and is
+//! then refused for good.
 
 pub mod caller;
 pub mod consent;
@@ -80,13 +97,15 @@ use meerkat_core::{
 };
 use meerkat_runtime::input::{ExternalEventInput, Input, InputDurability, InputOrigin};
 use meerkat_runtime::meerkat_machine::{
-    AuthenticatedOriginal, AuthenticatedOriginalSource, ScopedInvocation, bind_scoped_original,
+    AuthenticatedOriginal, AuthenticatedOriginalSource, NativeRetainedResumeCheck,
+    RetainedInvocationOwner, ScopedInvocation, ScopedRetainedResume, bind_scoped_original,
 };
-use meerkat_runtime::{IdempotencyKey, MeerkatMachine, RuntimeDriverError};
+use meerkat_runtime::{IdempotencyKey, LogicalRuntimeId, MeerkatMachine, RuntimeDriverError};
 use meerkat_store::RealmPaths;
 use serde::{Deserialize, Serialize};
 
 use self::caller::{StockAuthenticatedCaller, StockCallerAccess, StockCallerPosture};
+use self::controller::StockResumePins;
 use self::originals::{PendingOriginal, StockOriginalLedger};
 
 /// The stock CLI ingress namespace of authenticated prompts.
@@ -330,6 +349,11 @@ pub struct StockGovernance {
     /// them when the realm last opened: the current installation a resumed
     /// session's attachment restore resolves.
     installed_mcp: std::sync::Mutex<Vec<meerkat_core::McpServerConfig>>,
+    /// Each session runtime's controller pin from its newest governed
+    /// binding, which only the composition's retained-resume check reads: a
+    /// capability cache of live clients, not lifecycle state (see
+    /// `StockResumePins`).
+    resume_pins: Arc<StockResumePins>,
 }
 
 impl StockGovernance {
@@ -424,6 +448,7 @@ impl StockGovernance {
             configured_policy: std::sync::Mutex::new(None),
             composed_grants: std::sync::Mutex::new(None),
             installed_mcp: std::sync::Mutex::new(Vec::new()),
+            resume_pins: Arc::default(),
         })
     }
 
@@ -728,14 +753,48 @@ impl StockGovernance {
         if let Ok(mut slot) = self.composed_grants.lock() {
             *slot = Some(Arc::downgrade(&grants));
         }
+        let retained_resume = self.retained_resume_check(
+            Arc::clone(&grants),
+            Arc::clone(&policy) as Arc<dyn RetainedInvocationOwner>,
+        );
         Ok(meerkat_runtime::meerkat_machine::ScopedGrantComposition {
             grants,
             ingress_domain: self.principals.ingress_domain(),
             originals: self.originals(),
             invocation: ScopedInvocation::from_policy(Arc::clone(&policy)),
             operation_owner: policy,
-            retained_resume: None,
+            retained_resume: Some(retained_resume),
         })
+    }
+
+    /// The composition's retained-resume check: the scoped original
+    /// composition's own check ([`ScopedRetainedResume`]) over the owners
+    /// that admitted the work, the restored grant owner `grants`, this
+    /// composition's ingress domain and originals ledger and the stock
+    /// requester rule `invocation`, with, as its controller owner, the pin of
+    /// the resumed session's own newest governed binding.
+    fn retained_resume_check(
+        &self,
+        grants: Arc<LocalGrantAuthority>,
+        invocation: Arc<dyn RetainedInvocationOwner>,
+    ) -> Arc<NativeRetainedResumeCheck> {
+        let ingress_domain = self.principals.ingress_domain();
+        let originals = self.originals();
+        let pins = Arc::clone(&self.resume_pins);
+        Arc::new(
+            move |runtime: &LogicalRuntimeId,
+                  input: &Input,
+                  evidence: &meerkat_runtime::retained_work::RetainedResumeEvidence| {
+                ScopedRetainedResume::new(
+                    Arc::clone(&grants),
+                    ingress_domain.clone(),
+                    Arc::clone(&originals),
+                    Arc::clone(&invocation),
+                    pins.controller_owner(runtime),
+                )
+                .check(runtime, input, evidence)
+            },
+        )
     }
 
     /// Bind one prompt of the local operator (the CLI's, or a governed JSONL
@@ -922,11 +981,19 @@ impl StockGovernance {
         let (authority_basis, controller_grant) = self
             .prompt_selection()
             .ok_or(StockGovernanceError::GrantsUnavailable)?;
-        let destination = match requesting {
+        let (destination, registration) = match requesting {
             Requesting::Operator | Requesting::Ingress => {
-                destination::bind_stock_session(machine, &self.principals.operator, session_id)
-                    .await
-                    .map_err(|error| StockGovernanceError::Destination(error.to_string()))?
+                destination::bind_stock_session_on_registration(
+                    machine,
+                    &self.principals.operator,
+                    session_id,
+                    |commit| {
+                        commit();
+                        Ok(())
+                    },
+                )
+                .await
+                .map_err(|error| StockGovernanceError::Destination(error.to_string()))?
             }
             Requesting::Caller(caller) => {
                 self.bind_caller_session(machine, session_id, caller)
@@ -959,6 +1026,11 @@ impl StockGovernance {
                 },
             )
             .map_err(|error| StockGovernanceError::Binding(error.to_string()))?;
+        // The session's pin for a retained resume of its work: the client
+        // this binding was made with, replacing the pin of an older binding
+        // (a lower destination generation) only.
+        let pinned = controller.clone();
+        let generation = destination.target().context_generation;
         let input = bind_scoped_original(
             input,
             claims.association,
@@ -970,6 +1042,7 @@ impl StockGovernance {
             controller,
         )
         .map_err(|error| StockGovernanceError::Binding(error.to_string()))?;
+        self.resume_pins.record(registration, generation, pinned);
         Ok((input, pending))
     }
 
@@ -987,13 +1060,20 @@ impl StockGovernance {
     /// every owner change on the publication is excluded until the commit
     /// returns ([`LocalGrantAuthority::try_with_owner_changes_excluded`]). An
     /// observation the publication moved past, or an exclusion an owner
-    /// change held, is taken again, a bounded number of times.
+    /// change held, is taken again, a bounded number of times. Returns the
+    /// destination with the exact registration it was bound on.
     async fn bind_caller_session(
         &self,
         machine: &MeerkatMachine,
         session_id: &SessionId,
         caller: &StockAuthenticatedCaller,
-    ) -> Result<destination::StockSessionDestination, StockGovernanceError> {
+    ) -> Result<
+        (
+            destination::StockSessionDestination,
+            meerkat_runtime::RuntimeSessionRegistrationWitness,
+        ),
+        StockGovernanceError,
+    > {
         if !matches!(self.posture, StockCallerPosture::HostAuthenticated(_)) {
             return Err(StockGovernanceError::RequesterUnsupported(
                 "the local-operator composition admits only its operator".to_string(),
@@ -1031,7 +1111,7 @@ impl StockGovernance {
             // Why the commit was refused: 1 moved or held, 2 unavailable,
             // 3 the caller's login past its deadline.
             let refused = AtomicU8::new(0);
-            let bound = destination::bind_stock_session_within(
+            let bound = destination::bind_stock_session_on_registration(
                 machine,
                 &self.principals.operator,
                 session_id,
@@ -1063,7 +1143,7 @@ impl StockGovernance {
             )
             .await;
             match (bound, refused.load(Ordering::Relaxed)) {
-                (Ok(destination), _) => return Ok(destination),
+                (Ok(bound), _) => return Ok(bound),
                 (Err(_), 1) => continue,
                 (Err(_), 2) => return Err(unavailable()),
                 (Err(_), 3) => {

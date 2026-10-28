@@ -886,10 +886,13 @@ async fn member_creation_cold_resume_projects_recovered_binding_immediately() {
             Ok(())
         })
     });
+    // The row reads the successor binding the start's restore repoints the
+    // member to, so the start materializes the member.
     let resumed = MobBuilder::for_resume(storage)
         .with_session_service(restored_service)
         .before_activation(hook)
         .notify_orchestrator_on_resume(false)
+        .with_member_restore_policy(crate::runtime::MemberRestorePolicy::Eager)
         .resume()
         .await
         .unwrap();

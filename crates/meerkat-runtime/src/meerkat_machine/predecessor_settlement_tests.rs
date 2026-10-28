@@ -1576,6 +1576,7 @@ async fn cancelled_while_queued(
             generation: Some(dsl::Generation::from(PLACED_GENERATION)),
             runtime_epoch_id: Some(epoch_id),
             session_id: dsl::SessionId::from_domain(session_id),
+            residency_owner: dsl::SessionResidencyOwner::Session,
         },
     )
     .expect("the predecessor's placed authority");

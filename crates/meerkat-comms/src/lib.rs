@@ -55,8 +55,9 @@ pub use host_acceptor::{
 pub use identity::{IdentityError, Keypair, PubKey, Signature};
 pub use inbox::{AdmissionOutcome, DropReason, Inbox, InboxError, InboxSender};
 pub use inproc::{
-    InprocPeerInfo, InprocPublicationError, InprocRegistry, InprocSendError, RegistrationOutcome,
-    RegistrationRejection,
+    InprocPeerInfo, InprocPeerWaker, InprocPublicationError, InprocRegistry, InprocSendError,
+    PeerWakeAnswer, PeerWakeDenial, PeerWakeFuture, PeerWakeInputClass, PeerWakeRequest,
+    RegistrationOutcome, RegistrationRejection,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use io_task::{IoTaskError, handle_connection};

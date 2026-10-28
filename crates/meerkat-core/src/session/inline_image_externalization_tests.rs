@@ -634,3 +634,85 @@ async fn a_re_anchored_household_history_with_tool_result_images_converts() {
         );
     }
 }
+
+/// A WholeBlob session loaded without a rewrite graph holds only the lazy
+/// row-lineage mark. An inline image appended after the load is moved to the
+/// blob store in place, as a checkpoint and a compaction do before they bind
+/// the rows: the scan changes that row, and the session keeps its row
+/// lineage, so the next compaction's rewrite commits and the session store
+/// accepts the compacted document over the checkpointed one.
+#[tokio::test]
+async fn a_mutating_media_scan_keeps_a_loaded_whole_blob_sessions_row_lineage() {
+    let mut persisted = Session::new();
+    persisted.push(Message::User(UserMessage::text("hello")));
+    persisted.push(Message::BlockAssistant(BlockAssistantMessage::new(
+        vec![AssistantBlock::Text {
+            text: "hi".to_string(),
+            meta: None,
+        }],
+        StopReason::EndTurn,
+    )));
+    let mut live = Session::decode_whole_blob_document(&serde_json::to_vec(&persisted).unwrap())
+        .unwrap()
+        .into_session();
+    let snapshot = photo(0);
+    live.push(Message::User(UserMessage::with_blocks(vec![inline_png(
+        &snapshot,
+    )])));
+
+    let store = PayloadStore::default();
+    live.externalize_media(&store, 0).await.unwrap();
+    let scanned = serde_json::to_string(&live.messages()[2]).unwrap();
+    assert!(
+        !scanned.contains(snapshot.as_str()) && scanned.contains("\"blob_id\""),
+        "the scan moved the appended image to the blob store: {scanned}"
+    );
+    let rows = u64::try_from(live.messages().len()).unwrap();
+    assert_eq!(
+        live.exact_message_row_prefix_at(rows),
+        Some(
+            crate::session_store::SessionMessageRowPrefixAccumulator::from_messages(
+                live.messages()
+            )
+            .unwrap()
+        ),
+        "the mutating media scan keeps the loaded WholeBlob row lineage, over the scanned rows"
+    );
+
+    // The checkpoint writes the scanned rows; the next compaction folds the
+    // first turn.
+    let checkpointed = Session::decode_whole_blob_document(&serde_json::to_vec(&live).unwrap())
+        .unwrap()
+        .into_session();
+    live.commit_transcript_rewrite(
+        TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+        vec![Message::User(UserMessage::text("summary"))],
+        TranscriptRewriteReason::new("compaction"),
+        Some("test".to_string()),
+        None,
+    )
+    .expect("the next compaction's rewrite commits");
+    assert_eq!(commits(&live).len(), 1);
+
+    let history = live
+        .validated_transcript_history_state()
+        .expect("history validation")
+        .expect("the compaction's graph");
+    let revision = live.transcript_content_digest().unwrap();
+    let chain = crate::session_store::find_transcript_rewrite_commit_chain_extending_session(
+        &history,
+        &checkpointed,
+        &revision,
+    )
+    .unwrap();
+    assert_eq!(
+        chain.map(|chain| chain.len()),
+        Some(1),
+        "the session store accepts the compacted document over the checkpointed one"
+    );
+    let reloaded = Session::decode_whole_blob_document(&serde_json::to_vec(&live).unwrap())
+        .unwrap()
+        .into_session();
+    assert_eq!(reloaded.messages(), live.messages());
+    assert_eq!(commits(&reloaded), commits(&live));
+}

@@ -62,7 +62,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.6",
+        "CARGO_PKG_VERSION": "0.9.7",
         "CARGO_MANIFEST_DIR": "./crates/xtask",
     },
     proc_macro_deps = all_crate_deps(
@@ -101,7 +101,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.6",
+        "CARGO_PKG_VERSION": "0.9.7",
         "CARGO_MANIFEST_DIR": "./crates/xtask",
     },
     tags = [
@@ -218,7 +218,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.6",
+        "CARGO_PKG_VERSION": "0.9.7",
         "CARGO_BIN_NAME": "xtask",
         "CARGO_MANIFEST_DIR": "crates/xtask",
     },
@@ -261,7 +261,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.6",
+        "CARGO_PKG_VERSION": "0.9.7",
         "CARGO_BIN_NAME": "buildbuddy_static_lanes",
         "CARGO_MANIFEST_DIR": "./crates/xtask",
     },
@@ -357,7 +357,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.6",
+        "CARGO_PKG_VERSION": "0.9.7",
         "CARGO_BIN_NAME": "ci_gate_requires_rmat",
         "CARGO_MANIFEST_DIR": "./crates/xtask",
     },
@@ -423,7 +423,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.6",
+        "CARGO_PKG_VERSION": "0.9.7",
         "CARGO_BIN_NAME": "effect_authority",
         "CARGO_MANIFEST_DIR": "./crates/xtask",
     },
@@ -503,7 +503,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.6",
+        "CARGO_PKG_VERSION": "0.9.7",
         "CARGO_BIN_NAME": "machines_contracts",
         "CARGO_MANIFEST_DIR": "./crates/xtask",
     },
@@ -576,7 +576,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.6",
+        "CARGO_PKG_VERSION": "0.9.7",
         "CARGO_BIN_NAME": "no_provider_data_in_core",
         "CARGO_MANIFEST_DIR": "./crates/xtask",
     },
@@ -646,7 +646,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.6",
+        "CARGO_PKG_VERSION": "0.9.7",
         "CARGO_BIN_NAME": "protocol_codegen_drift",
         "CARGO_MANIFEST_DIR": "./crates/xtask",
     },
@@ -779,7 +779,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.6",
+        "CARGO_PKG_VERSION": "0.9.7",
         "CARGO_BIN_NAME": "release_workflow_asset_manifest",
         "CARGO_MANIFEST_DIR": "./crates/xtask",
     },
@@ -848,7 +848,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.6",
+        "CARGO_PKG_VERSION": "0.9.7",
         "CARGO_BIN_NAME": "released_enum_ordinals",
         "CARGO_MANIFEST_DIR": "./crates/xtask",
     },
@@ -914,7 +914,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.6",
+        "CARGO_PKG_VERSION": "0.9.7",
         "CARGO_BIN_NAME": "rmat_audit",
         "CARGO_MANIFEST_DIR": "./crates/xtask",
     },
@@ -985,7 +985,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.6",
+        "CARGO_PKG_VERSION": "0.9.7",
         "CARGO_BIN_NAME": "rmat_strict",
         "CARGO_MANIFEST_DIR": "./crates/xtask",
     },
@@ -1050,7 +1050,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.6",
+        "CARGO_PKG_VERSION": "0.9.7",
         "CARGO_BIN_NAME": "runtime_authority_bypass",
         "CARGO_MANIFEST_DIR": "./crates/xtask",
     },
@@ -1114,7 +1114,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.6",
+        "CARGO_PKG_VERSION": "0.9.7",
         "CARGO_BIN_NAME": "seam_inventory_strict",
         "CARGO_MANIFEST_DIR": "./crates/xtask",
     },
@@ -1287,6 +1287,102 @@ sh_test(
     name = "machine_verify_audits_d_tlc_test",
     srcs = ["tests/machine_verify_all_tlc_test.sh"],
     args = ["$(rootpath :xtask_bin)", "--part", "audits-d"],
+    data = [
+        ":xtask_bin",
+        "//:workspace_runfiles",
+        "tests/rustfmt_host.sh",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin",
+    ],
+    env = {
+        "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
+        "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
+        "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
+        "TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",
+    },
+    exec_properties = {
+        "EstimatedCPU": "8",
+        "EstimatedMemory": "24GB",
+    },
+    size = "enormous",
+    timeout = "eternal",
+    tags = [
+        "buildbuddy",
+        "required-feature",
+    ],
+)
+
+sh_test(
+    name = "machine_verify_audits_e_tlc_test",
+    srcs = ["tests/machine_verify_all_tlc_test.sh"],
+    args = ["$(rootpath :xtask_bin)", "--part", "audits-e"],
+    data = [
+        ":xtask_bin",
+        "//:workspace_runfiles",
+        "tests/rustfmt_host.sh",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin",
+    ],
+    env = {
+        "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
+        "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
+        "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
+        "TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",
+    },
+    exec_properties = {
+        "EstimatedCPU": "8",
+        "EstimatedMemory": "24GB",
+    },
+    size = "enormous",
+    timeout = "eternal",
+    tags = [
+        "buildbuddy",
+        "required-feature",
+    ],
+)
+
+sh_test(
+    name = "machine_verify_audits_f_tlc_test",
+    srcs = ["tests/machine_verify_all_tlc_test.sh"],
+    args = ["$(rootpath :xtask_bin)", "--part", "audits-f"],
+    data = [
+        ":xtask_bin",
+        "//:workspace_runfiles",
+        "tests/rustfmt_host.sh",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin",
+    ],
+    env = {
+        "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
+        "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
+        "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
+        "TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",
+    },
+    exec_properties = {
+        "EstimatedCPU": "8",
+        "EstimatedMemory": "24GB",
+    },
+    size = "enormous",
+    timeout = "eternal",
+    tags = [
+        "buildbuddy",
+        "required-feature",
+    ],
+)
+
+sh_test(
+    name = "machine_verify_audits_g_tlc_test",
+    srcs = ["tests/machine_verify_all_tlc_test.sh"],
+    args = ["$(rootpath :xtask_bin)", "--part", "audits-g"],
     data = [
         ":xtask_bin",
         "//:workspace_runfiles",

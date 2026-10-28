@@ -12,6 +12,7 @@ pub mod machines;
 #[cfg(not(feature = "machine-authority"))]
 #[path = "machines_test_support.rs"]
 pub mod machines;
+pub mod materialization_authority_gates;
 pub mod ownership_ledger;
 pub mod protocol_codegen;
 pub mod public_contracts;

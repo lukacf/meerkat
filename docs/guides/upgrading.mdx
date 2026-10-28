@@ -55,6 +55,225 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.7
+
+This section is for systems running 0.9.6. The full list of changes is in
+the CHANGELOG under `## [0.9.7]`. 0.9.7 is a patch release for systems with
+many agents: a mob now restores its members on demand. It needs no storage
+migration: it opens every 0.9.6 store as it is, and 0.9.6 reads everything it
+writes, except a session that stored the opt-in 12-hour prompt-cache TTL (see
+[Downgrading to 0.9.6](#downgrading-to-0-9-6)). Back up the state root as the
+steps above say.
+
+### On-demand member restore
+
+A mob's start now materializes only the members that must run: members that
+hold durable work (an open or suspended run, queued inputs, a provisional
+tail, a pending delivery, a background operation completion not yet
+delivered), a member that owes a kickoff, a member wired to a placed member, a
+member on a network transport or without a durable endpoint, an orchestrator
+the resume notifies, and the members the host requires. Every other member
+stays dormant until its first delivery wakes it, while the caller waits. A
+dormant member is listed, addressable and reported like an idle live member,
+and reads never wake it. `rkat-rpc`, `rkat-rest`, `rkat-mcp` and the CLI start
+their mobs this way. A start, and the lift of a stopped mob, restore the
+members they must materialize at most
+`MobBuilder::with_resume_restore_concurrency` at a time (16 by default); a
+member a lift has not reached yet stays dormant, and a delivery to it wakes it
+at once.
+
+**Do:** nothing, to take the default. To keep the 0.9.6 start, build the mob
+with `MobBuilder::with_member_restore_policy(MemberRestorePolicy::Eager)` and
+pass the same policy to `MobMcpState::with_member_restore_policy`; the stock
+servers have no setting for it in this release. If a check after a start must
+find every broken member, use `MemberRestorePolicy::OnDemandVerified`: under
+the default, a member whose durable session cannot be resumed reads active
+until its first delivery fails. Expect a dormant member's first delivery to
+take as long as the member's build, its MCP servers included.
+
+A Rust host that feeds a member's session through the runtime machine
+directly (`MeerkatMachine::accept_input_with_completion` and its variants, on
+the member's session id) wakes the member first with
+`MobHandle::ensure_member_live`: members start dormant in 0.9.7, and the
+machine answers `NotReady { state: Destroyed }` for a session that is not
+resident in this process. The mob handle, REST, RPC, the MCP server, runtime
+delivery and the schedule host wake a member themselves.
+
+Members on TCP or UDS comms (`MobBuilder::with_network_member_comms`) are not
+lazy: every start and every lift of a stopped mob wakes them, whatever the
+policy, since a dormant member has no listener for peers that reach it over
+the network.
+
+On a host store, the first 0.9.7 start over a realm that 0.9.6 or an earlier
+release last wrote wakes every mob member that is not archived, once, and
+takes about as long as a 0.9.6 start: those releases' heads cannot show that
+no background operation completion is still owed. Each member's next commit
+records its state in the 0.9.7 form, and later starts wake only the members
+that hold work. Keep `OnDemand` there: `OnDemandVerified` loads each dormant
+member's stored session rows at every start.
+
+### Breaking changes and what to do
+
+#### Peer messages to members that are not materialized
+
+`comms/send` gains the error code `peer_wake_refused`, with a typed `refusal`
+and `retryable`: a peer message to a seated member whose wake was refused or
+did not finish, and to a member of a stopped mob, fails with it. Nothing was
+delivered, so a retry cannot duplicate the message.
+`peer_not_found_or_not_trusted` now means only a peer that is not a member, or
+one the sender does not trust. `CommsSendErrorData` gains `PeerWakeRefused`,
+`InprocSendError` gains `WakeRefused`, and both `SendError` enums gain
+`PeerWakeRefused`.
+
+**Do:** upgrade the Python and TypeScript SDKs with the server, branch on
+`peer_wake_refused` and its `retryable`, and add the arm where you match
+`CommsSendErrorData` or `InprocSendError` exhaustively.
+
+#### Machine types
+
+The mob and runtime machine types in `meerkat-machine-kernels`,
+`meerkat-machine-schema`, `meerkat-mob` and `meerkat-runtime` gain the member
+residency inputs, signals, effects, state fields and transitions, and
+`MeerkatSeamSignal` gains `RuntimeRegistrationReleased`. The approval
+lifecycle machine (`ApprovalLifecycleMachine`, version 6) in `meerkat-core`,
+`meerkat-machine-schema` and `meerkat-machine-kernels` gains the inputs
+`AdmitEnteredStep` and `FinishEnteredStep`, their transitions, and the state
+fields `review_entered_phase` and `review_entered_steps`. Every new variant is
+appended after the released ones, so no existing implicit discriminant
+changes.
+
+**Do:** add the arms where you match these enums exhaustively, and set the new
+fields in struct literals.
+
+#### The OpenAI 12-hour prompt-cache TTL
+
+`OpenAiPromptCacheTtl`, `WireOpenAiPromptCacheTtl` and `ProviderCacheTtl`
+gain `TwelveHours`, and the SDKs read a fork's cache-breakpoint lifetime they
+do not know as `{"unknown": <value>}`.
+
+**Do:** add the arms, handle the unknown form of
+`ForkAuthoredCacheBreakpoint.ttl`, and upgrade the SDKs before you select
+`12h` for a session you fork.
+
+#### Rebuilt members run on their current auth binding
+
+A member rebuilt on its durable session (an explicit resume, a revival or
+reload, a Resume-mode spawn, a wake) now runs on the auth binding its current
+spec names. A Resume-mode spawn, a restore or a wake that would keep a live
+actor running another binding is refused with
+`MobError::MemberAuthBindingConflict`.
+
+**Do:** nothing, if each member's spec names the binding it should run on.
+Expect the refusal where a live actor on another binding used to be reused.
+
+#### Resuming a stopped mob no longer fails on its orchestrator's notification
+
+`MobHandle::resume` hands the resume notification turn of a turn-driven or
+placed orchestrator to the mob and answers without waiting for it, as
+`MobBuilder::resume` already did; a failed notification is recorded as an
+`OrchestratorResumeNotificationFailed` mob event, and the mob keeps running.
+
+**Do:** if you relied on the resume failing when that notification failed,
+watch for the event instead.
+
+#### A governed helper step its review settles answers `Denied`
+
+`GovernedHelperAdmissionFence::from_dispatch` and
+`GovernedHelperChildIssuance::from_dispatch` now answer `Denied`, not
+`Unavailable`, when the dispatch's review settles the step: an R2 or R3
+decision at the fence, a review already spent, an ended dispatch, or a
+refused review. The review owner's own unavailability (contention, an
+unconfirmed store, unreadable review material, a failed reviewer) still
+answers `Unavailable`.
+
+**Do:** treat `Denied` as final for that dispatch and stop retrying it; a new
+call is reviewed anew. To run several governed helper steps under one review,
+enter the operation once (`ToolDispatchContext::enter_governed_operation`) and
+build the steps with `GovernedHelperAdmissionFence::from_entered` and
+`GovernedHelperChildIssuance::from_entered`.
+
+#### `rkat resume` and `meerkat_resume` refuse mob members' sessions
+
+They refuse a session built as a mob member's when no mob in their own process
+owns it (`SESSION_UNSUPPORTED`).
+
+**Do:** deliver to the member through its mob, which wakes it.
+
+### Wrappers and decorators
+
+Forward the new provided methods; their defaults do less:
+
+- a `RuntimeStore` decorator: `list_runtimes_with_recovery_work` (without it,
+  every start materializes every member);
+- a `CommsRuntime` wrapper: `close_inproc_route` and `reopen_inproc_route`;
+- a `SessionAgentBuilder` or `MobSessionService` wrapper:
+  `recorded_auth_binding`;
+- a `WorkAuthorization` wrapper: `run_entered_if_current_within` (without it,
+  every further step of an entered governed operation is refused).
+
+### Host store authors
+
+A realm now asks `list_heads` for 2048 heads per call, not 256, when it opens
+and when a stopped writer acquires the fence again, so one answer of typical
+runtime heads is several MiB.
+
+**Do:** if your backend or transport caps an answer below that, answer the
+heads that fit and set `HeadPage::next`, as the SPI requires. A store that
+sets `next` only after a full page of `limit` heads ends the listing early,
+and the realm opens without the scopes it was not given.
+
+### Thread stacks of Core's process-wide runtimes
+
+`RKAT_WORKER_STACK_BYTES` now also sets the stack of the threads of
+`meerkat-machine-cleanup` and `meerkat-runtime-serving`, the two process-wide
+runtimes that run session and mob work. Without it they take 8 MiB, or
+`RUST_MIN_STACK` when that asks for more; with neither set nothing changes.
+
+**Do:** correct an invalid `RKAT_WORKER_STACK_BYTES` before you upgrade: it
+now fails every operation that needs these runtimes. The turns of
+runtime-backed mob members run on the cleanup runtime's two workers, so keep
+member tools non-blocking.
+
+### Consent on stock governed realms
+
+On a stock governed realm, an approved consent's notice is now admitted as a
+resume of the run that parked it, and the consent moves into the resumed run.
+Before, the notice stayed pending forever. The resume is refused, and the
+notice records `Failed`, for work an earlier process admitted (the stock
+originals ledger is process memory), for a requester no longer admitted, and,
+on any governed composition, once the session no longer keeps the
+registration that ran the parked run or a later governed prompt has moved
+its destination; the parked consent is then withdrawn. After a stock session
+is closed and reopened in the same process, the notice stays owed until the
+session's destination is next bound, and then fails.
+
+**Do:** expect `Failed` notices in those cases where notices used to stay
+pending, and treat them as final for that consent.
+
+### Downgrading to 0.9.6
+
+Starting 0.9.6 on a state root that 0.9.7 used is safe: 0.9.6 restores every
+member at start again, and reads the journal rows and runtime heads 0.9.7
+wrote. Three things do not carry back:
+
+- **The 12-hour prompt-cache TTL.** 0.9.6 does not know `12h`: a session whose
+  stored provider parameters carry it panics when 0.9.6 decodes its metadata,
+  and a profile or mob definition that carries it fails its parse. Remove the
+  setting on 0.9.7 before a downgrade.
+- **A rotated member's owed kickoff.** 0.9.6 ignores the kickoff prompt 0.9.7
+  stores for a member rotated with `MobHandle::rotate_member`, so a rotated
+  member whose kickoff has not run yet does not run it under 0.9.6.
+- **A fresh seat that never woke.** A member seated fresh by
+  `MobHandle::seat_dormant_members`, or a rotation's next incarnation, has no
+  session until its first wake. 0.9.6 restores such a member as broken, with
+  a missing session, and ignores the build inputs 0.9.7 stored for its first
+  build. Wake those members on 0.9.7 before a downgrade, or re-create them
+  after it.
+
+A downgrade also brings back the 0.9.6 behaviour that 0.9.7 changes, the
+eager start included. To undo everything 0.9.7 wrote, restore the backup
+instead.
+
 ## Upgrading to 0.9.6
 
 This section is for systems running 0.9.5. The full list of changes is in

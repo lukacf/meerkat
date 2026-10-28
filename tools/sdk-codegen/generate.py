@@ -301,6 +301,11 @@ COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES = [
     "CommsPeerUnreachableReason",
     "AdmissionDropReason",
     "CommsSendRequiredAction",
+    # The closed wake refusal carried by `peer_wake_refused`, and the durable
+    # hold one of its variants names. Both precede `CommsSendErrorData` so the
+    # refusal is a named union in every SDK, never an open map.
+    "DurableResumeHold",
+    "PeerWakeRefusal",
     "CommsSendErrorData",
     "CommsChecksumTokenResultIntent",
     "CommsPeerRequestIntent",

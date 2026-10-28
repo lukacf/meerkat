@@ -53,7 +53,7 @@ AuditPrefixLength == 5
 AuditPrefix ==
     \/ model_step_count = 0 /\ Initialize
     \/ model_step_count = 1 /\ RegisterSessionIdle(AuditSession, None, {})
-    \/ model_step_count = 2 /\ PrepareBindingsIdle(AuditRuntime, 1, Some(1), None, AuditSession)
+    \/ model_step_count = 2 /\ PrepareBindingsIdle(AuditRuntime, 1, Some(1), None, AuditSession, "Session")
     \/ model_step_count = 3 /\ ResolveLiveOpenAdmissionAcceptedAttached(AuditSession, AuditFirstChannel, AuditIdentity, None)
     \/ model_step_count = 4 /\ BindLiveExecutionChannelAttached(AuditSession, AuditFirstChannel, AuditRuntime, 1, 1, 0)
 
@@ -126,7 +126,7 @@ AuditSessionLifecycle ==
     \/ registration_phase # "Draining" /\ StopRuntimeExecutorAttached(AuditStopReason)
     \/ RuntimeExecutorExitedFromAttached
     \/ RegisterSessionResumesStopped(AuditSession, None, {})
-    \/ PrepareBindingsIdle(AuditRuntime, 1, Some(1), None, AuditSession)
+    \/ PrepareBindingsIdle(AuditRuntime, 1, Some(1), None, AuditSession, "Session")
 
 AuditModelNext ==
     \/ AuditPrefix

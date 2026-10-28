@@ -81,6 +81,36 @@ describe("commsSendError", () => {
       },
     },
     {
+      name: "peer_wake_refused (mob_not_running)",
+      rpcCode: -32603,
+      rpcMessage: `peer 'alice' was not woken for envelope ${ENVELOPE_ID} (mob_not_running)`,
+      data: {
+        code: "peer_wake_refused",
+        peer: "alice",
+        envelope_id: ENVELOPE_ID,
+        refusal: { kind: "mob_not_running" },
+        retryable: true,
+        message: `peer 'alice' was not woken for envelope ${ENVELOPE_ID} (mob_not_running)`,
+      },
+    },
+    {
+      name: "peer_wake_refused (member_broken)",
+      rpcCode: -32603,
+      rpcMessage: `peer 'alice' was not woken for envelope ${ENVELOPE_ID} (member_broken)`,
+      data: {
+        code: "peer_wake_refused",
+        peer: "alice",
+        envelope_id: ENVELOPE_ID,
+        refusal: {
+          kind: "member_broken",
+          reason: "missing durable session snapshot",
+          hold: "tail_held_for_recovery",
+        },
+        retryable: false,
+        message: `peer 'alice' was not woken for envelope ${ENVELOPE_ID} (member_broken)`,
+      },
+    },
+    {
       name: "send_ambiguous",
       rpcCode: -32603,
       rpcMessage: AMBIGUOUS_MESSAGE,

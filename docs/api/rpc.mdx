@@ -593,9 +593,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.9.6"
+      "version": "0.9.7"
     },
-    "contract_version": "0.9.6",
+    "contract_version": "0.9.7",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -892,7 +892,7 @@ Trajectory Interchange Format) v1.7 trajectory document.
   "params": {
     "session_id": "01936f8a-7b2c-7000-8000-000000000001",
     "agent_name": "meerkat",
-    "agent_version": "0.9.6",
+    "agent_version": "0.9.7",
     "model_name": "claude-opus-5"
   }
 }
@@ -2805,7 +2805,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 6},
+    "contract_version": {"major": 0, "minor": 9, "patch": 7},
     "providers": [
       {
         "provider": "anthropic",
@@ -2869,7 +2869,7 @@ synthesized with that status.
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 6},
+    "contract_version": {"major": 0, "minor": 9, "patch": 7},
     "capabilities": [
       {
         "id": "sessions",
@@ -3437,13 +3437,33 @@ variant also carries a `message`.
 
 | `code` | Meaning | Other fields |
 |--------|---------|--------------|
-| `peer_not_found_or_not_trusted` | The peer is unknown or not trusted | `peer` |
+| `peer_not_found_or_not_trusted` | The peer is unknown or not trusted: not a member, or a member the sender is not wired to (does not trust). A seated member the sender trusts is never reported this way | `peer` |
 | `peer_unreachable` | The peer is offline, or the transport failed | `peer`, `reason` (`offline_or_no_ack` or `transport_error`), optional `details` |
 | `peer_admission_dropped` | The peer's ingress dropped the envelope | `peer`, `reason` |
 | `peer_input_rejected` | The peer durably rejected the envelope | `peer`, `envelope_id` |
+| `peer_wake_refused` | The peer is a seated member that was not materialized, and the wake the message needed was refused or did not finish. Not delivered: nothing reached the peer, so a retry cannot duplicate it | `peer`, `envelope_id`, `refusal` (tagged on `kind`, see below), `retryable` |
 | `send_ambiguous` | The delivery outcome is unknown: the envelope may already be delivered. Reconcile by `envelope_id` before any new attempt; a retry can duplicate it | `envelope_id`, `retry_safe` (`false`), `required_action` (`"reconcile"`) |
 | `send_failed` | Any other send failure | none |
 | `invalid_command` | The command failed validation | none |
+
+`peer_wake_refused` names why in `refusal.kind`, a closed vocabulary.
+`retryable` is `true` when a later send can succeed without an operator action.
+
+| `refusal.kind` | Meaning | Retryable |
+|----------------|---------|-----------|
+| `member_broken` | The member's restore failed; `reason` says why, and `hold` (when present) names what keeps its intact session withheld | no |
+| `member_retiring` | The member is being retired | no |
+| `mob_not_running` | The member's mob is stopped, completed or destroyed. A live member of a stopped mob answers the same way | yes, after the mob resumes |
+| `admission_closed` | The member's mob is shutting down | yes, after a restart |
+| `wake_timed_out` | The sender's `ack_timeout_secs`, or the mob's wake bound, ended before the member was ready | yes |
+| `mob_unavailable` | The member's mob actor exited while the wake waited | yes, after a restart |
+| `materialization_lost` | The member was woken, but its inbox was gone again before the hand-off | yes |
+| `non_authoritative_composition` | The member belongs to a candidate composition, which never materializes members | no |
+| `host_preparation_pending` | The member's host has preparation pending for it | yes |
+| `resume_gate_unavailable` | The member's durable resume gate was unavailable | yes |
+| `host_owned` | The member is placed on a member host, which owns its materialization | no |
+| `lifecycle_origin_fenced` | The member's mob is quiescing its lifecycle | no |
+| `sender_waking` | The sender is itself being woken (it sent from inside its own build) and the recipient was not live; the send is refused instead of waiting on another wake | yes, once the sender is live |
 
 ## Architecture
 

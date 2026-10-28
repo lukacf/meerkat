@@ -394,9 +394,11 @@ impl MeerkatMachine {
     /// Supply the truthful entry runtime epoch to a routed input that declares
     /// the field but cannot carry it.
     ///
-    /// The formal composition route projects MobMachine-owned facts only, and
-    /// the runtime epoch is a meerkat-owned fact about a meerkat-owned session
-    /// entry - the producer machine must never learn it. Resolving it here, from
+    /// A routed input projects MobMachine-owned facts only, and the runtime
+    /// epoch is a meerkat-owned fact about a meerkat-owned session entry: the
+    /// mob never states it on an input. (It does learn the bound epoch from
+    /// the routed `RuntimeBound` and `RuntimeRegistrationReleased` signals, to
+    /// fence a release against a newer registration.) Resolving it here, from
     /// the ENTRY (never from the authority's own state, which would make the
     /// receiving guard tautological), under the same `sessions` guard that
     /// resolved the entry and with the caller's session mutation gate held,
@@ -764,6 +766,7 @@ mod tests {
                     generation: Some(dsl::Generation(0)),
                     runtime_epoch_id: None,
                     session_id: dsl::SessionId("routed-session".into()),
+                    residency_owner: dsl::SessionResidencyOwner::Composition,
                 },
             ),
             (

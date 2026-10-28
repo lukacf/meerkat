@@ -293,11 +293,11 @@ Rust applications can select only the provider adapters they use:
 <CodeGroup>
 
 ```toml Anthropic-only feature selection
-meerkat = { version = "=0.9.6", default-features = false, features = ["anthropic", "jsonl-store"] }
+meerkat = { version = "=0.9.7", default-features = false, features = ["anthropic", "jsonl-store"] }
 ```
 
 ```toml All providers
-meerkat = { version = "=0.9.6", features = ["all-providers", "jsonl-store"] }
+meerkat = { version = "=0.9.7", features = ["all-providers", "jsonl-store"] }
 ```
 
 </CodeGroup>
@@ -381,10 +381,35 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
 
     The catalog validates each model's reasoning-effort subset. GPT-5.6 and
     the GPT-6 family also support `prompt_cache_enabled`, `prompt_cache_key`,
-    and `prompt_cache_options` (`implicit` or `explicit`, with optional
-    `30m` TTL). On the OpenAI API Meerkat defaults GPT-5.6 to `explicit` and
-    GPT-6 to `implicit`, both with the `30m` TTL. Use `max`, not `ultra`, as
-    the public provider effort.
+    and `prompt_cache_options` (`implicit` or `explicit`, with an optional
+    `30m` or `12h` TTL). On the OpenAI API Meerkat defaults GPT-5.6 to
+    `explicit` and GPT-6 to `implicit`, both with the `30m` TTL. Use `max`,
+    not `ultra`, as the public provider effort.
+
+    The TTL is a minimum cache lifetime. `30m` is OpenAI's default and
+    Meerkat's; `12h` is only ever an explicit choice. Choose `12h` for a
+    long-lived agent with a stable prefix (system prompt, tools, reference
+    material) that responds every few hours, so the prefix stays cached
+    between its turns. A `12h` cache write costs 2.5x the uncached input
+    rate, against 1.25x for `30m`; cache reads cost the same, and OpenAI may
+    keep a `12h` entry for up to 24 hours. Set it per agent or profile, or
+    per turn:
+
+    ```json
+    {"provider_tag": {"provider": "open_ai", "prompt_cache_options": {"ttl": "12h"}}}
+    ```
+
+    Meerkat's breakpoints carry no lifetime of their own, so the request's
+    TTL applies to every breakpoint: a request with `12h` makes every cache
+    write of that request a 12-hour write at 2.5x, the conversation tail
+    included, not only the stable prefix. Weigh that against rewriting the
+    prefix after 30 minutes. On the public OpenAI API, models without
+    GPT-5.6-and-later prompt caching (`gpt-5.5`, `gpt-5.5-pro` and earlier)
+    refuse a TTL with a typed error when the agent is built (a per-turn
+    override, before its request is sent); they set their lifetime with
+    `prompt_cache_retention` instead. The ChatGPT backend, Azure OpenAI and
+    Copilot drop the prompt-cache fields, so a TTL there is not sent and not
+    refused.
 
     Explicit mode marks every input item, so the last input before the
     previous run's output always carries a breakpoint. In `implicit` mode on
@@ -570,7 +595,7 @@ current REST router does not expose a blob-byte fetch route. See
 
 ```toml
 # Exactly pin the pre-1.0 Meerkat crate family.
-meerkat = { version = "=0.9.6", features = ["sqlite-store", "session-store"] }
+meerkat = { version = "=0.9.7", features = ["sqlite-store", "session-store"] }
 ```
 
 The `meerkat` facade enables `anthropic`, `openai`, and `gemini` by

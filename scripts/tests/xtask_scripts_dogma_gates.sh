@@ -359,10 +359,24 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # invariants violated, its two RetireAtScope mutants' invariants violated,
 # its mint mutant's action property violated, and its three destroyed-runtime
 # mutants' action property violated.
+# member_residency_audit.sh requires a final distinct-state count at or above
+# each run's floor, a coverage block in which each covered action of its eight
+# runs generated a state and its thirty-two witnesses violated; the lane
+# runs it without --mutants, whose refusal lines are listed for a run by hand.
+# One of its arms is printed as TLC prints an application with a state-level
+# argument, with the location suffix "(L C L C)" before the ">", so the
+# runner's coverage parsing stays pinned to that form.
+# empty_resume_residency_audit.sh requires its four witnesses violated, and
+# with --mutants each seeded defect's invariant or property violated.
 # durable_tail_classification_audit.sh requires its Ready witness violated,
 # and with --mutants each seeded defect's target invariant violated.
 # durable_tail_recovery_ownership_audit.sh requires its four witnesses
 # violated, and with --mutants each seeded defect's target invariant violated.
+# entered_step_audit.sh (approval_lifecycle) requires a final distinct-state
+# count at or above its floor, a coverage block in which each of its covered
+# actions (of module entered_step_audit) generated a state, its three
+# witnesses violated, and with --mutants each seeded defect's invariant or
+# property violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -505,10 +519,107 @@ printf '%s\n' \
   'echo "Error: Invariant AuditHostRecoversAsARestartDoes is violated."' \
   'echo "Error: Invariant AuditWriterRecoversAsRetired is violated."' \
   'echo "Error: Invariant AuditWriterNeverContinues is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSealedDormant is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSealedEndpointPending is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStaleInStopped is violated."' \
+  'echo "Error: Invariant NotAuditWitnessDrift is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBrokenWake is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHeldEdge is violated."' \
+  'echo "Error: Invariant NotAuditWitnessEdgeRepairOwed is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnbornCreated is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnbornArchived is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSeatUnborn is violated."' \
+  'echo "Error: Action property NotAuditWitnessRotatedUnborn is violated."' \
+  'echo "Error: Action property NotAuditWitnessReseatCreated is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRotationGrant is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBothSeated is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSeatEndpointPending is violated."' \
+  'echo "Error: Action property NotAuditWitnessWokeLive is violated."' \
+  'echo "Error: Action property NotAuditWitnessReleased is violated."' \
+  'echo "Error: Action property NotAuditWitnessStopCloses is violated."' \
+  'echo "Error: Action property NotAuditWitnessRetireCloses is violated."' \
+  'echo "Error: Action property NotAuditWitnessResumeJoins is violated."' \
+  'echo "Error: Action property NotAuditWitnessResumeReservesLive is violated."' \
+  'echo "Error: Action property NotAuditWitnessResumeFinishedLive is violated."' \
+  'echo "Error: Action property NotAuditWitnessResumeJoinsAfterReadiness is violated."' \
+  'echo "Error: Action property NotAuditWitnessRotated is violated."' \
+  'echo "Error: Action property NotAuditWitnessReleasedSpawn is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchiveOnlyArchived is violated."' \
+  'echo "Error: Action property NotAuditWitnessDestroyBeatsRotation is violated."' \
+  'echo "Error: Action property NotAuditWitnessDestroyBeatsHostPending is violated."' \
+  'echo "Error: Action property NotAuditWitnessRotatedStopped is violated."' \
+  'echo "Error: Action property NotAuditWitnessCrossNotice is violated."' \
+  'echo "Error: Action property NotAuditWitnessRetireBesideWaking is violated."' \
+  'echo "Error: Action property NotAuditWitnessCommsLessWokeLive is violated."' \
+  'echo "Error: Invariant materialization_domain_is_session_bound_membership is violated."' \
+  'echo "Error: Invariant local_session_bound_member_is_live_or_wakeable is violated."' \
+  'echo "Error: Invariant broken_member_has_no_phase is violated."' \
+  'echo "Error: Invariant dormant_member_has_durable_endpoint is violated."' \
+  'echo "Error: Invariant endpoint_pending_member_has_no_endpoint is violated."' \
+  'echo "Error: Invariant dormant_member_requests_no_runtime_binding is violated."' \
+  'echo "Error: Invariant live_member_records_its_epoch is violated."' \
+  'echo "Error: Invariant waking_is_one_attempt is violated."' \
+  'echo "Error: Invariant retiring_incarnation_never_waking is violated."' \
+  'echo "Error: Invariant candidate_composition_never_wakes is violated."' \
+  'echo "Error: Invariant waking_has_an_open_attempt is violated."' \
+  'echo "Error: Invariant attempt_and_epoch_follow_the_phase is violated."' \
+  'echo "Error: Invariant only_a_running_mob_wakes is violated."' \
+  'echo "Error: Invariant AuditWakingClosable is violated."' \
+  'echo "Error: Invariant AuditResumeJoinable is violated."' \
+  'echo "Error: Invariant AuditResumeStagesHoldNoWork is violated."' \
+  'echo "Error: Action property AuditResumeReservesBeforeReadiness is violated."' \
+  'echo "Error: Invariant AuditWakeExactlyOne is violated."' \
+  'echo "Error: Invariant wiring_edges_connect_seated_members is violated."' \
+  'echo "Error: Invariant rotation_intent_is_a_retiring_member is violated."' \
+  'echo "Error: Invariant member_peer_id_ownership_is_global_across_generations is violated."' \
+  'echo "Error: Action property AuditRecoverKeepsPhase is violated."' \
+  'echo "Error: Action property AuditAttemptEndsClosed is violated."' \
+  'echo "Error: Action property AuditLifecycleNeverWakes is violated."' \
+  'echo "Error: Action property AuditWakeNeverSkipsWaking is violated."' \
+  'echo "Error: Action property AuditSucceededLeavesEndpoint is violated."' \
+  'echo "Error: Action property AuditReleaseEpochFence is violated."' \
+  'echo "Error: Action property AuditRetireRoutesOnlyRegistered is violated."' \
+  'echo "Error: Action property AuditDestroyFencesRotation is violated."' \
+  'echo "Error: Invariant AuditRetirementArchivable is violated."' \
+  'echo "Error: Invariant archive_only_retirement_is_retiring is violated."' \
+  'echo "Error: Invariant destroyed_mob_holds_no_member_lifecycle is violated."' \
+  'echo "Error: Invariant AuditWakeClosesLiveUnlessEndpointOwed is violated."' \
+  'echo "Error: Invariant AuditReleaseVerdictMatchesArm is violated."' \
+  'echo "Error: Action property AuditBindingRefusalFenced is violated."' \
+  'echo "Error: Action property AuditPlanLeavesSealable is violated."' \
+  'echo "Error: Invariant owed_edge_repairs_join_seated_members is violated."' \
+  'echo "Error: Invariant seat_session_unborn_is_seated is violated."' \
+  'echo "Error: Invariant seat_session_unborn_is_never_bound is violated."' \
+  'echo "Error: Action property AuditFreshCreateOnlyUnborn is violated."' \
+  'echo "Error: Invariant unborn_seat_session_is_recorded is violated."' \
+  'echo "Error: Action property AuditReseatUnbornIffNeverBorn is violated."' \
+  'echo "Error: Invariant spawn_profile_authority_is_a_pending_grant is violated."' \
+  'echo "Error: Action property NotAuditWitnessSessionOwnedRetires is violated."' \
+  'echo "Error: Action property NotAuditWitnessCompositionKeepsServing is violated."' \
+  'echo "Error: Action property NotAuditWitnessQueuedKeepsServing is violated."' \
+  'echo "Error: Action property NotAuditWitnessCompositionClaimed is violated."' \
+  'echo "Error: Invariant AuditVerdictExactlyOne is violated."' \
+  'echo "Error: Action property AuditPlacementOwnership is violated."' \
+  'echo "Error: Assumption line 1, col 1 to line 1, col 2 of module member_residency_audit is false."' \
   'echo "Error: The first argument of <= should be an integer, but instead it is:"' \
-  'echo "100000 states generated, 100000 distinct states found, 0 states left on queue."' \
+  'echo "200000 states generated, 200000 distinct states found, 0 states left on queue."' \
   'echo "The coverage statistics at 2026-01-01 00:00:00"' \
   'for action in RecoverRosterMemberRunning RecoverMemberSessionBindingFreshRunning ObserveMemberProgressChangedOpenRunning ObserveMemberProgressChangedIdleRunning ObserveMemberProgressUnchangedIdleRunning ObserveMemberProgressUnchangedOpenHealthyRunning ObserveMemberProgressUnchangedOpenDegradedRunning ObserveMemberProgressUnchangedOpenWedgedRunning ObserveMemberProgressStaleRunning RetireRunningReleasing RetireRunningPreservingBinding RetireRunningNoBinding RetireStoppedReleasing RetireStoppedPreservingBinding RetireStoppedNoBinding RetireAbsentRunning RetireAbsentStopped RetireMember SessionIngressDetachedForMobDestroyRunning ObserveRuntimeRetired ObserveRuntimeRetiredStopped ObserveMemberRetirementArchivedLive ObserveMemberRetirementArchivedRetired ObserveMemberRetirementArchivedLiveStopped ObserveMemberRetirementArchivedRetiredStopped ObserveMemberRetirementArchivedAlreadyCleared ObserveMemberRetirementArchivedStaleRuntimeAlreadyCleared ObserveMemberRetirementArchivedAlreadyClearedStopped ObserveMemberRetirementArchivedStaleRuntimeAlreadyClearedStopped BeginPlacedCompletionLifecycleQuiesceFreshStop StopRunning ResumeStopped BeginPlacedCompletionLifecycleQuiesceFresh MarkCompleted DestroyMob RetireAtScopeCurrentRunning RetireAtScopeCurrentStopped RetireAtScopeNoCurrentIncarnationRunning RetireAtScopeNoCurrentIncarnationStopped RetireAtScopeStaleFenceTokenRunning RetireAtScopeStaleFenceTokenStopped RetireAtScopeStaleSessionBindingRunning RetireAtScopeStaleSessionBindingStopped RetireAtScopeMobNotRunningCompleted RetireAtScopeMobNotRunningDestroyed RecoverRosterMemberResetRunning RecoverMemberSessionBindingReplacingRunning RecoverMemberSessionBindingAlreadyCurrentRunning RetireMemberPeerOnly SessionIngressDetachedForMobDestroyStopped RecoverRosterMemberRetiringRunning RecoverRosterMemberRetiringReplay RecoverRosterMemberRetiredRunning RecoverRosterMemberRetiredCurrentAlreadyAbsent RecoverRosterMemberRetiredStaleGeneration RecoverRosterMemberRetiredStaleIncarnation RecoverRosterMemberRetirementStartedReleasing RecoverRosterMemberRetirementStartedReleasingAlreadyApplied RecoverRosterMemberRetirementStartedPreservingBinding RecoverRosterMemberRetirementStartedPeerOnly RecoverRosterMemberAddressabilityRunning ObserveMemberRetirementArchivedLivePreservingTopology ObserveMemberRetirementArchivedRetiredPreservingTopology ObserveRuntimeDestroyed ObserveRuntimeDestroyedStopped ObserveRuntimeDestroyedCompleted AdmitDestroyCleanup AuditStartRun FinishRunRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'for action in RecoverRosterMemberRunning RecoverMemberSessionBindingFreshRunning RecoverMemberSessionBindingAlreadyCurrentRunning RecoverMemberPeerEndpointFreshRunning RegisterMemberPeerRunning RecoverRosterMemberRetiredRunning RecoverMemberRestoreFailureRunning RecoverMemberRestoreHostRefusedRunning SeedMemberResidencyRunning SeedMemberResidencyStopped SeedMemberResidencyCompleted ResolveMemberHostPreparationRunning ResolveMemberHostPreparationStopped ResolveMemberHostPreparationCompleted PlanBootMaterializationWake PlanBootMaterializationVerify PlanBootMaterializationStayDormant SealBootMaterializationPlan WakeMemberAuthorizedRunning WakeMemberJoinedRunning WakeMemberAlreadyLiveRunning WakeMemberRefusedRunning WakeMemberRefusedStopped WakeMemberRefusedCompleted WakeMemberRefusedDestroyed ResolveMemberRevivalBoundRunning ResolveMemberRevivalSucceededRunningLocal ResolveMemberRevivalFailedRunning ResolveMemberRevivalHostRefusedRunning ResolveMemberRevivalRetryableRunning AbandonMemberWakeDormantRunning AbandonMemberWakeBrokenRunning ResolveRecreatedMemberSessionSucceededRunningLocal ResolveMemberRevivalBoundStaleStopped ResolveMemberRevivalBoundStaleCompleted ResolveMemberRevivalBoundStaleDestroyed ResolveMemberRevivalSucceededStaleRunning ResolveMemberRevivalSucceededStaleStopped ResolveMemberRevivalSucceededStaleCompleted ResolveMemberRevivalSucceededStaleDestroyed ResolveMemberRevivalFailedStaleRunning ResolveMemberRevivalFailedStaleStopped ResolveMemberRevivalFailedStaleCompleted ResolveMemberRevivalFailedStaleDestroyed ResolveMemberRevivalHostRefusedStaleRunning ResolveMemberRevivalHostRefusedStaleStopped ResolveMemberRevivalHostRefusedStaleCompleted ResolveMemberRevivalHostRefusedStaleDestroyed ResolveMemberRevivalRetryableStaleRunning ResolveMemberRevivalRetryableStaleStopped ResolveMemberRevivalRetryableStaleCompleted ResolveMemberRevivalRetryableStaleDestroyed AbandonMemberWakeStaleRunning AbandonMemberWakeStaleStopped AbandonMemberWakeStaleCompleted AbandonMemberWakeStaleDestroyed ResolveRecreatedMemberSessionSucceededStaleRunning ResolveRecreatedMemberSessionSucceededStaleStopped ResolveRecreatedMemberSessionSucceededStaleCompleted ResolveRecreatedMemberSessionSucceededStaleDestroyed ResolveMemberRevivalSessionCreatedRunning ResolveMemberRevivalSessionCreatedStaleRunning ResolveMemberRevivalSessionCreatedStaleStopped ResolveMemberRevivalSessionCreatedStaleCompleted ResolveMemberRevivalSessionCreatedStaleDestroyed RecoverMemberSeatSessionUnbornRunning RecoverMemberSeatSessionBornRunning AuthorizeSpawnProfileSeatedRunning ObserveRuntimeReady ReleaseMemberMaterializationReleasedRunning ReleaseMemberMaterializationReleasedStopped ReleaseMemberMaterializationReleasedCompleted ReleaseMemberMaterializationStaleRunning ReleaseMemberMaterializationStaleStopped ReleaseMemberMaterializationStaleCompleted ReleaseMemberMaterializationStaleDestroyed ClassifyMemberLiveMaterializationRevivable ClassifyMemberLiveMaterializationTerminal ClassifyMemberLiveMaterializationTerminalDormant ClassifyPeerNoticeRunning ClassifyPeerNoticeStopped ClassifyPeerNoticeCompleted ClassifyPeerNoticeDestroyed BeginPlacedCompletionLifecycleQuiesceFreshStop StopRunning ResumeStopped BeginPlacedCompletionLifecycleQuiesceFresh CompleteRunning MarkCompleted AdmitDestroyCleanup DestroyMob ShutdownRunning RetireRunningReleasing RetireRunningPreservingBinding RetireStoppedReleasing SessionIngressDetachedForMobDestroyRunning SessionIngressDetachedForMobDestroyStopped ObserveRuntimeRetired ObserveRuntimeRetiredStopped ObserveMemberRetirementArchivedLive ObserveMemberRetirementArchivedRetired ObserveMemberRetirementArchivedLiveStopped ObserveMemberRetirementArchivedRetiredStopped RecoverMemberSessionBindingReplacingRunning BeginExplicitResumeStopped SettleExplicitResumePreparationStopped BeginExplicitResumeReadinessStopped SettleExplicitResumeReadinessStopped AuthorizeExplicitResumeMemberRunning AuthorizeExplicitResumeMemberLiveRunning AuthorizeExplicitResumeMemberJoinRunning ClassifyExplicitResumeMemberLiveRevivable ClassifyExplicitResumeMemberLiveMissing SettleExplicitResumeMemberRunning SettleExplicitResumeMemberReplacedRunning BeginExplicitResumeReadinessRunning SettleExplicitResumeReadinessRunning BeginExplicitResumeTopologyRunning SettleExplicitResumeTopologyRunning FinishExplicitResumeRunning RecoverRosterWiringRunning WireMembersRunning ObserveMemberRetirementArchivedLivePreservingTopology ResolveWiringEdgeRealizationRealizedRunning ResolveWiringEdgeRealizationOwedRunning ResolveWiringEdgeRealizationStaleRunning AuthorizeSpawnProfileRunning BeginSpawnExecFresh CommitDormantSeatRunning CommitSpawnMembershipFresh BeginMemberRotationRunning CommitMemberRotationLiveRunning CommitMemberRotationRetiredRunning RetireRunningReleasingArchiveOnly RetireRunningPreservingBindingArchiveOnly RetireStoppedReleasingArchiveOnly RetireStoppedPreservingBindingArchiveOnly RetireMemberArchiveOnly RetireStoppedPreservingBinding RetireMember RetryRuntimeRetireRunning RetryRuntimeRetireStopped RecoverRosterMemberRetirementStartedReleasing RecoverRosterMemberRetirementStartedPreservingBinding CommitMemberRotationLiveStopped CommitMemberRotationRetiredStopped AdmitDestroyMemberRetireLiveRunning AdmitDestroyMemberRetireArchiveOnlyRunning AdmitDestroyMemberRetireAlreadyRetiringSessionRunning AdmitDestroyMemberRetireAlreadyRetiringReleasedSessionRunning ObserveDestroyMemberRetirementArchivedLiveRunning ObserveDestroyMemberRetirementArchivedRetiredRunning ClassifyMemberReleaseRunning ClassifyMemberReleaseStopped ClassifyMemberReleaseCompleted ClassifyMemberReleaseDestroyed RecoverSpawnedMemberPeerEndpointFreshRunning ResolveRuntimeBindingRefusalRunning ResolveRuntimeBindingRefusalStaleRunning ResolveRuntimeBindingRefusalStaleStopped ResolveRuntimeBindingRefusalStaleCompleted ResolveRuntimeBindingRefusalStaleDestroyed; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "<ResolveMemberRevivalBoundStaleRunning line 1, col 1 to line 1, col 62 of module model (210 8 210 78)>: 0:490"' \
+  'for action in AuditConsumeReviewForEntry AuditConsumeConsentForEntry AuditConsumeReviewRejectedUsed AuditConsumeConsentRejectedAlreadyConsumed AuditAdmitEnteredStep AuditAdmitEnteredStepRejectedMissing AuditAdmitEnteredStepRejectedConsentLinked AuditAdmitEnteredStepRejectedRetired AuditAdmitEnteredStepRejectedNotEntered AuditAdmitEnteredStepRejectedClosing AuditFinishEnteredStepOpen AuditFinishEnteredStepClosing AuditFinishEnteredStepReleases AuditFinishEnteredStepRejectedMissing AuditFinishEnteredStepRejectedNotInFlight AuditReleaseReviewUsed AuditReleaseReviewUsedClosing AuditReleaseReviewRejectedClosing AuditReleaseReviewRejectedMissing AuditRetireReviewRejectedSettled AuditWithdrawConsentRejectedMismatch; do echo "<$action line 1, col 1 to line 1, col 2 of module entered_step_audit>: 1:1"; done' \
+  'echo "Error: Invariant NotAuditWitnessCancelWhileStepInFlight is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRefusedAfterRelease is violated."' \
+  'echo "Error: Invariant NotAuditWitnessGraphAndTwoChildrenAfterConsent is violated."' \
+  'echo "Error: Invariant entered_state_covers_exactly_the_used_attempts is violated."' \
+  'echo "Error: Invariant closing_entered_effect_has_a_step_in_flight is violated."' \
+  'echo "Error: Invariant AuditOneSpendPerAttempt is violated."' \
+  'echo "Error: Invariant AuditStepOnlyAfterSpend is violated."' \
+  'echo "Error: Invariant AuditNoStepAfterDispatchEnd is violated."' \
+  'echo "Error: Invariant AuditFinishesNeverExceedAdmissions is violated."' \
+  'echo "Error: Invariant AuditReleaseWaitsForSteps is violated."' \
+  'echo "Error: Invariant AuditEnteredStateMatchesHistory is violated."' \
+  'echo "Error: Action property AuditStepsNeverSpendOrSettle is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
@@ -559,49 +670,75 @@ else
 fi
 
 # The lane runs as parts (Bazel runs each as its own target): every hand
-# audit runs in exactly one audit shard, the machine-verify part runs none,
-# and the shards together run exactly the audits of the whole lane. Every
-# part runs and keeps its output whatever the others do: a failed part fails
-# this check by name, and no later check reads an output its failure left
-# unset (one such read ended in "a_out: unbound variable").
+# audit runs in exactly one audit shard, each shard runs at least one, the
+# machine-verify part runs none, and the shards together run exactly the
+# audits of the whole lane (the member audits and the MobMachine arm
+# coverage gate included). Every part runs and keeps its output whatever the
+# others do: a failed part fails this check by name, and no later check
+# reads an output its failure left unset (one such read ended in "a_out:
+# unbound variable").
 lane_part_output() {
   PATH="$tlc_env_tmp:$PATH" \
     TLC_JAVA_OPTIONS_CAPTURE="$capture" \
     TLC_JDK_JAVA_OPTIONS_CAPTURE="$jdk_capture" \
     bash crates/xtask/tests/machine_verify_all_tlc_test.sh "$true_bin" "$@" 2>&1
 }
-audit_lines() { grep -E '^running bounded .* TLC audit$' | sort; }
+audit_lines() {
+  grep -E '^running (bounded .* TLC audit|member [a-z]+ TLC audit|MobMachine arm coverage gate)$' | sort
+}
+audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g"
+shard_outputs="$(mktemp -d)"
 failed_parts=""
+idle_shards=""
 all_out="$(lane_part_output)" || failed_parts+=" all"
-a_out="$(lane_part_output --part audits-a)" || failed_parts+=" audits-a"
-b_out="$(lane_part_output --part audits-b)" || failed_parts+=" audits-b"
-c_out="$(lane_part_output --part audits-c)" || failed_parts+=" audits-c"
-d_out="$(lane_part_output --part audits-d)" || failed_parts+=" audits-d"
+for shard in $audit_shards; do
+  lane_part_output --part "$shard" > "$shard_outputs/$shard" || failed_parts+=" $shard"
+  [ -n "$(audit_lines < "$shard_outputs/$shard")" ] || idle_shards+=" $shard"
+done
 mv_out="$(lane_part_output --part machine-verify)" || failed_parts+=" machine-verify"
-if [ -z "$failed_parts" ] \
-  && [ -n "$(printf '%s\n' "$a_out" | audit_lines)" ] \
-  && [ -n "$(printf '%s\n' "$b_out" | audit_lines)" ] \
-  && [ -n "$(printf '%s\n' "$c_out" | audit_lines)" ] \
-  && [ -n "$(printf '%s\n' "$d_out" | audit_lines)" ] \
+# A shard without an audit is reported above, so its empty grep must not end
+# the script here.
+shard_audits="$(for shard in $audit_shards; do audit_lines < "$shard_outputs/$shard" || true; done | sort)"
+if [ -z "$failed_parts" ] && [ -z "$idle_shards" ] \
   && [ -z "$(printf '%s\n' "$mv_out" | audit_lines)" ] \
   && printf '%s\n' "$mv_out" | grep -Fq 'running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness' \
-  && ! printf '%s\n' "$a_out" "$b_out" "$c_out" "$d_out" | grep -Fq 'running bounded adaptive_mob_bundle' \
-  && [ -z "$( (printf '%s\n' "$a_out" | audit_lines; printf '%s\n' "$b_out" | audit_lines; printf '%s\n' "$c_out" | audit_lines; printf '%s\n' "$d_out" | audit_lines) | sort | uniq -d)" ] \
-  && [ "$( (printf '%s\n' "$a_out"; printf '%s\n' "$b_out"; printf '%s\n' "$c_out"; printf '%s\n' "$d_out") | audit_lines)" = "$(printf '%s\n' "$all_out" | audit_lines)" ]; then
-  ok "TLC lane parts: each hand audit runs in exactly one shard, machine-verify runs none, and the shards cover the whole lane"
+  && ! (for shard in $audit_shards; do cat "$shard_outputs/$shard"; done) | grep -Fq 'running bounded adaptive_mob_bundle' \
+  && [ -z "$(printf '%s\n' "$shard_audits" | uniq -d)" ] \
+  && [ "$shard_audits" = "$(printf '%s\n' "$all_out" | audit_lines)" ]; then
+  ok "TLC lane parts: each hand audit runs in exactly one shard, every shard runs one, machine-verify runs none, and the shards cover the whole lane"
 else
-  bad "TLC lane parts drop, duplicate, or misplace a hand audit, or the machine-verify part runs one${failed_parts:+ (failed parts:${failed_parts})}"
+  bad "TLC lane parts drop, duplicate, or misplace a hand audit, leave a shard without one, or the machine-verify part runs one${failed_parts:+ (failed parts:${failed_parts})}${idle_shards:+ (shards without an audit:${idle_shards})}"
   for part in $failed_parts; do
     case "$part" in
       all) show_tail all "$all_out" ;;
-      audits-a) show_tail audits-a "$a_out" ;;
-      audits-b) show_tail audits-b "$b_out" ;;
-      audits-c) show_tail audits-c "$c_out" ;;
-      audits-d) show_tail audits-d "$d_out" ;;
       machine-verify) show_tail machine-verify "$mv_out" ;;
+      *) show_tail "$part" "$(cat "$shard_outputs/$part")" ;;
     esac
   done
 fi
+
+# The member residency runner counts an arm printed with TLC's location
+# suffix (the fake above prints one so; the lane parts run it), and still
+# refuses a covered arm that is absent from the coverage block: a copy of the
+# fake without that arm's line must fail the runner on exactly that arm.
+absent_tlc_tmp="$(mktemp -d)"
+grep -vF 'ResolveMemberRevivalBoundStaleRunning line 1, col 1 to line 1, col 62 of module model (210 8 210 78)' \
+  "$tlc_env_tmp/tlc" > "$absent_tlc_tmp/tlc"
+chmod +x "$absent_tlc_tmp/tlc"
+absent_rc=0
+absent_out="$(PATH="$absent_tlc_tmp:$PATH" \
+  TLC_JAVA_OPTIONS_CAPTURE="$absent_tlc_tmp/capture" \
+  TLC_JDK_JAVA_OPTIONS_CAPTURE="$absent_tlc_tmp/capture-jdk" \
+  TLC_WORKERS=1 bash specs/machines/mob_machine/member_residency_audit.sh 2>&1)" || absent_rc=$?
+if [ "$absent_rc" != 0 ] \
+  && printf '%s\n' "$absent_out" \
+    | grep -Fq "wake run: ResolveMemberRevivalBoundStaleRunning never fired (coverage 'absent')"; then
+  ok "member residency audit refuses a covered arm absent from TLC's coverage block"
+else
+  bad "member residency audit accepted a coverage block without one of its covered arms (rc=$absent_rc)"
+  show_tail residency-absent "$absent_out"
+fi
+rm -rf "$absent_tlc_tmp"
 
 # tlc_run_cap.sh: the per-run watchdog must never outlive a run that ended
 # first, or hold a caller's `$(...)` capture open. A sleep orphaned between
@@ -715,12 +852,13 @@ if noxtask_a="$(PATH="$tlc_env_tmp:$PATH" \
       TLC_JAVA_OPTIONS_CAPTURE="$capture" \
       TLC_JDK_JAVA_OPTIONS_CAPTURE="$jdk_capture" \
       bash crates/xtask/tests/machine_verify_all_tlc_test.sh --part audits-a 2>&1)" \
-  && [ "$(printf '%s\n' "$noxtask_a" | audit_lines)" = "$(printf '%s\n' "$a_out" | audit_lines)" ] \
+  && [ "$(printf '%s\n' "$noxtask_a" | audit_lines)" = "$(audit_lines < "$shard_outputs/audits-a")" ] \
   && ! PATH="$tlc_env_tmp:$PATH" bash crates/xtask/tests/machine_verify_all_tlc_test.sh --part machine-verify >/dev/null 2>&1; then
   ok "TLC lane: audit shards run without an xtask argument; machine-verify still requires one"
 else
   bad "TLC lane: an audit shard needs an xtask argument, or machine-verify runs without one"
 fi
+rm -rf "$shard_outputs"
 
 # setup-tlc-ci is the one TLC install: the repository's immutable mirror of
 # the tlaplus v1.8.0 build (tlaplus rebuilds that pre-release in place),
@@ -747,6 +885,40 @@ if [ -z "$(grep -rlF 'tlaplus/tlaplus/releases' .github)" ] \
 else
   bad "a workflow or action installs TLC outside setup-tlc-ci, or downloads the rolling tlaplus jar"
 fi
+
+# The MobMachine arm-coverage gate reads the generated Next relation, the
+# audit runners' covered_actions arrays and the not-covered list. On a
+# synthetic spec directory it must pass a complete classification and refuse
+# an unlisted arm, a stale entry, an exact entry for a covered arm and an
+# entry without a reason.
+arm_gate_tmp="$(mktemp -d)"
+cp specs/machines/mob_machine/arm_coverage_gate.sh "$arm_gate_tmp/"
+printf '%s\n' \
+  'Next ==' \
+  '    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : ArmCoveredRunning(agent_identity)' \
+  '    \/ ArmListedRunning' \
+  '    \/ (phase = "Stopped") /\ ArmFamilyOneStopped' \
+  '    \/ ArmFamilyTwoStopped' \
+  '    \/ TerminalStutter' \
+  '' \
+  'Spec == Init /\ [][Next]_vars' \
+  > "$arm_gate_tmp/model.tla"
+printf '%s\n' '#!/usr/bin/env bash' 'covered_actions=(' '  ArmCoveredRunning' '  AuditWrapper' ')' \
+  > "$arm_gate_tmp/probe_audit.sh"
+arm_gate_run() {
+  printf '%s\n' "$@" > "$arm_gate_tmp/arm_coverage_not_covered.txt"
+  bash "$arm_gate_tmp/arm_coverage_gate.sh" >/dev/null 2>&1
+}
+if arm_gate_run '# header' 'ArmListedRunning listed with a reason' 'ArmFamily* a family with a reason' \
+  && ! arm_gate_run 'ArmFamily* a family with a reason' \
+  && ! arm_gate_run 'ArmListedRunning listed' 'ArmFamily* family' 'ArmGone stale entry' \
+  && ! arm_gate_run 'ArmListedRunning listed' 'ArmFamily* family' 'ArmCoveredRunning contradicts the audit' \
+  && ! arm_gate_run 'ArmListedRunning' 'ArmFamily* family'; then
+  ok "MobMachine arm-coverage gate passes a complete classification and refuses unlisted, stale, contradictory and reasonless entries"
+else
+  bad "MobMachine arm-coverage gate accepts an unclassified arm or a bad not-covered entry, or refuses a complete one"
+fi
+rm -rf "$arm_gate_tmp"
 
 echo ""
 echo "gate summary: ${pass} passed, ${fail} failed"

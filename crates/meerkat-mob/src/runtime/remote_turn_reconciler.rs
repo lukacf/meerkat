@@ -107,7 +107,9 @@ fn machine_route_is_current_for_replay(
         && machine_cancel_route_is_current_for_recovery(state, obligation)
         // An absent spawn-exec phase is the DSL's Settled state.
         && !state.spawn_exec_phase.contains_key(&identity)
-        && !state.member_revival_pending.contains(&identity)
+        // Placed members are never Dormant: not reviving is no open wake
+        // attempt.
+        && !state.member_wake_attempts.contains_key(&identity)
         && !state.member_materialization_failures.contains_key(&identity)
         && state.identity_to_runtime.get(&identity).is_some_and(|runtime_id| {
             // Placed PeerOnly runtimes intentionally have no local
@@ -490,6 +492,33 @@ pub(crate) fn current_epoch_events_for_mob(events: &[MobEvent], mob_id: &MobId) 
     mob_events[epoch_start..].to_vec()
 }
 
+/// Whether the reconciler reads events of `kind`: the run starts and step
+/// dispatches it joins private rows to, and the remote-turn public carriers
+/// (`current_epoch_dispatches`, `current_epoch_run_ids`,
+/// `current_epoch_obligations`, `finalized_sequences`,
+/// `validate_finalized_remote_turn_public_chain` and the material's
+/// Record and terminal reads). The epoch cache keeps only these, so it is not
+/// a second resident copy of the mob's journal and a scan walks only them.
+fn reconciler_reads(kind: &MobEventKind) -> bool {
+    matches!(
+        kind,
+        MobEventKind::FlowStarted { .. }
+            | MobEventKind::StepDispatched { .. }
+            | MobEventKind::RemoteTurnObligationRecorded { .. }
+            | MobEventKind::RemoteTurnOutcomeResolved { .. }
+            | MobEventKind::RemoteTurnOutcomeAcknowledged { .. }
+            | MobEventKind::RemoteTurnOutcomeDisposed { .. }
+            | MobEventKind::StepTargetCompleted {
+                remote_turn_obligation: Some(_),
+                ..
+            }
+            | MobEventKind::StepTargetFailed {
+                remote_turn_obligation: Some(_),
+                ..
+            }
+    )
+}
+
 /// Boot-time seed for [`EpochEventCache`], computed from the full-ledger
 /// replay the builder already performs for the actor idempotency index. The
 /// resume path's Record-projection repair appends land before that replay, so
@@ -510,9 +539,24 @@ impl RemoteTurnEventSeed {
                 .map(|event| event.cursor)
                 .max()
                 .unwrap_or(0),
-            epoch_events: current_epoch_events_for_mob(all_events, mob_id),
+            epoch_events: reconciler_epoch_events(all_events, mob_id),
         }
     }
+}
+
+/// The events of `mob_id`'s current epoch (after its last `MobReset`) the
+/// reconciler reads: [`current_epoch_events_for_mob`] without the kinds
+/// [`reconciler_reads`] leaves out, cloning only what it keeps.
+fn reconciler_epoch_events(all_events: &[MobEvent], mob_id: &MobId) -> Vec<MobEvent> {
+    let epoch_start = all_events
+        .iter()
+        .rposition(|event| event.mob_id == *mob_id && matches!(event.kind, MobEventKind::MobReset))
+        .map_or(0, |position| position + 1);
+    all_events[epoch_start..]
+        .iter()
+        .filter(|event| event.mob_id == *mob_id && reconciler_reads(&event.kind))
+        .cloned()
+        .collect()
 }
 
 /// Outcome of one [`EpochEventCache::refresh`] pass.
@@ -533,7 +577,9 @@ struct EpochRefreshOutcome {
 ///   lagged or absent subscription cannot corrupt the cache.
 /// - The cursor is store-global and allocated inside the append transaction,
 ///   so visibility order equals cursor order and the paged fold reproduces
-///   the `replay_all` + mob-filter + last-`MobReset` slice exactly.
+///   the `replay_all` + mob-filter + last-`MobReset` slice exactly, restricted
+///   to the kinds [`reconciler_reads`] keeps (every other kind is polled past
+///   and dropped: no consumer of the slice reads it).
 /// - `MobReset` truncates the epoch prefix and is itself excluded, matching
 ///   the historical `rposition + 1` slice.
 /// - Cursor regression (only possible via the destroy path's store `clear()`,
@@ -592,7 +638,7 @@ impl EpochEventCache {
                 outcome.advanced_for_this_mob = true;
                 if matches!(event.kind, MobEventKind::MobReset) {
                     self.epoch_events.clear();
-                } else {
+                } else if reconciler_reads(&event.kind) {
                     self.epoch_events.push(event);
                 }
             }
@@ -1045,6 +1091,23 @@ fn machine_only_wake_can_skip_event_poll(
         && !event_safety_poll_due
 }
 
+/// Whether a scan after an event of this mob may skip the private-row
+/// material: only after a proven-quiescent scan, with no remote-turn custody,
+/// while no member is placed on a host. MobMachine records a remote turn only
+/// for a placed member (`RecordRemoteTurnObligation`'s `target_placed`
+/// guard), so such a mob mints no private row. A placement is published
+/// before any private row it allows. A remote-turn row is written while its
+/// member is placed and before its custody mint, whose publish wakes the next
+/// scan with custody not quiet. The first scan after a start never skips (it
+/// is not preceded by a quiescent one).
+fn unplaced_mob_scan_can_skip_material(
+    previous_scan_quiescent: bool,
+    machine_custody_quiet: bool,
+    any_member_placed: bool,
+) -> bool {
+    previous_scan_quiescent && machine_custody_quiet && !any_member_placed
+}
+
 fn event_signal_requires_scan(event_mob_id: Option<&MobId>, reconciled_mob_id: &MobId) -> bool {
     event_mob_id.is_none_or(|event_mob_id| event_mob_id == reconciled_mob_id)
 }
@@ -1345,6 +1408,23 @@ impl RemoteTurnIntentReconciler {
             // dispatch by current-epoch FlowStarted/StepDispatched appends;
             // pre-actor rows are covered by the unconditional first scan
             // (wake flag seeded true).
+            return Ok(ScanSummary {
+                live_intents: 0,
+                next_retry_after: None,
+                event_store_polled: true,
+                quiescent: true,
+            });
+        }
+        if unplaced_mob_scan_can_skip_material(
+            previous_scan_quiescent,
+            machine_custody_quiet,
+            self.handle
+                .project_any_member_placed_from_current_machine_state(),
+        ) {
+            // An event of a proven-quiescent mob that places no member on a
+            // host: it cannot carry remote-turn work, so the scan skips the
+            // material (the run listing and every private-row read) and
+            // stays quiescent. The cache above still took the event.
             return Ok(ScanSummary {
                 live_intents: 0,
                 next_retry_after: None,
@@ -2632,6 +2712,199 @@ mod tests {
         assert!(rebuilt.advanced_for_this_mob);
         assert_eq!(epoch_flow_markers(&cache.epoch_events), vec!["post-clear"]);
         assert_eq!(cache.last_cursor, latest);
+    }
+
+    fn cursors(events: &[MobEvent]) -> Vec<u64> {
+        events.iter().map(|event| event.cursor).collect()
+    }
+
+    // The epoch cache keeps only the kinds the reconciler reads, from the
+    // boot seed and from the cursor-tailing refresh alike, and the recovery
+    // material prepared from it equals the material prepared from the whole
+    // current-epoch slice. The row set holds a finalized remote turn (public
+    // chain, intent and receipt), a live one whose Record projection is
+    // pending, and events the reconciler does not read: a local target's step
+    // output, a step terminal, a flow completion and a member wiring.
+    #[tokio::test]
+    async fn the_epoch_cache_keeps_only_the_kinds_the_reconciler_reads() {
+        let mob_id = MobId::from("reconcile-cache-kinds");
+        let raw_runs: Arc<dyn MobRunStore> = Arc::new(InMemoryMobRunStore::new());
+        let run_store = authority_validating_mob_run_store(raw_runs);
+        let event_store: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
+        let append = |kind: MobEventKind| {
+            let event_store = Arc::clone(&event_store);
+            let mob_id = mob_id.clone();
+            async move {
+                event_store
+                    .append(NewMobEvent {
+                        mob_id,
+                        timestamp: None,
+                        kind,
+                    })
+                    .await
+                    .expect("append");
+            }
+        };
+
+        // A finalized remote turn.
+        let finalized_run = RunId::new();
+        seed_run_and_dispatch(&run_store, &event_store, &mob_id, &finalized_run).await;
+        let finalized = test_intent(&mob_id, &finalized_run, 9);
+        let receipt = MobRunRemoteTurnReceipt {
+            obligation: finalized.obligation.clone(),
+            outcome: MobRunRemoteTurnReceiptOutcome::Completed {
+                value: serde_json::json!({"ok": true}),
+            },
+        };
+        run_store
+            .put_remote_turn_intent(&finalized_run, &finalized)
+            .await
+            .expect("put the finalized intent");
+        run_store
+            .put_remote_turn_receipt(&finalized_run, &receipt)
+            .await
+            .expect("put the finalized receipt");
+        for kind in [
+            MobEventKind::RemoteTurnObligationRecorded {
+                obligation: finalized.obligation.clone(),
+            },
+            MobEventKind::StepTargetCompleted {
+                run_id: finalized_run.clone(),
+                step_id: finalized.obligation.step_id.clone(),
+                target: AgentRuntimeId::new(
+                    finalized.obligation.agent_identity.clone(),
+                    finalized.obligation.generation,
+                ),
+                output: Some(serde_json::json!({"ok": true})),
+                remote_turn_obligation: Some(finalized.obligation.clone()),
+            },
+            MobEventKind::RemoteTurnOutcomeResolved {
+                obligation: finalized.obligation.clone(),
+            },
+            MobEventKind::RemoteTurnOutcomeAcknowledged {
+                obligation: finalized.obligation.clone(),
+            },
+        ] {
+            append(kind).await;
+        }
+
+        // A live remote turn whose public Record projection is pending.
+        let live_run = RunId::new();
+        seed_run_and_dispatch(&run_store, &event_store, &mob_id, &live_run).await;
+        let live = test_intent(&mob_id, &live_run, 10);
+        run_store
+            .put_remote_turn_intent(&live_run, &live)
+            .await
+            .expect("put the live intent");
+
+        // Events the reconciler does not read.
+        for kind in [
+            MobEventKind::StepTargetCompleted {
+                run_id: live_run.clone(),
+                step_id: StepId::from("step"),
+                target: AgentRuntimeId::new(
+                    AgentIdentity::from("local-worker"),
+                    Generation::new(1),
+                ),
+                output: Some(serde_json::json!({"text": "a local target's whole output"})),
+                remote_turn_obligation: None,
+            },
+            MobEventKind::StepCompleted {
+                run_id: live_run.clone(),
+                step_id: StepId::from("step"),
+            },
+            MobEventKind::FlowCompleted {
+                run_id: finalized_run.clone(),
+                flow_id: FlowId::from("flow"),
+                structured_output: Some(serde_json::json!({"steps": {"step": {"ok": true}}})),
+            },
+            MobEventKind::MembersWired {
+                a: AgentIdentity::from("local-worker"),
+                b: AgentIdentity::from("remote-worker"),
+            },
+        ] {
+            append(kind).await;
+        }
+
+        let replay = event_store.replay_all().await.expect("replay");
+        let whole_epoch = current_epoch_events_for_mob(&replay, &mob_id);
+        let seed = RemoteTurnEventSeed::from_boot_replay(&replay, &mob_id);
+        assert_eq!(
+            whole_epoch.len() - seed.epoch_events.len(),
+            4,
+            "the seed leaves out exactly the events the reconciler does not read"
+        );
+        assert!(
+            seed.epoch_events
+                .iter()
+                .all(|event| reconciler_reads(&event.kind))
+        );
+        let mut cache = EpochEventCache::from_seed(
+            mob_id.clone(),
+            RemoteTurnEventSeed {
+                last_cursor: 0,
+                epoch_events: Vec::new(),
+            },
+        );
+        cache.refresh(&event_store).await.expect("refresh");
+        assert_eq!(
+            cursors(&cache.epoch_events),
+            cursors(&seed.epoch_events),
+            "the refresh keeps what the seed keeps"
+        );
+
+        let from_cache = prepare_remote_turn_recovery_material(
+            run_store.clone(),
+            event_store.clone(),
+            &mob_id,
+            &cache.epoch_events,
+            false,
+        )
+        .await
+        .expect("the material from the cache");
+        let from_whole_epoch = prepare_remote_turn_recovery_material(
+            run_store.clone(),
+            event_store.clone(),
+            &mob_id,
+            &whole_epoch,
+            false,
+        )
+        .await
+        .expect("the material from the whole epoch");
+        assert_eq!(from_cache.intents, from_whole_epoch.intents);
+        assert_eq!(from_cache.receipts, from_whole_epoch.receipts);
+        assert_eq!(
+            from_cache.deferred_run_ids,
+            from_whole_epoch.deferred_run_ids
+        );
+        assert_eq!(
+            from_cache.record_projection_pending,
+            from_whole_epoch.record_projection_pending
+        );
+        assert_eq!(
+            from_cache.finalized_privacy_cleanup,
+            from_whole_epoch.finalized_privacy_cleanup
+        );
+        assert_eq!(
+            from_whole_epoch.record_projection_pending,
+            vec![live.obligation.clone()],
+            "the live turn's Record projection is pending"
+        );
+        assert_eq!(
+            from_whole_epoch.finalized_privacy_cleanup.len(),
+            1,
+            "the finalized turn's rows await their privacy cleanup"
+        );
+    }
+
+    // The scan skips the material only after a proven-quiescent scan, with
+    // quiet custody, while no member is placed on a host.
+    #[test]
+    fn only_a_quiescent_unplaced_mob_skips_the_material() {
+        assert!(unplaced_mob_scan_can_skip_material(true, true, false));
+        assert!(!unplaced_mob_scan_can_skip_material(true, true, true));
+        assert!(!unplaced_mob_scan_can_skip_material(false, true, false));
+        assert!(!unplaced_mob_scan_can_skip_material(true, false, false));
     }
 
     #[test]

@@ -167,6 +167,14 @@ class Bundle:
         record.update({"size": len(data), "sha256": digest(data)})
         self.seal()
 
+    def release_form(self, repository, tag, workflow):
+        """Re-seal these bytes as the candidate of another release."""
+        for value in (self.identity, self.manifest, self.intake, self.selection, self.provenance):
+            value["repository"] = repository
+        self.manifest["tag"] = tag
+        self.manifest["workflow"]["path"] = self.intake["workflow"]["path"] = workflow
+        self.seal()
+
 
 @pytest.fixture
 def bundle(tmp_path):
@@ -215,6 +223,41 @@ def test_a_json_verified_flag_cannot_replace_an_independent_binding(bundle):
 def test_caller_binding_identity_drift_is_rejected(bundle, field, value):
     with pytest.raises(candidates.CandidateArtifactError):
         bundle.read(accepted=replace(bundle.binding, **{field: value}))
+
+
+# The tuple has one release form: the standalone repository's signed
+# candidate, recorded under that repository's name at the time
+# (lukacf/meerkat-mobkit), its v<version> tag and release.yml. No monorepo
+# release can produce the tuple: its MobKit archives and SDK were renamed at
+# Meta 0.9.0, before the monorepo. In the monorepo (lukacf/meerkat) Meta
+# releases under meta-v<version> tags with meta-release.yml, and the
+# v<version> tags and release.yml are Core's. Existing installs keep reading
+# their tuple; every other form fails closed, and no form reads under
+# another's tag or workflow.
+STANDALONE = ("lukacf/meerkat-mobkit", "v" + VERSION, ".github/workflows/release.yml")
+
+
+def test_standalone_release_form_keeps_reading_for_existing_installs(bundle):
+    bundle.release_form(*STANDALONE)
+    identity = bundle.read().identity
+    assert (identity.repository, identity.native_version) == ("lukacf/meerkat-mobkit", VERSION)
+
+
+@pytest.mark.parametrize("repository,tag,workflow,refusal", [
+    # Meta's monorepo release form.
+    ("lukacf/meerkat", "meta-v" + VERSION, ".github/workflows/meta-release.yml", "identity is invalid"),
+    # Core's monorepo release form: its v tag is never a Meta candidate's.
+    ("lukacf/meerkat", "v" + VERSION, ".github/workflows/release.yml", "identity is invalid"),
+    ("lukacf/meerkat", "v" + VERSION, ".github/workflows/meta-release.yml", "identity is invalid"),
+    # The standalone repository under its later name, which released Meta 0.9.
+    ("lukacf/meerkat-meta", "v" + VERSION, ".github/workflows/release.yml", "identity is invalid"),
+    # The standalone identity never reads under a monorepo tag or workflow.
+    ("lukacf/meerkat-mobkit", "meta-v" + VERSION, ".github/workflows/release.yml", "workflow or run binding"),
+    ("lukacf/meerkat-mobkit", "v" + VERSION, ".github/workflows/meta-release.yml", "workflow or run binding")])
+def test_monorepo_and_other_release_forms_fail_closed(bundle, repository, tag, workflow, refusal):
+    bundle.release_form(repository, tag, workflow)
+    with pytest.raises(candidates.CandidateArtifactError, match=refusal):
+        bundle.read()
 
 
 @pytest.mark.parametrize("object_name,field,value", [

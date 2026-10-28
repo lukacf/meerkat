@@ -1,5 +1,5 @@
 //! Canonical native owner of bounded Toolkit component lifetime.
-//! Ordinary PairedHost callback token/activity custody still requires migration.
+//! Ordinary paired host callback token/activity custody still requires migration.
 //!
 //! Admission closure is separate from physical settlement. Only the production
 //! bridge can observe custody locks and submit ConfirmSettlement; zero activity

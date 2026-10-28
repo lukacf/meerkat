@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicUsize;
 
 // An explicit fixture view of the SAME application authority owner. It shares
 // original native records but fixes one separately selected request/destination
-// and one exact resource. This is not real PairedHost ingress or durable custody.
+// and one exact resource. This is not real paired host ingress or durable custody.
 struct CurrentOwner {
     inner: Arc<Owner>,
     reference: RequestContextRef,

@@ -1,4 +1,4 @@
-"""Pure Gmail message formatting, derived from private PairedHost helpers.
+"""Pure Gmail message formatting, derived from private paired host helpers.
 
 SPDX-License-Identifier: MIT OR Apache-2.0
 See LICENSE-EXTRACTED and GMAIL.md. These records confer no authority.

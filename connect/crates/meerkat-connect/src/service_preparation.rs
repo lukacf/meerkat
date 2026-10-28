@@ -286,7 +286,7 @@ impl LazySetup {
         )
     }
 
-    /// The initial private-pipe frontend has no service or PairedHost presenter.
+    /// The initial private-pipe frontend has no service or paired host presenter.
     /// Omit those dispatchers rather than advertising an unanswerable prompt.
     pub(crate) fn reading() -> Self {
         let (paired_host, host_presenter) = PairedHostFrontend::deferred_with_research();
@@ -343,7 +343,7 @@ impl LazySetup {
         setup
     }
 
-    /// Exact host-owned PairedHost preparation and compiled recipe readers.
+    /// Exact host-owned paired host preparation and compiled recipe readers.
     /// No service adapter, arbitrary document fetch, research or Forge tool is
     /// installed. The captured definitions also own the native access ceiling.
     pub(crate) fn paired_host_preparation(paired_host: PairedHostFrontend) -> Self {

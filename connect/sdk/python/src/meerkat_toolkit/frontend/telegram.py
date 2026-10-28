@@ -1,6 +1,6 @@
 """Telegram frontend transport and provider observations, without host policy.
 
-Extracted from user-owned paired-host-ext-telegram at f187bf89. Source provenance
+Extracted from user-owned example-ext-telegram at f187bf89. Source provenance
 and the MIT OR Apache-2.0 grant for this copy are recorded in TELEGRAM.md. The
 host still owns credentials, recipients, admission, durable rows and retries.
 """

@@ -1,4 +1,4 @@
-//! Disposable human-only delivery of validated PairedHost entry and review links.
+//! Disposable human-only delivery of validated paired host entry and review links.
 //! This is output custody, not authentication, approval or effect authority.
 
 use std::io::Write;
@@ -127,18 +127,18 @@ impl SecretEntryNotice {
     pub fn present(self, output: &mut impl Write) -> Result<(), ConnectError> {
         match self.kind {
             NoticeKind::SecretEntry { intent_id } => writeln!(output,
-            "PairedHost secret entry\nIntent: {}\nOpen this link in your browser. Pair that browser with PairedHost independently. Never enter the secret in this conversation.\n{}\nEntry and owner confirmation happen in PairedHost. This link does not prove the secret was committed or the selected extension roles are ready.",
+            "Paired host secret entry\nIntent: {}\nOpen this link in your browser. Pair that browser with the paired host independently. Never enter the secret in this conversation.\n{}\nEntry and owner confirmation happen in the paired host. This link does not prove the secret was committed or the selected extension roles are ready.",
             review_text(&intent_id), review_text(&self.url))
             .and_then(|_| output.flush())
             .map_err(|_| ConnectError::InvalidInput(format!(
-                "PairedHost intent {} exists, but its entry link could not be displayed. Do not create it again; explicitly request this intent's status and entry link when terminal output is available.",
+                "Paired host intent {} exists, but its entry link could not be displayed. Do not create it again; explicitly request this intent's status and entry link when terminal output is available.",
                 intent_id))),
             NoticeKind::PreparedReview { change_digest, candidate_kind } => writeln!(output,
-                "PairedHost change review\nKind: {}\nChange: {}\n{}\nPair your browser with PairedHost if prompted. Check PairedHost for this change's current review and activation status.",
+                "Paired host change review\nKind: {}\nChange: {}\n{}\nPair your browser with the paired host if prompted. Check the paired host for this change's current review and activation status.",
                 candidate_kind, review_text(&change_digest), review_text(&self.url))
                 .and_then(|_| output.flush())
                 .map_err(|_| ConnectError::InvalidInput(format!(
-                    "The review link for PairedHost change {} could not be displayed.",
+                    "The review link for the paired host change {} could not be displayed.",
                     change_digest))),
         }
     }

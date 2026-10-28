@@ -13,7 +13,7 @@ use tokio::{
 
 const FIXTURE_BOUND: Duration = Duration::from_secs(5);
 const SOURCES: &str = "/console/extensions/frontend/sources";
-const REPO: &str = "https://github.com/fixture/paired-host-telegram.git";
+const REPO: &str = "https://github.com/fixture/example-telegram.git";
 const TAG: &str = "v0.2.8+fixture";
 const COMMIT: &str = "49f53a27a4535f80a357ee13e8150776ed02886b";
 const COOKIE: &str = "synthetic-source-device";
@@ -194,11 +194,11 @@ fn tags() -> Value {
 
 fn inspection() -> Value {
     json!({"repo":REPO,"tag":TAG,"commit":COMMIT,
-        "distribution":"paired-host-ext-telegram","version":"0.2.8",
-        "entry_point":{"group":"paired_host.extensions","name":"telegram","object":"paired_host_ext_telegram.extension:TelegramExtension"},
+        "distribution":"example-ext-telegram","version":"0.2.8",
+        "entry_point":{"group":"paired_host.extensions","name":"telegram","object":"example_ext_telegram.extension:TelegramExtension"},
         "declared":{},"unverified":["manifest","facades","channel_template","secrets"],
         "already_declared":false,
-        "prepare":{"new_extension":{"distribution":"paired-host-ext-telegram","version":"0.2.8",
+        "prepare":{"new_extension":{"distribution":"example-ext-telegram","version":"0.2.8",
             "source":{"repo":REPO,"tag":TAG,"commit":COMMIT},
             "channel":{"ingress":null,"approved_groups":null}}}})
 }
@@ -211,7 +211,7 @@ fn proposal() -> Value {
 
 fn prepared() -> Value {
     json!({"valid":true,"problems":[],"change":{
-        "change_digest":format!("hc-frontend-change-v1:sha256:{}","a".repeat(64)),
+        "change_digest":format!("paired-host-change-v1:sha256:{}","a".repeat(64)),
         "kind":"new_extension", "base":{"activation_id":"218","policy_digest":"fixture-policy","ledger_digest":"fixture-ledger"},
         "proposal":proposal(),"unverified":["manifest","facades","channel_template","secrets"],
         "prerequisites":[{"kind":"build_and_review","state":"pending"}],
@@ -222,10 +222,10 @@ fn prepared() -> Value {
 fn role_inspection() -> Value {
     let mut body = inspection();
     body["package_path"] = json!("extension");
-    body["distribution"] = json!("paired-host-ext-robot");
+    body["distribution"] = json!("example-ext-device");
     body["version"] = json!("0.5.1.dev2026100301");
-    body["entry_point"] = json!({"group":"paired_host.extensions", "name":"robot",
-        "object":"paired_host_ext_robot.extension:RobotExtension"});
+    body["entry_point"] = json!({"group":"paired_host.extensions", "name":"device",
+        "object":"example_ext_device.extension:DeviceExtension"});
     body["unverified"] = json!([
         "manifest",
         "facades",
@@ -242,7 +242,7 @@ fn role_inspection() -> Value {
          "required_facades":["daemon_control.v1","live.v1","media.v1","notify.v1"],"voice_map_entries":1}
     ]});
     let draft = body["prepare"]["new_extension"].as_object_mut().unwrap();
-    draft.insert("distribution".into(), json!("paired-host-ext-robot"));
+    draft.insert("distribution".into(), json!("example-ext-device"));
     draft.insert("version".into(), json!("0.5.1.dev2026100301"));
     draft.get_mut("source").unwrap()["package_path"] = json!("extension");
     draft.remove("channel");
@@ -262,7 +262,7 @@ fn role_proposal(selection: usize) -> Value {
     roles["voice_map"] = if selection == 0 {
         json!({})
     } else {
-        json!({"identity:fixture-child":"robot:fixture-room"})
+        json!({"identity:fixture-member":"device:fixture-room"})
     };
     proposal["roles"] = roles;
     proposal
@@ -294,10 +294,10 @@ fn role_change_preserves_each_proposal_and_exact_owner_bytes() {
 
 #[test]
 fn role_built_status_preserves_required_null_template_and_package_path() {
-    let body = json!({"request_id":format!("hc-frontend-change-v1:sha256:{}","a".repeat(64)),
+    let body = json!({"request_id":format!("paired-host-change-v1:sha256:{}","a".repeat(64)),
         "submitted_at":"fixture-time","kind":"new_extension","state":"built",
         "staged_at":"fixture-stage","prerequisites":[],
-        "built":{"extension_id":"robot","distribution":"paired-host-ext-robot",
+        "built":{"extension_id":"device","distribution":"example-ext-device",
             "version":"0.5.1.dev2026100301","source_commit":COMMIT,"package_path":"extension",
             "wheel_sha256":"b".repeat(64),"release_evidence_sha256":"c".repeat(64),
             "facades":["daemon_control.v1"],"channel_template":null,"secret_names":[]}});
@@ -317,7 +317,7 @@ async fn role_required_is_an_exact_host_problem_instead_of_an_unknown_response()
     .await;
     let mut client = PairedHostClient::new(&fixture.origin).unwrap();
     let mut value = proposal();
-    value["distribution"] = json!("paired-host-ext-robot");
+    value["distribution"] = json!("example-ext-device");
     let request = serde_json::from_value(value).unwrap();
     let result = client.prepare_new_extension(&request).await;
     assert_eq!(fixture.finish().await.len(), 1);
@@ -331,7 +331,7 @@ async fn role_required_is_an_exact_host_problem_instead_of_an_unknown_response()
 fn pairing() -> Reply {
     Reply::json(200, json!({"ok":true})).header(
         "Set-Cookie",
-        &format!("hc_console_device={COOKIE}; Max-Age=15552000; Path=/; HttpOnly; SameSite=Lax"),
+        &format!("paired_host_device={COOKIE}; Max-Age=15552000; Path=/; HttpOnly; SameSite=Lax"),
     )
 }
 
@@ -394,7 +394,7 @@ async fn captured_client_reads_exact_pins_and_only_fills_channel_before_existing
         assert_eq!(request.headers["origin"], origin);
         assert_eq!(request.headers["cache-control"], "no-store");
         assert!(request.headers["cookie"].contains(COOKIE));
-        assert!(!request.headers.contains_key("x-paired-host-dev-token"));
+        assert!(!request.headers.contains_key("x-host-dev-token"));
         assert!(request.body.is_empty());
     }
     let query = |request: &Request| -> BTreeMap<String, String> {
@@ -598,7 +598,7 @@ async fn inspection_correlation_and_closed_unverified_shapes_refuse_host_contrad
         ),
         (
             "/prepare/new_extension/distribution",
-            json!("paired-host-ext-other"),
+            json!("example-ext-other"),
         ),
         ("/prepare/new_extension/version", json!("9.0")),
         ("/prepare/new_extension/channel/ingress", json!("polling")),
@@ -645,7 +645,7 @@ async fn source_failures_preserve_only_the_exact_static_problem_and_optional_rea
         "unprocessable",
         "metadata_invalid",
         "pyproject.toml:project.entry-points.paired_host.extensions",
-        "The source's package metadata is not static, valid PairedHost extension metadata.",
+        "The source's package metadata is not static, valid extension metadata for this host.",
     );
     let no_tags = source_error(
         "not_found",
@@ -788,7 +788,7 @@ async fn selected_origin_is_not_a_tool_argument_and_device_cookies_never_cross_o
     let others = second.finish().await;
     assert_eq!(others.len(), 1);
     assert!(!others[0].headers.contains_key("cookie"));
-    assert!(!others[0].headers.contains_key("x-paired-host-dev-token"));
+    assert!(!others[0].headers.contains_key("x-host-dev-token"));
     let own = first.finish().await;
     assert_eq!(own.len(), 2);
     assert!(own[1].headers["cookie"].contains(COOKIE));
@@ -836,7 +836,7 @@ fn role_prepared(selection: usize) -> Value {
 fn role_status(selection: usize) -> Value {
     json!({"request_id":prepared()["change"]["change_digest"],"state":"built","kind":"new_extension",
         "submitted_at":"fixture-time","staged_at":"fixture-stage","attempt":2,
-        "built":{"extension_id":"robot","distribution":role_proposal(selection)["distribution"],"version":role_proposal(selection)["version"],
+        "built":{"extension_id":"device","distribution":role_proposal(selection)["distribution"],"version":role_proposal(selection)["version"],
             "source_commit":COMMIT,"package_path":"extension","wheel_sha256":"b".repeat(64),
             "release_evidence_sha256":"c".repeat(64),"channel_template":null,
             "facades":role_proposal(selection)["roles"]["required_facades"],"secret_names":[]},"prerequisites":[]})
@@ -846,7 +846,7 @@ fn role_secret_status() -> Value {
     let mut body = role_status(2);
     body["built"]["secret_names"] = json!(["api_key"]);
     body["built"]["role_consumers"] =
-        json!({"api_key":{"consumer":"extension","consumer_id":"robot"}});
+        json!({"api_key":{"consumer":"extension","consumer_id":"device"}});
     body["prerequisites"] = json!([{"kind":"secret","name":"api_key","provisioned":false}]);
     body
 }
@@ -899,22 +899,22 @@ async fn role_consumer_status_refuses_ambiguous_or_contradictory_owner_facts() {
         Value::Null,
         json!([]),
         json!({}),
-        json!({"other":{"consumer":"extension","consumer_id":"robot"}}),
+        json!({"other":{"consumer":"extension","consumer_id":"device"}}),
         json!({"api_key":null}),
         json!({"api_key":{"consumer":"extension"}}),
-        json!({"api_key":{"consumer_id":"robot"}}),
-        json!({"api_key":{"consumer":"channel","consumer_id":"robot"}}),
+        json!({"api_key":{"consumer_id":"device"}}),
+        json!({"api_key":{"consumer":"channel","consumer_id":"device"}}),
         json!({"api_key":{"consumer":"extension","consumer_id":"other"}}),
         json!({"api_key":{"consumer":"extension","consumer_id":null}}),
-        json!({"api_key":{"consumer":"extension","consumer_id":"robot","extra":"private-response-marker"}}),
-        json!({"api_key":{"consumer":"extension","consumer_id":"robot"},"extra":{"consumer":"extension","consumer_id":"robot"}}),
+        json!({"api_key":{"consumer":"extension","consumer_id":"device","extra":"private-response-marker"}}),
+        json!({"api_key":{"consumer":"extension","consumer_id":"device"},"extra":{"consumer":"extension","consumer_id":"device"}}),
     ] {
         let mut body = role_secret_status();
         body["built"]["role_consumers"] = value;
         bodies.push(serde_json::to_vec(&body).unwrap());
     }
     let mut channel = role_secret_status();
-    channel["built"]["channel_template"] = json!({"id":"robot:primary"});
+    channel["built"]["channel_template"] = json!({"id":"device:primary"});
     bodies.push(serde_json::to_vec(&channel).unwrap());
     let raw = role_secret_status().to_string();
     for replacement in [
@@ -980,7 +980,7 @@ fn role_configuration_is_closed_and_never_collapses_path_or_selection() {
     ] {
         assert!(FrontendPackagePath::new(path).is_err(), "{path:?}");
     }
-    for path in ["extension", "Packages/Robot-1.2", "a/b/c/d/e/f/g/h"] {
+    for path in ["extension", "Packages/Device-1.2", "a/b/c/d/e/f/g/h"] {
         assert_eq!(FrontendPackagePath::new(path).unwrap().as_str(), path);
     }
     assert!(FrontendPackagePath::new("a".repeat(101)).is_err());
@@ -1066,7 +1066,7 @@ fn role_choices_fill_only_the_advertised_contract_and_preserve_facade_order() {
         mode.daemon.voice_mode = "unadvertised".into();
         assert!(observed.with_roles(mode).is_err());
         let mut map = roles.clone();
-        map.voice_map.insert("additional".into(), "robot".into());
+        map.voice_map.insert("additional".into(), "device".into());
         assert!(observed.with_roles(map).is_err());
         if roles.required_facades.len() > 1 {
             let mut reversed = roles.clone();
@@ -1165,7 +1165,7 @@ async fn role_inspection_refuses_crossed_paths_choices_and_placeholders() {
 #[tokio::test]
 async fn role_source_diagnostics_are_fixed_and_bound_to_the_requested_package() {
     let metadata =
-        "The source's package metadata is not static, valid PairedHost extension metadata.";
+        "The source's package metadata is not static, valid extension metadata for this host.";
     let mismatch =
         "The source commit's build recipe does not build the package at the requested path.";
     let cases = [
@@ -1206,7 +1206,7 @@ async fn role_source_diagnostics_are_fixed_and_bound_to_the_requested_package() 
             "unprocessable",
             "not_a_paired_host_extension",
             "extension/pyproject.toml",
-            "The source declares no PairedHost extension entry point.",
+            "The source declares no extension entry point for this host.",
             true,
         ),
         (
@@ -1559,12 +1559,12 @@ async fn role_prepare_keeps_exact_owner_pins_and_fixed_errors() {
         (
             "not_a_paired_host_extension",
             "new_extension.source.package_path",
-            "The source declares no PairedHost extension entry point.",
+            "The source declares no extension entry point for this host.",
         ),
         (
             "metadata_invalid",
             "new_extension.source.package_path",
-            "The source's package metadata is not static, valid PairedHost extension metadata.",
+            "The source's package metadata is not static, valid extension metadata for this host.",
         ),
     ];
     let failures:Vec<_> = messages.iter().map(|(code,path,message)|json!({"valid":false,"problems":[{"code":code,"path":path,"message":message}],"change":null})).collect();
@@ -1630,7 +1630,7 @@ async fn role_tool_arguments_refuse_duplicate_decoded_keys_before_transport() {
             .await
             .unwrap_err();
         assert!(
-            matches!(error, meerkat_core::ToolError::ExecutionFailed { message } if message == "The PairedHost candidate request has an invalid or unknown field; use the offered closed schema")
+            matches!(error, meerkat_core::ToolError::ExecutionFailed { message } if message == "The paired host candidate request has an invalid or unknown field; use the offered closed schema")
         );
     }
 }

@@ -1,5 +1,5 @@
 //! Opt-in public research through normal native provider/auth construction.
-//! No PairedHost server, provider override, installation or source-pin claim.
+//! No paired host server, provider override, installation or source-pin claim.
 
 use futures_util::{FutureExt, StreamExt};
 use meerkat_connect::{
@@ -203,7 +203,7 @@ async fn real_agent_researches_public_frontend_evidence_with_native_search() -> 
         "semantic_review":"pending"}))?;
 
     // This placeholder client performs no HTTP request. The caller ceiling
-    // denies every PairedHost operation, including inventory and preparation.
+    // denies every paired host operation, including inventory and preparation.
     let host = PairedHostFrontend::with_research(
         PairedHostClient::new("http://127.0.0.1:9")
             .map_err(|_| io::Error::other("captured loopback binding failed"))?,

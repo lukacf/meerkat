@@ -5,7 +5,7 @@
 //! existing host implementations, or register them in otherwise unused builder
 //! slots. They never replace a host registration themselves.
 //!
-//! Recipe research and captured PairedHost preparation remain separate choices on
+//! Recipe research and captured paired host preparation remain separate choices on
 //! MobKit 0.8.47. This module does not bypass the native composite plan-owner
 //! limitation or transport executable tools through a remote SDK customizer.
 
@@ -45,7 +45,7 @@ pub struct ConsoleSetupCustomizer {
 
 impl ConsoleSetupCustomizer {
     /// Offer canonical service, frontend and hybrid recipe metadata, without a
-    /// PairedHost client, prepared service resources or new native session.
+    /// Paired host client, prepared service resources or new native session.
     pub fn recipes(selected: AgentIdentity) -> Self {
         Self {
             selected,
@@ -106,7 +106,7 @@ impl AgentCustomizer for ConsoleSetupCustomizer {
 /// Use the real [`SessionHook`] service path, not MobKit's synthetic
 /// `SessionHookCustomizerAdapter`, which discards these build mutations.
 /// Delegate this call from an existing host hook to preserve its other work.
-/// The exact tool ceiling excludes paired PairedHost preparation. Cancellation,
+/// The exact tool ceiling excludes paired host preparation. Cancellation,
 /// native auth, search execution and runtime teardown retain their native owners.
 pub struct ConsoleResearchHook {
     selected: MobMemberBinding,

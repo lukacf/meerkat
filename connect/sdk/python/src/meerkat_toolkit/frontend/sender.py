@@ -1,4 +1,4 @@
-"""Durable sender selection, extracted from PairedHost's existing SQLite owner.
+"""Durable sender selection, extracted from the paired host's existing SQLite owner.
 
 Selection survives reopening the same database; live implementations do not.
 The host owns sender eligibility, provider credentials, lifecycle composition,

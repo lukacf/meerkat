@@ -15,12 +15,12 @@ const PAGE_READS: usize = 8;
 const PAGE_VISITS: usize = 128;
 
 pub(super) fn unavailable() -> crate::ConnectError {
-    crate::ConnectError::InvalidInput("PairedHost setup locators are unavailable. No previous approval or submission was restored.".into())
+    crate::ConnectError::InvalidInput("Paired host setup locators are unavailable. No previous approval or submission was restored.".into())
 }
 
 fn refused_recovery() -> ToolError {
     ToolError::execution_failed(
-        "PairedHost setup history is unavailable. No approval or submission was restored; do not reprepare or resubmit to recover it.",
+        "Paired host setup history is unavailable. No approval or submission was restored; do not reprepare or resubmit to recover it.",
     )
 }
 
@@ -582,7 +582,7 @@ mod tests {
     }
 
     fn digest(index: usize) -> FrontendChangeDigest {
-        FrontendChangeDigest::new(&format!("hc-frontend-change-v1:sha256:{index:064x}")).unwrap()
+        FrontendChangeDigest::new(&format!("paired-host-change-v1:sha256:{index:064x}")).unwrap()
     }
 
     fn reference(realm: &str, origin: &str, index: usize) -> Reference {

@@ -650,7 +650,7 @@ impl AgentToolDispatcher for ForgeFrontend {
         }
         let mut tools = vec![Arc::new(ToolDef::new(
             FORGE_SELECT_HOST,
-            "Ask the protected setup controls in this conversation to select one local Forge application's Console and sign in once, then read its frontend-management support. Supply only {}. Never supply or request an origin, port, password, nonce or cookie in chat. The person selects the literal loopback Console origin and enters its password privately. Sign-in creates an in-memory host session; it is not PairedHost pairing or a read-only operation. Unsupported means that application has no frontend producer, with no host identity or routing inferred. Declared support is not configuration, permission to submit, activation or readiness. Use the offered concrete inspection tools next. A saved change selected privately is returned with a recovery-only locator; read its status without preparing or submitting again. Never repeat this selection automatically or switch host. Explicit same-host reauthentication is a separate protected tool after session expiry.",
+            "Ask the protected setup controls in this conversation to select one local Forge application's Console and sign in once, then read its frontend-management support. Supply only {}. Never supply or request an origin, port, password, nonce or cookie in chat. The person selects the literal loopback Console origin and enters its password privately. Sign-in creates an in-memory host session; it is not paired host pairing or a read-only operation. Unsupported means that application has no frontend producer, with no host identity or routing inferred. Declared support is not configuration, permission to submit, activation or readiness. Use the offered concrete inspection tools next. A saved change selected privately is returned with a recovery-only locator; read its status without preparing or submitting again. Never repeat this selection automatically or switch host. Explicit same-host reauthentication is a separate protected tool after session expiry.",
             serde_json::json!({"type":"object","additionalProperties":false,"properties":{}}),
         ))];
         tools.extend(configuration::tools(&self.binding.recipe));
@@ -1162,7 +1162,7 @@ async fn login_selection<F: Future<Output = io::Result<()>>>(
         signal = &mut interrupted => { signal.map_err(|e| ConnectError::native("interrupt Forge login", e))?; return Ok(LoginEnd::Stopped); },
         result = client.login_form() => result.map_err(protocol)?,
     };
-    writeln!(output, "Use this application's Console password. Sign-in is kept only in memory; no OS credential store or PairedHost pairing is used.")
+    writeln!(output, "Use this application's Console password. Sign-in is kept only in memory; no OS credential store or paired host pairing is used.")
         .map_err(|e| ConnectError::native("write Forge login", e))?;
     let read = tokio::select! {
         biased;

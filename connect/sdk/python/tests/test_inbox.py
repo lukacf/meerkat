@@ -1,4 +1,4 @@
-"""Actual SQLite owner tests, independent of PairedHost adapters and SDK models."""
+"""Actual SQLite owner tests, independent of the paired host adapters and SDK models."""
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path

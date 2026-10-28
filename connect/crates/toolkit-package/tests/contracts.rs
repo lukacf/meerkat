@@ -171,7 +171,7 @@ fn host() -> HostCapabilities {
 }
 fn service(optional: bool) -> HostServiceRequirement {
     HostServiceRequirement {
-        name: id("robot/lease"),
+        name: id("device/lease"),
         version: VersionRequirement {
             major: 2,
             minimum_minor: 1,
@@ -332,7 +332,7 @@ fn missing_or_incompatible_required_service_blocks_before_code_import() {
     let mut capabilities = host();
     assert!(!selected.check_host(&capabilities).is_compatible());
     capabilities.services.insert(
-        id("robot/lease"),
+        id("device/lease"),
         HostServiceOffer {
             version: ContractVersion { major: 2, minor: 0 },
             authority: [id("observe")].into(),
@@ -341,14 +341,14 @@ fn missing_or_incompatible_required_service_blocks_before_code_import() {
     assert!(!selected.check_host(&capabilities).is_compatible());
     capabilities
         .services
-        .get_mut(&id("robot/lease"))
+        .get_mut(&id("device/lease"))
         .unwrap()
         .version
         .minor = 1;
     assert!(selected.check_host(&capabilities).is_compatible());
     capabilities
         .services
-        .get_mut(&id("robot/lease"))
+        .get_mut(&id("device/lease"))
         .unwrap()
         .authority
         .clear();

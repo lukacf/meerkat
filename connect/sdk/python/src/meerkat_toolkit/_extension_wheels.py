@@ -1,4 +1,4 @@
-"""Private wheel checks extracted from PairedHost's installed-artifact owner.
+"""Private wheel checks extracted from the paired host's installed-artifact owner.
 
 SPDX-License-Identifier: MIT OR Apache-2.0
 See LICENSE-EXTRACTED and

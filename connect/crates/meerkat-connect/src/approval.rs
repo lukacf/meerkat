@@ -2,8 +2,8 @@
 //!
 //! ApprovalService owns every durable decision. The state below only retains
 //! custody of a currently awaited dispatch; it cannot be restored or replayed.
-//! The direct PairedHost path permits exact retained review submissions and
-//! nonsecret secret-intent creation/cancellation. PairedHost owns secret entry.
+//! The direct paired host path permits exact retained review submissions and
+//! nonsecret secret-intent creation/cancellation. The paired host owns secret entry.
 //! Packaged preparation keeps its existing authorization. Only the separately
 //! composed service path can approve one captured package installation; account
 //! effects remain denied here. An access review may return a native decision
@@ -328,7 +328,7 @@ impl LocalApprovals {
         Self::create_with(parent, DECISION_LIFETIME, &[])
     }
 
-    /// Local terminal decisions for the bounded direct PairedHost composition.
+    /// Local terminal decisions for the bounded direct paired host composition.
     /// No remote decision or saved approval is accepted by this invocation.
     /// Attribution of this installed presenter only. The actual verified Human
     /// and task/login checks remain with the caller and native decision owner.
@@ -1072,7 +1072,7 @@ impl LocalApprovals {
     }
 
     /// Attach the same native per-effect approval gate to the exact combined
-    /// selected stdio preparation and local PairedHost composition.
+    /// selected stdio preparation and local paired host composition.
     pub fn attach_paired_host_interactive(
         &self,
         options: &mut SessionOptions,
@@ -1103,7 +1103,7 @@ impl LocalApprovals {
             || !expected_composition
         {
             return Err(invalid(
-                "Local PairedHost consent requires its exact fresh local host composition",
+                "Local paired host consent requires its exact fresh local host composition",
             ));
         }
         let mut allowed = paired_host.allowed_tools();
@@ -1117,9 +1117,9 @@ impl LocalApprovals {
                 .build
                 .tool_access_policy
                 .take()
-                .ok_or_else(|| invalid("Local PairedHost policy is missing"))?
+                .ok_or_else(|| invalid("Local paired host policy is missing"))?
                 .conjoin(ceiling)
-                .map_err(|e| ConnectError::native("conjoin PairedHost consent ceiling", e))?,
+                .map_err(|e| ConnectError::native("conjoin paired host consent ceiling", e))?,
         );
         options.build.tool_dispatch_admission = Some(Arc::new(Admission(
             self.shared.clone(),
@@ -1534,15 +1534,15 @@ impl Shared {
                     summary: if held.is_some() && reviewed["kind"] == "new_extension" {
                         "Request host-owned build and review of this pinned extension package. The receipt confirms the request was recorded; installation, activation and readiness require later host evidence.".into()
                     } else if held.is_some() && reviewed["kind"] == "secret_intent_create" {
-                        "Create the reviewed PairedHost secret-entry intent. This supersedes older pending intents for the same slot and discards their pending values; it does not enter or confirm a secret.".into()
+                        "Create the reviewed paired host secret-entry intent. This supersedes older pending intents for the same slot and discards their pending values; it does not enter or confirm a secret.".into()
                     } else if held.is_some() && reviewed["kind"] == "secret_intent_cancel" {
-                        "Cancel the reviewed PairedHost secret-entry intent and discard its pending value. This does not revoke or roll back a committed secret.".into()
+                        "Cancel the reviewed paired host secret-entry intent and discard its pending value. This does not revoke or roll back a committed secret.".into()
                     } else if matches!(held, Some(HeldAction::Forge(_))) {
                         "Commit the exact reviewed Forge frontend configuration. This may trigger the application's existing activation or reconciliation and process messages already queued from the configured person; it does not provision credentials or prove activation or delivery.".into()
                     } else if matches!(held, Some(HeldAction::Service(_))) {
                         "Ask the selected package owner to install this exact checked software configuration once. The returned job and receipt are software-only observations; this does not authenticate an account, attach usable tools, grant access or complete the original task.".into()
                     } else if held.is_some() {
-                        "Submit the reviewed change to PairedHost for operator review. This does not activate it.".into()
+                        "Submit the reviewed change to the paired host for operator review. This does not activate it.".into()
                     } else { format!("Run {} once in this setup invocation", call.name) },
                     body: Some(reviewed) },
                 risk: ApprovalRisk::Medium, request_body: None,
@@ -2346,7 +2346,7 @@ mod tests {
                     policy_entry: None,
                     readback: Some(ReadbackTarget::PairedHost(PairedHostReadback::Change(
                         crate::paired_host::FrontendChangeDigest::new(&format!(
-                            "hc-frontend-change-v1:sha256:{}",
+                            "paired-host-change-v1:sha256:{}",
                             "a".repeat(64)
                         ))
                         .unwrap(),
@@ -2360,7 +2360,7 @@ mod tests {
                         .is_err()
                 );
                 assert!(approvals.has_uncertain_dispatch());
-                let status_args = serde_json::value::RawValue::from_string(serde_json::json!({"change_digest":format!("hc-frontend-change-v1:sha256:{}", "a".repeat(64))}).to_string()).unwrap();
+                let status_args = serde_json::value::RawValue::from_string(serde_json::json!({"change_digest":format!("paired-host-change-v1:sha256:{}", "a".repeat(64))}).to_string()).unwrap();
                 let status = ToolCallView {
                     id: "status",
                     name: PAIRED_HOST_FRONTEND_STATUS,

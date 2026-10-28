@@ -97,8 +97,8 @@ impl Host {
                 if method == "POST" {
                     assert_eq!(headers["origin"], expected_origin);
                 }
-                assert!(!headers.contains_key("x-paired-host-dev-token"));
-                assert!(!headers.contains_key("x-paired-host-harness-token"));
+                assert!(!headers.contains_key("x-host-dev-token"));
+                assert!(!headers.contains_key("x-host-harness-token"));
                 if path.starts_with(INTENTS) {
                     assert!(headers["cookie"].contains(DEVICE));
                     if method == "GET" {
@@ -106,8 +106,8 @@ impl Host {
                     }
                 }
                 let (status, cookie, response) = match (method.as_str(), path.as_str()) {
-                    ("POST", "/console/pair/request") => (200, "Set-Cookie: hc_console_pair=fixture-pair; Path=/console/pair; HttpOnly; SameSite=Strict\r\n".into(), json!({"ok":true})),
-                    ("POST", "/console/pair/confirm") => (200, format!("Set-Cookie: hc_console_device={DEVICE}; Path=/; HttpOnly; SameSite=Lax\r\nSet-Cookie: hc_console_pair=; Max-Age=0; Path=/console/pair\r\n"), json!({"ok":true})),
+                    ("POST", "/console/pair/request") => (200, "Set-Cookie: paired_host_pair=fixture-pair; Path=/console/pair; HttpOnly; SameSite=Strict\r\n".into(), json!({"ok":true})),
+                    ("POST", "/console/pair/confirm") => (200, format!("Set-Cookie: paired_host_device={DEVICE}; Path=/; HttpOnly; SameSite=Lax\r\nSet-Cookie: paired_host_pair=; Max-Age=0; Path=/console/pair\r\n"), json!({"ok":true})),
                     ("POST", INTENTS) => (if matches!(mode,Mode::LostCreate) {0} else {201}, String::new(), observation("awaiting_entry")),
                     ("POST", p) if p == format!("{INTENTS}/{ID}/cancel") => (if matches!(mode,Mode::LostCancel) {0} else {200}, String::new(), observation("cancelled")),
                     ("GET", p) if p == format!("{INTENTS}/{ID}") => {
@@ -353,7 +353,7 @@ async fn exact_approval_create_is_settled_before_private_completion_drain_and_re
     notices.present_pending(&mut terminal).unwrap();
     let terminal = String::from_utf8(terminal).unwrap();
     assert!(terminal.contains(&format!("{}{INTENTS}/{ID}/entry", host.origin)));
-    assert!(terminal.contains("Pair that browser with PairedHost independently"));
+    assert!(terminal.contains("Pair that browser with the paired host independently"));
     let mut drained = Vec::new();
     notices.present_pending(&mut drained).unwrap();
     assert!(drained.is_empty());
@@ -503,7 +503,7 @@ async fn lost_creation_has_no_recovery_target_or_second_effect() {
         ),
         (
             PAIRED_HOST_FRONTEND_STATUS,
-            json!({"change_digest":format!("hc-frontend-change-v1:sha256:{}","a".repeat(64))}),
+            json!({"change_digest":format!("paired-host-change-v1:sha256:{}","a".repeat(64))}),
         ),
         (PAIRED_HOST_FRONTEND_INVENTORY, json!({})),
     ] {
@@ -548,11 +548,11 @@ async fn lost_cancellation_admits_only_its_exact_intent_and_never_restores_effec
         ),
         (
             PAIRED_HOST_FRONTEND_STATUS,
-            json!({"change_digest":format!("hc-frontend-change-v1:sha256:{}","a".repeat(64))}),
+            json!({"change_digest":format!("paired-host-change-v1:sha256:{}","a".repeat(64))}),
         ),
         (
             PAIRED_HOST_FRONTEND_SUBMIT,
-            json!({"change_digest":format!("hc-frontend-change-v1:sha256:{}","a".repeat(64))}),
+            json!({"change_digest":format!("paired-host-change-v1:sha256:{}","a".repeat(64))}),
         ),
         (PAIRED_HOST_SECRET_CREATE, request()),
         (PAIRED_HOST_SECRET_CANCEL, json!({"intent_id":ID})),
@@ -769,7 +769,7 @@ async fn invalid_create_is_rejected_before_approval_and_valid_work_remains_possi
     let mut oversized = request();
     oversized["binding_name"] = json!("a".repeat(8192));
     let malformed_wheel = json!({"binding_name":"telegram_bot_token", "candidate":{
-        "change_digest":format!("hc-frontend-change-v1:sha256:{}", "a".repeat(64)),"wheel_sha256":"not-a-wheel-hash"}});
+        "change_digest":format!("paired-host-change-v1:sha256:{}", "a".repeat(64)),"wheel_sha256":"not-a-wheel-hash"}});
     let mut secret_field = request();
     secret_field["value"] = json!("forbidden-field-sentinel");
     for args in [
@@ -819,7 +819,7 @@ async fn candidate_secret_binding_preserves_reviewed_digest_wheel_and_host() {
     let host = Host::new(Mode::Normal).await;
     let binding = host.binding().await;
     let mut setup = Setup::new(&binding, false);
-    let proposal = json!({"candidate":{"change_digest":format!("hc-frontend-change-v1:sha256:{}","c".repeat(64)),
+    let proposal = json!({"candidate":{"change_digest":format!("paired-host-change-v1:sha256:{}","c".repeat(64)),
         "wheel_sha256":"d".repeat(64)},"binding_name":"telegram_bot_token"});
     let task = setup.start(
         "candidate-secret",

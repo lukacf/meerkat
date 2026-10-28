@@ -19,7 +19,7 @@ pub(crate) struct Target {
 }
 
 fn ended() -> ConnectError {
-    ConnectError::InvalidInput("The protected PairedHost interaction ended. No pairing retry was started; PairedHost retains any enrollment it accepted.".into())
+    ConnectError::InvalidInput("The protected paired host interaction ended. No pairing retry was started; the paired host retains any enrollment it accepted.".into())
 }
 
 pub(crate) async fn entered<T>(
@@ -35,7 +35,7 @@ pub(crate) async fn entered<T>(
         result
     } else {
         // Retain the exact first-polled HTTP operation. Cancelling local
-        // presentation cannot undo an enrollment accepted by PairedHost.
+        // presentation cannot undo an enrollment accepted by the paired host.
         tokio::select! {
             biased;
             _ = bridge.closed() => operation.await,
@@ -43,7 +43,7 @@ pub(crate) async fn entered<T>(
             result = &mut operation => result,
         }
     };
-    result.map_err(|error| ConnectError::native("pair selected PairedHost", error))
+    result.map_err(|error| ConnectError::native("pair selected paired host", error))
 }
 
 pub(crate) async fn present(

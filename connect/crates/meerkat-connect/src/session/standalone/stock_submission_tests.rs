@@ -962,7 +962,7 @@ fn inspect_native_forge_composition(
         require(
             before.iter().any(|tool| tool.name.as_ref() == name)
                 && tools.iter().any(|tool| tool.name.as_ref() == name),
-            "Selecting Forge removed an existing PairedHost or service operation",
+            "Selecting Forge removed an existing paired host or service operation",
         )?;
     }
     let paired_host_ceiling = lazy.paired_host().allowed_tools();
@@ -972,7 +972,7 @@ fn inspect_native_forge_composition(
     ] {
         require(
             paired_host_ceiling.contains(&name) && setup.bundle_operations().contains(name),
-            "Selecting Forge removed a declared PairedHost operation",
+            "Selecting Forge removed a declared paired host operation",
         )?;
         require(
             !before
@@ -1056,7 +1056,7 @@ async fn native_setup_default_keeps_reading_and_existing_service_paired_host_too
     };
     let cleanup = fixture.finish().await;
     assert!(cleanup.is_ok(), "fixture cleanup failed: {cleanup:?}");
-    checked.expect("default Reading, PairedHost and service composition must remain available");
+    checked.expect("default Reading, paired host and service composition must remain available");
 }
 
 #[path = "stock_submission_tests/forge_finalization.rs"]

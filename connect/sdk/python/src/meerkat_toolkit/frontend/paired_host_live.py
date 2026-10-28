@@ -1,4 +1,4 @@
-"""Bounded image input to the existing PairedHost lease-authenticated live route.
+"""Bounded image input to the existing paired host lease-authenticated live route.
 
 The host owns the lease, agent, channel, admission and native content commit.
 An HTTP response from this module is not a content-commit or delivery receipt.
@@ -43,7 +43,7 @@ class ImageSubmissionError(Exception):
         self.kind = kind
         self.request_entered = request_entered
         self.status = status
-        super().__init__(f"PairedHost image input: {kind.value}")
+        super().__init__(f"Paired host image input: {kind.value}")
 
 
 _AUTHORIZATION = re.compile(r"PairedHostLease [A-Za-z0-9\-._~+/]{32,512}={0,2}\Z")

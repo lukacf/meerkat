@@ -2,7 +2,7 @@
 
 The host selects credentials/transport, maps principals, authorizes recipients and
 media, owns lifecycle, and commits inbox cursors. No returned DTO is admission.
-This module imports no PairedHost or agent runtime. PTB is lazy and optional.
+This module imports no paired host or agent runtime. PTB is lazy and optional.
 """
 
 from __future__ import annotations

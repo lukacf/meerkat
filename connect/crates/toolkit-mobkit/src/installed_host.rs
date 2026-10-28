@@ -1738,7 +1738,7 @@ mod tests {
     /// Laptop-only owner fixture. Ordinary portable runs report this ignored;
     /// explicit selection requires a path and never substitutes sample bytes.
     #[test]
-    #[ignore = "requires an explicitly selected external PairedHost policy artifact"]
+    #[ignore = "requires an explicitly selected external paired host policy artifact"]
     fn external_paired_host_policy_uses_actual_native_provider_parser() {
         let path = std::env::var_os("MEERKAT_TOOLKIT_APPLICATION_POLICY_FIXTURE")
             .expect("set MEERKAT_TOOLKIT_APPLICATION_POLICY_FIXTURE for this explicit check");

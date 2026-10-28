@@ -2,7 +2,7 @@
 
 Package compatibility and selection belong to the canonical package inspector
 and host. This module does not install, resolve dependencies, authorize access,
-activate a frontend, or own the loaded extension's lifetime. PairedHost-derived
+activate a frontend, or own the loaded extension's lifetime. The extracted
 verification is licensed under MIT OR Apache-2.0 (see LICENSE-EXTRACTED and
 EXTENSIONS.md).
 """

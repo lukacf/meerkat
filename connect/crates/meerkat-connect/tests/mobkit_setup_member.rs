@@ -1,4 +1,4 @@
-//! Released MobKit console composition with synthetic auth/model and optional PairedHost.
+//! Released MobKit console composition with synthetic auth/model and an optional paired host.
 //! No Connect runtime, approval owner, live account or provider is constructed.
 
 use std::{
@@ -108,7 +108,7 @@ fn prepared() -> Value {
         "missing_prerequisites":[{"kind":"secret","name":"telegram_bot_token"}],
         "current":{"activation_id":"210","policy_digest":"sha256:current-fixture"},
         "candidate":{"channel_row_digest":"sha256:row-fixture",
-            "policy_digest":"hc-policy-content-v1:sha256:policy-fixture","compile_depth":"policy_bundle"},
+            "policy_digest":"fixture-policy-v1:sha256:policy-fixture","compile_depth":"policy_bundle"},
         "compiled_is_not_ready":true})
 }
 
@@ -335,8 +335,8 @@ async fn host_request(State(state): State<HostState>, request: Request<Body>) ->
     let method = request.method().as_str().to_owned();
     let path = request.uri().path().to_owned();
     let headers = request.headers().clone();
-    assert!(!headers.contains_key("x-paired-host-dev-token"));
-    assert!(!headers.contains_key("x-paired-host-harness-token"));
+    assert!(!headers.contains_key("x-host-dev-token"));
+    assert!(!headers.contains_key("x-host-harness-token"));
     assert!(!headers.contains_key(header::AUTHORIZATION));
     if method == "POST" {
         assert_eq!(headers[header::ORIGIN], state.origin);
@@ -359,7 +359,7 @@ async fn host_request(State(state): State<HostState>, request: Request<Body>) ->
         ("POST", "/console/pair/request") => (
             json!({"ok":true}),
             vec![format!(
-                "hc_console_pair={PAIR}; Path=/console/pair; HttpOnly; SameSite=Strict"
+                "paired_host_pair={PAIR}; Path=/console/pair; HttpOnly; SameSite=Strict"
             )],
         ),
         ("POST", "/console/pair/confirm") => {
@@ -367,8 +367,8 @@ async fn host_request(State(state): State<HostState>, request: Request<Body>) ->
             (
                 json!({"ok":true}),
                 vec![
-                    format!("hc_console_device={DEVICE}; Path=/; HttpOnly; SameSite=Lax"),
-                    "hc_console_pair=; Max-Age=0; Path=/console/pair".into(),
+                    format!("paired_host_device={DEVICE}; Path=/; HttpOnly; SameSite=Lax"),
+                    "paired_host_pair=; Max-Age=0; Path=/console/pair".into(),
                 ],
             )
         }
@@ -377,7 +377,7 @@ async fn host_request(State(state): State<HostState>, request: Request<Body>) ->
             assert_eq!(body, candidate());
             (prepared(), vec![])
         }
-        _ => panic!("unexpected PairedHost effect or route: {method} {path}"),
+        _ => panic!("unexpected paired host effect or route: {method} {path}"),
     };
     let mut response = axum::Json(value).into_response();
     if path.starts_with("/console/extensions/") {
@@ -463,7 +463,7 @@ fn no_private(value: &str) {
     for private in [DEVICE, PAIR, CODE, "/secrets/intents/"] {
         assert!(
             !value.contains(private),
-            "private PairedHost material entered ordinary output"
+            "private paired host material entered ordinary output"
         );
     }
 }
@@ -1247,7 +1247,11 @@ async fn stock_console_prepares_for_one_admitted_member_without_effect_authority
     bootstrap_settled(service.as_ref(), &other_id).await;
     let bootstrap_calls = probe.calls.load(Ordering::SeqCst);
     assert_eq!(bootstrap_calls, 2);
-    assert_eq!(host.count(), 2, "bootstrap must perform no PairedHost call");
+    assert_eq!(
+        host.count(),
+        2,
+        "bootstrap must perform no paired host call"
+    );
     let mut setup_events =
         meerkat_mob::MobSessionService::subscribe_session_events(service.as_ref(), &setup_id)
             .await
@@ -1466,7 +1470,7 @@ async fn stock_console_discovers_bundled_recipes_without_host_or_resources() {
         );
     }
 
-    // Only the existing native runtime is built. There is no PairedHost client,
+    // Only the existing native runtime is built. There is no paired host client,
     // resource locator/preparer, MCP server or additional session facade.
     let directory = tempfile::tempdir().unwrap();
     let runtime = setup_runtime(
@@ -2068,7 +2072,7 @@ async fn stock_console_research_uses_explicit_native_helper_and_exact_member() {
             .supports_web_search
     );
     // No default_llm_client, host decorator, executor override, environment change,
-    // PairedHost client or prepared service resource is used by this scenario.
+    // Paired host client or prepared service resource is used by this scenario.
     let builder = setup_builder(
         meerkat_mob::MobId::from(RESEARCH_MOB),
         directory.path(),

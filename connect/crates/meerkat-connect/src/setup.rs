@@ -121,7 +121,7 @@ impl PreparedSetupConnection {
         self.compose(options, None)
     }
 
-    /// Compose the same preparation tools plus exactly this captured PairedHost
+    /// Compose the same preparation tools plus exactly this captured paired host
     /// inventory/candidate binding. Caller restrictions are conjoined, never replaced.
     pub fn preparation_session_with_paired_host(
         self,
@@ -132,7 +132,7 @@ impl PreparedSetupConnection {
     }
 
     /// One original setup session with the selected stdio preparation server
-    /// and this exact local PairedHost binding. Only PairedHost effects receive
+    /// and this exact local paired host binding. Only the paired host effects receive
     /// per-call consent; service installation remains outside the tool ceiling.
     pub fn interactive_session_with_paired_host(
         self,
@@ -222,7 +222,7 @@ pub(crate) fn compose_paired_host_session<S: Into<String>>(
         || options.build.keep_alive
     {
         return Err(ConnectError::InvalidInput(
-            "Direct PairedHost setup requires a fresh local session without other execution surfaces"
+            "Direct paired host setup requires a fresh local session without other execution surfaces"
                 .into(),
         ));
     }
@@ -235,7 +235,7 @@ pub(crate) fn compose_paired_host_session<S: Into<String>>(
     options.build.tool_access_policy = Some(match options.build.tool_access_policy.take() {
         Some(existing) => existing
             .conjoin(ceiling)
-            .map_err(|e| ConnectError::native("compose PairedHost tool policy", e))?,
+            .map_err(|e| ConnectError::native("compose paired host tool policy", e))?,
         None => ceiling,
     });
     use meerkat_core::ToolCategoryOverride::Disable;

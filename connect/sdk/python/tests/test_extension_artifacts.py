@@ -1,6 +1,6 @@
 """Real local wheel installations at the extension import boundary.
 
-No PairedHost, network, provider or native agent runtime is involved. Fixture
+No paired host, network, provider or native agent runtime is involved. Fixture
 packages write a marker when imported, so negative cases prove import refusal.
 """
 

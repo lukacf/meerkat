@@ -1,4 +1,4 @@
-//! PairedHost device-cookie custody in the current OS user's protected store.
+//! Paired host device-cookie custody in the current OS user's protected store.
 //! This is not provider auth, a realm grant, or a host-revocation API.
 
 use std::{
@@ -15,7 +15,7 @@ use crate::paired_host::PairedHostClient;
 
 const SERVICE: &str = "ai.rkat.meerkat-connect.paired-host-device.v1";
 const MAX_RECORD: usize = 8192;
-const DEVICE_COOKIE: &str = "hc_console_device";
+const DEVICE_COOKIE: &str = "paired_host_device";
 
 #[cfg(any(target_os = "linux", test))]
 const SECRET_SERVICE_SCHEMA_ATTRIBUTE: &str = "xdg:schema";
@@ -412,7 +412,7 @@ mod platform {
             // or get-any fallback. Concurrent duplicates are refused on readback.
             collection
                 .create_item(
-                    "Meerkat Connect PairedHost device",
+                    "Meerkat Connect paired host device",
                     attributes(origin),
                     bytes,
                     false,
@@ -456,7 +456,7 @@ mod tests {
     const MARKER: &str = "synthetic-device-only";
 
     fn header(attributes: &str) -> String {
-        format!("hc_console_device={MARKER}; Path=/; HttpOnly; SameSite=Lax; {attributes}")
+        format!("paired_host_device={MARKER}; Path=/; HttpOnly; SameSite=Lax; {attributes}")
     }
 
     fn secret_service_metadata() -> HashMap<String, String> {
@@ -579,7 +579,7 @@ mod tests {
         assert!(
             ConfirmedDevice::from_cookie(
                 ORIGIN,
-                "hc_console_pair=synthetic; Path=/; HttpOnly; SameSite=Lax; Max-Age=90",
+                "paired_host_pair=synthetic; Path=/; HttpOnly; SameSite=Lax; Max-Age=90",
                 1000
             )
             .is_none()

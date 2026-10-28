@@ -145,7 +145,7 @@ The paired host adoption, with no additional queue or retry machine here.
 
 ## The paired host adoption and provenance
 
-The isolated `paired-host-ext-telegram` adoption retains its frozen API-v1 types,
+The isolated `example-ext-telegram` adoption retains its frozen API-v1 types,
 inbound identity mapping, channel lifecycle, provider token lookup, typing
 behavior, host limits and authorized media retrieval. Its `provider.py` is a
 compatibility import. Provider interpretation and presentation now live in the

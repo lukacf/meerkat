@@ -80,7 +80,7 @@ impl HostSelection {
         let state = self.state.into_inner().map_err(|_| ended())?;
         if !state.retired || state.active.is_some() {
             return Err(ConnectError::InvalidInput(
-            "The previous PairedHost selection has not settled; no continuation connection was created.".into()));
+            "The previous paired host selection has not settled; no continuation connection was created.".into()));
         }
         Ok(self
             .captured
@@ -201,7 +201,7 @@ impl Drop for SelectionLease {
 pub(crate) fn definition() -> Arc<ToolDef> {
     Arc::new(ToolDef::new(
         PAIRED_HOST_SELECT_HOST,
-        "Ask the protected setup controls to select and pair one PairedHost extension host in this same conversation. Supply only an empty object. Never ask for or send its origin, pairing code, password, token or cookie in chat. The person chooses among the host and credential-custody options offered privately. Console pairing is process-only; the standalone CLI may offer remembered pairing. This can change pairing/device custody and is not a read-only call. It authorizes no extension change, secret intent or installation; those keep their own exact approvals. Once captured the host cannot be replaced in this conversation. If this interaction ends or times out, stop; do not retry pairing or infer that host enrollment was undone.",
+        "Ask the protected setup controls to select and pair one paired extension host in this same conversation. Supply only an empty object. Never ask for or send its origin, pairing code, password, token or cookie in chat. The person chooses among the host and credential-custody options offered privately. Console pairing is process-only; the standalone CLI may offer remembered pairing. This can change pairing/device custody and is not a read-only call. It authorizes no extension change, secret intent or installation; those keep their own exact approvals. Once captured the host cannot be replaced in this conversation. If this interaction ends or times out, stop; do not retry pairing or infer that host enrollment was undone.",
         serde_json::json!({"type":"object","additionalProperties":false,"properties":{}}),
     ))
 }
@@ -255,7 +255,7 @@ impl Drop for HostSelectionPrompt {
 }
 
 fn ended() -> ConnectError {
-    ConnectError::InvalidInput("The native host-selection request has ended. No late binding or automatic pairing retry is allowed; any completed host enrollment remains owned by PairedHost.".into())
+    ConnectError::InvalidInput("The native host-selection request has ended. No late binding or automatic pairing retry is allowed; any completed host enrollment remains owned by the paired host.".into())
 }
 
 /// Own the existing terminal exclusively until pairing settles or the exact
@@ -271,10 +271,10 @@ pub async fn present_host_selection(
         .require_terminal()
         .map_err(|error| ConnectError::native("check protected host selection", error))?;
     tokio::pin!(interrupted);
-    writeln!(output, "Select the running PairedHost for this extension. This realm keeps the same setup conversation. Enter the origin here, never in chat. /quit ends setup.")
+    writeln!(output, "Select the running paired host for this extension. This realm keeps the same setup conversation. Enter the origin here, never in chat. /quit ends setup.")
         .map_err(|error| ConnectError::native("write host selection", error))?;
     let origin = loop {
-        write!(output, "PairedHost origin: ")
+        write!(output, "Paired host origin: ")
             .and_then(|_| output.flush())
             .map_err(|error| ConnectError::native("write host selection", error))?;
         let line = tokio::select! {
@@ -297,7 +297,7 @@ pub async fn present_host_selection(
         }
         writeln!(
             output,
-            "Enter a supported PairedHost origin without a path, query, fragment or credentials."
+            "Enter a supported paired host origin without a path, query, fragment or credentials."
         )
         .map_err(|error| ConnectError::native("write host selection", error))?;
     };
@@ -332,7 +332,7 @@ pub async fn present_host_selection(
             pair_paired_host_with_store(&origin, Arc::new(OsDeviceStore), input, output, cancelled)
                 .await?
         } else {
-            writeln!(output, "Pairing is kept only for this process. The OS credential store will not be read or written. PairedHost enrollment is not revoked when this process ends.")
+            writeln!(output, "Pairing is kept only for this process. The OS credential store will not be read or written. Paired host enrollment is not revoked when this process ends.")
                 .map_err(|error| ConnectError::native("write pairing custody", error))?;
             pair_paired_host(&origin, input, output, cancelled).await?
         }

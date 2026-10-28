@@ -15,13 +15,30 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import tarfile
 import tempfile
+
+
+def release_url(version):
+    """Where Meta's release of `version` publishes its assets.
+
+    Meta releases up to 0.9.6 stay in the standalone repository under v tags;
+    later ones come from the monorepo under meta-v tags (its v tags are
+    Core's). Both publish the same archive and checksum manifest names.
+    """
+    found = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", version) if isinstance(version, str) else None
+    if found is None:
+        raise ValueError(f"The Meta release version {version!r} is invalid.")
+    if tuple(int(part) for part in found.groups()) <= (0, 9, 6):
+        return f"https://github.com/lukacf/meerkat-meta/releases/download/v{version}"
+    return f"https://github.com/lukacf/meerkat/releases/download/meta-v{version}"
+
 
 VERSION = "0.9.4"
 SDK_DISTRIBUTION = "meerkat-meta"
 SDK_WHEEL_SHA256 = "46cc44eb3e05a4bd9fb2ec630c06f2e3c62548184b7f6c81101f042d8e11a659"
-RELEASE_URL = f"https://github.com/lukacf/meerkat-meta/releases/download/v{VERSION}"
+RELEASE_URL = release_url(VERSION)
 CATALOG_FORMAT = "forge-public-meta-model-catalog-v1"
 MODEL_CATALOG = Path(__file__).with_name(f"meta_model_catalog_{VERSION.replace('.', '_')}.json")
 MODELS_UNLISTED = ("The Meta {version} runtime this agent team installs does not list {models}. "

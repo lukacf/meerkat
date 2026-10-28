@@ -175,7 +175,7 @@ def official_meta_assets(module, target, monkeypatch):
             member = tarfile.TarInfo(name)
             member.size = len(binary)
             archive.addfile(member, io.BytesIO(binary))
-        assets[f"{prefix}-{VERSION}-{target}.tar.gz"] = stream.getvalue()
+        assets[f"{prefix}-{module.VERSION}-{target}.tar.gz"] = stream.getvalue()
     assets[module.checksum_manifest(target)] = "".join(
         hashlib.sha256(payload).hexdigest() + "  " + name + "\n" for name, payload in assets.items()).encode()
     calls = []
@@ -207,12 +207,49 @@ def test_meta_install_reads_the_meta_release_and_writes_its_receipts(tmp_path, m
     assert max(sizes.values()) < module.MAX_BINARY_BYTES
 
 
-@pytest.mark.parametrize("version,meta", [("0.8.47", False), ("0.9.4", True), ("0.10.0", True), ("1.0.0", True)])
-def test_later_meta_versions_keep_the_meta_release(tmp_path, monkeypatch, version, meta):
+STANDALONE_META = "https://github.com/lukacf/meerkat-meta/releases/download/v"
+MONOREPO_META = "https://github.com/lukacf/meerkat/releases/download/meta-v"
+
+
+# Meta releases up to 0.9.6 stay in the standalone repository under v tags;
+# later ones come from the monorepo under meta-v tags (its v tags are Core's).
+@pytest.mark.parametrize("version,release", [
+    ("0.8.47", "https://github.com/lukacf/meerkat-mobkit/releases/download/v0.8.47"),
+    ("0.9.4", STANDALONE_META + "0.9.4"), ("0.9.6", STANDALONE_META + "0.9.6"),
+    ("0.9.7", MONOREPO_META + "0.9.7"), ("0.10.0", MONOREPO_META + "0.10.0"), ("1.0.0", MONOREPO_META + "1.0.0")])
+def test_meta_versions_download_from_the_repository_that_released_them(tmp_path, monkeypatch, version, release):
     module = gateway_installer(tmp_path, monkeypatch, "x86_64-unknown-linux-gnu", version)
-    repository = "meerkat-meta" if meta else "meerkat-mobkit"
-    assert module.RELEASE_URL == f"https://github.com/lukacf/{repository}/releases/download/v{version}"
+    meta = version != "0.8.47"
+    assert module.RELEASE_URL == release
     assert set(module.BINARIES) == ({"rpc_gateway", "meta_gateway"} if meta else {"rpc_gateway", "mobkit_gateway"})
+    if meta:
+        assert public_meta_runtime.release_url(version) == release
+
+
+@pytest.mark.parametrize("version,release", [("0.9.4", STANDALONE_META + "0.9.4"),
+    ("0.9.6", STANDALONE_META + "0.9.6"), ("0.9.7", MONOREPO_META + "0.9.7")])
+def test_meta_install_reads_its_release_and_keeps_the_receipt_shape(tmp_path, monkeypatch, version, release):
+    target = "x86_64-unknown-linux-gnu"
+    module = gateway_installer(tmp_path, monkeypatch, target, version)
+    calls = official_meta_assets(module, target, monkeypatch)
+    module.main()
+    # The monorepo publishes the same archive and checksum manifest names.
+    assert calls == [f"{release}/checksums.sha256", f"{release}/meta-rpc-gateway-{version}-{target}.tar.gz",
+        f"{release}/meta-gateway-{version}-{target}.tar.gz"]
+    for name, prefix in module.BINARIES.items():
+        receipt = json.loads((tmp_path / ".bin" / (name + ".receipt.json")).read_text())
+        assert set(receipt) == {"version", "archive", "release_url", "archive_sha256", "binary_sha256"}
+        assert (receipt["version"], receipt["archive"], receipt["release_url"]) == (
+            version, f"{prefix}-{version}-{target}.tar.gz", release)
+        assert module.verified_cache(tmp_path / ".bin", name, target)
+
+
+@pytest.mark.parametrize("version", ["0.9", "0.9.x", "0.9.7-rc.1", "v0.9.7", "meta-v0.9.7", " 0.9.7", "", 97])
+def test_an_unparsable_runtime_version_names_no_release(tmp_path, monkeypatch, version):
+    with pytest.raises(SystemExit, match="invalid runtime version"):
+        gateway_installer(tmp_path, monkeypatch, "x86_64-unknown-linux-gnu", version)
+    with pytest.raises(ValueError, match="Meta release version .* is invalid"):
+        public_meta_runtime.release_url(version)
 
 
 def test_intel_mac_names_a_missing_trailing_tier(tmp_path, monkeypatch):

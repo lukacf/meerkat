@@ -84,8 +84,10 @@ is explicit host policy, not agent-intent inference.
 incident_delivery=...)` commits output before any provider call. Repeating the
 same issuer/key returns the same output ID only for the same candidate list,
 normalized parts and incident flag. Changing those inputs raises `ValueError`.
-The established `hc-notify-v1:` root and request digest remain compatible with
-an adopting host's existing database.
+Each output's durable root is `<prefix>:<issuer_id>/<logical_key>`. The prefix
+is host configuration, `root_prefix=` (default `notify-v1`): a host adopting an
+existing database passes the prefix its rows already carry, on every reopening
+and to `migrate_format`. The request digest does not depend on it.
 
 `spawn_dispatch(output_id)` starts a retained task. A host with a short request
 budget can stop waiting while that task continues; caller abandonment must not
@@ -423,7 +425,8 @@ Hosts integrating package updates use the same owner's explicit format API:
   manifest, owner artifact and migration artifact digests, with an optional
   previous manifest digest. The host must first verify those selections and
   quiesce every relevant writer. The binding is historical correlation, not
-  proof of verification or authority.
+  proof of verification or authority. Adoption also requires every existing
+  output root to carry the host's `root_prefix=`.
 - `ProactiveEgress(..., schema_mode="managed")` requires an existing valid
   committed v4 format and performs no DDL or backfill. Subsequent connections
   cannot recreate a removed database. Default construction also validates a

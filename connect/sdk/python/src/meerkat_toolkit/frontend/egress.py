@@ -156,6 +156,11 @@ EGRESS_STATE_NAMESPACE = "channels/egress"
 EGRESS_STATE_OWNER = "frontend/egress"
 EGRESS_STATE_FORMAT = "egress-sqlite-4"
 EGRESS_MIGRATION_OPERATION = "adopt-egress-sqlite-4"
+# Each output's durable root is "<prefix>:<issuer_id>/<logical_key>". The prefix
+# is host configuration: a host adopting an existing database supplies the
+# prefix its rows already carry; this generic default serves every other host.
+EGRESS_ROOT_PREFIX = "notify-v1"
+_ROOT_PREFIX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 _UNKNOWN_REASONS = frozenset({
     "provider_unknown", "invalid_outcome", "invalid_receipt", "timeout",
@@ -956,15 +961,23 @@ def _require_thread_format(connection: sqlite3.Connection, host_extension: Egres
         raise ValueError("thread targets require managed egress-sqlite-4")
 
 
+def _checked_root_prefix(value: object) -> str:
+    if not isinstance(value, str) or not _ROOT_PREFIX.match(value):
+        raise ValueError("invalid egress root prefix")
+    return value
+
+
 def _migrate_format(
     path: Path, expected: EgressFormatObservation, binding: EgressMigrationBinding,
     *, host_extension: EgressHostExtension | None = None,
+    root_prefix: str = EGRESS_ROOT_PREFIX,
 ) -> EgressFormatObservation:
     """Explicitly adopt the supported format after host-established quiescence.
 
     Bindings correlate the host request only. On a lost return, inspect rather
     than replaying this transition. An upgrade links the prior observation;
     the host retains that observation if it needs its complete historical data.
+    Every existing output root must carry the host's configured prefix.
     """
     if (
         type(expected) is not EgressFormatObservation
@@ -978,6 +991,7 @@ def _migrate_format(
     # Recheck frozen dataclass values; they are correlation, never authority.
     EgressMigrationBinding(**asdict(binding))
     _checked_extension(host_extension)
+    root_prefix = _checked_root_prefix(root_prefix)
     path = _state_path(path)
     if host_extension is not None and expected.state in {"absent_database", "absent_namespace"}:
         raise ValueError("host must prepare the declared schema before adoption")
@@ -996,7 +1010,7 @@ def _migrate_format(
         upgrading = observed.state == "managed"
         if upgrading:
             connection.execute("DROP TABLE egress_format")
-        _migrate_legacy_schema(connection)
+        _migrate_legacy_schema(connection, root_prefix)
         # Backfills have no permission to alter accepted/uncertain part evidence.
         if (
             connection.execute("PRAGMA foreign_key_check(egress_parts)").fetchone()
@@ -1005,7 +1019,8 @@ def _migrate_format(
             raise ValueError("invalid egress row references")
         if (
             connection.execute(
-                "SELECT 1 FROM egress_outputs WHERE root != 'hc-notify-v1:' || issuer_id || '/' || logical_key OR part_count != (SELECT COUNT(*) FROM egress_parts WHERE egress_parts.output_id=egress_outputs.output_id) LIMIT 1"
+                "SELECT 1 FROM egress_outputs WHERE root != ? || ':' || issuer_id || '/' || logical_key OR part_count != (SELECT COUNT(*) FROM egress_parts WHERE egress_parts.output_id=egress_outputs.output_id) LIMIT 1",
+                (root_prefix,),
             ).fetchone()
             is not None
         ):
@@ -1042,7 +1057,7 @@ def _migrate_format(
     return result
 
 
-def _migrate_legacy_schema(connection: sqlite3.Connection) -> None:
+def _migrate_legacy_schema(connection: sqlite3.Connection, root_prefix: str) -> None:
     connection.execute(
         """
                 CREATE TABLE IF NOT EXISTS egress_outputs (
@@ -1113,7 +1128,8 @@ def _migrate_legacy_schema(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE egress_outputs ADD COLUMN delivery_policy TEXT")
     connection.execute(
         "UPDATE egress_outputs SET root = "
-        "'hc-notify-v1:' || issuer_id || '/' || logical_key WHERE root = ''"
+        "? || ':' || issuer_id || '/' || logical_key WHERE root = ''",
+        (root_prefix,),
     )
     connection.execute(
         "UPDATE egress_outputs SET part_count = "
@@ -1188,7 +1204,11 @@ class ProactiveEgress:
             [Sequence[Mapping[str, Any]]], Sequence[Mapping[str, Any]]
         ]
         | None = None,
+        root_prefix: str = EGRESS_ROOT_PREFIX,
     ) -> None:
+        # Host configuration like the authorization mode: every reopening of an
+        # existing database must select the prefix its rows already carry.
+        self._root_prefix = _checked_root_prefix(root_prefix)
         if delivery_policy is None:
             delivery_policy = EgressDeliveryPolicy()
         if type(delivery_policy) is not EgressDeliveryPolicy:
@@ -1250,7 +1270,7 @@ class ProactiveEgress:
                         raise ValueError("managed egress format required")
                     self._schema_mode = "managed"
                 else:
-                    _migrate_legacy_schema(connection)
+                    _migrate_legacy_schema(connection, self._root_prefix)
                 connection.commit()
             if created:
                 _fsync_file(self.path)
@@ -1482,7 +1502,7 @@ class ProactiveEgress:
                 candidate_rows.append((str(sender), str(recipient), None))
         # No-thread calls preserve the exact historical digest representation.
         digest_candidates = tuple(row if row[2] is not None else row[:2] for row in candidate_rows)
-        root = f"hc-notify-v1:{issuer_id}/{logical_key}"
+        root = f"{self._root_prefix}:{issuer_id}/{logical_key}"
         core_digest = {"candidates": digest_candidates, "parts": normalized_parts,
                        "incident_delivery": incident_delivery}
         selected = next(

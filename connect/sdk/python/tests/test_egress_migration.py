@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from meerkat_toolkit.frontend.egress import ProactiveEgress
+from meerkat_toolkit.frontend.egress import EgressMigrationBinding, ProactiveEgress
 
 
 def engine(path, cls=ProactiveEgress, sender=None):
@@ -189,7 +189,7 @@ def test_multipart_evidence_and_shared_cursor_survive_migration_and_reopen(tmp_p
         old_rows = db.execute('SELECT '+','.join(old_columns)+' FROM egress_parts ORDER BY part_index').fetchall()
         baseline_rows = [row[:10] for row in before['rows']['egress_parts']]
         assert old_rows == baseline_rows
-        assert db.execute('SELECT root,part_count FROM egress_outputs').fetchall() == [('hc-notify-v1:issuer/logical', 4)]
+        assert db.execute('SELECT root,part_count FROM egress_outputs').fetchall() == [('notify-v1:issuer/logical', 4)]
         assert db.execute('SELECT last_outcome,entities,caption_entities FROM egress_parts').fetchall() == [(None,None,None)] * 4
         assert db.execute('SELECT unknown_attempts FROM egress_parts ORDER BY part_index').fetchall() == (
             [(0,), (2,), (1,), (0,)] if unknown_marker else [(0,)] * 4)
@@ -211,3 +211,28 @@ def test_multipart_evidence_and_shared_cursor_survive_migration_and_reopen(tmp_p
     asyncio.run(engine(path, sender=sender).recover_pending())
     assert [c['part_index'] for c in calls] == [3]
     assert related_rows(path) == {k: before['rows'][k] for k in related_rows(path)}
+
+
+def test_output_root_prefix_is_host_configuration(tmp_path):
+    unused = tmp_path / 'unused' / 'channels.sqlite3'
+    for prefix in ['', 'host:notify', 'host/notify', '-host', 'h' * 65, None]:
+        with pytest.raises(ValueError, match='invalid egress root prefix'):
+            ProactiveEgress(path=unused, senders={}, incident_sink=lambda _: None,
+                            health_sink=lambda _: None, sleep=lambda _: None, root_prefix=prefix)
+    assert not unused.parent.exists()
+    path = tmp_path / 'channels.sqlite3'
+    legacy(path)
+    ProactiveEgress(path=path, senders={}, incident_sink=lambda _: None,
+                    health_sink=lambda _: None, sleep=lambda _: None, root_prefix='host-notify-v1')
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT root FROM egress_outputs').fetchall() == [('host-notify-v1:issuer/logical',)]
+    before = snapshot(path)
+    expected = ProactiveEgress.inspect_format(path=path)
+    binding = EgressMigrationBinding('1' * 64, '2' * 64, '3' * 64)
+    # Adoption checks every existing root against the prefix the host configures.
+    with pytest.raises(ValueError, match='invalid egress output identity'):
+        ProactiveEgress.migrate_format(path=path, expected=expected, binding=binding)
+    assert snapshot(path) == before
+    adopted = ProactiveEgress.migrate_format(path=path, expected=expected, binding=binding,
+                                             root_prefix='host-notify-v1')
+    assert adopted.state == 'managed'

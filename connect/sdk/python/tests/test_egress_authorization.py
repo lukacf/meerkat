@@ -238,7 +238,7 @@ async def test_legitimate_legacy_backfill_keeps_identity_for_enforced_adoption(t
     assert contexts[0].issuer_id == "issuer/person" and contexts[0].logical_key == "work/one"
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT root,part_count FROM egress_outputs").fetchone() == (
-            "hc-notify-v1:issuer/person/work/one",
+            "notify-v1:issuer/person/work/one",
             1,
         )
 

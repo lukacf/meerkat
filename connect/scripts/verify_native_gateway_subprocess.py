@@ -483,7 +483,7 @@ def write_artifacts(root, mapped_member):
         {"path": "toolkit-local-policy.json", "sha256": digest(local)}]}))
     activation = root / "shared/activations/1.json"
     activation.write_bytes(canonical({"activation_id": "1", "policy_bundle": {
-        "path": "shared/policy/bundle.1", "policy_digest": "hc-policy-v1:sha256:" + digest(manifest)}}))
+        "path": "shared/policy/bundle.1", "policy_digest": "policy-v1:sha256:" + digest(manifest)}}))
     (root / "current").symlink_to("shared/activations/1.json")
     issuer = root / "issuer.key"
     issuer.write_bytes(bytes([17]) * 32)

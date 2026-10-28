@@ -434,7 +434,9 @@ pub fn validate_candidate_selection(
     {
         return Err(HostLifetimeError::InvalidSelection);
     }
-    let revision = format!("hc-policy-v1:sha256:{}", selection.policy_manifest.sha256);
+    // An activation bound in any other form is not current. It is refused
+    // here; the next install step prepares a fresh bundle and activation.
+    let revision = format!("policy-v1:sha256:{}", selection.policy_manifest.sha256);
     if bundle.get("policy_digest").and_then(|v| v.as_str()) != Some(revision.as_str()) {
         return Err(HostLifetimeError::InvalidSelection);
     }

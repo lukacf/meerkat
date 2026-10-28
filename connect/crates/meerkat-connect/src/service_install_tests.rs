@@ -2402,7 +2402,7 @@ mod application_policy_tests {
             deployment.join("shared/activations/1.json"),
             &toolkit_package::canonical_json(&json!({
                 "activation_id":"1","policy_bundle":{"path":"shared/policy/bundle.1",
-                    "policy_digest":format!("hc-policy-v1:sha256:{}",manifest.sha256)}
+                    "policy_digest":format!("policy-v1:sha256:{}",manifest.sha256)}
             }))
             .unwrap(),
         );

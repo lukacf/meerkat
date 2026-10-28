@@ -236,7 +236,6 @@ fn receipt() -> Value {
 fn inventory() -> Value {
     json!({
         "current":{"activation_id":"210","policy_digest":"sha256:current-fixture"},
-        "ledger_path":"host/extensions.toml",
         "extensions":[
             {"extension_id":"telegram","enabled":true,"wheel_present":true,
                 "channels":[{"channel_id":"telegram:primary","ingress":["polling","webhook"],
@@ -572,10 +571,6 @@ async fn inventory_refuses_unknown_secret_fields_false_routing_promises_and_unsa
         .as_object_mut()
         .unwrap()
         .remove("policy_digest");
-    let mut undeclared = inventory();
-    undeclared.as_object_mut().unwrap().remove("ledger_path");
-    let mut ledger = inventory();
-    ledger["ledger_path"] = json!("../host/extensions.toml");
     let duplicate = inventory().to_string().replacen(
         "\"enabled\":true",
         "\"enabled\":true,\"enabled\":false",
@@ -583,12 +578,10 @@ async fn inventory_refuses_unknown_secret_fields_false_routing_promises_and_unsa
     );
     let mut no_store = Reply::json(200, inventory());
     no_store.headers.retain(|(name, _)| name != "Cache-Control");
-    let mut replies: Vec<_> = [
-        unknown, target, routing, senders, discovery, missing, undeclared, ledger,
-    ]
-    .into_iter()
-    .map(|value| Reply::json(200, value))
-    .collect();
+    let mut replies: Vec<_> = [unknown, target, routing, senders, discovery, missing]
+        .into_iter()
+        .map(|value| Reply::json(200, value))
+        .collect();
     replies.extend([Reply::bytes(200, duplicate.into_bytes()), no_store,
         Reply::json(409, json!({"error":"conflict","problems":[{"code":"snapshot_changed","path":"","message":DEVICE_COOKIE}]})),
         Reply::json(403, json!({"error":DEVICE_COOKIE,"code":CODE}))]);
@@ -3758,36 +3751,6 @@ fn ledger_patch_names_the_hosts_own_ledger_file_by_shape() {
     ] {
         assert!(with_path(path).is_err(), "{path}");
     }
-}
-
-#[tokio::test]
-async fn prepared_changes_patch_only_the_ledger_file_the_host_declared() {
-    let other = change_raw().replace(
-        "\"path\":\"host/extensions.toml\"",
-        "\"path\":\"host/other.toml\"",
-    );
-    let fixture = Fixture::new(vec![
-        Reply::json(200, inventory()),
-        prepared_change_reply(&other),
-        prepared_change_reply(&change_raw()),
-    ])
-    .await;
-    let mut client = PairedHostClient::new(&fixture.origin).unwrap();
-    assert!(matches!(
-        client.frontend_inventory().await.unwrap(),
-        FrontendInventoryRead::Inventory(_)
-    ));
-    let error = client.prepare_candidate(&request()).await.unwrap_err();
-    assert_eq!(
-        error,
-        unconfirmed(
-            PairedHostOperation::PrepareCandidate,
-            UnconfirmedReason::UnexpectedResponse
-        )
-    );
-    let change = capture_change(&mut client).await;
-    assert_eq!(change.ledger_patch().path, "host/extensions.toml");
-    assert_eq!(fixture.finish().await.len(), 3);
 }
 
 #[tokio::test]

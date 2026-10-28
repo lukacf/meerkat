@@ -3637,6 +3637,13 @@ async fn submission_preserves_stale_base_and_closed_host_refusals_without_reprep
             "The submitted change is not the change the host derives for this candidate from the current snapshot.",
             FrontendChangeRejectionKind::CandidateInvalid,
         ),
+        (
+            409,
+            "change_rejected",
+            "change_rejected",
+            "The change was rejected in the host's approval flow and cannot be submitted.",
+            FrontendChangeRejectionKind::ChangeRejected,
+        ),
     ];
     let mut replies = vec![prepared_change_reply(&change_raw())];
     replies.extend(cases.iter().map(|(status, error, code, message, _)| {
@@ -3659,7 +3666,7 @@ async fn submission_preserves_stale_base_and_closed_host_refusals_without_reprep
         assert_eq!(rejection.problems[0].code, code);
     }
     let requests = fixture.finish().await;
-    assert_eq!(requests.len(), 5);
+    assert_eq!(requests.len(), 6);
     assert_eq!(
         requests
             .iter()
@@ -3668,6 +3675,31 @@ async fn submission_preserves_stale_base_and_closed_host_refusals_without_reprep
         1,
         "no automatic prepare or resubmit after stale base"
     );
+}
+
+#[tokio::test]
+async fn approval_rejection_requires_its_exact_host_text() {
+    let fixture = Fixture::new(vec![
+        prepared_change_reply(&change_raw()),
+        Reply::json(
+            409,
+            json!({"error":"change_rejected","problems":[{"code":"change_rejected","path":"change",
+                "message":"Rejected by the owner."}]}),
+        ),
+    ])
+    .await;
+    let mut client = PairedHostClient::new(&fixture.origin).unwrap();
+    let change = capture_change(&mut client).await;
+    let error = client.submit_frontend_change(&change).await.unwrap_err();
+    assert_eq!(
+        error,
+        unconfirmed(
+            PairedHostOperation::SubmitFrontendChange,
+            UnconfirmedReason::UnexpectedResponse
+        )
+    );
+    assert_safe(&error);
+    assert_eq!(fixture.finish().await.len(), 2);
 }
 
 #[tokio::test]

@@ -2153,6 +2153,7 @@ pub enum FrontendChangeRejectionKind {
     DigestMismatch,
     CandidateInvalid,
     StaleBase,
+    ChangeRejected,
     Conflict,
     Unavailable,
     InternalError,
@@ -2317,6 +2318,9 @@ impl FrontendProblem {
                 "The distribution name collides with a declared extension id."
             }
             "stale_base" => "The change was prepared against a snapshot that is no longer current.",
+            "change_rejected" => {
+                "The change was rejected in the host's approval flow and cannot be submitted."
+            }
             "change_not_reproducible" => {
                 "The submitted change is not the change the host derives for this candidate from the current snapshot."
             }
@@ -3911,6 +3915,9 @@ fn change_rejection(
             Some("digest_mismatch")
         }
         (PairedHostOperation::SubmitFrontendChange, 409, Kind::StaleBase) => Some("stale_base"),
+        (PairedHostOperation::SubmitFrontendChange, 409, Kind::ChangeRejected) => {
+            Some("change_rejected")
+        }
         (PairedHostOperation::SubmitFrontendChange, 409, Kind::CandidateInvalid) => None,
         (_, 409, Kind::Conflict) => Some("snapshot_changed"),
         (_, 503, Kind::Unavailable) => Some("current_inputs_invalid"),

@@ -51,7 +51,7 @@ fn every_bundled_strategy_source_has_an_exact_assessment_observation() {
 fn bundled_discovery_is_inert_and_never_claims_tested_support() {
     let catalog = bundled_discovery_catalog().expect("valid bundled inventory");
     let entries: Vec<_> = catalog.entries().collect();
-    assert_eq!(entries.len(), 10);
+    assert_eq!(entries.len(), 9);
     for entry in &entries {
         assert_eq!(
             entry.package.identity.publisher,
@@ -71,7 +71,7 @@ fn bundled_discovery_is_inert_and_never_claims_tested_support() {
         assert_eq!(entry.package, decoded);
     }
 
-    for dual_role in ["slack", "robot"] {
+    for dual_role in ["slack"] {
         let package = &entries
             .iter()
             .find(|entry| entry.package.identity.name.as_str() == dual_role)

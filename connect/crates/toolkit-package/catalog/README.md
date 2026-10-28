@@ -30,7 +30,7 @@ remain separate. The projection neither selects integrations nor installs them.
 
 ## Earlier research catalog
 
-This inventory contains ten Toolkit-authored packages with twelve role hints and twelve setup strategies. It contains no executable implementation, credential, grant, selected activation manifest or claim of tested Toolkit support. `bundled_discovery_catalog()` loads it through the same inert metadata validator as other packages. Agents choose integrations and may investigate outside this inventory.
+This inventory contains nine Toolkit-authored packages with ten role hints and ten setup strategies. It contains no executable implementation, credential, grant, selected activation manifest or claim of tested Toolkit support. `bundled_discovery_catalog()` loads it through the same inert metadata validator as other packages. Agents choose integrations and may investigate outside this inventory.
 
 Each source hash in `source-observations.json` identifies the bytes inspected for the recipe. For web documentation it is an observation, not an immutable upstream release or a pin on a remote service. Resolve and verify the selected artifact, endpoint, account and actual operations at setup. No upstream source code is copied by these recipes, and the Toolkit recipe license does not relicense the cited sources or services.
 
@@ -44,11 +44,10 @@ Each source hash in `source-observations.json` identifies the bytes inspected fo
 | Playwright | Service | [Official MCP implementation](https://github.com/microsoft/playwright-mcp) |
 | Gmail | Service | [API setup](https://developers.google.com/workspace/gmail/api/quickstart/python) |
 | Google Calendar | Service | [API setup](https://developers.google.com/workspace/calendar/api/quickstart/python) |
-| Telegram | Frontend | [the paired host extension source](https://github.com/fixture/paired-host-telegram/blob/49f53a27a4535f80a357ee13e8150776ed02886b/pyproject.toml), [Bot API](https://core.telegram.org/bots/api) |
-| The robot | Service and frontend | [Inspected custom contract](https://github.com/fixture/paired-host-robot/blob/0418a8b4e69a84f94adccd703a6060b9c293a49a/extension/contract.py) |
+| Telegram | Frontend | [Bot API](https://core.telegram.org/bots/api), [SDK frontend modules](../../../sdk/python/TELEGRAM.md) |
 
 The setup instructions retain unresolved requirements. Remote MCP availability does not provide agent admission or response delivery. Frontend hints require separate application identity, conversation and audience bindings. Authentication uses the configured credential/user-action owner; these recipes neither launch a browser nor request a secret in model context.
 
-Telegram's `paired-host-extension` strategy identifies the genuine private `paired-host-ext-telegram` repository for a selected paired host. Its source observations come from immutable local Git objects, with file hashes and commit identity recorded alongside the earlier provider documentation. The agent must select and verify a release through available host source inspection; this catalog does not select the observed release automatically. The paired host owns build, review, secrets, activation and sender-to-own-agent routing. The older `bot-frontend` strategy retains its generic private Toolkit component scope. Reading either strategy grants no source access and proves no running host or delivery.
+Telegram's `bot-frontend` strategy points at the Meerkat Toolkit Python SDK frontend modules described in `sdk/python/TELEGRAM.md`. A host that offers its own Telegram extension supplies that extension's source and packaging through its own host integration, not through this catalog. Reading the strategy grants no source access and proves no running host or delivery.
 
 Maintainers can revise recipes after refreshing source evidence. An immutable package version must not change content. Promotion to supported status requires reproducible conformance for the exact service, deployment and operations, with separate frontend evidence where relevant. The current library acceptance obligations remain incomplete.

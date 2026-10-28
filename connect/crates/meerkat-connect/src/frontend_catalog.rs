@@ -135,7 +135,7 @@ mod tests {
         assert_eq!(result["entries"], serde_json::to_value(expected).unwrap());
         for invalid in [
             r#"{"query":"telegram"}"#.to_owned(),
-            r#"{"package":"robot"}"#.to_owned(),
+            r#"{"package":"slack"}"#.to_owned(),
             "[]".into(),
             "null".into(),
             format!("{{{}}}", " ".repeat(ARGUMENT_LIMIT)),

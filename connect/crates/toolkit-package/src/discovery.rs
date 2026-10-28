@@ -57,7 +57,7 @@ pub fn bundled_discovery_catalog() -> Result<PackageCatalog, BundledDiscoveryErr
     let origin = CatalogOrigin::Curated {
         catalog: Id::new("meerkat-toolkit/discovery")
             .map_err(|_| BundledDiscoveryError::InvalidOrigin)?,
-        revision: Revision::new("discovery-2026-10-07.1")
+        revision: Revision::new("discovery-2026-10-28.1")
             .map_err(|_| BundledDiscoveryError::InvalidOrigin)?,
     };
     let mut catalog = PackageCatalog::default();

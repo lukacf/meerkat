@@ -8,7 +8,7 @@ version = "0.9.4"
 description = "Shared Meerkat Toolkit host adapters"
 requires-python = ">=3.11"
 license = "(MIT OR Apache-2.0) AND Apache-2.0 AND BSD-2-Clause AND MIT"
-license-files = ["LICENSE-MIT", "LICENSE-APACHE", "LICENSE-Agno", "LICENSE-EXTRACTED", "THIRD_PARTY_NOTICES.md", "TELEGRAM.md", "FRONTEND.md", "PAIRED_HOST-LIVE.md", "EXTENSIONS.md", "GMAIL.md"]
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "LICENSE-Agno", "LICENSE-EXTRACTED", "THIRD_PARTY_NOTICES.md", "TELEGRAM.md", "FRONTEND.md", "PAIRED-HOST-LIVE.md", "EXTENSIONS.md", "GMAIL.md"]
 
 [project.optional-dependencies]
 extensions = ["packaging>=25.0"]

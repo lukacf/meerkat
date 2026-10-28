@@ -4704,8 +4704,28 @@ pub trait SessionBridge: Send + Sync {
         ))
     }
 
+    /// Wake `identity`'s member when Core holds it Dormant, before a governed
+    /// input reads its binding. The host binds the input for the member
+    /// session's live actor before the dispatch that would wake the member,
+    /// and the wake decides that session: a seat's first wake creates its
+    /// unborn session, and a wake whose bound session is missing moves the
+    /// member to a successor. Waking first, as that dispatch would, lets the
+    /// input follow the woken member's binding. Runs no turn; a live member,
+    /// and an identity Core holds no member for, are left as they are. A
+    /// refused wake answers as that dispatch's would. Defaults to doing
+    /// nothing.
+    async fn wake_for_governed_input(
+        &self,
+        _identity: &AgentIdentity,
+    ) -> Result<(), BridgeAdmissionError> {
+        Ok(())
+    }
+
     /// The actual controller client of the member's live session actor, for
-    /// binding a governed input. Defaults to unsupported.
+    /// binding a governed input. A member whose session has no live actor is
+    /// woken first, as the dispatch after the bind would wake it; one woken
+    /// onto another session answers `BindingChanged`. Defaults to
+    /// unsupported.
     async fn governed_controller(
         &self,
         _runtime_id: &AgentRuntimeId,
@@ -8501,9 +8521,22 @@ impl SessionBridge for MobSessionBridge {
         true
     }
 
+    async fn wake_for_governed_input(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<(), BridgeAdmissionError> {
+        let member_id = member_id_for_identity(identity);
+        // Read from the machine state Core published, without a command:
+        // only a Dormant member, or one whose wake is in flight, is woken.
+        if !self.handle.member_unmaterialized(&member_id) {
+            return Ok(());
+        }
+        self.wake_for_governed_bind(&member_id).await
+    }
+
     async fn governed_controller(
         &self,
-        _runtime_id: &AgentRuntimeId,
+        runtime_id: &AgentRuntimeId,
         session_id: &meerkat_core::types::SessionId,
     ) -> Result<meerkat_core::ControllerModelClient, BridgeAdmissionError> {
         let governed = |error| BridgeAdmissionError::GovernedInput(error);
@@ -8512,11 +8545,23 @@ impl SessionBridge for MobSessionBridge {
                 "no controller pin source is installed for this bridge".to_string(),
             ))
         })?;
-        let actor = source.live_actor(session_id).await.ok_or_else(|| {
-            governed(GovernedInputError::Unsupported(
-                "the member session has no live actor".to_string(),
-            ))
-        })?;
+        let actor = match source.live_actor(session_id).await {
+            Some(actor) => actor,
+            // A member whose session has no actor here was not woken before
+            // its binding was read (through a wrapping bridge that does not
+            // forward `wake_for_governed_input`, or a host's own call), or
+            // lost its actor since: Core wakes it before the bind, as the
+            // dispatch after the bind would. A member woken onto another
+            // session than the one the input is bound for is not retargeted.
+            None => {
+                let mid = self.member_id_for_runtime_id(runtime_id).await?;
+                self.wake_for_governed_bind(&mid).await?;
+                source
+                    .live_actor(session_id)
+                    .await
+                    .ok_or_else(|| governed(GovernedInputError::BindingChanged))?
+            }
+        };
         // Retained per exact actor: a running actor answers the pin only
         // after its turn, so it is asked once per actor incarnation, and
         // again after recovery or replacement.
@@ -8874,6 +8919,23 @@ impl MobSessionBridge {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         ActorAdmissionDeadline::with_health(self.actor_admission_budget, health)
+    }
+
+    /// Core's wake of `member_id` for a governed input: MobMachine's verdict
+    /// through `MobHandle::ensure_member_live`, which joins a wake in flight
+    /// and runs no turn. Core holding no member, or none bound to a session,
+    /// is left to the caller's read after it. A refused wake is typed as the
+    /// same delivery's dispatch wake would be.
+    async fn wake_for_governed_bind(
+        &self,
+        member_id: &MobAgentIdentity,
+    ) -> Result<(), BridgeAdmissionError> {
+        match self.handle.ensure_member_live(member_id).await {
+            Ok(()) | Err(meerkat_mob::MobError::MemberNotFound(_)) => Ok(()),
+            Err(error) => {
+                Err(classify_submit_mob_error(member_id, error, &self.admission_deadline()).into())
+            }
+        }
     }
 
     /// The installed probe verdict, for operator reads.
@@ -9470,6 +9532,13 @@ impl SessionBridge for super::PublicSessionBridge {
         self.bridge
             .begin_internal_governed_delivery(runtime_id, session_id, input, custody)
             .await
+    }
+
+    async fn wake_for_governed_input(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<(), BridgeAdmissionError> {
+        self.bridge.wake_for_governed_input(identity).await
     }
 
     async fn governed_controller(

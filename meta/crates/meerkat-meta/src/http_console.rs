@@ -26400,6 +26400,124 @@ comms = true
         Ok(())
     }
 
+    /// A member Core holds Dormant shows in the console's progress exactly
+    /// as an idle live member does: run state idle, healthy, no in-flight
+    /// work, and no `unknown` anywhere. Core answers a Dormant member's
+    /// progress from MobMachine, so the console keeps its status read for
+    /// it and never falls back to the runtime machine, which serves no
+    /// Dormant member and would read `unknown`. The console read wakes
+    /// nothing. Passes from the Core 0.9.7 pin on (earlier Core answered a
+    /// Dormant member's run state and health `unknown`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn console_progress_shows_a_dormant_member_as_an_idle_live_one()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let mob_id = "console-progress-dormant";
+        let definition = MobDefinition::from_toml(&format!(
+            "[mob]\nid = \"{mob_id}\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\n\n\
+             [profiles.worker.tools]\ncomms = true\n"
+        ))?;
+        let (storage, provenance) = crate::mob_composition_manifest::persistent_mob_storage(
+            temp_dir.path().join("mob.sqlite3"),
+        )
+        .expect("open persistent mob storage");
+        let state_root = temp_dir.path().join("state");
+        std::fs::create_dir_all(&state_root)?;
+        let runtime = MobRuntime::bootstrap(
+            MobBootstrapSpec::persistent(definition, storage, provenance, state_root, 4)
+                .await
+                .expect("compose persistent Meta stores")
+                .with_child_mob_storage(crate::ChildMobStorage::ProcessBound)
+                .with_options(MobBootstrapOptions {
+                    allow_ephemeral_sessions: true,
+                    notify_orchestrator_on_resume: true,
+                    default_llm_client: Some(Arc::new(TestClient::default())),
+                }),
+        )
+        .await?;
+        let handle = runtime.handle();
+        for member in ["awake", "resting"] {
+            let mut spec = SpawnMemberSpec::new(
+                ProfileName::from("worker"),
+                meerkat_mob::AgentIdentity::from(member),
+            );
+            spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+            handle.ensure_member(spec).await?;
+        }
+        let resting = meerkat_mob::AgentIdentity::from("resting");
+        // Refused retryably until the member's runtime binding has landed.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match handle.release_member(&resting).await {
+                Ok(()) => break,
+                Err(meerkat_mob::MobError::LifecycleOperationPending { .. })
+                    if tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        // The release's reply follows its MobMachine signal onto the actor's
+        // queue; the published machine state member_unmaterialized reads
+        // follows once the actor applied it.
+        let mut changes = handle.machine_state_changes();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !handle.member_unmaterialized(&resting) {
+                changes
+                    .changed()
+                    .await
+                    .expect("the mob's machine state stays published");
+            }
+        })
+        .await
+        .expect("the release left the member Dormant");
+        let runtime_machine = runtime.session_service().and_then(|service| {
+            service
+                .acquire_runtime_adapter(None)
+                .expect("acquire the runtime machine")
+        });
+
+        let (members, _) = project_console_members_from_handle(
+            &handle,
+            None,
+            runtime_machine.as_deref(),
+            None,
+            None,
+            &ConsoleSnapshotReadModelState::default(),
+            &BTreeMap::new(),
+        )
+        .await;
+        let awake = console_progress_of(&members, "awake").expect("awake has progress");
+        let dormant = console_progress_of(&members, "resting").expect("resting has progress");
+        for field in ["run_state", "health", "in_flight_work"] {
+            assert_eq!(
+                dormant.get(field),
+                awake.get(field),
+                "{field}: {dormant} against {awake}"
+            );
+        }
+        assert_eq!(
+            dormant.get("run_state").and_then(Value::as_str),
+            Some("idle"),
+            "{dormant}"
+        );
+        assert_eq!(
+            dormant.get("health").and_then(Value::as_str),
+            Some("healthy"),
+            "{dormant}"
+        );
+        assert!(
+            !dormant.to_string().contains("unknown"),
+            "no unknown badge: {dormant}"
+        );
+        assert!(
+            handle.member_unmaterialized(&resting),
+            "the console read woke nothing"
+        );
+        Ok(())
+    }
+
     /// A member whose run state the console cannot read is shown as
     /// `unknown`, never left without progress.
     #[tokio::test]

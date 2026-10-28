@@ -10913,7 +10913,8 @@ impl IdentityRuntime {
             }
         }
         // A target Core does not hold yet (or whose first-boot row is still
-        // to carry out) is seated first; Core's dispatch materializes it.
+        // to carry out) is seated first, and woken below before its binding
+        // is read.
         self.seat_for_admission(identity, expected_alias, None)
             .await?;
         let lifecycle_lock = self.lifecycle_lock_for(identity).await;
@@ -10938,18 +10939,31 @@ impl IdentityRuntime {
             GovernedDoor::External => "send",
             GovernedDoor::TrustedHostInternal => "dispatch",
         };
-        let (live, scope) = self.live_delivery_target(identity, operation).await?;
-        let runtime_id = Some(live.agent_runtime_id);
-        let session_id = live.session_id;
-        let token = Self::scope_fence(scope.as_ref());
-        let completion_baseline = self.credited_completion_cursor(identity, token).await;
-        if durable_spec_uses_external_binding(&spec) {
+        // A hosted identity (placed on a host, or bound to an external
+        // runtime) has no local session actor to bind for, and its host owns
+        // its materialization: it is refused before any wake.
+        if durable_spec_is_hosted(&spec) {
             return Err(IdentityRuntimeError::GovernedInput(
                 GovernedInputError::Unsupported(
                     "governed input requires a local session-backed member".to_string(),
                 ),
             ));
         }
+        // Core's dispatch would wake a Dormant member only after the bind
+        // below, and the wake decides the member's session (a seat's first
+        // wake creates it, a missing one moves to its successor): Core wakes
+        // it first, so the binding read below is the woken member's.
+        if let Some(bridge) = self.bridge.as_ref() {
+            bridge
+                .wake_for_governed_input(identity)
+                .await
+                .map_err(|error| self.admission_error(identity, error))?;
+        }
+        let (live, scope) = self.live_delivery_target(identity, operation).await?;
+        let runtime_id = Some(live.agent_runtime_id);
+        let session_id = live.session_id;
+        let token = Self::scope_fence(scope.as_ref());
+        let completion_baseline = self.credited_completion_cursor(identity, token).await;
         let (Some(bridge), Some(runtime_id), Some(session_id)) =
             (self.bridge.as_ref(), runtime_id, session_id)
         else {

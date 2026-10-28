@@ -745,21 +745,24 @@ const AGENT_EVENT_ATTACH_RETRY_FLOOR: Duration = Duration::from_millis(500);
 /// [`subscribe_agent_events_resuming`] for an SSE connection, which also
 /// opens for a member Core seats with no live session actor in this process
 /// (dormant after a restart, or seated with a session its first wake has not
-/// created yet): Core refuses that subscription `MemberSessionNotLive`, and
-/// the connection opens anyway with a stream that attaches once Core
-/// materializes the member. The read never wakes the member; its next
-/// delivery does. While Core holds the member unmaterialized
+/// created yet). Core opens that subscription with a stream that attaches
+/// at the member's wake, from the woken actor's first retained event, and
+/// sets its `attached_epoch` at the attach, before the first event, so the
+/// connection's frame ids are resumable once it attached. The read never
+/// wakes the member; its next delivery does. A member Core holds live whose
+/// session actor is gone is refused `MemberSessionNotLive`, and the
+/// connection opens anyway with a stream of its own that attaches once Core
+/// serves the member: while Core holds it unmaterialized
 /// (`MobHandle::member_unmaterialized`, read from the published machine
-/// state) the stream asks Core nothing. On the change that ends the wake it
-/// asks, and after a refused attempt it asks again on the next change of the
-/// mob's machine state, no sooner than [`AGENT_EVENT_ATTACH_RETRY_FLOOR`]
-/// after it, from the same cursor, until it attaches. The stream then
-/// delivers from the woken actor's first retained event (or after the
-/// connection's `Last-Event-ID` in that actor's sequence space) and names
-/// that space once attached, before its first event, so its frame ids are
-/// resumable. Any other refusal ends the stream (the member left the mob,
-/// say), and so does the end of the mob. The retries hold a non-owning
-/// observer handle, so a waiting connection never keeps the mob open.
+/// state) it asks Core nothing, and after a refused attempt it asks again
+/// on the next change of the mob's machine state, no sooner than
+/// [`AGENT_EVENT_ATTACH_RETRY_FLOOR`] after it, from the same cursor, until
+/// it attaches. That stream then delivers from the attached actor's first
+/// retained event (or after the connection's `Last-Event-ID` in that actor's
+/// sequence space) and names that space once attached, before its first
+/// event. Any other refusal ends the stream (the member left the mob, say),
+/// and so does the end of the mob. The retries hold a non-owning observer
+/// handle, so a waiting connection never keeps the mob open.
 async fn subscribe_agent_events_once_materialized(
     handle: &meerkat_mob::MobHandle,
     member_id: &meerkat_mob::AgentIdentity,
@@ -771,7 +774,7 @@ async fn subscribe_agent_events_once_materialized(
     match subscribe_agent_events_resuming(handle, member_id, cursor).await {
         Ok(subscription) => Ok(crate::http_sse::AgentEventReplay {
             epoch: subscription.epoch,
-            attached_epoch: None,
+            attached_epoch: subscription.attached_epoch,
             stream: subscription.stream,
         }),
         Err(meerkat_mob::MobError::MemberSessionNotLive { .. }) => {

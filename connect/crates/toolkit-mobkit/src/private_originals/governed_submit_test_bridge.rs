@@ -5,6 +5,7 @@ use super::*;
 use meerkat_core::types::HandlingMode;
 use meerkat_mob::ids::AgentIdentity as MobAgentIdentity;
 use meerkat_mobkit::actor_loop_health::ActorLoopHealth;
+use meerkat_mobkit::identity_first::bridge::{DormantSeatRequest, DormantSeatResult};
 use meerkat_mobkit::identity_first::*;
 
 pub(super) struct ObservedBridge {
@@ -409,6 +410,13 @@ impl SessionBridge for ObservedBridge {
             .await
     }
 
+    async fn wake_for_governed_input(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<(), BridgeAdmissionError> {
+        self.inner.wake_for_governed_input(identity).await
+    }
+
     fn observe_actor_loop_health(&self, health: Arc<ActorLoopHealth>) {
         self.inner.observe_actor_loop_health(health);
     }
@@ -467,6 +475,26 @@ impl SessionBridge for ObservedBridge {
         self.inner
             .create_session_held(identity, spec, draft, pass)
             .await
+    }
+
+    async fn seat_dormant_members(
+        &self,
+        requests: Vec<DormantSeatRequest>,
+    ) -> Result<Vec<(AgentIdentity, DormantSeatResult)>, BridgeError> {
+        self.inner.seat_dormant_members(requests).await
+    }
+
+    async fn rotate_member(
+        &self,
+        identity: &AgentIdentity,
+        spec: &DurableAgentSpec,
+        draft: &AgentBuildDraft,
+    ) -> Result<SessionId, BridgeError> {
+        self.inner.rotate_member(identity, spec, draft).await
+    }
+
+    async fn release_member(&self, identity: &AgentIdentity) -> Result<(), BridgeError> {
+        self.inner.release_member(identity).await
     }
 
     async fn capture_queued_member_inputs(

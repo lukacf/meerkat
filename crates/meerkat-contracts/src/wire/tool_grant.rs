@@ -4,10 +4,11 @@
 //! opens, for a bounded time, the gated names its target covers for its
 //! subject. The grant lifecycle (issuance, expiry, revocation, use
 //! admission) is owned by the runtime's `ToolGrantLifecycleMachine`; these
-//! types are its surface projection. Tagged enums use `kind`, and every
-//! closed vocabulary a later version may extend (status, issuer, audit event,
-//! expiry driver, refusal kind) carries a forward-compatible `unknown`
-//! variant that the server never sends.
+//! types are its surface projection. Tagged enums use `kind`. A request's
+//! subject and target are closed: a kind or a field this version does not
+//! know is refused. Every vocabulary a result carries (subject, target,
+//! status, issuer, audit event, expiry driver, refusal kind) has a
+//! forward-compatible `unknown` variant that the server never sends.
 
 use serde::{Deserialize, Serialize};
 
@@ -38,11 +39,12 @@ impl From<WireGrantGatedTools> for meerkat_core::tool_grant::GrantGatedTools {
     }
 }
 
-/// Whose grants: a session, or (in a later version) a mob member's identity.
+/// The subject a request names: whose grants it writes or reads. Closed: a
+/// kind or a field this version does not know is refused, never ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WireToolGrantSubject {
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolGrantSubjectRequest {
     /// One session's grants.
     Session { session_id: String },
     /// One mob member identity's grants. Refused by servers that do not
@@ -50,20 +52,54 @@ pub enum WireToolGrantSubject {
     Identity { mob_id: String, identity: String },
 }
 
-/// What a grant opens: one tool name, or a built-in tool family.
+/// The target a grant request names: one tool name, or a built-in tool
+/// family, whose names the server takes at grant time. Closed: a kind or a
+/// field this version does not know is refused, never ignored, so a request
+/// is never read as wider than it asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolGrantTargetRequest {
+    /// One tool name.
+    Tool { name: String },
+    /// A built-in tool family.
+    Family { family: String },
+}
+
+/// Whose grant a record names: a session, or (in a later version) a mob
+/// member's identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireToolGrantSubject {
+    /// One session's grants.
+    Session { session_id: String },
+    /// One mob member identity's grants.
+    Identity { mob_id: String, identity: String },
+    /// Forward compatibility: a subject kind this version does not know.
+    /// The server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What a grant record opens: one tool name, or a built-in tool family with
+/// the names the server took for it at grant time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireToolGrantTarget {
     /// One tool name.
     Tool { name: String },
-    /// A built-in tool family. `names` is the family's snapshot the server
-    /// takes at grant time: omit it in a request.
+    /// A built-in tool family, and the names it opened.
     Family {
         family: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(default)]
         names: Vec<String>,
     },
+    /// Forward compatibility: a target kind this version does not know.
+    /// The server never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Who issued a grant.
@@ -140,8 +176,8 @@ pub struct WireUnreadableToolGrant {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GrantToolParams {
-    pub subject: WireToolGrantSubject,
-    pub target: WireToolGrantTarget,
+    pub subject: ToolGrantSubjectRequest,
+    pub target: ToolGrantTargetRequest,
     /// The grant's absolute deadline, in UNIX ms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<u64>,
@@ -183,7 +219,7 @@ pub struct RevokeToolGrantResult {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ListToolGrantsParams {
-    pub subject: WireToolGrantSubject,
+    pub subject: ToolGrantSubjectRequest,
     /// List ended (expired or revoked) grants too.
     #[serde(default)]
     pub include_ended: bool,
@@ -204,7 +240,7 @@ pub struct ListToolGrantsResult {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ToolGrantAuditParams {
-    pub subject: WireToolGrantSubject,
+    pub subject: ToolGrantSubjectRequest,
     /// Rows after this sequence; the log's start when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_sequence: Option<u64>,
@@ -329,12 +365,11 @@ mod tests {
     #[test]
     fn grant_params_tag_their_subject_and_target_and_refuse_unknown_fields() {
         let params = GrantToolParams {
-            subject: WireToolGrantSubject::Session {
+            subject: ToolGrantSubjectRequest::Session {
                 session_id: "session-1".to_string(),
             },
-            target: WireToolGrantTarget::Family {
+            target: ToolGrantTargetRequest::Family {
                 family: "shell".to_string(),
-                names: Vec::new(),
             },
             expires_at_ms: None,
             duration_ms: Some(60_000),
@@ -365,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_status_issuer_and_event_kinds_decode_as_unknown() {
+    fn unknown_result_kinds_decode_as_unknown() {
         let grant: WireToolGrant = serde_json::from_value(json!({
             "grant_id": "g1",
             "subject": {"kind": "session", "session_id": "session-1"},
@@ -378,6 +413,19 @@ mod tests {
         .unwrap();
         assert_eq!(grant.status, WireToolGrantStatus::Unknown);
         assert_eq!(grant.issuer, WireToolGrantIssuer::Unknown);
+
+        let grant: WireToolGrant = serde_json::from_value(json!({
+            "grant_id": "g2",
+            "subject": {"kind": "workspace", "workspace_id": "w1"},
+            "target": {"kind": "server", "server": "deploy-tools"},
+            "issuer": {"kind": "operator"},
+            "status": "active",
+            "issued_at_ms": 1,
+            "expires_at_ms": 2,
+        }))
+        .unwrap();
+        assert_eq!(grant.subject, WireToolGrantSubject::Unknown);
+        assert_eq!(grant.target, WireToolGrantTarget::Unknown);
 
         let row: WireToolGrantAuditRow = serde_json::from_value(json!({
             "sequence": 4,

@@ -7133,6 +7133,9 @@ mod tests {
                 serde_json::json!({"kind": "tool", "name": "web_search"}),
                 serde_json::json!({"kind": "family", "family": "tasks"}),
                 serde_json::json!({"kind": "family", "family": "shell", "names": ["shell"]}),
+                // A field this server does not know is refused, never dropped
+                // into a grant wider than the request asked for.
+                serde_json::json!({"kind": "tool", "name": "shell", "scope": "current_run"}),
             ] {
                 let refused = call(
                     &router,

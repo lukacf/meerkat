@@ -12,7 +12,7 @@ use std::time::Duration;
 use meerkat_contracts::{
     GrantToolParams, GrantToolResult, ListToolGrantsParams, ListToolGrantsResult,
     RevokeToolGrantParams, RevokeToolGrantResult, ToolGrantAuditParams, ToolGrantAuditResult,
-    WireToolGrantSubject, WireToolGrantTarget,
+    ToolGrantSubjectRequest, ToolGrantTargetRequest,
 };
 use meerkat_core::SessionId;
 use meerkat_core::tool_grant::{
@@ -58,14 +58,14 @@ fn grant_error_to_response(id: Option<RpcId>, error_value: ToolGrantServiceError
 #[allow(clippy::result_large_err)]
 fn subject_session(
     id: Option<RpcId>,
-    subject: &WireToolGrantSubject,
+    subject: &ToolGrantSubjectRequest,
     runtime: &SessionRuntime,
 ) -> Result<SessionId, RpcResponse> {
     match subject {
-        WireToolGrantSubject::Session { session_id } => {
+        ToolGrantSubjectRequest::Session { session_id } => {
             parse_session_id_for_runtime(id, session_id, runtime)
         }
-        WireToolGrantSubject::Identity { .. } => Err(RpcResponse::error(
+        ToolGrantSubjectRequest::Identity { .. } => Err(RpcResponse::error(
             id,
             meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
             "this server grants tools to sessions only: identity subjects are unsupported",
@@ -78,11 +78,11 @@ fn subject_session(
 /// family), or a family the session gates, with every name the family can
 /// provide (the gate admits only the names the session's build gated).
 fn resolve_target(
-    target: WireToolGrantTarget,
+    target: ToolGrantTargetRequest,
     gate: &GrantGatedTools,
 ) -> Result<ToolGrantTarget, String> {
     match target {
-        WireToolGrantTarget::Tool { name } => {
+        ToolGrantTargetRequest::Tool { name } => {
             let gated = gate.tools.contains(&name)
                 || gate.families.iter().any(|family| {
                     meerkat::tool_family_names(family)
@@ -98,12 +98,7 @@ fn resolve_target(
                 name: ToolName::from(name),
             })
         }
-        WireToolGrantTarget::Family { family, names } => {
-            if !names.is_empty() {
-                return Err(
-                    "a family target's names are filled in by the server: omit them".to_string(),
-                );
-            }
+        ToolGrantTargetRequest::Family { family } => {
             if !gate.families.contains(&family) {
                 return Err(format!(
                     "the session does not grant-gate the tool family '{family}'"
@@ -332,7 +327,7 @@ mod tests {
 
         assert_eq!(
             resolve_target(
-                WireToolGrantTarget::Tool {
+                ToolGrantTargetRequest::Tool {
                     name: "deploy".to_string()
                 },
                 &gate
@@ -344,7 +339,7 @@ mod tests {
         // A name a gated family provides is gated through the family.
         assert!(
             resolve_target(
-                WireToolGrantTarget::Tool {
+                ToolGrantTargetRequest::Tool {
                     name: "shell".to_string()
                 },
                 &gate
@@ -352,9 +347,8 @@ mod tests {
             .is_ok()
         );
         let Ok(ToolGrantTarget::Family { family, names }) = resolve_target(
-            WireToolGrantTarget::Family {
+            ToolGrantTargetRequest::Family {
                 family: "shell".to_string(),
-                names: Vec::new(),
             },
             &gate,
         ) else {
@@ -364,16 +358,11 @@ mod tests {
         assert!(names.contains("shell"), "{names:?}");
 
         for refused in [
-            WireToolGrantTarget::Tool {
+            ToolGrantTargetRequest::Tool {
                 name: "web_search".to_string(),
             },
-            WireToolGrantTarget::Family {
+            ToolGrantTargetRequest::Family {
                 family: "tasks".to_string(),
-                names: Vec::new(),
-            },
-            WireToolGrantTarget::Family {
-                family: "shell".to_string(),
-                names: vec!["shell".to_string()],
             },
         ] {
             assert!(

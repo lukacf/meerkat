@@ -755,6 +755,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "ApprovalGetParams": schema_for!(crate::wire::ApprovalGetParams),
         "ApprovalListParams": schema_for!(crate::wire::ApprovalListParams),
         "ApprovalDecideParams": schema_for!(crate::wire::ApprovalDecideParams),
+        "ToolGrantSubjectRequest": schema_for!(crate::wire::ToolGrantSubjectRequest),
+        "ToolGrantTargetRequest": schema_for!(crate::wire::ToolGrantTargetRequest),
         "GrantToolParams": schema_for!(crate::wire::GrantToolParams),
         "RevokeToolGrantParams": schema_for!(crate::wire::RevokeToolGrantParams),
         "ListToolGrantsParams": schema_for!(crate::wire::ListToolGrantsParams),

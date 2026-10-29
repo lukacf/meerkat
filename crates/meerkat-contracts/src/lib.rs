@@ -442,6 +442,8 @@ pub use wire::{
     SupervisorRotationRetryScope,
     ToolGrantAuditParams,
     ToolGrantAuditResult,
+    ToolGrantSubjectRequest,
+    ToolGrantTargetRequest,
     TranscriptRewriteMessage,
     TrustDomainId,
     UpdateScheduleParams,

@@ -1422,6 +1422,135 @@ fn tool_grant_results_pin_their_field_names() {
     );
 }
 
+/// A request's subject and target are closed: a field or a kind this
+/// version does not know is refused, so a narrowing field a later client
+/// adds is never dropped into a wider grant, and a family request carries
+/// no names (the server takes them).
+#[test]
+fn tool_grant_request_subjects_and_targets_refuse_unknown_kinds_and_fields() {
+    use meerkat_contracts::{
+        GrantToolParams, ListToolGrantsParams, ToolGrantAuditParams, ToolGrantSubjectRequest,
+        ToolGrantTargetRequest,
+    };
+    fn grant(target: &serde_json::Value) -> Result<GrantToolParams, serde_json::Error> {
+        serde_json::from_value(serde_json::json!({
+            "subject": {"kind": "session", "session_id": "session-1"},
+            "target": target,
+            "duration_ms": 60_000,
+        }))
+    }
+    fn subject_refused(subject: &serde_json::Value) -> bool {
+        let request = serde_json::json!({"subject": subject});
+        let listed = serde_json::from_value::<ListToolGrantsParams>(request.clone());
+        let audited = serde_json::from_value::<ToolGrantAuditParams>(request);
+        listed.is_err() && audited.is_err()
+    }
+
+    let tool = grant(&serde_json::json!({"kind": "tool", "name": "shell"}));
+    assert_eq!(
+        tool.expect("a tool target").target,
+        ToolGrantTargetRequest::Tool {
+            name: "shell".to_string()
+        }
+    );
+    let family = grant(&serde_json::json!({"kind": "family", "family": "shell"}));
+    assert_eq!(
+        family.expect("a family target").target,
+        ToolGrantTargetRequest::Family {
+            family: "shell".to_string()
+        }
+    );
+    for refused in [
+        serde_json::json!({"kind": "tool", "name": "shell", "scope": "current_run"}),
+        serde_json::json!({"kind": "family", "family": "shell", "names": ["shell"]}),
+        serde_json::json!({"kind": "server", "server": "deploy-tools"}),
+    ] {
+        assert!(grant(&refused).is_err(), "{refused} must be refused");
+    }
+
+    let listed: ListToolGrantsParams = serde_json::from_value(serde_json::json!({
+        "subject": {"kind": "identity", "mob_id": "mob-1", "identity": "worker"},
+    }))
+    .expect("an identity subject");
+    assert_eq!(
+        listed.subject,
+        ToolGrantSubjectRequest::Identity {
+            mob_id: "mob-1".to_string(),
+            identity: "worker".to_string(),
+        }
+    );
+    for refused in [
+        serde_json::json!({"kind": "session", "session_id": "session-1", "mob_id": "mob-1"}),
+        serde_json::json!({"kind": "workspace", "workspace_id": "w1"}),
+    ] {
+        assert!(subject_refused(&refused), "{refused} must be refused");
+    }
+}
+
+/// A result's subject and target are tolerant: a kind a later server adds
+/// decodes as `unknown` instead of failing the whole list or audit page,
+/// and a field this version does not know is ignored.
+#[test]
+fn tool_grant_results_decode_unknown_subject_and_target_kinds() {
+    use meerkat_contracts::{
+        ListToolGrantsResult, ToolGrantAuditResult, WireToolGrantAuditEvent, WireToolGrantSubject,
+        WireToolGrantTarget,
+    };
+    let listed: ListToolGrantsResult = serde_json::from_value(serde_json::json!({
+        "grants": [
+            {
+                "grant_id": "g1",
+                "subject": {"kind": "workspace", "workspace_id": "w1"},
+                "target": {"kind": "server", "server": "deploy-tools"},
+                "issuer": {"kind": "operator"},
+                "status": "active",
+                "issued_at_ms": 1,
+                "expires_at_ms": 2,
+            },
+            {
+                "grant_id": "g2",
+                "subject": {"kind": "session", "session_id": "session-1"},
+                "target": {"kind": "tool", "name": "deploy", "scope": "current_run"},
+                "issuer": {"kind": "operator"},
+                "status": "active",
+                "issued_at_ms": 1,
+                "expires_at_ms": 2,
+            },
+        ],
+    }))
+    .expect("a list with later kinds decodes");
+    assert_eq!(listed.grants[0].subject, WireToolGrantSubject::Unknown);
+    assert_eq!(listed.grants[0].target, WireToolGrantTarget::Unknown);
+    assert_eq!(
+        listed.grants[1].target,
+        WireToolGrantTarget::Tool {
+            name: "deploy".to_string()
+        }
+    );
+
+    let page: ToolGrantAuditResult = serde_json::from_value(serde_json::json!({
+        "rows": [{
+            "sequence": 0,
+            "at_ms": 1,
+            "event": {
+                "kind": "granted",
+                "grant_id": "g1",
+                "target": {"kind": "server", "server": "deploy-tools"},
+                "issuer": {"kind": "operator"},
+                "expires_at_ms": 2,
+            },
+        }],
+    }))
+    .expect("an audit page with a later target kind decodes");
+    assert!(matches!(
+        &page.rows[0].event,
+        WireToolGrantAuditEvent::Granted {
+            target: WireToolGrantTarget::Unknown,
+            ..
+        }
+    ));
+}
+
 /// A `session/create` grant gate converts to the build's gate, and a field
 /// the gate does not know is refused rather than read as an empty gate.
 #[test]

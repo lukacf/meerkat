@@ -180,13 +180,16 @@ them.
   `grant_gated_tools`. `meerkat-contracts` adds `GrantToolParams`,
   `GrantToolResult`, `RevokeToolGrantParams`, `RevokeToolGrantResult`,
   `ListToolGrantsParams`, `ListToolGrantsResult`, `ToolGrantAuditParams`,
-  `ToolGrantAuditResult`, `WireGrantGatedTools`, `WireToolGrant`,
-  `WireToolGrantSubject`, `WireToolGrantTarget`, `WireToolGrantIssuer`,
-  `WireToolGrantStatus`, `WireToolGrantAuditRow`, `WireToolGrantAuditEvent`,
+  `ToolGrantAuditResult`, `ToolGrantSubjectRequest`, `ToolGrantTargetRequest`,
+  `WireGrantGatedTools`, `WireToolGrant`, `WireToolGrantSubject`,
+  `WireToolGrantTarget`, `WireToolGrantIssuer`, `WireToolGrantStatus`,
+  `WireToolGrantAuditRow`, `WireToolGrantAuditEvent`,
   `WireToolGrantExpiryDriver`, `WireToolGrantRefusalKind`,
-  `WireUnreadableToolGrant` and `WireUnreadableToolGrantAuditRow`; each closed
-  vocabulary decodes a value a later
-  version adds as `unknown`. `meerkat-runtime` adds `tool_grant::wire`, the
+  `WireUnreadableToolGrant` and `WireUnreadableToolGrantAuditRow`. A request's
+  subject and target (`ToolGrantSubjectRequest`, `ToolGrantTargetRequest`)
+  refuse a kind or a field the server does not know, and every vocabulary a
+  result carries decodes a value a later version adds as `unknown`.
+  `meerkat-runtime` adds `tool_grant::wire`, the
   projection of grants, listings and audit rows onto them, and `meerkat`'s
   `StagedSessionRegistry` gains `grant_gated_tools`. Python (`grant_tool`,
   `revoke_tool_grant`, `list_tool_grants`, `tool_grant_audit`, and

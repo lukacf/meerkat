@@ -520,6 +520,8 @@ struct AgentAssembly {
     tool_execution_policy: Option<meerkat_core::ToolExecutionPolicy>,
     consequence_policy: AssemblyConsequencePolicy,
     tool_dispatch_admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
+    /// The build's scoped tool grant gate, for the outermost dispatch gate.
+    tool_grant_gate: Option<meerkat_core::tool_grant::ToolGrantGate>,
     builder: AgentBuilder,
     session: Session,
     factory_metadata: SessionMetadata,
@@ -1061,6 +1063,13 @@ pub struct AgentBuildConfig {
     /// It is not persisted; live delegation reconstructs it from generated
     /// operation admission when rematerialization is supported.
     pub tool_dispatch_admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
+    /// The built-in tool families and tool names this build marks
+    /// grant-gated: mounted (a gated family as if enabled) but hidden and
+    /// refused until a live scoped tool grant opens them. Persisted as
+    /// `SessionMetadata.tooling.grant_gated`; a resume that leaves this
+    /// `None` restores the recorded gate. A gate needs the runtime's grant
+    /// service, on the session's runtime bindings.
+    pub grant_gated_tools: Option<meerkat_core::tool_grant::GrantGatedTools>,
     /// Stable application consequence-policy binding for the member/session.
     pub application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
     /// Host-scoped registry containing in-process immutable policy providers.
@@ -1216,6 +1225,7 @@ impl std::fmt::Debug for AgentBuildConfig {
                 "tool_dispatch_admission",
                 &self.tool_dispatch_admission.is_some(),
             )
+            .field("grant_gated_tools", &self.grant_gated_tools)
             .field(
                 "session_comms_runtime_override",
                 &self.session_comms_runtime_override.is_some(),
@@ -1312,6 +1322,7 @@ impl AgentBuildConfig {
             tool_access_policy: None,
             declared_tool_restriction: None,
             tool_dispatch_admission: None,
+            grant_gated_tools: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
             session_comms_runtime_override: None,
@@ -1442,6 +1453,7 @@ impl AgentBuildConfig {
         self.tool_access_policy = build.tool_access_policy.clone();
         self.declared_tool_restriction = build.declared_tool_restriction.clone();
         self.tool_dispatch_admission = build.tool_dispatch_admission.clone();
+        self.grant_gated_tools = build.grant_gated_tools.clone();
         self.application_tool_policy = build.application_tool_policy.clone();
         self.tool_consequence_policy_registry = build.tool_consequence_policy_registry.clone();
         self.shell_env = build.shell_env.clone();
@@ -1543,7 +1555,7 @@ impl AgentBuildConfig {
             // handed to; a projection never carries it to another build.
             prepared_controller: None,
             host_prompt_sections: self.host_prompt_sections,
-            grant_gated_tools: None,
+            grant_gated_tools: self.grant_gated_tools.clone(),
         }
     }
 }
@@ -1672,6 +1684,242 @@ fn builtin_tool_vocabulary() -> Vec<(meerkat_core::ToolVocabularySource, Vec<&'s
     ]
 }
 
+/// The tool names a built-in tool family can provide, whether or not a given
+/// build mounts it: the snapshot a family grant target names. `None` for a
+/// name that is not a built-in tool family.
+#[must_use]
+pub fn tool_family_names(family: &str) -> Option<Vec<&'static str>> {
+    builtin_tool_vocabulary()
+        .into_iter()
+        .find_map(|(source, names)| match source {
+            meerkat_core::ToolVocabularySource::Family(name) if name == family => Some(names),
+            _ => None,
+        })
+}
+
+/// Why a build's scoped tool grant gate was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum GrantGateBuildError {
+    /// A gated family is not a built-in tool family.
+    #[error("'{family}' is not a built-in tool family, so it cannot be grant-gated")]
+    UnknownFamily { family: String },
+    /// A gated family is disabled by this build; a gated family is mounted
+    /// closed, never disabled.
+    #[error("the tool family '{family}' is both disabled and grant-gated")]
+    FamilyDisabled { family: String },
+    /// A gated tool name that no tool source of this build provides, and no
+    /// pending source could provide once it connects.
+    #[error("'{tool}' is grant-gated, but no tool source of this build provides it")]
+    UnknownTool { tool: String },
+    /// The build's tool policy refuses a gated name, so no grant could ever
+    /// open it.
+    #[error("'{tool}' is grant-gated, but the build's tool policy refuses it")]
+    PolicyRefused { tool: String },
+    /// A gated name is a capability the provider serves natively: its calls
+    /// never reach the dispatcher, so no gate could adjudicate them.
+    #[error("'{tool}' is served natively by the provider and cannot be grant-gated")]
+    ProviderNative { tool: String },
+    /// The build has no grant service: a gate needs the runtime's, carried
+    /// on the session's runtime bindings.
+    #[error("a grant gate needs the runtime's tool grant service, and this build has none")]
+    NoGrantService,
+}
+
+/// The category overrides a session's metadata records: the caller's own,
+/// before the build's grant gate mounted its gated families.
+#[derive(Debug, Clone, Copy)]
+struct RecordedToolOverrides {
+    shell: ToolCategoryOverride,
+    comms: ToolCategoryOverride,
+    memory: ToolCategoryOverride,
+    schedule: ToolCategoryOverride,
+    workgraph: ToolCategoryOverride,
+    image_generation: ToolCategoryOverride,
+    web_search: ToolCategoryOverride,
+}
+
+impl RecordedToolOverrides {
+    fn of(build_config: &AgentBuildConfig) -> Self {
+        Self {
+            shell: build_config.override_shell,
+            comms: build_config.override_comms,
+            memory: build_config.override_memory,
+            schedule: build_config.override_schedule,
+            workgraph: build_config.override_workgraph,
+            image_generation: build_config.override_image_generation,
+            web_search: build_config.override_web_search,
+        }
+    }
+}
+
+/// A build's grant gate, rules 1 and 2: every gated family is a built-in
+/// tool family, and a gated family with a category of its own is mounted as
+/// if enabled; the build may not disable it. A family that shares its
+/// category with ungated tools (the builtins) or has none is not mounted by
+/// the gate: its gated names stay closed wherever the build mounts them.
+fn mount_grant_gated_families(
+    build_config: &mut AgentBuildConfig,
+    gated: &meerkat_core::tool_grant::GrantGatedTools,
+) -> Result<(), GrantGateBuildError> {
+    for family in &gated.families {
+        if tool_family_names(family).is_none() {
+            return Err(GrantGateBuildError::UnknownFamily {
+                family: family.clone(),
+            });
+        }
+        let category = match family.as_str() {
+            "shell" => &mut build_config.override_shell,
+            "comms" => &mut build_config.override_comms,
+            "memory" => &mut build_config.override_memory,
+            "schedule" => &mut build_config.override_schedule,
+            "workgraph" => &mut build_config.override_workgraph,
+            "image_generation" => &mut build_config.override_image_generation,
+            "web_search" => &mut build_config.override_web_search,
+            _ => continue,
+        };
+        match *category {
+            ToolCategoryOverride::Disable => {
+                return Err(GrantGateBuildError::FamilyDisabled {
+                    family: family.clone(),
+                });
+            }
+            ToolCategoryOverride::Inherit => *category = ToolCategoryOverride::Enable,
+            ToolCategoryOverride::Enable => {}
+        }
+    }
+    Ok(())
+}
+
+/// A build's grant gate, rules 3 to 6, over the build's final dispatcher:
+/// every gated tool name is one a tool source of the build provides (a name
+/// a pending source may provide once it connects is gated from the moment
+/// it appears), the build's tool policy refuses no gated name, no gated
+/// name is a capability the provider serves natively, and the runtime
+/// carries the session's grants. Answers the gate to install, or `None` for
+/// an empty gate.
+fn grant_gate_for_build(
+    gated: &meerkat_core::tool_grant::GrantGatedTools,
+    tools: &Arc<dyn AgentToolDispatcher>,
+    tool_execution_policy: Option<&meerkat_core::ToolExecutionPolicy>,
+    declared_tool_restriction: Option<&meerkat_core::ops::DeclaredToolRestriction>,
+    provider_native_web_search: bool,
+    session_grants: Option<Arc<dyn meerkat_core::tool_grant::SessionToolGrants>>,
+) -> Result<Option<meerkat_core::tool_grant::ToolGrantGate>, GrantGateBuildError> {
+    use meerkat_core::types::ToolName;
+    if gated.is_empty() {
+        return Ok(None);
+    }
+    let mut families = BTreeMap::new();
+    for family in &gated.families {
+        let names =
+            tool_family_names(family).ok_or_else(|| GrantGateBuildError::UnknownFamily {
+                family: family.clone(),
+            })?;
+        families.insert(
+            family.clone(),
+            names
+                .into_iter()
+                .map(ToolName::from)
+                .collect::<BTreeSet<_>>(),
+        );
+    }
+    let table = meerkat_core::tool_grant::GatedToolTable::new(
+        families,
+        gated.tools.iter().cloned().collect(),
+    );
+
+    let mounted: std::collections::HashSet<String> = tools
+        .tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .chain(
+            tools
+                .tool_catalog()
+                .iter()
+                .map(|entry| entry.tool.name.to_string()),
+        )
+        .collect();
+    let vocabulary: std::collections::HashSet<&str> = builtin_tool_vocabulary()
+        .into_iter()
+        .flat_map(|(_, names)| names)
+        .collect();
+    let declared = |name: &str| {
+        declared_tool_restriction.is_some_and(|restriction| {
+            restriction
+                .vocabulary
+                .values()
+                .any(|names| names.contains(name))
+        })
+    };
+    let pending_sources = !tools.pending_catalog_sources().is_empty()
+        || declared_tool_restriction
+            .is_some_and(|restriction| !restriction.deferred_mcp_servers.is_empty());
+    for name in table.tools() {
+        let name = name.as_str();
+        if mounted.contains(name) || vocabulary.contains(name) || declared(name) {
+            continue;
+        }
+        if pending_sources {
+            tracing::info!(
+                tool = name,
+                "grant-gated name deferred: a pending tool source may provide it"
+            );
+            continue;
+        }
+        return Err(GrantGateBuildError::UnknownTool {
+            tool: name.to_string(),
+        });
+    }
+
+    if let Some(policy) = tool_execution_policy {
+        for name in table.gated_names() {
+            let name = name.as_str();
+            let refused = if mounted.contains(name) {
+                !policy.permits_call(name, tools.tool_mutation_class(name))
+            } else if table.tools().contains(name) {
+                // Not mounted yet: only a refusal by name is certain now.
+                !policy.permits_call(name, meerkat_core::ToolMutationClass::ReadOnly)
+            } else {
+                false
+            };
+            if refused {
+                return Err(GrantGateBuildError::PolicyRefused {
+                    tool: name.to_string(),
+                });
+            }
+        }
+    }
+
+    if provider_native_web_search {
+        for name in meerkat_tools::builtin::WEB_SEARCH_TOOL_NAMES {
+            if table.is_gated(name) {
+                return Err(GrantGateBuildError::ProviderNative {
+                    tool: (*name).to_string(),
+                });
+            }
+        }
+    }
+
+    let grants = session_grants.ok_or(GrantGateBuildError::NoGrantService)?;
+    Ok(Some(meerkat_core::tool_grant::ToolGrantGate::new(
+        grants, table,
+    )))
+}
+
+/// Whether a provider request default carries the provider's own web search.
+fn provider_tag_offers_web_search(
+    tag: &meerkat_core::lifecycle::run_primitive::ProviderTag,
+) -> bool {
+    use meerkat_core::lifecycle::run_primitive::ProviderTag;
+    match tag {
+        ProviderTag::Anthropic(tag) => tag.web_search.is_some(),
+        ProviderTag::OpenAi(tag) => tag.web_search.is_some(),
+        ProviderTag::Gemini(tag) => tag.google_search.is_some(),
+        _ => false,
+    }
+}
+
 /// Errors that can occur when building an agent via [`AgentFactory::build_agent()`].
 #[derive(Debug, thiserror::Error)]
 pub enum BuildAgentError {
@@ -1728,6 +1976,10 @@ pub enum BuildAgentError {
     /// composed nor finds in any tool vocabulary.
     #[error(transparent)]
     DeclaredToolUnknown(Box<meerkat_core::error::DeclaredToolUnknown>),
+
+    /// The build's scoped tool grant gate cannot be honoured.
+    #[error(transparent)]
+    GrantGate(GrantGateBuildError),
 
     /// An explicit tool-category `Enable` could not be satisfied.
     ///
@@ -5472,6 +5724,12 @@ impl AgentFactory {
         if !mask.application_tool_policy {
             build_config.application_tool_policy = metadata.tooling.application_tool_policy.clone();
         }
+        // The grant gate is durable session truth, like the launch policy: a
+        // resume that names no gate restores the recorded one, so a gated
+        // session cannot shed its gate by being resumed.
+        if build_config.grant_gated_tools.is_none() && !metadata.tooling.grant_gated.is_empty() {
+            build_config.grant_gated_tools = Some(metadata.tooling.grant_gated.clone());
+        }
         if !mask.keep_alive {
             build_config.keep_alive = metadata.keep_alive;
         }
@@ -7179,6 +7437,13 @@ impl AgentFactory {
         // the resumed binding is settled against the registry's provider below.
         let caller_auth_binding = build_config.auth_binding.clone();
         let resumed_session_metadata = Self::apply_resumed_session_metadata(&mut build_config)?;
+        // The build's scoped tool grant gate. The session's metadata records
+        // the category overrides the caller asked for, before the gate mounts
+        // its gated families as if enabled.
+        let grant_gated = build_config.grant_gated_tools.clone().unwrap_or_default();
+        let recorded_overrides = RecordedToolOverrides::of(&build_config);
+        mount_grant_gated_families(&mut build_config, &grant_gated)
+            .map_err(BuildAgentError::GrantGate)?;
         self.validate_runtime_profile(&build_config, config)?;
         let mut session =
             build_config.resume_session.clone().unwrap_or_else(|| {
@@ -9294,22 +9559,21 @@ impl AgentFactory {
             metadata.self_hosted_server_id = self_hosted_server_id.clone();
             metadata.provider_params = build_config.provider_params.clone();
             metadata.tooling.builtins = build_config.override_builtins;
-            metadata.tooling.shell = build_config.override_shell;
+            metadata.tooling.shell = recorded_overrides.shell;
             // Apply an explicit comms override on resume; preserve the persisted
             // value when the build carries no explicit comms intent (Inherit) so
             // a prior explicit Enable/Disable survives across resumes.
-            if !matches!(build_config.override_comms, ToolCategoryOverride::Inherit) {
-                metadata.tooling.comms = build_config.override_comms;
+            if !matches!(recorded_overrides.comms, ToolCategoryOverride::Inherit) {
+                metadata.tooling.comms = recorded_overrides.comms;
             }
             metadata.tooling.mob = build_config.override_mob;
-            metadata.tooling.memory = metadata_memory_override_for_realm(
-                build_config.override_memory,
-                build_config.backend,
-            );
-            metadata.tooling.schedule = build_config.override_schedule;
-            metadata.tooling.workgraph = build_config.override_workgraph;
-            metadata.tooling.image_generation = build_config.override_image_generation;
-            metadata.tooling.web_search = build_config.override_web_search;
+            metadata.tooling.memory =
+                metadata_memory_override_for_realm(recorded_overrides.memory, build_config.backend);
+            metadata.tooling.schedule = recorded_overrides.schedule;
+            metadata.tooling.workgraph = recorded_overrides.workgraph;
+            metadata.tooling.image_generation = recorded_overrides.image_generation;
+            metadata.tooling.web_search = recorded_overrides.web_search;
+            metadata.tooling.grant_gated = grant_gated.clone();
             // Effective (resolved) policy only — an unresolved `Inherit`
             // failed the build above, so `Inherit` can never persist here.
             metadata.tooling.tool_access_policy = build_config.tool_access_policy.clone();
@@ -9343,17 +9607,17 @@ impl AgentFactory {
                 provider_params: build_config.provider_params.clone(),
                 tooling: SessionTooling {
                     builtins: build_config.override_builtins,
-                    shell: build_config.override_shell,
-                    comms: build_config.override_comms,
+                    shell: recorded_overrides.shell,
+                    comms: recorded_overrides.comms,
                     mob: build_config.override_mob,
                     memory: metadata_memory_override_for_realm(
-                        build_config.override_memory,
+                        recorded_overrides.memory,
                         build_config.backend,
                     ),
-                    schedule: build_config.override_schedule,
-                    workgraph: build_config.override_workgraph,
-                    image_generation: build_config.override_image_generation,
-                    web_search: build_config.override_web_search,
+                    schedule: recorded_overrides.schedule,
+                    workgraph: recorded_overrides.workgraph,
+                    image_generation: recorded_overrides.image_generation,
+                    web_search: recorded_overrides.web_search,
                     // Effective (resolved) policy only — an unresolved
                     // `Inherit` failed the build above.
                     tool_access_policy: build_config.tool_access_policy.clone(),
@@ -9364,7 +9628,7 @@ impl AgentFactory {
                     ),
                     application_tool_policy: build_config.application_tool_policy.clone(),
                     active_skills: active_skill_ids.clone(),
-                    grant_gated: Default::default(),
+                    grant_gated: grant_gated.clone(),
                 },
                 keep_alive: build_config.keep_alive,
                 comms_name: build_config.comms_name.clone(),
@@ -9782,6 +10046,35 @@ impl AgentFactory {
             }
         }
 
+        // 12i-gate. The scoped tool grant gate over the final dispatcher: the
+        // agent opens the gated names a live grant admits at each boundary,
+        // and the outermost dispatch gate adjudicates every gated call.
+        let provider_native_web_search = provider_request_defaults_for(
+            provider,
+            &model,
+            config,
+            model_profile.as_ref(),
+            build_config.override_web_search,
+            None,
+        )
+        .is_some_and(|tag| provider_tag_offers_web_search(&tag));
+        let session_grants = match resolved_mode {
+            RuntimeBuildMode::SessionOwned(bindings) => bindings.tool_grants().cloned(),
+            RuntimeBuildMode::StandaloneEphemeral => None,
+        };
+        let tool_grant_gate = grant_gate_for_build(
+            &grant_gated,
+            &tools,
+            tool_execution_policy.as_ref(),
+            declared_tool_restriction.as_ref(),
+            provider_native_web_search,
+            session_grants,
+        )
+        .map_err(BuildAgentError::GrantGate)?;
+        if let Some(gate) = &tool_grant_gate {
+            builder = builder.with_tool_grant_gate(gate.clone());
+        }
+
         let visibility_filters = capability_base_filter_override
             .into_iter()
             .chain(
@@ -9796,6 +10089,7 @@ impl AgentFactory {
             tool_execution_policy,
             consequence_policy,
             tool_dispatch_admission,
+            tool_grant_gate,
             builder,
             session,
             factory_metadata,
@@ -9823,6 +10117,7 @@ impl AgentFactory {
             tool_execution_policy,
             consequence_policy,
             tool_dispatch_admission,
+            tool_grant_gate,
             mut builder,
             mut session,
             mut factory_metadata,
@@ -9893,9 +10188,12 @@ impl AgentFactory {
         // reach the inner dispatcher. Provider-native server tools never
         // traverse the dispatcher and cannot be gated here; hosts that need
         // them gated must disable the native capability on gated builds.
+        // A grant-gated build's gate adjudicates every gated call last, after
+        // the policy, the consequence policy and any dispatch admission.
         if tool_execution_policy.is_some()
             || bound_consequence_policy.is_some()
             || tool_dispatch_admission.is_some()
+            || tool_grant_gate.is_some()
         {
             let mut gate = meerkat_core::ExecutionPolicyGatedDispatcher::new(
                 tools,
@@ -9907,6 +10205,9 @@ impl AgentFactory {
             }
             if let Some(admission) = tool_dispatch_admission {
                 gate = gate.with_dispatch_admission(admission);
+            }
+            if let Some(grant_gate) = tool_grant_gate {
+                gate = gate.with_tool_grant_gate(grant_gate);
             }
             tools = Arc::new(gate);
         }

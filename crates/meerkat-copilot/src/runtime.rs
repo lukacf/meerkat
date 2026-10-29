@@ -1296,10 +1296,15 @@ struct CopilotAccountPacing {
     /// No identity lookup before this instant: GitHub rate limited the last
     /// one.
     identity_retry_at: Mutex<Option<DateTime<Utc>>>,
-    /// While the lease withdraws the token (GitHub refused it, or a logout
-    /// released it), a source that runs something is not read again before
-    /// this instant.
-    withdrawn_source_reread: Mutex<Option<WithdrawnSourceReread>>,
+    /// Per AuthMachine lease registry of the account (the registry's
+    /// `auth_lifecycle_restore_instance_id`): while that registry's lease
+    /// withdraws the token (GitHub refused it, or a logout released it), a
+    /// source that runs something is not read again before the entry's
+    /// instant. Two registries for one account (two credential stores, two
+    /// hosts' runtime machines) pause apart. An entry lives only while its
+    /// pause may still apply: the claim that finds its lease published again
+    /// removes it.
+    withdrawn_source_rereads: Mutex<BTreeMap<usize, WithdrawnSourceReread>>,
 }
 
 /// When the source of a token the lease withdrew (GitHub refused it, or a
@@ -2302,12 +2307,19 @@ impl CopilotAuthorizer {
     /// read on every request: reading it costs nothing, and a new value
     /// heals at once.
     fn pace_withdrawn_source(&self, generation: u64) {
-        if source_reread_is_paced(&self.binding.auth_profile().source) {
-            *self.state.pacing.withdrawn_source_reread.lock() = Some(WithdrawnSourceReread {
+        if !source_reread_is_paced(&self.binding.auth_profile().source) {
+            return;
+        }
+        let Ok(auth_lease) = self.auth_lease() else {
+            return;
+        };
+        self.state.pacing.withdrawn_source_rereads.lock().insert(
+            auth_lease.auth_lifecycle_restore_instance_id(),
+            WithdrawnSourceReread {
                 generation,
                 at: withdrawn_source_reread_at((self.env.now)()),
-            });
-        }
+            },
+        );
     }
 
     /// Claim a read of the route's source while the lease withdraws the
@@ -2322,19 +2334,21 @@ impl CopilotAuthorizer {
     /// read that gives the withdrawn token again is. A new publication on the
     /// lease ends the pause at once, so a value another session, machine or
     /// login published heals this account state on its next request. The
-    /// pause is checked and moved under its own lock, so of concurrent
-    /// account states only one reads at each paced instant.
+    /// pause belongs to the lease's AuthMachine registry, and is checked and
+    /// moved under its own lock, so of concurrent account states over one
+    /// registry only one reads at each paced instant.
     fn claim_withdrawn_source_reread(
         &self,
     ) -> Result<Option<ProviderAuthError>, ProviderAuthError> {
         if !source_reread_is_paced(&self.binding.auth_profile().source) {
             return Ok(None);
         }
-        let mut pause = self.state.pacing.withdrawn_source_reread.lock();
-        let Some(paced) = *pause else {
+        let auth_lease = self.auth_lease()?;
+        let registry = auth_lease.auth_lifecycle_restore_instance_id();
+        let mut pauses = self.state.pacing.withdrawn_source_rereads.lock();
+        let Some(paced) = pauses.get(&registry).copied() else {
             return Ok(None);
         };
-        let auth_lease = self.auth_lease()?;
         let lease_key = self.lease_key();
         let generation = auth_lease.snapshot(&lease_key).generation;
         let withdrawn = withdrawn_token_error(
@@ -2343,17 +2357,20 @@ impl CopilotAuthorizer {
                 .map_err(credential_use_admission_error)?,
         );
         let Some(withdrawn) = withdrawn.filter(|_| generation == paced.generation) else {
-            *pause = None;
+            pauses.remove(&registry);
             return Ok(None);
         };
         let now = (self.env.now)();
         if now < paced.at {
             return Ok(Some(withdrawn));
         }
-        *pause = Some(WithdrawnSourceReread {
-            generation,
-            at: withdrawn_source_reread_at(now),
-        });
+        pauses.insert(
+            registry,
+            WithdrawnSourceReread {
+                generation,
+                at: withdrawn_source_reread_at(now),
+            },
+        );
         Ok(None)
     }
 
@@ -6030,6 +6047,100 @@ mod tests {
             assert_eq!(resolve().await.err(), absent);
             assert_eq!(command_runs(directory.path()), 3);
             assert_eq!(harness.transport.request_count(), 2);
+        }
+
+        /// One account over two AuthMachine registries (here two credential
+        /// stores, each with its own runtime machine) keeps a pause per
+        /// registry: a refusal in the second registry does not overwrite
+        /// the first registry's pause, so neither source is read again
+        /// before its own paced instant.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn withdrawn_source_pauses_are_kept_per_registry() {
+            let first_directory = tempfile::tempdir().expect("first command directory");
+            let second_directory = tempfile::tempdir().expect("second command directory");
+            std::fs::write(
+                first_directory.path().join("token"),
+                user_token("first-registry"),
+            )
+            .expect("write the first token");
+            std::fs::write(
+                second_directory.path().join("token"),
+                user_token("second-registry"),
+            )
+            .expect("write the second token");
+            let harness = Harness::new([
+                Ok(json_response(
+                    401,
+                    serde_json::json!({"message": "Bad credentials"}),
+                )),
+                Ok(svc_bot()),
+                Ok(models_response()),
+                Ok(json_response(
+                    401,
+                    serde_json::json!({"message": "Bad credentials"}),
+                )),
+            ]);
+            let second_store = OperatorEnv::new();
+            *second_store.clock.lock() = *harness.operator.clock.lock();
+            let first = token_file_command(first_directory.path());
+            let second = token_binding(
+                CopilotProviderRoute::Anthropic,
+                token_file_command(second_directory.path()),
+            );
+            let reauth = Some(ProviderAuthError::Auth(AuthError::UserReauthRequired));
+
+            // The first registry's lease refuses its token at generation 1.
+            assert_eq!(
+                harness
+                    .resolve_from(CopilotProviderRoute::OpenAi, first.clone())
+                    .await
+                    .err(),
+                reauth
+            );
+            // The second registry's lease refuses its rotated token at
+            // generation 2.
+            harness
+                .runtime
+                .resolve(&second, &second_store.env)
+                .await
+                .expect("the second store's first token resolves");
+            std::fs::write(
+                second_directory.path().join("token"),
+                user_token("second-registry-rotated"),
+            )
+            .expect("rotate the second token");
+            assert_eq!(
+                harness
+                    .runtime
+                    .resolve(&second, &second_store.env)
+                    .await
+                    .err(),
+                reauth
+            );
+            assert_eq!(second_store.lease().generation, 2);
+            assert_eq!(command_runs(first_directory.path()), 1);
+            assert_eq!(command_runs(second_directory.path()), 2);
+
+            // Within the minute neither source is read again.
+            assert_eq!(
+                harness
+                    .resolve_from(CopilotProviderRoute::OpenAi, first.clone())
+                    .await
+                    .err(),
+                reauth
+            );
+            assert_eq!(
+                harness
+                    .runtime
+                    .resolve(&second, &second_store.env)
+                    .await
+                    .err(),
+                reauth
+            );
+            assert_eq!(command_runs(first_directory.path()), 1);
+            assert_eq!(command_runs(second_directory.path()), 2);
+            assert_eq!(harness.transport.request_count(), 4);
         }
 
         /// A refusal of another account state's publication (another runtime

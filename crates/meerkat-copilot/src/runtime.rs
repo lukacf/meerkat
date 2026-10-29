@@ -260,9 +260,16 @@ fn github_rate_limited(status: u16, remaining: Option<&str>, has_retry_after: bo
 
 pub struct CopilotRuntime {
     accounts: Mutex<BTreeMap<CopilotAccountCacheKey, Weak<CopilotAccountState>>>,
-    /// Rate-limit pacing per account, held for the runtime's life so it
-    /// outlives the account states that read it.
-    pacing: Mutex<BTreeMap<CopilotAccountCacheKey, Arc<CopilotAccountPacing>>>,
+    /// Rate-limit pacing per credential account, held for the runtime's life
+    /// so it outlives the account states that read it. The key is the
+    /// account alone (the credential identity the routes share and the
+    /// AuthMachine lease key comes from), not the persistence authority:
+    /// every account state of one account shares one pause, whichever
+    /// credential store it was built over. The map stays bounded: it holds
+    /// one small entry per credential account a route was resolved for, a
+    /// set the realm configuration fixes, and nothing per request, session or
+    /// persistence instance.
+    pacing: Mutex<BTreeMap<AuthCredentialIdentity, Arc<CopilotAccountPacing>>>,
     transport: Arc<dyn CopilotHttpTransport>,
 }
 
@@ -418,7 +425,7 @@ impl CopilotRuntime {
             }
             return Ok(existing);
         }
-        let pacing = Arc::clone(self.pacing.lock().entry(key.clone()).or_default());
+        let pacing = Arc::clone(self.pacing.lock().entry(identity.clone()).or_default());
         let state = Arc::new(CopilotAccountState::with_pacing(config, mode, pacing));
         accounts.insert(key, Arc::downgrade(&state));
         Ok(state)
@@ -6107,6 +6114,51 @@ mod tests {
                 .await
                 .expect("the lookup runs again after the wait");
             assert_eq!(harness.transport.request_count(), 3);
+        }
+
+        /// The pause belongs to the credential account, whichever credential
+        /// store an account state was built over: resolving the same account
+        /// through another provider-auth persistence (another store, another
+        /// host environment) waits for GitHub's stated time too, with no
+        /// request.
+        #[tokio::test]
+        async fn identity_pause_is_shared_across_credential_stores() {
+            let harness = Harness::new([
+                Ok(rate_limited(403, 120)),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            let token = user_token("paced-across-stores");
+            harness.operator.set("COPILOT_GITHUB_TOKEN", &token);
+            let other_store = OperatorEnv::new();
+            other_store.set("COPILOT_GITHUB_TOKEN", &token);
+            *other_store.clock.lock() = *harness.operator.clock.lock();
+            let detail = refresh_failure(
+                harness
+                    .resolve(CopilotProviderRoute::OpenAi)
+                    .await
+                    .err()
+                    .expect("the identity lookup is rate limited"),
+            );
+            assert!(detail.contains("rate limited"), "{detail}");
+
+            let detail = refresh_failure(
+                harness
+                    .runtime
+                    .resolve(
+                        &token_binding(CopilotProviderRoute::Anthropic, env_source()),
+                        &other_store.env,
+                    )
+                    .await
+                    .err()
+                    .expect("the account waits through another credential store too"),
+            );
+            assert!(detail.contains("rate limited"), "{detail}");
+            assert_eq!(
+                harness.transport.request_count(),
+                1,
+                "no request before GitHub's stated time"
+            );
         }
 
         /// A rate-limited model listing (a 403 with `Retry-After`, GitHub's

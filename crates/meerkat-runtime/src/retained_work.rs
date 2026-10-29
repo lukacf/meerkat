@@ -363,10 +363,12 @@ pub(crate) struct KeptResumeControllerAsks {
 }
 
 impl KeptResumeControllerAsks {
-    /// Whether the machine's holds or the rows' clients changed, so the loop
-    /// plans its lap again.
-    pub(crate) fn changed_plan(&self) -> bool {
-        self.released || self.held || !self.refused.is_empty() || self.refused_run.is_some()
+    /// Whether the machine's holds changed, or `ended` refused rows ended, so
+    /// the loop plans its lap again. A refused row that did not end (it was
+    /// no longer queued) changes nothing to plan around, so it never makes
+    /// the loop ask again at once.
+    pub(crate) fn changed_plan(&self, ended: usize) -> bool {
+        self.released || self.held || ended > 0
     }
 }
 

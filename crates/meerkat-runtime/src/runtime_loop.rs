@@ -7934,7 +7934,7 @@ async fn process_queue(
                     ResumedRunAdmissionLap::Exit(wake) => return wake,
                 }
             }
-            if asks.changed_plan() {
+            if asks.changed_plan(ended.settled.len()) {
                 continue;
             }
         }

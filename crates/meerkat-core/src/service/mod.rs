@@ -1971,7 +1971,8 @@ impl ParentToolCompositionAuthority {
 
     /// The parent's visible tools, without the names a scoped tool grant
     /// opened: a grant opens its subject's gate only, so no child inherits
-    /// a grant-opened tool through its ceiling.
+    /// a grant-opened tool through its ceiling. One read of the visibility
+    /// state answers both.
     fn visible_tool_snapshot_result(
         &self,
     ) -> Result<Vec<Arc<ToolDef>>, crate::tool_scope::ToolScopeStageError> {
@@ -1980,18 +1981,9 @@ impl ParentToolCompositionAuthority {
                 message: "parent tool scope is unavailable".to_string(),
             }
         })?;
-        let grant_opened = tool_scope
-            .tool_grant_open_names()
-            .map_err(Self::map_visible_tools_error)?;
         tool_scope
-            .visible_tools_result()
-            .map(|tools| {
-                tools
-                    .iter()
-                    .filter(|tool| !grant_opened.contains(tool.name.as_str()))
-                    .cloned()
-                    .collect()
-            })
+            .visible_tools_with_grant_gate_closed_result()
+            .map(|tools| tools.iter().cloned().collect())
             .map_err(Self::map_visible_tools_error)
     }
 

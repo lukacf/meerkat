@@ -1681,6 +1681,28 @@ impl ToolScope {
         ))
     }
 
+    /// The visible tools with the scoped tool grant gate closed: without the
+    /// gated names a live grant opened, from one read of the visibility
+    /// state. A grant opens its subject's gate only, so a parent's snapshot
+    /// for an inheriting child uses this.
+    pub fn visible_tools_with_grant_gate_closed_result(
+        &self,
+    ) -> Result<Arc<[Arc<ToolDef>]>, ToolScopeApplyError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+        let mut visibility_state = self.visibility_owner.visibility_state()?;
+        visibility_state.tool_grant_open_names.clear();
+        let require_filter_witnesses = self.visibility_owner.requires_filter_witnesses();
+
+        Ok(Self::visible_tools_for_state(
+            &state,
+            &visibility_state,
+            require_filter_witnesses,
+        ))
+    }
+
     /// Project source tools for host inspection through the committed member filters.
     ///
     /// This includes every audience without loading tools into the model's

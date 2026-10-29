@@ -7595,17 +7595,34 @@ where
                         .iter()
                         .cloned()
                         .collect::<BTreeSet<_>>();
-                    let hidden_deferred_names = if matches!(catalog_mode, ToolCatalogMode::Deferred)
-                    {
-                        current_catalog
-                            .as_ref()
-                            .map(|catalog| {
-                                hidden_deferred_catalog_names(catalog.as_ref(), &visible_names_set)
-                            })
-                            .unwrap_or_default()
-                    } else {
-                        BTreeSet::new()
-                    };
+                    let hidden_deferred_names: BTreeSet<crate::types::ToolName> =
+                        if matches!(catalog_mode, ToolCatalogMode::Deferred) {
+                            // A gated name its closed grant gate hides cannot
+                            // be loaded from the deferred catalog, so the
+                            // notice never offers it; it appears once a live
+                            // grant opens it.
+                            let closed_grant_gated_names = self
+                                .tool_scope
+                                .visibility_state()
+                                .map(|visibility_state| {
+                                    visibility_state.closed_tool_grant_gated_names()
+                                })
+                                .unwrap_or_default();
+                            current_catalog
+                                .as_ref()
+                                .map(|catalog| {
+                                    hidden_deferred_catalog_names(
+                                        catalog.as_ref(),
+                                        &visible_names_set,
+                                    )
+                                })
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter(|name| !closed_grant_gated_names.contains(name))
+                                .collect()
+                        } else {
+                            BTreeSet::new()
+                        };
                     let pending_catalog_sources =
                         if matches!(catalog_mode, ToolCatalogMode::Deferred) {
                             current_pending_catalog_sources
@@ -26317,6 +26334,101 @@ mod tests {
         assert!(
             payload.settled(),
             "an applied catalog delta is a settled fact"
+        );
+    }
+
+    /// The deferred catalog notice never offers a gated name its closed grant
+    /// gate hides: such a name cannot be loaded until a live grant opens it,
+    /// so the boundary lists only the loadable deferred tools.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn deferred_catalog_notice_never_offers_a_closed_gated_name() {
+        /// A session with no live grant.
+        struct NoLiveGrant;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
+            async fn open_names(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn admit_call(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+                _call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+        }
+
+        let gate = crate::tool_grant::ToolGrantGate::new(
+            Arc::new(NoLiveGrant) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            crate::tool_grant::GatedToolTable::new(
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::from([crate::types::ToolName::from(
+                    "deferred_tool_two",
+                )]),
+            ),
+        );
+        let tools = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(DeferredLoadDispatcher::new()),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        let client = Arc::new(DeferredLoadVisibilityClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate)
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(2);
+
+        let result = agent.run("prompt".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            client.seen_tools(),
+            vec![
+                vec!["tool_catalog_load".to_string()],
+                vec!["deferred_tool".to_string(), "tool_catalog_load".to_string()],
+            ]
+        );
+
+        let deferred_notices = agent
+            .session()
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::SystemNotice(notice)
+                    if notice.kind == SystemNoticeKind::ToolScope
+                        && notice.body.as_deref().is_some_and(|body| {
+                            body.starts_with("Deferred catalog changed at turn boundary:")
+                        }) =>
+                {
+                    notice.body.clone()
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            deferred_notices.first().map(String::as_str),
+            Some(
+                "Deferred catalog changed at turn boundary: new deferred tools available: \
+                 deferred_tool"
+            ),
+            "{deferred_notices:?}"
+        );
+        assert!(
+            deferred_notices
+                .iter()
+                .all(|body| !body.contains("deferred_tool_two")),
+            "the closed gated name is never offered: {deferred_notices:?}"
         );
     }
 

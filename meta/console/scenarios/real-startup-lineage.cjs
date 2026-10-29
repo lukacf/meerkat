@@ -7,6 +7,7 @@ const { performance } = require("node:perf_hooks");
 const { setTimeout: delay } = require("node:timers/promises");
 const { chromium } = require("playwright");
 const { startFixture, eventually, rpc, snapshot } = require("../acceptance-runtime.cjs");
+const { assertCompactedText } = require("./compacted-log.cjs");
 
 const evidence = process.env.META_BROWSER_EVIDENCE || path.join(__dirname, "../../output/playwright/console-acceptance");
 const source = "## Acceptance reply\n\nReal runtime **Markdown**, a [safe link](https://example.com), and `code`.\n\n| Item | Value |\n| --- | --- |\n| Result | Ready |\n";
@@ -36,8 +37,9 @@ function assertStartupLineage(frames, historyPages) {
       assert.equal(boundary.payload.identity?.run_id, runId, `${runId}: runtime boundary owner`);
       assert.equal(boundary.payload.identity?.interaction_id, interactionId, `${runId}: runtime interaction owner`);
     }
-    const deltas = live.filter(frame => frame.kind === "text_delta");
-    assert.equal(deltas.map(frame => frame.payload.delta).join(""), source, `${runId}: exact source deltas`);
+    // Every read here is of the log, which keeps the reply's first delta row
+    // and its complete row, which carries the exact source.
+    const deltas = [assertCompactedText(live, source, runId).first];
     assert(deltas.every(frame => frame.interaction_id === interactionId), `${runId}: delta interaction owner`);
     const history = frames.filter(frame => frame.source?.kind === "session_history" && frame.run_id === runId && frame.payload?.result === source);
     if (!historyPages) assert.equal(history.length, 1, `${runId}: one persisted reply`);

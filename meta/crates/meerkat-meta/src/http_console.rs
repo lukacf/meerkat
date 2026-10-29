@@ -13091,9 +13091,19 @@ async fn console_member_peer_info(
         .await
         .map_err(|error| format!("member lookup failed: {error}"))?
         .ok_or_else(|| format!("member {member_alias:?} not found"))?;
-    let peer_id = entry
-        .peer_id()
-        .ok_or_else(|| format!("member {member_alias:?} has no comms runtime"))?;
+    let peer_id = match entry.peer_id() {
+        Some(peer_id) => peer_id.to_string(),
+        // No comms runtime of the member is live (a seat no delivery has
+        // woken yet, or a released member): the endpoint MobMachine records
+        // for it, which a live peer trusts at once. Nothing is woken.
+        None => {
+            crate::runtime::cross_mob_control::recorded_member_comms_identity(&handle, &member_id)
+                .await
+                .map_err(|error| format!("member endpoint read failed: {error}"))?
+                .map(|(peer_id, _)| peer_id)
+                .ok_or_else(|| format!("member {member_alias:?} has no comms runtime"))?
+        }
+    };
     let mob_id = handle.mob_id().to_string();
     let comms_name = meerkat_core::MemberCommsName::new(
         &mob_id,

@@ -45,3 +45,13 @@ test("stream parity rejects changed bytes, repeated IDs and duplicate live compl
   const wrongOwner = structuredClone(frames); wrongOwner[1].payload.message.identity.run_id = "other-run";
   assert.throws(() => assertCapturedSource(wrongOwner, source, "router"), /saved message run owner/);
 });
+
+test("the owner's log keeps the first delta row, and the live completion carries the exact source", () => {
+  const owner = capturedFrames().filter(frame => frame.id !== "delta-b");
+  assert.doesNotThrow(() => assertCapturedSource(owner, source, "owner", { compacted: true }));
+  assert.throws(() => assertCapturedSource(capturedFrames(), source, "owner", { compacted: true }), /first delta row only/);
+  assert.throws(() => assertCapturedSource(owner, source, "router"), /exact delta source/);
+  const changed = structuredClone(owner); changed[0].payload.delta = "Second line  \n";
+  assert.throws(() => assertCapturedSource(changed, source, "owner", { compacted: true }), /kept delta row begins the source/);
+  assert.throws(() => assertCapturedSource(owner.filter(frame => frame.id !== "text"), source, "owner", { compacted: true }), /live text completion/);
+});

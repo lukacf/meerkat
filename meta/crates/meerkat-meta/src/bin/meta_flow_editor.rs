@@ -3,6 +3,10 @@ use std::net::SocketAddr;
 use meerkat_meta::{flow_editor_router, flow_editor_router_with_host_deploy};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // SAFETY: the first statement of main: no other thread exists yet and
+    // nothing has used SQLite, as the switch requires.
+    #[allow(unsafe_code)]
+    let _ = unsafe { meerkat_sqlite::disable_memory_statistics_at_process_start() };
     // The worker count follows meerkat's `RKAT_WORKER_THREADS`, then
     // `TOKIO_WORKER_THREADS`, as for the gateways; unset, Tokio starts one
     // worker per available CPU.

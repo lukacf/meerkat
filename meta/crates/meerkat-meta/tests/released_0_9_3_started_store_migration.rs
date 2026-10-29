@@ -58,6 +58,9 @@ const IDENTITY: &str = "learner:fixture-0001";
 const MEMBER_ID: &str = "mk--learner_cfixture-0001";
 /// The session the identity has been bound to since the 0.8.26 mint.
 const SESSION_ID: &str = "01a15646-b33f-7ee2-b9d9-b4a5b2d1ad36";
+/// The comms endpoint key the capture records for the member (its
+/// `member_spawned` row). A launch that builds no member lists it unchanged.
+const RECORDED_TRANSPORT_KEY: &str = "ed25519:DxbBXobKFvuC9XLnFS0XqX2hcldw0K5HoGh49d+Al1o=";
 /// The two agent memories the 0.8.26 mint stored for the identity.
 const MEMORIES: [(&str, &str); 2] = [
     (
@@ -502,9 +505,11 @@ fn assert_unmigrated_boot_refused(label: &str, state: &Path, home: &Path, launch
 /// publish its endpoint when Core restores it, so Core marks it broken; it
 /// carries no durable-identity marker, so an authoritative launch's roster
 /// pass respawns it onto the same session, and the roster lists it active
-/// and without an error. A candidate launch respawns no member: its roster
-/// lists the member as Core restored it, broken, for the authoritative
-/// launch to respawn.
+/// and without an error. A candidate launch restores, wakes and respawns no
+/// member (Core's non-authoritative composition materializes none): Core
+/// holds the member seated and not materialized, which lists as active and
+/// without an error, under the endpoint key the capture records, for the
+/// authoritative launch to respawn.
 fn assert_migrated_identity_reads_back(gateway: &mut Gateway, launch: Launch) {
     let label = gateway.label.clone();
     let status = gateway.call(
@@ -581,17 +586,16 @@ fn assert_migrated_identity_reads_back(gateway: &mut Gateway, launch: Launch) {
         1,
         "[{label}] the migrated identity must be listed exactly once: {members}"
     );
-    match launch {
-        Launch::Authoritative => assert!(
-            listed[0]["state"] == "active" && listed[0].get("error").is_none(),
-            "[{label}] the migrated identity's member must be active, without an error: \
-             {members}"
-        ),
-        Launch::Candidate => assert_eq!(
-            listed[0]["state"], "broken",
-            "[{label}] a candidate leaves the migrated identity's member as Core restored it: \
-             {members}"
-        ),
+    assert!(
+        listed[0]["state"] == "active" && listed[0].get("error").is_none(),
+        "[{label}] the migrated identity's member must be active, without an error: {members}"
+    );
+    if matches!(launch, Launch::Candidate) {
+        assert_eq!(
+            listed[0]["transport_public_key"], RECORDED_TRANSPORT_KEY,
+            "[{label}] a candidate gives the member no key pair: it lists the endpoint key the \
+             capture records: {members}"
+        );
     }
 }
 
@@ -694,7 +698,8 @@ fn released_0_9_3_started_store_migrates_and_boots_its_mobkit_manifest_authorita
 /// capture back. The member Meta 0.9.3 spawned lacks the durable-identity
 /// marker: the candidate does not respawn it and reports its identity
 /// deferred as `resume_member`, with a complete bootstrap and no broken
-/// identity, while its member detail shows it as Core restored it; the
+/// identity, while its member detail lists it as Core holds it, seated and
+/// not materialized: active, under the endpoint key the capture records. The
 /// authoritative launch respawns it.
 #[test]
 fn released_0_9_3_started_store_reports_one_identity_to_candidate_and_authoritative_launches() {

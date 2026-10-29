@@ -26,3 +26,19 @@ test("real reasoning oracle requires every equal fragment and both identical blo
   damagedCompletion[6].payload.content = "Check again and check again.";
   assert.throws(() => assertReasoningSource(damagedCompletion, "operator", "damaged completion"), /exact owner completion/);
 });
+
+test("a read of the log keeps each block's first delta and its exact completion", () => {
+  // Each block is six deltas then its completion; the log keeps the first delta and the completion.
+  const frames = exactFrames();
+  const stored = frames.filter((_, index) => index % 7 === 0 || index % 7 === 6);
+  assert.deepEqual(assertReasoningSource(stored, "operator", "owner", { compacted: true }).eventIds,
+    ["source-1", "source-7", "source-8", "source-14"]);
+  assert.throws(() => assertReasoningSource(frames, "operator", "uncompacted", { compacted: true }), /first delta row only/);
+  assert.throws(() => assertReasoningSource(stored.filter((_, index) => index !== 2), "operator", "lost first delta", { compacted: true }), /first delta row only/);
+  assert.throws(() => assertReasoningSource(stored, "operator", "live"), /exact delta join/);
+  const changedChunk = structuredClone(stored); changedChunk[2].payload.delta = "again ";
+  assert.throws(() => assertReasoningSource(changedChunk, "operator", "changed chunk", { compacted: true }), /first chunk/);
+  const damagedCompletion = structuredClone(stored); damagedCompletion[3].payload.content = "Check again and check again.";
+  assert.throws(() => assertReasoningSource(damagedCompletion, "operator", "damaged completion", { compacted: true }), /exact owner completion/);
+  assert.throws(() => assertReasoningSource(stored.slice(0, 2), "operator", "lost block", { compacted: true }), /identical sequential blocks/);
+});

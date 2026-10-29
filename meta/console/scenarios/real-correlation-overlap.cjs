@@ -4,6 +4,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { startFixture, eventually, rpc } = require("../acceptance-runtime.cjs");
+const { assertCompactedText } = require("./compacted-log.cjs");
 
 const sender = "router:main";
 const recipient = "domain:delivery";
@@ -131,8 +132,10 @@ async function overlap() {
     assert.equal(results[0].payload.is_error, false);
     const resultText = results[0].payload.content.filter(block => block.type === "text").map(block => block.text).join("");
     assert(Array.isArray(JSON.parse(resultText).items));
-    assert.equal(foreignFrames.filter(frame => frame.kind === "text_delta").map(frame => frame.payload.delta).join(""), foreignSource);
-    assert.equal(operatorFrames.filter(frame => frame.kind === "text_delta").map(frame => frame.payload.delta).join(""), operatorSource);
+    // A timeline read: the log keeps each run's first text delta row and its
+    // complete row, which carries the exact text.
+    assertCompactedText(foreignFrames, foreignSource, "foreign text");
+    assertCompactedText(operatorFrames, operatorSource, "operator text");
     const retained = current.filter(frame => frame.id === accepted.input_frame_id);
     assert.equal(retained.length, 1, "the accepted operator input remains unique");
     assert.equal(retained[0].payload.content, operatorInput);

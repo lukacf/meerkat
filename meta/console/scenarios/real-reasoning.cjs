@@ -10,8 +10,14 @@ const evidence = process.env.META_BROWSER_EVIDENCE || path.join(__dirname, "../.
 const source = "Check again again and check again.";
 const answer = "Review complete. Both independent checks support the release candidate.";
 const chunkChars = 6;
+// What the console log keeps of a completed block's delta rows: the first.
+const firstChunk = Array.from(source).slice(0, chunkChars).join("");
 
-function assertReasoningSource(frames, interactionId, label) {
+// A live stream delivers every delta row. A `compacted` read of the console
+// log (a timeline query, or a replay from the log) carries each completed
+// block's first delta row and its complete row: the log removes the block's
+// other delta rows once the complete row is stored.
+function assertReasoningSource(frames, interactionId, label, { compacted = false } = {}) {
   const reasoning = frames.filter(frame => frame.interaction_id === interactionId && ["reasoning_delta", "reasoning_complete"].includes(frame.kind));
   assert.equal(new Set(reasoning.map(frame => frame.id)).size, reasoning.length, `${label}: source event IDs are distinct`);
   const blocks = [];
@@ -24,17 +30,24 @@ function assertReasoningSource(frames, interactionId, label) {
       current += frame.payload.delta;
       deltaIds.push(frame.id);
     } else {
-      assert.equal(current, source, `${label}: exact delta join per completed block`);
+      if (compacted) {
+        assert.equal(deltaIds.length, 1, `${label}: the log keeps each completed block's first delta row only`);
+        assert.equal(current, firstChunk, `${label}: the kept delta row is the block's first chunk`);
+      } else {
+        assert.equal(current, source, `${label}: exact delta join per completed block`);
+        assert.equal(deltaIds.length, Math.ceil(Array.from(source).length / chunkChars), `${label}: every actual delta retained`);
+      }
       assert.equal(frame.payload.content, source, `${label}: exact owner completion`);
-      assert.equal(deltaIds.length, Math.ceil(Array.from(source).length / chunkChars), `${label}: every actual delta retained`);
       blocks.push({ source: current, deltaIds, completeId: frame.id });
       current = ""; deltaIds = [];
     }
   }
   assert.equal(current, "", `${label}: no unterminated reasoning fragment`);
   assert.equal(blocks.length, 2, `${label}: identical sequential blocks remain separate`);
-  assert.equal(reasoning.filter(frame => frame.kind === "reasoning_delta" && frame.payload.delta === "again ").length, 4,
-    `${label}: repeated equal fragments all survive`);
+  if (!compacted) {
+    assert.equal(reasoning.filter(frame => frame.kind === "reasoning_delta" && frame.payload.delta === "again ").length, 4,
+      `${label}: repeated equal fragments all survive`);
+  }
   return { blocks, eventIds: reasoning.map(frame => frame.id) };
 }
 
@@ -147,11 +160,12 @@ async function repeatedReasoning(host) {
     const ownerResponse = await fetch(`${fixture.baseUrl}/console/timeline?identity=router%3Amain&mode=recent&limit=1000`);
     assert.equal(ownerResponse.status, 200);
     result.ownerFrames = (await ownerResponse.json()).frames;
-    result.owner = assertReasoningSource(result.ownerFrames, interactionId, "owner");
-    assert.deepEqual(result.live.eventIds, result.owner.eventIds, "live and owner retain the same exact reasoning event identities");
+    result.owner = assertReasoningSource(result.ownerFrames, interactionId, "owner", { compacted: true });
+    assert.deepEqual(result.owner.eventIds, result.live.blocks.flatMap(block => [block.deltaIds[0], block.completeId]),
+      "the log keeps each block's first live delta and its completion, under the live event identities");
     const replay = await captureStream(streamUrl); captures.push(replay);
     await eventually(() => { replay.check(); return replay.events.some(event => event.type === "snapshot_complete"); }, "actual replay snapshot completes");
-    result.replay = assertReasoningSource(replay.events.flatMap(event => event.frame ? [event.frame] : []), interactionId, "replay");
+    result.replay = assertReasoningSource(replay.events.flatMap(event => event.frame ? [event.frame] : []), interactionId, "replay", { compacted: true });
     assert.deepEqual(result.replay.eventIds, result.owner.eventIds, "replay preserves every event exactly once");
     await replay.close();
     allowance = "disconnect";

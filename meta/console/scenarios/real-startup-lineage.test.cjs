@@ -19,6 +19,7 @@ function runFrames(runId, interactionId) {
     frame("delta", "text_delta", { delta: source, identity }),
     frame("history", "interaction_complete", { result: source, message: { identity } }, true),
     frame("complete", "interaction_complete", { result: source, identity }),
+    frame("text", "text_complete", { content: source, identity }),
   ];
 }
 
@@ -31,7 +32,8 @@ test("startup lineage oracle requires exact live/history runtime owners for ever
   const missingRun = structuredClone(frames);
   delete missingRun[3].run_id;
   assert.throws(() => assertStartupLineage(missingRun), /canonical run/);
-  assert.throws(() => assertStartupLineage(frames.filter(frame => frame.id !== "run-a:delta")), /exact source deltas/);
+  assert.throws(() => assertStartupLineage(frames.filter(frame => frame.id !== "run-a:delta")), /first delta row and its complete row/);
+  assert.throws(() => assertStartupLineage(frames.filter(frame => frame.id !== "run-a:text")), /first delta row and its complete row/);
 });
 
 test("startup durability requires actual committed owner messages even when timeline counterparts are pruned", () => {
@@ -375,7 +377,7 @@ test("startup readiness keeps deadline failure when no expected terminal ever ar
   assert.deepEqual(observations.at(-1).frames, ready);
 });
 
-test("startup readiness never accepts a durable owner mismatch or incomplete source deltas", async () => {
+test("startup readiness never accepts a durable owner mismatch or a changed source delta", async () => {
   for (const corrupt of ["owner", "delta"]) {
     const frames = runFrames("run-a");
     if (corrupt === "delta") frames.find(frame => frame.kind === "text_delta").payload.delta = "partial";
@@ -383,7 +385,7 @@ test("startup readiness never accepts a durable owner mismatch or incomplete sou
       timeoutMs: 25, pollIntervalMs: 1,
       timeline: async () => ({ frames }),
       durableHistory: async () => [historyPage(corrupt === "owner" ? "other-run" : "run-a")],
-    }), corrupt === "owner" ? /exactly one actual committed reply/ : /exact source deltas/);
+    }), corrupt === "owner" ? /exactly one actual committed reply/ : /kept delta row begins the text/);
   }
 });
 

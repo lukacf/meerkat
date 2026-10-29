@@ -410,6 +410,11 @@ fn drive(
 /// the registration of the retired incarnation's own session. The pass
 /// that brings the explicitly retired identity back (it is still listed)
 /// tells the host nothing, and the host hears of nothing else.
+///
+/// The boot seats both identities unmaterialized, and no registration holds
+/// a session until the member's first wake: each is woken (no turn) first,
+/// so each retirement ends a registration of its own. A retirement of a
+/// member that was never materialized names none.
 #[test]
 fn a_host_hears_an_explicit_and_an_unlisted_retirement_once_each() {
     serve_if_host_process();
@@ -420,6 +425,16 @@ fn a_host_hears_an_explicit_and_an_unlisted_retirement_once_each() {
         dir.path(),
         &[KEEPER, LEAVER],
         vec![
+            Step::Request {
+                id: "warm-keeper",
+                method: "meta/identity/warm",
+                params: json!({ "identity": KEEPER }),
+            },
+            Step::Request {
+                id: "warm-leaver",
+                method: "meta/identity/warm",
+                params: json!({ "identity": LEAVER }),
+            },
             Step::Request {
                 id: "retire",
                 method: "meta/retire",
@@ -436,6 +451,8 @@ fn a_host_hears_an_explicit_and_an_unlisted_retirement_once_each() {
         false,
     );
     assert_eq!(run.outcome(), "ready", "{:?}", run.seen);
+    run.succeeded("warm-keeper");
+    run.succeeded("warm-leaver");
     run.succeeded("retire");
     run.succeeded("reconcile");
     let retired = run.retired();

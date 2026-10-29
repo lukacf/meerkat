@@ -2688,8 +2688,10 @@ async fn recorded_member_bindings(
     dir: &Path,
 ) -> Vec<(String, String, Option<meerkat_core::AuthBindingRef>)> {
     use meerkat::SessionStore as _;
-    let store = meerkat_store::SqliteSessionStore::open(dir.join("runtime.sqlite"))
-        .expect("open the session store");
+    let store = meerkat_store::SqliteSessionStore::open(
+        MetaStorageLayout::with_injected_roots(dir.to_path_buf(), None).runtime_db(),
+    )
+    .expect("open the session store");
     let mut recorded = Vec::new();
     for meta in store
         .list(meerkat::SessionFilter::default())

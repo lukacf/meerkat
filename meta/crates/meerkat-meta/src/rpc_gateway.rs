@@ -18367,6 +18367,9 @@ external_addressable = true
                 default_llm_client: default_llm_client.clone(),
             });
         spec.committed_boundary_recoverer = Some(committed_boundary_recoverer);
+        if let Some(root) = gateway_options.session_identity_config_root.as_ref() {
+            spec = spec.with_session_identity_config_root(root.clone());
+        }
         spec.controller_pin_source = Some(controller_pin_source);
         if let Some((_, admission_slot, workgraph_state_dir)) = &workgraph {
             // Durable (cross-process shareable) store: register the
@@ -18663,6 +18666,9 @@ external_addressable = true
                 notify_orchestrator_on_resume: true,
                 default_llm_client: default_llm_client.clone(),
             });
+        if let Some(root) = gateway_options.session_identity_config_root.as_ref() {
+            spec = spec.with_session_identity_config_root(root.clone());
+        }
         spec.controller_pin_source = Some(controller_pin_source);
         for slot in workgraph_admission_slots {
             spec = spec.with_workgraph_admission_slot(slot);
@@ -25468,5 +25474,614 @@ mod provider_credentials_tests {
                 .expect("no store")
                 .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod identity_root_forwarding_tests {
+    use super::*;
+    use std::io::Write;
+    use std::process::{Child, Command, Stdio};
+
+    const CHILD: &str = "META_GATEWAY_IDENTITY_ROOT_FORWARD_CHILD";
+    const RECORD: &str = "META_GATEWAY_IDENTITY_ROOT_FORWARD_RECORD";
+    const TEST: &str = "rpc_gateway::identity_root_forwarding_tests::gateway_spec_keeps_declared_or_absent_identity_root";
+
+    fn mark_gateway_returned() {
+        let record = PathBuf::from(std::env::var_os(RECORD).expect("record path"));
+        let pending = record.with_extension("returned.pending");
+        let mut marker = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pending)
+            .expect("one checked gateway return");
+        marker
+            .write_all(b"gateway_returned\n")
+            .expect("return marker");
+        marker.flush().expect("flush return marker");
+        drop(marker);
+        std::fs::rename(pending, record.with_extension("returned"))
+            .expect("publish complete return marker");
+    }
+
+    fn checked_gateway_returned(record: &std::path::Path) -> bool {
+        match std::fs::read(record.with_extension("returned")) {
+            Ok(bytes) => {
+                assert_eq!(bytes, b"gateway_returned\n", "exact checked-return marker");
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => panic!("read return marker: {error}"),
+        }
+    }
+
+    // Observe the actual spec at the host boundary, then refuse before any
+    // runtime activation. This does not substitute a spec or issue authority.
+    struct RootProbe {
+        record: PathBuf,
+    }
+
+    #[async_trait]
+    impl GatewayHostComposition for RootProbe {
+        async fn prepare_bootstrap(
+            &self,
+            spec: MobBootstrapSpec,
+        ) -> Result<MobBootstrapSpec, GatewayHostError> {
+            let mut record = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&self.record)
+                .expect("one actual gateway spec observation");
+            serde_json::to_writer(&mut record, &spec.session_identity_config_root)
+                .expect("record the exact optional root");
+            record.flush().expect("flush observation");
+            Err(GatewayHostError::Denied)
+        }
+
+        fn native_grant_work_configuration(
+            &self,
+        ) -> Result<
+            Option<meerkat_runtime::meerkat_machine::NativeGrantWorkConfiguration>,
+            GatewayHostError,
+        > {
+            Ok(None)
+        }
+
+        async fn bind_runtime(
+            &self,
+            _runtime: &mut UnifiedRuntime,
+        ) -> Result<(), GatewayHostError> {
+            panic!("the observing host must refuse before runtime binding")
+        }
+
+        fn publish_bootstrap_ready(
+            &self,
+            _publication: GatewayBootstrapReady<'_>,
+        ) -> Result<(), GatewayHostError> {
+            panic!("the observing host must refuse before Ready")
+        }
+
+        fn begin_close(&self, _reason: GatewayHostCloseReason) -> Result<(), GatewayHostError> {
+            Ok(())
+        }
+
+        async fn join_close(&self) -> Result<(), GatewayHostError> {
+            Ok(())
+        }
+
+        async fn wait_closed(&self) {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    // Retain direct-child ownership on every assertion/I/O failure too.
+    struct OwnedChild(Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn gateway_spec_keeps_declared_or_absent_identity_root() {
+        if std::env::var_os(CHILD).is_some() {
+            let host = Arc::new(RootProbe {
+                record: std::env::var_os(RECORD).expect("record path").into(),
+            });
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let result = runtime.block_on(run_persistent_with_host(None, host));
+            assert!(
+                matches!(result, Err(GatewayRunError::Init(_))),
+                "the observation must refuse initialization with completed cleanup: {result:?}"
+            );
+            mark_gateway_returned();
+            return;
+        }
+
+        for persistent in [true, false] {
+            for explicit in [true, false] {
+                let directory = tempfile::tempdir().expect("isolated gateway roots");
+                let root = directory.path();
+                let record = root.join("spec-root.json");
+                let stdout = root.join("stdout.log");
+                let stderr = root.join("stderr.log");
+                let declared = root.join("declared-user-root");
+                let mut child = OwnedChild(
+                    Command::new(std::env::current_exe().expect("test executable"))
+                        .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+                        .env(CHILD, "1")
+                        .env(RECORD, &record)
+                        .env("OPENAI_API_KEY", "sk-regression-test")
+                        .env("HOME", root.join("ambient-home"))
+                        .env("XDG_CONFIG_HOME", root.join("ambient-config"))
+                        .env("XDG_STATE_HOME", root.join("ambient-state"))
+                        .env("RUST_MIN_STACK", "33554432")
+                        .current_dir(root)
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::from(
+                            std::fs::File::create(&stdout).expect("stdout file"),
+                        ))
+                        .stderr(Stdio::from(
+                            std::fs::File::create(&stderr).expect("stderr file"),
+                        ))
+                        .spawn()
+                        .expect("gateway host child"),
+                );
+                let mut params = serde_json::json!({
+                    "mob_config": "[mob]\nid = \"gateway-root-forward\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\n",
+                    "runtime_options": {}
+                });
+                if persistent {
+                    params["persistent_state"] = serde_json::json!(root.join("state"));
+                }
+                if explicit {
+                    params["runtime_options"]["session_identity_config_root"] =
+                        serde_json::json!(&declared);
+                }
+                let mut stdin = child.0.stdin.take().expect("child stdin");
+                writeln!(
+                    stdin,
+                    "{}",
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": "init", "method": "meta/init", "params": params
+                    })
+                )
+                .expect("write actual init request");
+                stdin.flush().expect("flush init");
+                let deadline = std::time::Instant::now() + Duration::from_secs(90);
+                let mut stdin = Some(stdin);
+                let mut checked_return = false;
+                let status = loop {
+                    if !checked_return && checked_gateway_returned(&record) {
+                        checked_return = true;
+                        // Tokio stdin's blocking read can outlive its aborted
+                        // task. Release it only after the gateway has returned.
+                        drop(stdin.take());
+                    }
+                    if let Some(status) = child.0.try_wait().expect("observe child") {
+                        break status;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "gateway root probe timed out"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                };
+                if !checked_return && checked_gateway_returned(&record) {
+                    checked_return = true;
+                    drop(stdin.take());
+                }
+                drop(stdin);
+                assert_eq!(child.0.wait().expect("reap exact child"), status);
+                assert!(checked_return, "child must mark its checked gateway return");
+                assert!(
+                    status.success(),
+                    "gateway root probe child failed: {}",
+                    std::fs::read_to_string(&stderr).unwrap_or_default()
+                );
+                let observed: Option<PathBuf> = serde_json::from_slice(
+                    &std::fs::read(&record).expect("actual host preparation was reached"),
+                )
+                .expect("optional root observation");
+                assert_eq!(
+                    observed,
+                    explicit.then_some(declared),
+                    "persistent={persistent} explicit={explicit}: the real gateway spec preserves the declared option"
+                );
+            }
+        }
+    }
+
+    const LIFECYCLE_CHILD: &str = "META_GATEWAY_ROOT_LIFECYCLE_CHILD";
+    const LIFECYCLE_TEST: &str = "rpc_gateway::identity_root_forwarding_tests::actual_gateway_declared_root_materializes_dormant_member";
+
+    struct LifecycleHost {
+        remove_declaration: bool,
+        record: PathBuf,
+        store: std::sync::Mutex<Option<Arc<dyn meerkat_runtime::RuntimeStore>>>,
+        ready: Arc<tokio::sync::Notify>,
+        closed: Arc<std::sync::atomic::AtomicBool>,
+        close_notice: Arc<tokio::sync::Notify>,
+        observer: std::sync::Mutex<Option<tokio::task::JoinHandle<bool>>>,
+    }
+
+    struct CloseObserver {
+        closed: Arc<std::sync::atomic::AtomicBool>,
+        notice: Arc<tokio::sync::Notify>,
+    }
+    impl Drop for CloseObserver {
+        fn drop(&mut self) {
+            self.closed.store(true, Ordering::Release);
+            self.notice.notify_waiters();
+        }
+    }
+
+    #[async_trait]
+    impl GatewayHostComposition for LifecycleHost {
+        async fn prepare_bootstrap(
+            &self,
+            mut spec: MobBootstrapSpec,
+        ) -> Result<MobBootstrapSpec, GatewayHostError> {
+            *self.store.lock().expect("store slot") = Some(
+                spec.durable_runtime_store
+                    .clone()
+                    .expect("actual gateway runtime store"),
+            );
+            if self.remove_declaration {
+                // The RED control removes only the declaration from the
+                // actual gateway-built spec. Its factory keeps the root.
+                spec.session_identity_config_root = None;
+            }
+            Ok(spec)
+        }
+
+        fn native_grant_work_configuration(
+            &self,
+        ) -> Result<
+            Option<meerkat_runtime::meerkat_machine::NativeGrantWorkConfiguration>,
+            GatewayHostError,
+        > {
+            Ok(None)
+        }
+
+        async fn bind_runtime(
+            &self,
+            _runtime: &mut UnifiedRuntime,
+        ) -> Result<(), GatewayHostError> {
+            Ok(())
+        }
+
+        async fn bind_identity_runtime(
+            &self,
+            runtime: &mut UnifiedRuntime,
+        ) -> Result<(), GatewayHostError> {
+            use futures::FutureExt;
+            use meerkat_mob::machines::mob_machine::MemberMaterializationPhase;
+
+            let identities = runtime
+                .identity_runtime()
+                .expect("actual gateway identity view");
+            let handle = runtime.mob_handle().clone();
+            let machine = runtime
+                .mob_runtime()
+                .session_service()
+                .expect("actual gateway service")
+                .acquire_runtime_adapter(None)
+                .expect("runtime acquisition")
+                .expect("actual gateway machine");
+            let store = self
+                .store
+                .lock()
+                .expect("store slot")
+                .take()
+                .expect("captured actual store");
+            let ready = self.ready.clone();
+            let closed = self.closed.clone();
+            let close_notice = self.close_notice.clone();
+            let record = self.record.clone();
+            let remove_declaration = self.remove_declaration;
+            let observer = tokio::spawn(async move {
+                let _close = CloseObserver {
+                    closed: closed.clone(),
+                    notice: close_notice,
+                };
+                ready.notified().await;
+                if closed.load(Ordering::Acquire) {
+                    return false;
+                }
+                let observed = std::panic::AssertUnwindSafe(async {
+                    let identity = crate::identity_first::AgentIdentity::parse("gateway-root:member").unwrap();
+                    let member = crate::member_comms_id::mob_member_id(identity.as_str());
+                    let seated = identities.status(&identity).await.expect("real roster seat");
+                    let session = seated.session_id.expect("historical session for the seat");
+                    let logical = meerkat_runtime::LogicalRuntimeId::for_session(&session);
+                    assert_eq!(handle.member_materialization_for_test(&member),
+                        Some(MemberMaterializationPhase::Dormant));
+                    assert!(machine.current_executor_attachment_witness(&session).await.is_none());
+                    assert!(store.load_input_states_strict(&logical).await.unwrap().is_empty());
+                    let materialized = identities.materialize_tracked(&identity).await;
+                    if remove_declaration {
+                        assert!(matches!(materialized,
+                            Err(crate::identity_first::IdentityRuntimeError::AdmissionFailed {
+                                identity: refused_identity, detail,
+                            }) if refused_identity == identity
+                                && detail.contains("cannot publish its comms endpoint")
+                                && detail.contains("disagrees with its durable generation endpoint")
+                        ), "the missing-declaration control must retain Core's exact endpoint mismatch");
+                    } else {
+                        let scope = materialized.expect("gateway root forward must materialize")
+                            .expect("actual delivery scope");
+                        assert_eq!(scope.session_id(), &session);
+                        assert_eq!(handle.member_materialization_for_test(&member),
+                            Some(MemberMaterializationPhase::Live));
+                        assert!(machine.current_executor_attachment_witness(&session).await.is_some());
+                    }
+                    assert!(store.load_input_states_strict(&logical).await.unwrap().is_empty());
+                    json!({"session": session, "outcome": if remove_declaration {
+                        "exact_endpoint_mismatch"
+                    } else {
+                        "same_session_materialized"
+                    }, "inputs_before": 0, "inputs_after": 0})
+                }).catch_unwind().await;
+                let passed = observed.is_ok();
+                let value = observed.unwrap_or_else(|_| json!({"outcome": "assertion_failed"}));
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(record)
+                    .expect("one lifecycle observation");
+                serde_json::to_writer(file, &value).expect("record lifecycle result");
+                passed
+            });
+            assert!(
+                self.observer
+                    .lock()
+                    .expect("observer slot")
+                    .replace(observer)
+                    .is_none()
+            );
+            Ok(())
+        }
+
+        fn publish_bootstrap_ready(
+            &self,
+            mut publication: GatewayBootstrapReady<'_>,
+        ) -> Result<(), GatewayHostError> {
+            let completion = publication
+                .take_runtime_completion()
+                .expect("actual identity bootstrap completion");
+            completion
+                .publish(|| publication.publish())
+                .map_err(|_| GatewayHostError::Denied)?;
+            // Wake the owned async observer only after actual Ready; never
+            // block or materialize inside the synchronous publication fence.
+            self.ready.notify_one();
+            Ok(())
+        }
+
+        fn begin_close(&self, _reason: GatewayHostCloseReason) -> Result<(), GatewayHostError> {
+            self.closed.store(true, Ordering::Release);
+            self.close_notice.notify_waiters();
+            self.ready.notify_one();
+            Ok(())
+        }
+
+        async fn join_close(&self) -> Result<(), GatewayHostError> {
+            let observer = self.observer.lock().expect("observer slot").take();
+            match observer {
+                Some(observer) => {
+                    if observer.await.unwrap_or(false) {
+                        Ok(())
+                    } else {
+                        Err(GatewayHostError::Unavailable)
+                    }
+                }
+                None => Err(GatewayHostError::Unavailable),
+            }
+        }
+
+        async fn wait_closed(&self) {
+            loop {
+                let notified = self.close_notice.notified();
+                if self.closed.load(Ordering::Acquire) {
+                    return;
+                }
+                notified.await;
+            }
+        }
+    }
+
+    struct GatewayChild {
+        child: Child,
+        reader: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for GatewayChild {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
+            }
+        }
+    }
+
+    #[test]
+    fn actual_gateway_declared_root_materializes_dormant_member() {
+        use std::io::{BufRead, BufReader};
+        if let Some(mode) = std::env::var_os(LIFECYCLE_CHILD) {
+            let host = Arc::new(LifecycleHost {
+                remove_declaration: mode == "missing",
+                record: std::env::var_os(RECORD).expect("record path").into(),
+                store: std::sync::Mutex::new(None),
+                ready: Arc::new(tokio::sync::Notify::new()),
+                closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                close_notice: Arc::new(tokio::sync::Notify::new()),
+                observer: std::sync::Mutex::new(None),
+            });
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(run_persistent_with_host(None, host));
+            assert!(
+                matches!(result, Ok(()) | Err(GatewayRunError::HostClosed)),
+                "observer close must settle through the actual gateway cleanup: {result:?}"
+            );
+            mark_gateway_returned();
+            return;
+        }
+        for remove_declaration in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let record = root.join("lifecycle.json");
+            let stderr = root.join("stderr.log");
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", LIFECYCLE_TEST, "--nocapture", "--test-threads=1"])
+                .env(
+                    LIFECYCLE_CHILD,
+                    if remove_declaration {
+                        "missing"
+                    } else {
+                        "forwarded"
+                    },
+                )
+                .env(RECORD, &record)
+                .env("OPENAI_API_KEY", "sk-regression-test")
+                .env("HOME", root.join("ambient-home"))
+                .env("XDG_CONFIG_HOME", root.join("ambient-config"))
+                .env("XDG_STATE_HOME", root.join("ambient-state"))
+                .env("RUST_MIN_STACK", "33554432")
+                .current_dir(root)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::from(std::fs::File::create(&stderr).unwrap()))
+                .spawn()
+                .expect("real gateway lifecycle child");
+            let mut child = GatewayChild {
+                child,
+                reader: None,
+            };
+            let stdout = child.child.stdout.take().unwrap();
+            let (send_line, lines) = std::sync::mpsc::channel();
+            child.reader = Some(std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break };
+                    if send_line.send(line).is_err() {
+                        break;
+                    }
+                }
+            }));
+            let mut stdin = Some(child.child.stdin.take().unwrap());
+            let send = |stdin: &mut Option<std::process::ChildStdin>, value: Value| {
+                let stdin = stdin
+                    .as_mut()
+                    .expect("callbacks before checked gateway return");
+                writeln!(stdin, "{value}").unwrap();
+                stdin.flush().unwrap();
+            };
+            send(
+                &mut stdin,
+                json!({"jsonrpc": "2.0", "id": "init", "method": "meta/init", "params": {
+                    "mob_config": "[mob]\nid = \"gateway-root-lifecycle\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\nruntime_mode = \"turn_driven\"\n\n[profiles.worker.tools]\ncomms = true\n",
+                    "persistent_state": root.join("state"),
+                    "has_roster_provider": true,
+                    "runtime_options": {
+                        "demo_llm": true,
+                        "identity_bootstrap_mode": {"mode": "lazy_materialize"},
+                        "session_identity_config_root": root.join("declared-user-root")
+                    }
+                }}),
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(90);
+            let mut checked_return = false;
+            loop {
+                if !checked_return && checked_gateway_returned(&record) {
+                    checked_return = true;
+                    drop(stdin.take());
+                }
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                assert!(!remaining.is_zero(), "gateway lifecycle deadline");
+                let line = match lines.recv_timeout(remaining.min(Duration::from_millis(20))) {
+                    Ok(line) => line,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        if !checked_return && checked_gateway_returned(&record) {
+                            checked_return = true;
+                            drop(stdin.take());
+                        }
+                        break;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                };
+                if checked_return {
+                    continue;
+                }
+                let Some(message) = line
+                    .find('{')
+                    .and_then(|start| serde_json::from_str::<Value>(&line[start..]).ok())
+                else {
+                    continue;
+                };
+                if message["method"] == "callback/roster_provider/roster" {
+                    send(
+                        &mut stdin,
+                        json!({"jsonrpc":"2.0", "id":message["id"], "result":[{
+                            "identity":"gateway-root:member", "profile":"worker"
+                        }]}),
+                    );
+                } else if message.get("id").is_some()
+                    && message["method"]
+                        .as_str()
+                        .is_some_and(|m| m.starts_with("callback/"))
+                {
+                    send(
+                        &mut stdin,
+                        json!({"jsonrpc":"2.0", "id":message["id"], "error":{
+                            "code":-32601, "message":"unexpected lifecycle test callback"
+                        }}),
+                    );
+                }
+            }
+            drop(stdin);
+            let status = loop {
+                if let Some(status) = child.child.try_wait().unwrap() {
+                    break status;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "child must reap within the case bound"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            assert_eq!(child.child.wait().unwrap(), status);
+            assert!(
+                checked_return,
+                "gateway cleanup must return before stdin closes"
+            );
+            if let Some(reader) = child.reader.take() {
+                reader.join().expect("stdout reader joined");
+            }
+            assert!(
+                status.success(),
+                "lifecycle child failed: {}",
+                std::fs::read_to_string(&stderr).unwrap_or_default()
+            );
+            let observed: Value =
+                serde_json::from_slice(&std::fs::read(record).expect("real lifecycle record"))
+                    .unwrap();
+            assert_eq!(
+                observed["outcome"],
+                if remove_declaration {
+                    "exact_endpoint_mismatch"
+                } else {
+                    "same_session_materialized"
+                }
+            );
+            assert_eq!(observed["inputs_before"], 0);
+            assert_eq!(observed["inputs_after"], 0);
+        }
     }
 }

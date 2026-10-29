@@ -84,6 +84,8 @@ mod runtime_store_forwarding_probe;
 pub mod schedule_wiring;
 pub mod shutdown_signal;
 pub mod spec_update_ceremony;
+#[cfg(test)]
+mod sqlite_lock_profile_tests;
 pub mod state_dir_claim;
 pub mod storage_doctor;
 pub mod storage_health;

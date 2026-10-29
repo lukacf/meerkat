@@ -2661,6 +2661,29 @@ pub(crate) async fn member_peer_info_address(
     ))
 }
 
+/// The comms identity a peer-info read reports for `member` when its roster
+/// row projects none: its peer id and transport key (`ed25519:<base64>`), as
+/// MobMachine records them for its current incarnation.
+///
+/// A roster row projects a member's comms identity only while a comms
+/// runtime of it is live, so a member Core holds unmaterialized (a seat no
+/// delivery has woken yet, or a released member) projects none. Its seat
+/// recorded the endpoint its build loads, which a live peer trusts at once,
+/// and that endpoint is the member's. A read: it wakes nothing. `None` when
+/// MobMachine holds no usable endpoint either: a Broken member, or a member
+/// on network comms, whose endpoint its first wake registers.
+pub(crate) async fn recorded_member_comms_identity(
+    handle: &meerkat_mob::MobHandle,
+    member: &meerkat_mob::ids::AgentIdentity,
+) -> Result<Option<(String, String)>, meerkat_mob::MobError> {
+    Ok(handle.member_peer_endpoint(member).await?.map(|endpoint| {
+        (
+            endpoint.descriptor.peer_id.to_string(),
+            meerkat_comms::PubKey::new(endpoint.descriptor.pubkey).to_pubkey_string(),
+        )
+    }))
+}
+
 /// Pure peer-info address choice: a placed member's durable host address,
 /// otherwise the in-process route.
 pub(crate) fn peer_info_address_for(plane: &MemberPlane, comms_name: &str) -> String {

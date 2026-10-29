@@ -217,6 +217,36 @@ impl meerkat_core::service::SessionServiceControlExt for ForwardingService {
 '''
 
 
+# meerkat-mob 0.9.7 declares a test seam on the trait under `#[cfg(test)]`. A
+# dependency build never sets `cfg(test)`, so the method is not in the trait a
+# decorator implements (implementing it is E0407), while the unconditional
+# method declared after it is.
+CFG_TEST_TRAIT_SRC = '''
+pub trait MobSessionService:
+    SessionServiceCommsExt + SessionServiceControlExt + SessionServiceHistoryExt
+{
+    /// Test seam: only meerkat-mob's own tests compile it.
+    #[cfg(test)]
+    fn bind_member_comms_identity_root_for_test(&self, _identity_root: &std::path::Path) {}
+
+    /// Wait until every actor removed for `session_id` has exited.
+    async fn await_removed_actor_exit(&self, _session_id: &SessionId) {}
+}
+'''
+
+CFG_TEST_IMPL_SRC = '''
+impl MobSessionService for ForwardingWrapper {
+    async fn await_removed_actor_exit(&self, session_id: &SessionId) {
+        self.inner.await_removed_actor_exit(session_id).await;
+    }
+}
+
+impl MobSessionService for ForgetfulWrapper {
+    // Forwards nothing: every method answers its trait default.
+}
+'''
+
+
 class DecoratorConformanceGate(unittest.TestCase):
     def test_runtime_store_spec_is_checked_and_exemption_needs_a_reason(self) -> None:
         spec = next(s for s in gate.TRAIT_SPECS if s.name == "RuntimeStore")
@@ -375,6 +405,31 @@ class DecoratorConformanceGate(unittest.TestCase):
         names = {"required_one", "defaulted_refusal", "plain_default"}
         self.assertEqual(gate.missing_methods(methods, set(), names), [])
         self.assertEqual(gate.missing_methods(methods, {"experimental-gpt-live"}, names), ["live_only"])
+
+    def test_cfg_test_method_is_never_required(self) -> None:
+        # meerkat-mob 0.9.7's `bind_member_comms_identity_root_for_test`: a
+        # decorator lacking it passes, whatever features Cargo enables
+        # (`test-support` included: a feature is not `cfg(test)`).
+        methods = gate.trait_methods(CFG_TEST_TRAIT_SRC)
+        self.assertEqual(
+            methods,
+            {
+                "bind_member_comms_identity_root_for_test": gate.CFG_TEST_GATE,
+                "await_removed_actor_exit": None,
+            },
+        )
+        names = dict(gate.production_impls(CFG_TEST_IMPL_SRC))["ForwardingWrapper"]
+        self.assertEqual(names, {"await_removed_actor_exit"})
+        self.assertEqual(gate.missing_methods(methods, set(), names), [])
+        self.assertEqual(gate.missing_methods(methods, {"runtime-adapter", "test-support"}, names), [])
+
+    def test_method_after_a_cfg_test_method_is_still_required(self) -> None:
+        # The gate ends at the gated method: a decorator lacking the
+        # unconditional method declared after it fails.
+        methods = gate.trait_methods(CFG_TEST_TRAIT_SRC)
+        names = dict(gate.production_impls(CFG_TEST_IMPL_SRC))["ForgetfulWrapper"]
+        self.assertEqual(names, set())
+        self.assertEqual(gate.missing_methods(methods, set(), names), ["await_removed_actor_exit"])
 
 
 if __name__ == "__main__":

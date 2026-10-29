@@ -218,15 +218,15 @@ pub enum ScopeMismatch {
     Generation,
     /// The identity runs under a different Core fence. Since 0.9.4 the
     /// scope's lease-token slot carries Core's fence, and Meta holds no
-    /// lease.
+    /// lease. A scoped retirement also answers it when the runtime id is the
+    /// same but the scope's binding moved.
     LeaseFencingToken,
     /// The native member scope does not name this identity's member.
     Member,
     /// The member's session, runtime incarnation or fence moved: meerkat
-    /// refused the native scope at admission, or a scoped retirement found
-    /// the identity bound to another session or member incarnation. Also a
-    /// scope captured at another incarnation of the mob (one destroyed and
-    /// created again under its id).
+    /// refused the native scope at admission. Also a scope captured at
+    /// another incarnation of the mob (one destroyed and created again under
+    /// its id).
     MemberBinding,
 }
 

@@ -4,6 +4,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { startFixture, eventually, rpc } = require("../acceptance-runtime.cjs");
+const { compactedLog } = require("./compacted-log.cjs");
 
 async function liveCapture(url) {
   const abort = new AbortController();
@@ -34,10 +35,16 @@ async function liveCapture(url) {
   };
 }
 
-function assertCapturedSource(frames, source, label) {
+// `compacted` frames are a read of the console log, which keeps the block's
+// first delta row and removes the others once its complete row is stored.
+function assertCapturedSource(frames, source, label, { compacted = false } = {}) {
   assert.equal(new Set(frames.map(frame => frame.id)).size, frames.length, `${label}: no duplicate canonical frames`);
   const live = frames.filter(frame => frame.source?.kind === "console_event");
-  assert.equal(live.filter(frame => frame.kind === "text_delta").map(frame => frame.payload.delta).join(""), source, `${label}: exact delta source`);
+  const deltas = live.filter(frame => frame.kind === "text_delta").map(frame => frame.payload.delta);
+  if (compacted) {
+    assert.equal(deltas.length, 1, `${label}: the log keeps the block's first delta row only`);
+    assert(deltas[0] && source.startsWith(deltas[0]), `${label}: the kept delta row begins the source`);
+  } else assert.equal(deltas.join(""), source, `${label}: exact delta source`);
   const text = live.filter(frame => frame.kind === "text_complete"), terminals = live.filter(frame => frame.kind === "interaction_complete");
   assert.equal(text.length, 1, `${label}: one live text completion`);
   assert.equal(terminals.length, 1, `${label}: one live interaction completion`);
@@ -92,13 +99,16 @@ async function sharedOwnerStreamParity() {
     assert.equal(ownerResponse.status, 200);
     const owner = (await ownerResponse.json()).frames.filter(frame => frame.interaction_id === interactionId);
     evidence.owner = owner;
-    assertCapturedSource(owner, source, "canonical owner");
+    assertCapturedSource(owner, source, "canonical owner", { compacted: true });
     const ownerIds = owner.filter(frame => frame.source.kind !== "session_history").map(frame => frame.id).sort();
     const ownerLive = owner.filter(frame => frame.source.kind === "console_event");
     for (const [index, frames] of evidence.streams.entries()) {
       assertCapturedSource(frames, source, `router ${index}`);
-      assert.deepEqual(frames.filter(frame => frame.source.kind !== "session_history").map(frame => frame.id).sort(), ownerIds, `router ${index}: complete owner frame set`);
-      assert.deepEqual(frames.filter(frame => frame.source.kind === "console_event"), ownerLive, `router ${index}: exact canonical live frame payloads and order`);
+      // The owner reads the log: this live stream less the delta rows the
+      // log removed once the complete row was stored.
+      const kept = compactedLog(frames);
+      assert.deepEqual(kept.filter(frame => frame.source.kind !== "session_history").map(frame => frame.id).sort(), ownerIds, `router ${index}: complete owner frame set`);
+      assert.deepEqual(kept.filter(frame => frame.source.kind === "console_event"), ownerLive, `router ${index}: exact canonical live frame payloads and order`);
       assert.deepEqual(frames, evidence.streams[0], `router ${index}: exact raw frame payloads and order across routers`);
     }
     evidence.sourceLength = source.length;

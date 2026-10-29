@@ -250,6 +250,13 @@ async function stoppedScenario(host, action) {
     assert.equal(owner.status, 200); assert.equal(owner.body.result?.identity, "router:main");
     result.baselineOwner = owner.body.result; assert(result.baselineOwner.session_id, "actual pre-run session owner");
     const sessionId = result.baselineOwner.session_id;
+    // The fixture seats router:main unmaterialized, so no runtime holds its
+    // session until its first wake, and the owner's run state is a runtime
+    // read. Wake it with no turn first; it keeps the captured session.
+    const warm = await rpc(fixture.baseUrl, "meta/identity/warm", { identity: "router:main" });
+    assert.equal(warm.status, 200); assert(!warm.body.error, JSON.stringify(warm.body));
+    assert.equal(warm.body.result?.session_id, sessionId, "the wake builds the captured pre-run owner session");
+    result.ownerWarm = warm.body.result;
     const idle = () => fixture.control("routine-run", { identity: "router:main", session_id: sessionId, run_id: randomUUID(), action: "status" });
     await eventually(async () => (await idle()).current_run_id === null, "owner is idle before warmup");
     result.warmup = { sessionId, source: `Prior completed routine check ${result.scenarioId}.`, content: `Record the baseline for ${result.scenarioId}; no tools are needed.` };

@@ -16,8 +16,10 @@ This gate reads the trait from the pinned meerkat-mob source (via `cargo
 metadata`, so it is the exact version Cargo.lock resolves), reads the features
 Cargo enables on meerkat-mob (via `cargo tree`), and fails when any PRODUCTION
 `impl MobSessionService for X` block in crates/meerkat-meta/src lacks a method that
-exists under those features. Test doubles inside `#[cfg(test)]` modules are
-skipped with the same trap-aware scan as verify-decorator-authority.py.
+exists under those features. A `#[cfg(test)]` trait method does not exist in a
+dependency build, so a decorator cannot and need not forward it. Test doubles
+inside `#[cfg(test)]` modules are skipped with the same trap-aware scan as
+verify-decorator-authority.py.
 
 Required methods are checked too: a missing one is a compile error anyway, but
 listing it here keeps the report complete.
@@ -143,10 +145,16 @@ CFG_TEST = re.compile(r"^\s*#\[cfg\(test\)\]")
 MOD_LINE = re.compile(r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{")
 FN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([a-z_0-9]+)\s*[<(]")
 CFG_FEATURE = re.compile(r'#\[cfg\(feature\s*=\s*"([^"]+)"\)\]')
+# The gate of a trait method declared under `#[cfg(test)]`: only its own
+# crate's tests compile it, never a dependency build. No Cargo feature name can
+# contain parentheses, so this is never an enabled feature and such a method is
+# never required.
+CFG_TEST_GATE = "cfg(test)"
 
 
 def trait_methods(trait_source: str, trait: str = TRAIT) -> dict[str, str | None]:
-    """Method name -> feature it is gated on (None when unconditional)."""
+    """Method name -> feature it is gated on (None when unconditional,
+    `CFG_TEST_GATE` when it is gated on `#[cfg(test)]`)."""
     m = re.search(r"^pub trait " + trait + r"\b.*?\n\}\n", trait_source, re.S | re.M)
     if not m:
         raise SystemExit(f"error: `pub trait {trait}` not found in the pinned meerkat source")
@@ -162,6 +170,8 @@ def trait_methods(trait_source: str, trait: str = TRAIT) -> dict[str, str | None
             cfg = CFG_FEATURE.search(stripped)
             if cfg:
                 pending_feature = cfg.group(1)
+            elif CFG_TEST.match(line):
+                pending_feature = CFG_TEST_GATE
             fn = FN.match(line)
             if fn:
                 methods[fn.group(1)] = pending_feature

@@ -119,27 +119,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Upgrade
 
-- Meta 0.9.6 requires Meerkat Core 0.9.6: every Meerkat dependency, the
+- Meta 0.9.6 requires Meerkat Core 0.9.7: every Meerkat dependency, the
   dev-dependencies and the `meerkat-store-conformance` suite included, is
-  pinned to `=0.9.6` from crates.io. Upgrade Meerkat Core together with Meta;
-  its 0.9.6 upgrade notes and Breaking list apply to a Meta host too. A 0.9.5
-  Python or TypeScript SDK still works against a 0.9.6 gateway, without the
-  new `deferred` and `applied` fields (see Breaking and Fixed);
+  pinned to `=0.9.7` from crates.io. Upgrade Meerkat Core together with Meta;
+  its 0.9.6 and 0.9.7 upgrade notes and Breaking lists apply to a Meta host
+  too. A 0.9.5 Python or TypeScript SDK still works against a 0.9.6 gateway,
+  without the new `deferred` and `applied` fields (see Breaking and Fixed);
   `provider_credentials_root` needs a 0.9.6 gateway, since a 0.9.5
   `rpc_gateway` refuses a runtime option it does not know.
-- No storage migration: 0.9.6 opens a 0.9.5 state directory as it is. No
-  store schema, file format or record version changed in the state
-  directory, nothing is renamed, moved or stamped at open, and Meerkat Core
-  0.9.6 needs no migration either. A host store realm is new and opt-in, and
-  no state directory is moved into one. A 0.9.6 candidate launch over a
-  0.9.5 production directory writes only state that 0.9.5 reads (after an
-  unclean stop, start the authoritative launch once first; see Known
-  limitations). Before upgrading, stop the gateway gracefully and back up the
-  whole state directory (each SQLite file together with its `-wal` and `-shm`
-  files, or a `sqlite3 <db> ".backup <copy>"` copy), the provider credentials
-  store (`<config dir>/meerkat/credentials`, or a named root) and the session
-  comms identity directory; for a host store realm, snapshot the host's
-  database. That backup is the only complete way back.
+- No storage migration: 0.9.6 opens a 0.9.5 state directory as it is. No store
+  schema, file format or record version changed in the state directory, nothing
+  is renamed, moved or stamped at open, and Meerkat Core 0.9.6 and 0.9.7 need no
+  migration either. A host store realm is new and opt-in, and no state directory
+  is moved into one. A 0.9.6 candidate launch over a 0.9.5 production directory
+  writes only state that 0.9.5 reads (after an unclean stop, start the
+  authoritative launch once first; see Known limitations). Before upgrading,
+  stop the gateway gracefully and back up the whole state directory (each SQLite
+  file together with its `-wal` and `-shm` files, or a
+  `sqlite3 <db> ".backup <copy>"` copy), the provider credentials store
+  (`<config dir>/meerkat/credentials`, or a named root) and the session comms
+  identity directory; for a host store realm, snapshot the host's database. That
+  backup is the only complete way back.
 - Rolling back to 0.9.5 in place, Meta and Meerkat Core together, is safe
   for a state directory on the format side, though it brings back the 0.9.5
   defects this release fixes. The exceptions:
@@ -175,6 +175,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - a `GatewayHostComposition` that delegates to another: `operation_review`
     and `provider_auth_persistence` (their defaults install no review and
     keep the process default credential store).
+- A build of Meta outside this repository (`cargo install meerkat-meta`, or
+  an application that depends on the `meerkat-meta` crate) reads neither
+  Meta's nor Meerkat's `.cargo/config.toml`. Set the `LIBSQLITE3_FLAGS`
+  environment variable for that build to
+  `meerkat_sqlite::REQUIRED_LIBSQLITE3_FLAGS`
+  (`-DSQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_ENABLE_MEMORY_MANAGEMENT
+  -DSQLITE_DISABLE_PAGECACHE_OVERFLOW_STATS`), as Meerkat's deploying guide
+  describes. An application with its own `main` also calls
+  `meerkat_sqlite::disable_memory_statistics_at_process_start` as its first
+  statement, as Meta's host binaries do; `meerkat_sqlite::check_lock_profile`
+  reports the profile a process runs with.
 
 ### Added
 
@@ -517,6 +528,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   delta rows, all but the first, once the block's complete row is stored.
   The default removes nothing, so an existing implementation keeps every row;
   the SQLite and in-memory stores implement it.
+- `SessionBridge::wake_for_governed_input`, which a governed send calls before
+  it reads the member's binding. The default does nothing; a bridge that wraps
+  `MobSessionBridge` should forward it.
+- `MobBootstrapSpec::with_session_identity_config_root` declares the user-global
+  config root under which the agent factory of a session service composed
+  outside Meta's stock constructors (`MobBootstrapSpec::new`) keeps the
+  members' session comms identities: the root given to
+  `AgentFactory::user_config_root`. The mob seats dormant members with
+  in-process comms under it, so a member's first materialization uses the
+  endpoint identity the factory loads. Set it before the first bootstrap and on
+  every cold reopen; the root and its per-session identity keys must survive
+  with the durable state. Unset, the ambient platform root stays the default.
+  An empty or whitespace-only root is refused (`MobRuntimeError::InvalidConfig`)
+  before the mob is prepared.
+  `UnifiedRuntimeBuilder::session_identity_config_root` with `mob_spec()` still
+  refuses (`ConflictingConfiguration`), and the refusal now names this setter.
 
 ### Changed
 
@@ -710,6 +737,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - An explicit materialization and `meta/identity/warm` reconcile only the
   materialized identity's own managed edges, bounded, instead of the whole
   roster's.
+- A peer message to a member of a stopped mob is refused `peer_wake_refused`
+  with `mob_not_running` (Meerkat 0.9.7), whether the member is live or
+  dormant. Before, a message to a live member could land in an inbox that
+  nothing drained, or come back as an unconfirmed delivery. The sender
+  retries after the mob resumes.
+- Within one process, a session-keyed operation (a turn, a live channel, a
+  cold attach) on the session of a member whose mob no longer admits work
+  (stood down, shut down, destroyed, or stopped by a failure) proceeds as
+  for a session no mob owns (Meerkat 0.9.7). That mob refused it as busy
+  before. A peer message to a member of such a mob is still refused.
+- An agent event subscription to a member that is seated but not
+  materialized (dormant, or waking) opens without waking the member and
+  attaches when it wakes, from the first event of the run the wake starts
+  (Meerkat 0.9.7). `MobHandle::subscribe_agent_events` and
+  `subscribe_agent_events_from` refused it with `MemberSessionNotLive`
+  before. A member event stream Meta opens before the wake names the epoch
+  Core attaches it in, so its `<epoch>:<seq>` ids resume across the wake.
+- A dormant member's status reads like an idle live member's (Meerkat
+  0.9.7): `meta/status_identity`, the member health and the Console's
+  progress show run state `idle` and health `healthy` with nothing in
+  flight, where they read `unknown` before. A seated member that has never
+  woken reads like a member with an empty session. Reading it wakes nothing.
+- A member restored dormant has no runtime registration, executor attachment
+  or live actor until it is materialized (Meerkat 0.9.7), and reads never
+  materialize it. Host code that reads a member's executor attachment or its
+  live actor (`ControllerPinSource::live_actor`) after a restart, before a
+  delivery has woken the member, materializes it first
+  (`PublicIdentityRuntime::materialize_tracked`). A delivery, a governed
+  send and a Console send wake the member on their own.
+- A host that composes its own session service (`MobBootstrapSpec::new`) whose
+  agent factory keeps session comms identities under its own root
+  (`AgentFactory::user_config_root`) now declares that root with
+  `MobBootstrapSpec::with_session_identity_config_root`: Meerkat 0.9.7 seats
+  members dormant, and without it the mob seats them under the ambient platform
+  root and a member's first materialization is refused ("disagrees with its
+  durable generation endpoint").
 
 ### Fixed
 
@@ -834,8 +897,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   row, or a stored session Core still holds with no live member: a dormant
   or retired identity, or a first-boot `Resume` row; or a live member Meta
   0.9.3 spawned without the durable-identity marker, which the roster pass
-  respawns onto its session, and which stays as Core restored it, broken
-  when its comms keys are lost) defers the identity:
+  respawns onto its session, and which stays as Core holds it, seated and
+  not materialized, reading active even when its comms keys are lost)
+  defers the identity:
   the bootstrap status (`meta/status_identity_bootstrap`,
   `meta/wait_identity_bootstrap` and the `identity_bootstrap` of the
   `meta/init` result) leaves it out of `identities` and lists it in
@@ -1157,6 +1221,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   came before its subscription, up to the whole run; it now replays from the
   earliest event the member's actor retains, and hands each event to the
   memory stages once.
+- Mob members: tools behind a member's name filter or MCP source filter keep
+  their review and mutation declarations (Meerkat 0.9.7). Before, when a
+  member's external tool names collided with its profile tool names, or its
+  profile listed MCP sources (`tools.mcp`) over a default external-tools
+  provider, every tool behind that filter answered as not supporting review and
+  as an unknown mutation class. A call that required operation review was then
+  refused as unavailable before any reviewer or consent, and a read-only member
+  was denied those tools even when they were declared read-only. Nothing was
+  allowed that should have been refused. The workaround of avoiding name
+  collisions and leaving `tools.mcp` empty is no longer needed.
+- A governed send to a member Core holds Dormant wakes the member before it
+  reads the member's binding, as any delivery wakes it. The send
+  (`send_governed_with_turn_ticket`, `dispatch_governed_with_turn_ticket` and
+  a governed Console send) read the controller of the member session's live
+  actor first, which a Dormant member does not have, and failed with
+  `GovernedInputError::Unsupported("the member session has no live actor")`
+  before any bind. Every roster identity is seated Dormant and a restart
+  restores members Dormant, so a governed composition reached no member that
+  nothing else had woken. The send now follows the woken member's binding,
+  including a fresh seat's first session and the successor Core binds when the
+  bound session is missing. A wake Core refuses answers as the same delivery's
+  would (`IdentityWakeRetryable` when Core's refusal is retryable, otherwise
+  `AdmissionFailed`, or the typed resume refusal of a member Core holds
+  Broken); nothing is submitted. A hosted identity (placed on a host, or bound
+  to an external runtime) is still refused `Unsupported` before any wake.
+  `MobSessionBridge::governed_controller` also wakes a member it finds without
+  a live actor.
+- Meta builds the bundled SQLite with Meerkat's lock profile,
+  `meerkat_sqlite::REQUIRED_LIBSQLITE3_FLAGS`: no allocator statistics, one
+  page cache per connection and no page-cache overflow statistics. Meerkat
+  requires it since 0.9.4, but Meta 0.9.4 and 0.9.5 built SQLite without it,
+  so every connection in a gateway queued on SQLite's three process-wide
+  mutexes and concurrent sessions slowed each other down (Meerkat measured
+  sixteen threads opening fewer connections per second together than one
+  thread alone). `.cargo/config.toml` (forced over a value in the
+  environment) and `MODULE.bazel` now set it for every build in the
+  repository, the release gateways included. `meta_gateway`, `rpc_gateway`,
+  `meta_repair` and `meta_flow_editor` also turn allocator statistics off as
+  the first statement of `main`
+  (`meerkat_sqlite::disable_memory_statistics_at_process_start`), which
+  removes that lock even from a build without the flags.
+- Two live identities wired to each other whose first-boot rows both start
+  them fresh now both start fresh at the first roster compile after an import
+  or a storage migration. 0.9.5 carried those rows out at the same time, and
+  one identity's successor could be refused ("topology restore failed") until
+  its next wake or roster compile.
 
 ### Known limitations
 
@@ -1220,20 +1330,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and a long tool-heavy run writes bytes that grow with the square of its
   rounds. Bound the document size with the builder's `compaction()` policy.
 - RUSTSEC-2026-0387 (crypto-bigint 0.5.5) stays waived for builds with the
-  `openai-live` feature: Meerkat Core 0.9.6 still builds its live voice
+  `openai-live` feature: Meerkat Core 0.9.7 still builds its live voice
   WebRTC stack on webrtc 0.14 (see the 0.9.5 Security section). Builds
   without `openai-live` do not contain it.
-- Mob members: tools behind a member's name filter or MCP source filter lose
-  their review and mutation declarations. When a member's external tool names
-  collide with its profile tool names, or its profile lists MCP sources
-  (`tools.mcp`) over a default external-tools provider, every tool behind that
-  filter answers as not supporting review and as an unknown mutation class. A
-  call that requires operation review is then refused as unavailable before any
-  reviewer or consent, and a read-only member is denied those tools even when
-  they are declared read-only. Nothing is allowed that should be refused. This
-  has been the case since 0.8; a fix is planned for the next release.
-  Workaround: for members that run reviewed tools or a read-only policy, avoid
-  tool-name collisions with profile tools and leave `tools.mcp` empty.
 - Under `runtime_options.member_auth_binding`, Meerkat's auxiliary tool
   executors (image generation, the fallback web search) still resolve their
   credentials by default selection, so whatever would enable them is refused

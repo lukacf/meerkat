@@ -6467,3 +6467,405 @@ async fn a_persistent_boot_seats_every_identity_unmaterialized_over_an_observed_
         runtime.shutdown().await;
     }
 }
+
+/// A seated identity's peer info is the endpoint Core's MobMachine recorded
+/// at its seat, and the read wakes nothing. The default boot materializes
+/// no member, so no comms runtime of the member is live and its roster row
+/// projects no comms identity: the peer-info read
+/// (`UnifiedRuntime::local_member_peer_info`, which `meta/cross_mob/peer_info`
+/// answers from when an SDK builds a cross-mob peer spec) refused every
+/// seated identity `NoCommsInfo` until its first delivery.
+#[tokio::test]
+async fn a_seated_identitys_peer_info_is_its_recorded_endpoint_and_wakes_nothing() {
+    let state = tempfile::tempdir().unwrap();
+    let keys = tempfile::tempdir().unwrap();
+    let runtime = Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(test_definition_with_id(&unique_builder_mob_id()))
+            .persistent_state(state.path())
+            .session_identity_config_root(keys.path())
+            .roster_provider(Arc::new(StubRosterProvider::new(vec![durable_spec(
+                "agent:alpha",
+            )])))
+            .identity_runtime_instance_id("builder-seated-peer-info")
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .build(),
+    )
+    .await
+    .expect("the persistent identity-first build starts");
+    let handle = runtime.mob_handle();
+    let member = meerkat_meta::member_comms_id::mob_member_id("agent:alpha");
+    let dormant = Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Dormant);
+    assert_eq!(
+        handle.member_materialization_for_test(&member),
+        dormant,
+        "the default boot seats the identity unmaterialized"
+    );
+    let recorded = handle
+        .member_peer_endpoint(&member)
+        .await
+        .expect("read the member's endpoint")
+        .expect("the seat recorded the member's endpoint");
+
+    let (peer_id, comms_name, address) = runtime
+        .local_member_peer_info("agent:alpha")
+        .await
+        .expect("a seated identity's peer info is its recorded endpoint");
+
+    assert_eq!(peer_id, recorded.descriptor.peer_id.to_string());
+    assert!(
+        comms_name.ends_with(member.as_str()),
+        "the peer info names the identity's roster member: {comms_name}"
+    );
+    assert_eq!(address, format!("inproc://{comms_name}"));
+    assert_eq!(
+        handle.member_materialization_for_test(&member),
+        dormant,
+        "the peer-info read woke nothing"
+    );
+    runtime.shutdown().await;
+}
+
+/// A host adopts a seated identity through
+/// `mob/adopt_member_identity_declaration` before any delivery has woken it.
+/// The default boot seats the identity with its session unborn (the member's
+/// first wake creates it), and Meerkat's adoption reads that session first,
+/// so the route wakes the member, as a delivery would, before it hands the
+/// adoption to Meerkat. Without the wake the route answered `SessionError`
+/// `NotFound` for every identity a boot seated.
+#[tokio::test]
+async fn a_host_adopts_a_seated_identity_before_its_first_delivery() {
+    let state = tempfile::tempdir().unwrap();
+    let keys = tempfile::tempdir().unwrap();
+    let mob_id = unique_builder_mob_id();
+    let runtime = Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(test_definition_with_id(&mob_id))
+            .persistent_state(state.path())
+            .session_identity_config_root(keys.path())
+            .roster_provider(Arc::new(StubRosterProvider::new(vec![durable_spec(
+                "agent:alpha",
+            )])))
+            .identity_runtime_instance_id("builder-seated-adoption")
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .build(),
+    )
+    .await
+    .expect("the persistent identity-first build starts");
+    let handle = runtime.mob_handle();
+    let member = meerkat_meta::member_comms_id::mob_member_id("agent:alpha");
+    assert!(
+        handle.member_unmaterialized(&member),
+        "the default boot seats the identity unmaterialized"
+    );
+    // Adoption states the member's exact baseline: its role, runtime mode
+    // and roster labels, on the session its seat binds.
+    let entry = handle
+        .get_member(&member)
+        .await
+        .expect("Core's roster read")
+        .expect("the seated member");
+    let session_id = handle
+        .resolve_bridge_session_id(&member)
+        .await
+        .expect("the seat binds the member to a session");
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": "adopt",
+        "method": "mob/adopt_member_identity_declaration",
+        "params": {
+            "mob_id": mob_id,
+            "agent_identity": "agent:alpha",
+            "request_id": "seated-adoption-1",
+            "precondition": "expected_absent",
+            "declaration_scope": "seated-adoption-host",
+            "declaration_revision": 1,
+            "session": {
+                "session_id": session_id,
+                "lineage_id": format!("session:{session_id}"),
+                "lineage_generation": 0,
+                "authority_policy": "require_existing"
+            },
+            "member": {
+                "profile_name": "default",
+                "runtime_mode": "turn_driven",
+                "labels": entry.labels,
+                "execution": { "execution": "controlling_session" }
+            },
+            "owned_wiring": [],
+            "convergence": { "kind": "drain", "max_wait_ms": 5000 }
+        }
+    });
+
+    let reply: serde_json::Value = serde_json::from_str(
+        &handle_unified_rpc_json(
+            &runtime,
+            &request.to_string(),
+            Duration::from_secs(30),
+            None,
+            None,
+        )
+        .await,
+    )
+    .expect("a JSON-RPC reply");
+
+    assert_eq!(
+        reply["error"],
+        serde_json::Value::Null,
+        "a seated identity is adopted before its first delivery: {reply}"
+    );
+    assert_eq!(
+        reply["result"]["adoption"]["desired_revision"],
+        json!(1),
+        "{reply}"
+    );
+    runtime.shutdown().await;
+}
+
+// Raw host composition: the caller owns the service/factory and declares the
+// factory's root on the spec. No stock constructor or builder root override
+// can supply the declaration these regressions exercise.
+fn raw_identity_root_spec(
+    state: &std::path::Path,
+    mob_id: &str,
+) -> (
+    meerkat_meta::MobBootstrapSpec,
+    Arc<meerkat_runtime::MeerkatMachine>,
+    Arc<dyn meerkat_runtime::RuntimeStore>,
+) {
+    std::fs::create_dir_all(state).expect("raw spec state directory");
+    let (sessions, store) = meerkat_meta::mob_handle_runtime::open_native_session_pair(
+        state,
+        &meerkat_meta::storage_provider::default_meerkat_level_realm(),
+    )
+    .expect("raw spec native session pair");
+    let blobs: Arc<dyn meerkat_core::BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
+    let machine = Arc::new(
+        meerkat_runtime::MeerkatMachine::persistent(store.clone(), blobs.clone())
+            .expect("raw spec machine"),
+    );
+    let factory = meerkat::AgentFactory::new(state)
+        .session_store(sessions.clone())
+        .user_config_root(state.join("identity-home"))
+        .builtins(false)
+        .comms(true);
+    let mut builder = meerkat::FactoryAgentBuilder::new(factory, meerkat::Config::default());
+    builder.default_blob_store = Some(blobs.clone());
+    let service: Arc<dyn meerkat_mob::MobSessionService> = Arc::new(
+        meerkat::PersistentSessionService::new(builder, 8, sessions, store.clone(), blobs)
+            .with_canonical_runtime_adapter(machine.clone()),
+    );
+    let (storage, provenance) =
+        meerkat_meta::mob_composition_manifest::persistent_mob_storage(state.join("mob.sqlite3"))
+            .expect("raw spec mob storage");
+    let spec =
+        meerkat_meta::MobBootstrapSpec::new(test_definition_with_id(mob_id), storage, service)
+            .with_mob_storage_provenance(provenance)
+            .with_durable_runtime_store(&store)
+            .with_runtime_archived_terminal_authority(store.clone())
+            .with_session_runtime_adapter(machine.clone())
+            .expect("raw spec shared machine")
+            .with_child_mob_storage(meerkat_meta::ChildMobStorage::ProcessBound)
+            .with_options(meerkat_meta::MobBootstrapOptions {
+                allow_ephemeral_sessions: false,
+                notify_orchestrator_on_resume: true,
+                default_llm_client: Some(Arc::new(meerkat_client::TestClient::default())),
+            });
+    (spec, machine, store)
+}
+
+/// One real boot and wake, with every exported owner dropped before returning.
+/// Catch assertion unwinds so a failing regression still joins shutdown.
+async fn observe_raw_identity_root(
+    state: &std::path::Path,
+    mob_id: &str,
+    declare_root: bool,
+) -> (meerkat_core::SessionId, Vec<u8>) {
+    use futures::FutureExt;
+    use meerkat_mob::machines::mob_machine::MemberMaterializationPhase;
+
+    let (spec, machine, store) = raw_identity_root_spec(state, mob_id);
+    let spec = if declare_root {
+        spec.with_session_identity_config_root(state.join("identity-home"))
+    } else {
+        spec
+    };
+    let identity = AgentIdentity::parse("raw-root:member").expect("fixture identity");
+    let runtime = Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .mob_spec(spec)
+            .persistent_state(state)
+            .identity_bootstrap_mode(IdentityBootstrapMode::LazyMaterialize)
+            .roster_provider(Arc::new(StubRosterProvider::new(vec![durable_spec(
+                identity.as_str(),
+            )])))
+            .module_config(meerkat_meta::MetaConfig {
+                modules: Vec::new(),
+                discovery: meerkat_meta::DiscoverySpec {
+                    namespace: mob_id.to_owned(),
+                    modules: Vec::new(),
+                },
+                pre_spawn: Vec::new(),
+            })
+            .timeout(Duration::from_secs(20))
+            .build(),
+    )
+    .await
+    .expect("raw spec lazy bootstrap");
+    let observation = std::panic::AssertUnwindSafe(async {
+        let identities = runtime.identity_runtime().expect("actual identity runtime");
+        let handle = runtime.mob_handle();
+        let member = meerkat_meta::member_comms_id::mob_member_id(identity.as_str());
+        let seated = identities
+            .status(&identity)
+            .await
+            .expect("actual seated member");
+        let session = seated.session_id.expect("seat owns a durable session");
+        let logical = meerkat_runtime::LogicalRuntimeId::for_session(&session);
+        assert_eq!(
+            handle.member_materialization_for_test(&member),
+            Some(MemberMaterializationPhase::Dormant),
+        );
+        assert!(
+            machine
+                .current_executor_attachment_witness(&session)
+                .await
+                .is_none()
+        );
+        assert!(
+            store
+                .load_input_states_strict(&logical)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let materialized = identities.materialize_tracked(&identity).await;
+        if declare_root {
+            let scope = materialized
+                .expect("declared factory root must preserve the seated endpoint")
+                .expect("native member owns a delivery scope");
+            assert_eq!(scope.session_id(), &session);
+            assert_eq!(
+                handle.member_materialization_for_test(&member),
+                Some(MemberMaterializationPhase::Live),
+            );
+            assert!(
+                machine
+                    .current_executor_attachment_witness(&session)
+                    .await
+                    .is_some()
+            );
+        } else {
+            // RED control: preserve Core's exact endpoint mismatch, through
+            // Meta's typed final wake refusal, rather than accepting any error.
+            assert!(matches!(
+                materialized,
+                Err(meerkat_meta::identity_first::IdentityRuntimeError::AdmissionFailed {
+                    identity: refused_identity,
+                    detail,
+                }) if refused_identity == identity
+                    && detail.contains("cannot publish its comms endpoint")
+                    && detail.contains("disagrees with its durable generation endpoint")
+            ));
+        }
+        assert!(
+            store
+                .load_input_states_strict(&logical)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let public_key = if declare_root {
+            let key = std::fs::read(
+                state
+                    .join("identity-home/.rkat/session_comms_identity")
+                    .join(session.to_string())
+                    .join("identity.pub"),
+            )
+            .expect("factory persisted the session public key");
+            assert_eq!(key.len(), 32);
+            key
+        } else {
+            Vec::new()
+        };
+        (session, public_key)
+    })
+    .catch_unwind()
+    .await;
+    let shutdown = runtime.shutdown().await;
+    drop(runtime);
+    drop(machine);
+    drop(store);
+    assert!(
+        shutdown.cleanup_completed(),
+        "raw spec shutdown: {shutdown:?}"
+    );
+    match observation {
+        Ok(observation) => observation,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+#[tokio::test]
+async fn raw_spec_declared_identity_root_materializes_dormant_member() {
+    let state = tempfile::tempdir().unwrap();
+    observe_raw_identity_root(state.path(), &unique_builder_mob_id(), true).await;
+}
+
+#[tokio::test]
+async fn raw_spec_missing_identity_root_refuses_exact_endpoint_mismatch() {
+    let state = tempfile::tempdir().unwrap();
+    observe_raw_identity_root(state.path(), &unique_builder_mob_id(), false).await;
+}
+
+#[tokio::test]
+async fn raw_spec_identity_root_survives_cold_reopen() {
+    let state = tempfile::tempdir().unwrap();
+    let mob_id = unique_builder_mob_id();
+    let (original_session, original_key) =
+        observe_raw_identity_root(state.path(), &mob_id, true).await;
+    // The first observation joined shutdown and dropped every runtime,
+    // identity, service, machine and store owner. Reopen all of them from disk.
+    let (reopened_session, reopened_key) =
+        observe_raw_identity_root(state.path(), &mob_id, true).await;
+    assert_eq!(reopened_session, original_session);
+    assert!(
+        reopened_key == original_key,
+        "the durable endpoint key must not rotate"
+    );
+}
+
+#[tokio::test]
+async fn raw_spec_empty_identity_root_is_refused_before_bootstrap() {
+    const REASON: &str = "session_identity_config_root() must not be empty: an empty root would resolve the members' comms identity directory against the working directory";
+    for empty in ["", "  "] {
+        let state = tempfile::tempdir().unwrap();
+        let (spec, machine, store) = raw_identity_root_spec(state.path(), &unique_builder_mob_id());
+        let result =
+            meerkat_meta::MobRuntime::bootstrap(spec.with_session_identity_config_root(empty))
+                .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(runtime) => {
+                runtime
+                    .handle()
+                    .shutdown()
+                    .await
+                    .expect("unexpected runtime cleanup");
+                panic!("empty root must be refused before bootstrap");
+            }
+        };
+        drop(machine);
+        drop(store);
+        assert!(
+            matches!(error, meerkat_meta::MobRuntimeError::InvalidConfig(reason) if reason == REASON)
+        );
+        assert!(
+            !state
+                .path()
+                .join("identity-home/.rkat/session_comms_identity")
+                .exists()
+        );
+    }
+}

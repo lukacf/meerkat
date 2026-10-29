@@ -2454,6 +2454,10 @@ struct GatewayLaunchArgs {
 }
 
 fn main() {
+    // SAFETY: the first statement of main: no other thread exists yet and
+    // nothing has used SQLite, as the switch requires.
+    #[allow(unsafe_code)]
+    let _ = unsafe { meerkat_sqlite::disable_memory_statistics_at_process_start() };
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!(

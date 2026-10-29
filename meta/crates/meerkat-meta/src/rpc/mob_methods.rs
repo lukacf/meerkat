@@ -6045,6 +6045,13 @@ fn reject_foreign_mob(
 /// expected-absent precondition. The whole wire payload converts through
 /// meerkat-mob, so the precondition and every field constraint are enforced by
 /// the same code rkat-rpc uses.
+///
+/// Meerkat's adoption records the baseline of a materialized member and reads
+/// its session first. A member Core holds unmaterialized is woken first, as a
+/// delivery to it would be: a seat no delivery has woken yet holds no session
+/// until its first wake creates it under the id its seat named, so its
+/// adoption would answer that session not found. The wake runs no turn and
+/// joins one in flight; a refused wake is the answer.
 pub(super) async fn handle_adopt_member_identity_declaration(
     handle: &meerkat_mob::MobHandle,
     response_id: Value,
@@ -6072,6 +6079,14 @@ pub(super) async fn handle_adopt_member_identity_declaration(
         Ok(request) => request,
         Err(error) => return declaration_invalid_params(response_id, error.to_string()),
     };
+    // Read from the machine state Core published, without a command. A member
+    // Core does not hold is left to the adoption's own typed answer.
+    if handle.member_unmaterialized(&request.agent_identity) {
+        match handle.ensure_member_live(&request.agent_identity).await {
+            Ok(()) | Err(meerkat_mob::MobError::MemberNotFound(_)) => {}
+            Err(error) => return mob_declaration_error(response_id, &error),
+        }
+    }
     match handle.adopt_member_identity_declaration(request).await {
         Ok(result) => {
             let wire = meerkat_contracts::wire::MobAdoptMemberIdentityDeclarationResult {

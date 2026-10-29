@@ -189,6 +189,11 @@ CROSS_AREA_READS = {
     ("crates/*/tests/", "console/fixtures/"): {"integration", "console"},
     # The memory eval harness tests run scripts/memory-evals.
     ("crates/*/tests/", "scripts/memory-evals"): {"integration"},
+    # meerkat-meta's SQLite lock profile rows (lib tests, which the test job
+    # runs) read release.yml's shipped --bin list and MODULE.bazel's
+    # libsqlite3-sys flags.
+    ("crates/*/src/", ".github/workflows/release.yml"): {"rust"},
+    ("crates/*/src/", "MODULE.bazel"): {"rust"},
     # Workflow files: ci.yml runs console scripts and keys the console lane's
     # npm cache on console/package-lock.json, keys flow-editor's on its own,
     # installs sdk/python in test-python and runs examples/001's topology
@@ -229,6 +234,11 @@ CROSS_AREA_READS = {
     ("scripts/", "scripts/memory-evals"): set(),
     ("scripts/", "docs/"): set(),
     ("scripts/", "skippable"): set(),
+    # The same holds for their reads of release.yml (the release workflow's
+    # contract tests and release scripts) and MODULE.bazel (the version
+    # parity check and bump, and the Bazel BUILD generator).
+    ("scripts/", ".github/workflows/release.yml"): set(),
+    ("scripts/", "MODULE.bazel"): set(),
     # Forge's separate workflow exercises these reads. Its path filters include
     # installer, Console/packages, the Python SDK and root README/licenses.
     # They do not require an additional lane in this workflow's classifier.
@@ -568,12 +578,14 @@ class CiChangesTests(unittest.TestCase):
 
     def test_non_ci_workflows_skip_the_heavy_jobs_and_python_scripts_run_the_console_lane(self):
         self.assertEqual(self.lanes(".github/workflows/e2e-live.yml", ".github/workflows/publish-docs.yml"), set())
-        self.assertEqual(self.lanes(".github/CODEOWNERS", ".github/release.yml", ".github/workflows/release.yml"),
-                         set())
+        self.assertEqual(self.lanes(".github/CODEOWNERS", ".github/release.yml"), set())
+        # release.yml is not skippable: the SQLite lock profile rows, lib
+        # tests the test job runs, read its shipped --bin list.
+        self.assertEqual(self.lanes(".github/workflows/release.yml"), {"rust"})
         # The shape of PR #642: release.yml plus its python contract test.
         # fmt-lint runs the script; console/fixture-ready.test.cjs greps it.
         self.assertEqual(self.lanes(".github/workflows/release.yml", "scripts/test_release_workflow.py"),
-                         {"console"})
+                         {"rust", "console"})
 
     def test_files_only_fmt_lint_and_audit_read_skip_every_lane(self):
         # fmt-lint and audit run on every pull request.
@@ -583,7 +595,7 @@ class CiChangesTests(unittest.TestCase):
                               "tools/continuity-export/continuity-export.mjs",
                               "tools/continuity-export/test_continuity_export.py",
                               "tools/continuity-export/continuity-export.test.mjs"}, set(export_tools))
-        for path in (".pre-commit-config.yaml", ".gitignore", "BUILD.bazel", "MODULE.bazel", ".bazelrc",
+        for path in (".pre-commit-config.yaml", ".gitignore", "BUILD.bazel", ".bazelrc",
                      ".bazelversion", "tools/bazel/platforms/BUILD.bazel", "deny.toml",
                      # Generated per crate; only fmt-lint's freshness check reads them.
                      "crates/meerkat-meta/BUILD.bazel",
@@ -866,6 +878,10 @@ class CiChangesTests(unittest.TestCase):
             (("Makefile",), {"python", "flow_editor"}),
             ((".config/nextest.toml",), {"rust", "integration"}),
             (("scripts/memory-evals",), {"integration", "console"}),
+            # The SQLite lock profile rows, lib tests the test job runs, read
+            # release.yml's shipped binaries and MODULE.bazel's SQLite flags.
+            ((".github/workflows/release.yml",), {"rust"}),
+            (("MODULE.bazel",), {"rust"}),
         ):
             with self.subTest(paths=paths):
                 self.assertEqual(self.lanes(*paths), lanes)
@@ -902,6 +918,8 @@ class CiChangesTests(unittest.TestCase):
         self.assertIn(("console/", "sdk/typescript/"), reads)
         self.assertIn(("crates/*/tests/", "sdk/python/"), reads)
         self.assertIn(("crates/*/tests/", "scripts/memory-evals"), reads)
+        self.assertIn(("crates/*/src/", ".github/workflows/release.yml"), reads)
+        self.assertIn(("crates/*/src/", "MODULE.bazel"), reads)
         self.assertIn(("flow-editor/", "Makefile"), reads)
         self.assertIn(("crates/*/Cargo.toml", "examples/"), reads)
 

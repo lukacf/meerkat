@@ -1436,7 +1436,7 @@ impl UnifiedRuntimeBuilder {
 
         if self.mob_spec.is_some() && self.session_identity_config_root.is_some() {
             return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
-                "session_identity_config_root() requires builder-owned session services; mob_spec() is already erased".into(),
+                "session_identity_config_root() requires builder-owned session services; mob_spec() is already erased; declare the factory root on the supplied spec with MobBootstrapSpec::with_session_identity_config_root".into(),
             ));
         }
 
@@ -3914,7 +3914,8 @@ mod tests {
         assert!(matches!(result,
             Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(detail))
                 if detail.contains("session_identity_config_root()")
-                    && detail.contains("mob_spec() is already erased")));
+                    && detail.contains("mob_spec() is already erased")
+                    && detail.contains("MobBootstrapSpec::with_session_identity_config_root")));
     }
 
     /// An empty comms identity root is refused, as the gateway refuses an

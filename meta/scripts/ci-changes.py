@@ -16,8 +16,9 @@ Pushes, dispatches and an empty or unreadable diff run every lane, so main's
 run always covers every job. A pull request runs only the lanes its changed
 files reach and do not leave to the push:
 
-- docs, top-level markdown, the non-CI workflows and the files only fmt-lint
-  and audit read (see `skippable`) reach no lane;
+- docs, top-level markdown, the non-CI workflows (release.yml aside, see
+  AREA_FILES) and the files only fmt-lint and audit read (see `skippable`)
+  reach no lane;
 - the classifier and its test reach every lane;
 - the other top-level scripts reach the console lane, whose fixture test greps
   every script for port reservations;
@@ -104,12 +105,13 @@ CONSOLE_LANES = frozenset({"console", "console_perf", "flow_editor"})
 # Files nothing in the Rust, console, SDK or example jobs reads. docs/rct is
 # not here: tests/console_route_auth.rs and the governance_check binary read
 # it. Nor is .claude: src/mobpack.rs reads .claude/skills. Nor is any markdown
-# below the top level: crates embed prompt files with include_str!.
+# below the top level: crates embed prompt files with include_str!. Nor are
+# release.yml and MODULE.bazel: meerkat-meta's lib tests read them (see
+# AREA_FILES).
 SKIPPABLE_FILES = frozenset(
     {
         ".github/CODEOWNERS",
         ".github/release.yml",
-        ".github/workflows/release.yml",
         ".github/workflows/e2e-live.yml",
         ".github/workflows/publish-docs.yml",
         # fmt-lint, which every run includes, reads these and no lane job
@@ -119,7 +121,6 @@ SKIPPABLE_FILES = frozenset(
         # reason, see `skippable`).
         ".pre-commit-config.yaml",
         ".gitignore",
-        "MODULE.bazel",
         ".bazelrc",
         ".bazelversion",
         # cargo-deny's policy, read by the audit job every run includes.
@@ -176,6 +177,13 @@ AREA_FILES = {
     # The memory eval harness integration tests run it; the console fixture
     # test greps it like every script.
     "scripts/memory-evals": frozenset({"integration", "console"}),
+    # meerkat-meta's SQLite lock profile rows (src/sqlite_lock_profile_tests.rs,
+    # lib tests) read release.yml's shipped --bin list and MODULE.bazel's
+    # libsqlite3-sys flags. Only the test job runs them: the voice and
+    # extension-state jobs run their lib tests by name filters that leave
+    # these rows out.
+    ".github/workflows/release.yml": frozenset({"rust"}),
+    "MODULE.bazel": frozenset({"rust"}),
 }
 
 # Rust sources and build configuration reach every job that compiles Rust,

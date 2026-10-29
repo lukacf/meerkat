@@ -42,9 +42,11 @@ struct MemberPeerInfo {
     peer_id: String,
     comms_name: String,
     pubkey: [u8; 32],
-    /// Raw roster transport-pubkey string (base64, optional `ed25519:`
-    /// prefix), forwarded verbatim on remote wire requests so the far side
-    /// can build a signed descriptor for this member.
+    /// The member's transport-pubkey string (base64, optional `ed25519:`
+    /// prefix): its roster row's, or, while no comms runtime of it is live,
+    /// the one MobMachine records for it. Forwarded verbatim on remote wire
+    /// requests so the far side can build a signed descriptor for this
+    /// member.
     pubkey_b64: String,
 }
 
@@ -531,19 +533,29 @@ async fn member_peer_info(
             member_id: meerkat_id.to_string(),
             mob_id: mob_id.to_string(),
         })?;
-    let peer_id = entry
-        .peer_id()
-        .ok_or_else(|| CrossMobError::NoCommsInfo {
-            member_id: meerkat_id.to_string(),
-            mob_id: mob_id.to_string(),
-        })?
-        .to_string();
-    let pubkey_b64 = entry.transport_public_key().ok_or_else(|| {
-        CrossMobError::PeerSpec(format!(
-            "member '{meerkat_id}' in mob '{mob_id}' has no transport public key"
-        ))
-    })?;
-    let pubkey = crate::auth::peer_keys::decode_pubkey_b64(pubkey_b64).map_err(|err| {
+    let (peer_id, pubkey_b64) = match entry.peer_id() {
+        Some(peer_id) => {
+            let pubkey_b64 = entry.transport_public_key().ok_or_else(|| {
+                CrossMobError::PeerSpec(format!(
+                    "member '{meerkat_id}' in mob '{mob_id}' has no transport public key"
+                ))
+            })?;
+            (peer_id.to_string(), pubkey_b64.to_string())
+        }
+        // No comms runtime of the member is live (a seat no delivery has
+        // woken yet, or a released member): the endpoint MobMachine records
+        // for it, which a live peer trusts at once. Nothing is woken.
+        None => {
+            crate::runtime::cross_mob_control::recorded_member_comms_identity(handle, meerkat_id)
+                .await
+                .map_err(CrossMobError::Mob)?
+                .ok_or_else(|| CrossMobError::NoCommsInfo {
+                    member_id: meerkat_id.to_string(),
+                    mob_id: mob_id.to_string(),
+                })?
+        }
+    };
+    let pubkey = crate::auth::peer_keys::decode_pubkey_b64(&pubkey_b64).map_err(|err| {
         CrossMobError::PeerSpec(format!(
             "member '{meerkat_id}' in mob '{mob_id}' has invalid transport public key: {err}"
         ))
@@ -563,7 +575,7 @@ async fn member_peer_info(
         peer_id,
         comms_name,
         pubkey,
-        pubkey_b64: pubkey_b64.to_string(),
+        pubkey_b64,
     })
 }
 

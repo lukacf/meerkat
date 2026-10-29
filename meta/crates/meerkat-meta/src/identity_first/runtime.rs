@@ -12409,7 +12409,8 @@ impl IdentityRuntime {
     ///   not be read against;
     /// - `StaleScope`: another incarnation of the identity is current
     ///   (`RuntimeId` when it runs under another runtime id,
-    ///   `LeaseFencingToken` when only Core's fence moved).
+    ///   `LeaseFencingToken` when the runtime id is the same but Core's fence
+    ///   or the scope's binding moved).
     ///
     /// `Retire` is Core's release failing, or the tracked operation ending
     /// without a result.
@@ -15284,7 +15285,9 @@ impl IdentityRuntime {
     /// delivery scope. Core's dispatch materializes a Dormant member before
     /// it delivers; Meta wakes nothing here. An identity Core holds no
     /// member for refuses typed with its view state (the caller seated it
-    /// first, so Core let it go meanwhile).
+    /// first, so Core let it go meanwhile). A runtime with no session bridge
+    /// has no Core mob that could hold or wake the member: it refuses naming
+    /// the missing bridge, never with a member state no Core reported.
     ///
     /// A bound session Core holds no durable copy of is Core's verdict too:
     /// its wake repoints the member to a successor, or holds it Broken with
@@ -15301,6 +15304,7 @@ impl IdentityRuntime {
         ),
         IdentityRuntimeError,
     > {
+        self.core_bridge(identity)?;
         let Some(live) = self.core_live_member(identity).await? else {
             return Err(self.inactive_delivery_refusal(identity, operation).await);
         };

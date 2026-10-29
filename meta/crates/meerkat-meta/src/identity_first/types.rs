@@ -1855,8 +1855,10 @@ pub struct RetiredIdentityMember {
     /// registration, even one that resumes the same session. `None` names
     /// no registration: this gateway observed none for the incarnation (no
     /// local registration, as for a peer-only or placed member, or a bridge
-    /// without a runtime machine), or the registration was still current
-    /// after Core's retire answered, so the retire did not end it. Compare
+    /// without a runtime machine), the member was not materialized (a seat
+    /// no delivery has woken yet, or a member already released), so the
+    /// retire ended none, or the registration was still current after
+    /// Core's retire answered, so the retire did not end it. Compare
     /// registrations with `==` only: a successor that resumes the same
     /// session can carry the same session id and epoch (all its `Debug`
     /// output shows), and only `==` tells the two apart.

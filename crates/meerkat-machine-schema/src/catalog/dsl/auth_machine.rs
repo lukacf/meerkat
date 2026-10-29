@@ -117,7 +117,11 @@ macro_rules! auth_catalog_machine_dsl {
                 // after a restore (durable markers never hold it).
                 // MarkReauthRequired, RefreshFailed, ClearCredentialLifecycle
                 // and the release transitions keep it, so the machine itself
-                // remembers which value was refused or logged out.
+                // remembers which value was refused or logged out. A
+                // publication that names no value (a login's or a store's
+                // Acquire, CompleteRefresh, a restore, the rollback of a
+                // failed login) clears it, so a value refused before it is
+                // published, and tried, once more.
                 #[redacted] credential_material_fingerprint: Option<String>,
                 oauth_browser_flow_ids: Set<String>,
                 oauth_browser_flow_providers: Map<String, String>,

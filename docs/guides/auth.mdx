@@ -381,6 +381,13 @@ What each refusal looks like:
 | Rate limited, or GitHub unavailable | `refresh_failed` | the identity lookup waits for the time GitHub states, for every session of the account; a rate-limited model listing fails nothing and is asked again after that time |
 | Logged out (`rkat auth logout global:copilot_openai`) | `lease_absent` | until a different token value appears or the process restarts |
 
+Which token value was refused or logged out is remembered only in the
+process's memory, by the account's AuthMachine lease. A restart, or any other
+publication on the account that names no token value (a sign-in, a stored
+token, a refresh, the rollback of a failed login), replaces that record: a
+refused token is then sent once more, and refused again, and a logged-out
+token is used again.
+
 `rkat auth status copilot_openai` shows `auth_method: github_copilot_token`
 and the account's lifecycle (`absent` before a process first uses a token from
 the environment, then `valid`, `reauth_required` or `released`).

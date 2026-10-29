@@ -2681,6 +2681,12 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
     /// and it is never published again. The caller then takes the usual
     /// credential-use admission.
     ///
+    /// The record of the value lives in the lease's in-process AuthMachine
+    /// state only. Any publication that names no value (a login's or a
+    /// store's `acquire_lease`, a completed refresh, a restore, the rollback
+    /// of a failed login) replaces it, so a value refused before such a
+    /// publication is published, and used, once more.
+    ///
     /// Production handles must implement this through generated AuthMachine
     /// authority. The default fails closed so a handwritten handle cannot
     /// become a publication reducer.

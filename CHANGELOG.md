@@ -87,8 +87,11 @@ them.
   `Acquire`. A value that was refused (`reauth_required`) or logged out
   (`released`) stays so until a different value appears, also for every
   machine that shares the lease's durable store; a declared freshness window
-  that ran out republishes the same value. `CredentialFingerprint` (an opaque
-  SHA-256 fingerprint with a redacted `Debug` and no `Display`) and
+  that ran out republishes the same value. The record is in-process
+  AuthMachine state: a restart, or a publication that names no value (a
+  login, a stored token, the rollback of a failed login), replaces it, and
+  the refused value is then published once more. `CredentialFingerprint`
+  (an opaque SHA-256 fingerprint with a redacted `Debug` and no `Display`) and
   `SourceCredentialPublication` are new. The method's default fails closed,
   so other `AuthLeaseHandle` implementations are unaffected.
 

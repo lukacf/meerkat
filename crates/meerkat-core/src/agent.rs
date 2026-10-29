@@ -4882,6 +4882,10 @@ where
     client: Arc<C>,
     tools: Arc<T>,
     tool_scope: ToolScope,
+    /// The build's scoped tool grant gate: each model-request boundary opens
+    /// the gated names a live grant admits. The dispatch gate carries the
+    /// same binding and adjudicates every gated call again.
+    pub(crate) tool_grant_gate: Option<crate::tool_grant::ToolGrantGate>,
     store: Arc<S>,
     session: Session,
     budget: Budget,

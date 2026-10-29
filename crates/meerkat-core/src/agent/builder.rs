@@ -100,6 +100,7 @@ pub struct AgentBuilder {
     pub(super) tool_visibility_owner: Option<GeneratedToolVisibilityOwner>,
     pub(super) capability_base_filter_override: Option<ToolFilter>,
     pub(super) policy_base_filter: ToolFilter,
+    pub(super) tool_grant_gate: Option<crate::tool_grant::ToolGrantGate>,
     pub(super) initial_visibility_authority: Option<InheritedToolVisibilityAuthority>,
     pub(super) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
     pub(super) model_routing_handle: Option<Arc<dyn crate::handles::ModelRoutingHandle>>,
@@ -274,6 +275,7 @@ impl AgentBuilder {
             tool_visibility_owner: None,
             capability_base_filter_override: None,
             policy_base_filter: ToolFilter::All,
+            tool_grant_gate: None,
             initial_visibility_authority: None,
             turn_state_handle: None,
             model_routing_handle: None,
@@ -564,6 +566,11 @@ impl AgentBuilder {
             self.requires_explicit_runtime_tool_visibility_owner();
         let capability_base_filter_override = self.capability_base_filter_override.clone();
         let policy_base_filter = self.policy_base_filter.clone();
+        let tool_grant_gate = self.tool_grant_gate.clone();
+        let tool_grant_gated_names = tool_grant_gate
+            .as_ref()
+            .map(|gate| gate.table().gated_names())
+            .unwrap_or_default();
         let initial_visibility_authority = self.initial_visibility_authority.clone();
         let tool_visibility_owner = self.tool_visibility_owner.clone();
         if runtime_tool_visibility_owner_required && tool_visibility_owner.is_none() {
@@ -728,6 +735,7 @@ impl AgentBuilder {
             client,
             tools,
             tool_scope,
+            tool_grant_gate,
             store,
             session,
             budget,
@@ -995,6 +1003,11 @@ impl AgentBuilder {
         // session recomputes it from the policy it is rebuilt with.
         let policy_base_filter_changed = visibility_state.policy_base_filter != policy_base_filter;
         visibility_state.policy_base_filter = policy_base_filter;
+        // The grant gate is this build's too, and the generated owner holds
+        // it: a restored projection's gate fields are the previous build's.
+        // The gate is installed below, every gated name closed.
+        visibility_state.tool_grant_gated_names.clear();
+        visibility_state.tool_grant_open_names.clear();
 
         let visibility_state_requires_restore = visibility_state
             != SessionToolVisibilityState::default()
@@ -1007,6 +1020,19 @@ impl AgentBuilder {
         {
             return Err(AgentBuildPolicyError::ToolVisibilityRestore {
                 message: err.to_string(),
+            });
+        }
+        // Install this build's grant gate: every gated name starts closed
+        // until a boundary admits a live grant. A runtime-backed build always
+        // replaces the gate, so a rebuild without one clears the last
+        // build's. An owner without gate authority refuses a non-empty gate.
+        if (runtime_tool_visibility_owner_required || !tool_grant_gated_names.is_empty())
+            && let Err(err) = agent
+                .tool_scope
+                .replace_tool_grant_gate(tool_grant_gated_names)
+        {
+            return Err(AgentBuildPolicyError::ToolVisibilityRestore {
+                message: format!("failed to install the tool grant gate: {err}"),
             });
         }
         // Runtime-backed persistence must always materialize the generated
@@ -1172,6 +1198,18 @@ impl AgentBuilder {
     /// every denied call.
     pub fn with_policy_base_filter(mut self, filter: ToolFilter) -> Self {
         self.policy_base_filter = filter;
+        self
+    }
+
+    /// Install the build's scoped tool grant gate.
+    ///
+    /// The gated names start closed: the generated visibility owner hides
+    /// them until a model-request boundary finds a live grant that opens
+    /// them. Like the policy filter, the gate is this build's, recomputed on
+    /// every build, a resume included. The factory installs the same gate on
+    /// the outermost dispatch gate, which adjudicates every gated call.
+    pub fn with_tool_grant_gate(mut self, gate: crate::tool_grant::ToolGrantGate) -> Self {
+        self.tool_grant_gate = Some(gate);
         self
     }
 

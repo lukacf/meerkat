@@ -1543,6 +1543,7 @@ impl AgentBuildConfig {
             // handed to; a projection never carries it to another build.
             prepared_controller: None,
             host_prompt_sections: self.host_prompt_sections,
+            grant_gated_tools: None,
         }
     }
 }
@@ -9363,6 +9364,7 @@ impl AgentFactory {
                     ),
                     application_tool_policy: build_config.application_tool_policy.clone(),
                     active_skills: active_skill_ids.clone(),
+                    grant_gated: Default::default(),
                 },
                 keep_alive: build_config.keep_alive,
                 comms_name: build_config.comms_name.clone(),

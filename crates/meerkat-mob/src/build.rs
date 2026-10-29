@@ -1515,6 +1515,7 @@ mod tests {
                     spawn_tool_access_policy: None,
                     application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                     active_skills: None,
+                    grant_gated: Default::default(),
                 },
                 keep_alive: false,
                 comms_name: Some("test-mob/lead/lead-1".to_string()),

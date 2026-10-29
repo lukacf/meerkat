@@ -12158,6 +12158,7 @@ mod tests {
                             active_skills: build
                                 .as_ref()
                                 .and_then(|options| options.preload_skills.clone()),
+                            grant_gated: Default::default(),
                         },
                         keep_alive: is_keep_alive,
                         comms_name: build

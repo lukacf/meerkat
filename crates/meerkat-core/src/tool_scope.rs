@@ -300,6 +300,44 @@ pub trait ToolVisibilityOwner: Send + Sync {
         })
     }
 
+    /// Replace this build's grant gate: the names it marked grant-gated.
+    /// Every open name closes, so a new build starts closed.
+    ///
+    /// The default has no gate authority: it accepts an empty gate and
+    /// refuses any other, so a gated build fails closed on such an owner.
+    fn replace_tool_grant_gate(
+        &self,
+        gated: BTreeSet<ToolName>,
+    ) -> Result<(), ToolScopeApplyError> {
+        if gated.is_empty() {
+            Ok(())
+        } else {
+            Err(ToolScopeApplyError::Owner {
+                message: "generated MeerkatMachine tool grant gate authority is required"
+                    .to_string(),
+            })
+        }
+    }
+
+    /// Apply the gated names a live grant opens at this boundary. A set that
+    /// names an ungated name is refused, and the gate stays as it was.
+    ///
+    /// The default opens nothing: it accepts an empty set and refuses any
+    /// other, so the gate stays closed.
+    fn apply_tool_grant_open_set(
+        &self,
+        open: BTreeSet<ToolName>,
+    ) -> Result<(), ToolScopeApplyError> {
+        if open.is_empty() {
+            Ok(())
+        } else {
+            Err(ToolScopeApplyError::Owner {
+                message: "generated MeerkatMachine tool grant gate authority is required"
+                    .to_string(),
+            })
+        }
+    }
+
     fn requires_filter_witnesses(&self) -> bool {
         false
     }
@@ -386,6 +424,20 @@ impl GeneratedToolVisibilityOwner {
 
     pub fn clear_turn_overlay(&self) -> Result<ToolScopeTurnOverlay, ToolScopeStageError> {
         self.owner.clear_turn_overlay()
+    }
+
+    pub fn replace_tool_grant_gate(
+        &self,
+        gated: BTreeSet<ToolName>,
+    ) -> Result<(), ToolScopeApplyError> {
+        self.owner.replace_tool_grant_gate(gated)
+    }
+
+    pub fn apply_tool_grant_open_set(
+        &self,
+        open: BTreeSet<ToolName>,
+    ) -> Result<(), ToolScopeApplyError> {
+        self.owner.apply_tool_grant_open_set(open)
     }
 
     pub fn requires_filter_witnesses(&self) -> bool {
@@ -1990,6 +2042,9 @@ impl ToolScope {
                 require_filter_witnesses,
             ),
         ];
+        if let Some(closed) = Self::closed_grant_gate_filter(visibility_state) {
+            filters.push(closed);
+        }
         if let Some(allow) = &state.active_turn_allow {
             filters.push(ToolFilter::Allow(allow.clone()));
         }
@@ -1997,6 +2052,16 @@ impl ToolScope {
             filters.push(ToolFilter::Deny(state.active_turn_deny.clone()));
         }
         Self::compose(&filters)
+    }
+
+    /// The grant gate's layer: deny every gated name no live grant opened.
+    /// Like the policy layer it needs no witnesses, since a gated name may
+    /// not be mounted yet.
+    fn closed_grant_gate_filter(
+        visibility_state: &SessionToolVisibilityState,
+    ) -> Option<ToolFilter> {
+        let closed = visibility_state.closed_tool_grant_gated_names();
+        (!closed.is_empty()).then(|| ToolFilter::Deny(closed.into_iter().collect()))
     }
 
     fn current_projection_tool<'a>(state: &'a ToolScopeState, name: &str) -> Option<&'a ToolDef> {
@@ -2258,7 +2323,7 @@ impl ToolScope {
             .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
         let visibility_state = self.visibility_owner.visibility_state()?;
         let require_filter_witnesses = self.visibility_owner.requires_filter_witnesses();
-        Ok(Self::compose(&[
+        let mut filters = vec![
             Self::effective_filter_for_current_projection(
                 &state,
                 &visibility_state,
@@ -2282,8 +2347,77 @@ impl ToolScope {
                 &visibility_state.staged_filter,
                 require_filter_witnesses,
             ),
-        ])
-        .allows(name))
+        ];
+        // A closed gated name stays closed to the deferred catalog too: only
+        // a live grant opens it, at a boundary.
+        if let Some(closed) = Self::closed_grant_gate_filter(&visibility_state) {
+            filters.push(closed);
+        }
+        Ok(Self::compose(&filters).allows(name))
+    }
+
+    /// Replace this build's grant gate on the generated visibility owner:
+    /// the names the build marked grant-gated. Every open name closes.
+    pub fn replace_tool_grant_gate(
+        &self,
+        gated: BTreeSet<ToolName>,
+    ) -> Result<(), ToolScopeApplyError> {
+        if !gated.is_empty() {
+            self.ensure_generated_authority_for_apply("installing a tool grant gate")?;
+        }
+        self.visibility_owner.replace_tool_grant_gate(gated)
+    }
+
+    /// Apply the gated names a live grant opens at this boundary. The
+    /// generated owner refuses a name the build did not gate.
+    pub fn apply_tool_grant_open_set(
+        &self,
+        open: BTreeSet<ToolName>,
+    ) -> Result<(), ToolScopeApplyError> {
+        if !open.is_empty() {
+            self.ensure_generated_authority_for_apply("opening grant-gated tools")?;
+        }
+        self.visibility_owner.apply_tool_grant_open_set(open)
+    }
+
+    /// The gated names a live grant opened at the last boundary.
+    pub fn tool_grant_open_names(&self) -> Result<BTreeSet<ToolName>, ToolScopeApplyError> {
+        self.visibility_owner
+            .visibility_state()
+            .map(|visibility_state| visibility_state.tool_grant_open_names)
+    }
+
+    /// Whether the closed grant gate is the only layer hiding `name` at the
+    /// committed boundary: the name is gated, no live grant opened it, and
+    /// it would be visible had one opened it. Such a call goes on to the
+    /// dispatch gate, which adjudicates the grants and refuses it there.
+    pub fn hidden_only_by_closed_grant_gate(
+        &self,
+        name: &str,
+    ) -> Result<bool, ToolScopeApplyError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+        let mut visibility_state = self.visibility_owner.visibility_state()?;
+        if !visibility_state.tool_grant_gated_names.contains(name)
+            || visibility_state.tool_grant_open_names.contains(name)
+        {
+            return Ok(false);
+        }
+        visibility_state
+            .tool_grant_open_names
+            .insert(ToolName::from(name));
+        let composed = Self::compose_state_filters(
+            &state,
+            &visibility_state,
+            self.visibility_owner.requires_filter_witnesses(),
+        );
+        Ok(state.base_tools.iter().any(|tool| {
+            tool.name == name
+                && Self::tool_visibility(&state, &visibility_state, &composed, tool)
+                    == crate::tool_catalog::ToolCatalogVisibility::Visible
+        }))
     }
 
     /// Return the current base tool snapshot.

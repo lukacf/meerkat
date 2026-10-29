@@ -7428,6 +7428,67 @@ where
         ctx.tool_call_count += 1;
         Ok(Some(async_ops))
     }
+    /// Boundary step: the grant gate opens the gated names a live grant
+    /// admits now. A gate that cannot read its grants, or whose open set the
+    /// visibility owner refuses, closes every gated name and warns; the run
+    /// goes on with the gated names hidden until the next boundary.
+    async fn apply_tool_grant_open_set_at_boundary(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+        gate: &crate::tool_grant::ToolGrantGate,
+    ) {
+        let failure = match gate.open_names().await {
+            Ok(open) => self
+                .tool_scope
+                .apply_tool_grant_open_set(open.into_inner().into_iter().collect())
+                .err()
+                .map(|error| {
+                    tracing::warn!(
+                        error = %error,
+                        "the visibility owner refused the tool grant open set"
+                    );
+                    "the tool grant open set was refused"
+                }),
+            Err(refusal) => {
+                tracing::warn!(
+                    error = %refusal,
+                    "tool grants could not be read at the model-request boundary"
+                );
+                Some(refusal.code())
+            }
+        };
+        let Some(failure) = failure else {
+            return;
+        };
+        // The empty set is within every gate.
+        if let Err(error) = self.tool_scope.apply_tool_grant_open_set(BTreeSet::new()) {
+            tracing::warn!(error = %error, "failed to close the tool grant gate");
+        }
+        let status_info = ToolConfigChangeStatus::warning_failed_closed(format!(
+            "tool grants unavailable ({failure}); tools available by grant stay closed"
+        ));
+        let payload = ToolConfigChangedPayload::new(
+            ToolConfigChangeOperation::Reload,
+            "tool_grants",
+            status_info,
+        )
+        .with_applied_at_turn(Some(ctx.turn_count))
+        .with_domain(Some(ToolConfigChangeDomain::ToolScope));
+        emit_phase_event!(
+            self,
+            ctx,
+            AgentEvent::ToolConfigChanged {
+                payload: payload.clone(),
+            }
+        );
+        self.session.push(synthetic_notice_block_message(
+            SystemNoticeKind::ToolScopeWarning,
+            "Tool grants could not be checked; tools available by grant stay closed until the next boundary."
+                .to_string(),
+            crate::types::SystemNoticeBlock::ToolConfig { payload },
+        ));
+    }
+
     /// Boundary step 4: apply tool scope staged updates atomically at
     /// the CallingLlm boundary and project the visible tool set.
     async fn apply_calling_llm_tool_scope(
@@ -7465,6 +7526,12 @@ where
                 catalog_mode,
             );
             let previous_visibility_state = self.tool_scope.visibility_state().ok();
+            // The grant gate opens the gated names a live grant admits before
+            // the staged visibility promotes, so the projected set and its
+            // change event include them.
+            if let Some(gate) = self.tool_grant_gate.clone() {
+                self.apply_tool_grant_open_set_at_boundary(ctx, &gate).await;
+            }
             let apply_result = match self.tool_scope.promote_staged_visibility() {
                 Ok(visibility_state) => {
                     if let Some(previous_visibility_state) = previous_visibility_state.as_ref() {
@@ -9474,11 +9541,19 @@ where
                 continue;
             }
 
-            if let Err(error) = precheck_visible_tool_call(
-                tools_ref.as_ref(),
-                &visible_tool_names,
-                tc.name.as_str(),
-            ) {
+            // A gated name hidden only by its closed grant gate goes on to the
+            // dispatch gate, which adjudicates the grants and refuses it there:
+            // one refusal site, one error shape and one audit row.
+            let precheck = if self.call_reaches_tool_grant_gate(tc.name.as_str()) {
+                Ok(())
+            } else {
+                precheck_visible_tool_call(
+                    tools_ref.as_ref(),
+                    &visible_tool_names,
+                    tc.name.as_str(),
+                )
+            };
+            if let Err(error) = precheck {
                 if matches!(
                     error,
                     ToolError::AccessDenied { .. } | ToolError::NotFound { .. }

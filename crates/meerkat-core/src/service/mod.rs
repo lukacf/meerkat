@@ -1337,6 +1337,11 @@ pub struct SessionBuildOptions {
     /// contracts and durable metadata; its owner must reconstruct it from
     /// generated authority after restart.
     pub tool_dispatch_admission: Option<Arc<dyn crate::ToolDispatchAdmission>>,
+    /// Tool families and tool names this build marks grant-gated: mounted,
+    /// but hidden and refused until a live scoped tool grant opens them.
+    /// Recorded in the session's tooling, so a resume that leaves this unset
+    /// restores the recorded gate. A gate needs the runtime's grant service.
+    pub grant_gated_tools: Option<crate::tool_grant::GrantGatedTools>,
     /// Stable application consequence-policy identity for this session.
     pub application_tool_policy: crate::ApplicationToolPolicyBinding,
     /// Host-scoped in-process registry. Executable policy is never serialized.
@@ -1964,6 +1969,9 @@ impl ParentToolCompositionAuthority {
         }
     }
 
+    /// The parent's visible tools, without the names a scoped tool grant
+    /// opened: a grant opens its subject's gate only, so no child inherits
+    /// a grant-opened tool through its ceiling.
     fn visible_tool_snapshot_result(
         &self,
     ) -> Result<Vec<Arc<ToolDef>>, crate::tool_scope::ToolScopeStageError> {
@@ -1972,9 +1980,18 @@ impl ParentToolCompositionAuthority {
                 message: "parent tool scope is unavailable".to_string(),
             }
         })?;
+        let grant_opened = tool_scope
+            .tool_grant_open_names()
+            .map_err(Self::map_visible_tools_error)?;
         tool_scope
             .visible_tools_result()
-            .map(|tools| tools.iter().cloned().collect())
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter(|tool| !grant_opened.contains(tool.name.as_str()))
+                    .cloned()
+                    .collect()
+            })
             .map_err(Self::map_visible_tools_error)
     }
 
@@ -2331,6 +2348,7 @@ impl Default for SessionBuildOptions {
             tool_access_policy: None,
             declared_tool_restriction: None,
             tool_dispatch_admission: None,
+            grant_gated_tools: None,
             application_tool_policy: crate::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
             shell_env: None,
@@ -2424,6 +2442,7 @@ impl std::fmt::Debug for SessionBuildOptions {
                 "tool_dispatch_admission",
                 &self.tool_dispatch_admission.is_some(),
             )
+            .field("grant_gated_tools", &self.grant_gated_tools)
             .field("shell_timeout_secs", &self.shell_timeout_secs)
             .field("call_timeout_override", &self.call_timeout_override)
             .field("resume_override_mask", &self.resume_override_mask)
@@ -4061,6 +4080,127 @@ impl dyn SessionService {
 )]
 mod tests {
     use super::*;
+
+    /// A visibility owner holding one fixed projection.
+    struct FixedVisibilityOwner(crate::SessionToolVisibilityState);
+
+    impl crate::tool_scope::ToolVisibilityOwner for FixedVisibilityOwner {
+        fn visibility_state(
+            &self,
+        ) -> Result<crate::SessionToolVisibilityState, crate::tool_scope::ToolScopeApplyError>
+        {
+            Ok(self.0.clone())
+        }
+
+        fn replace_visibility_state(
+            &self,
+            _visibility_state: crate::SessionToolVisibilityState,
+        ) -> Result<(), crate::tool_scope::ToolScopeApplyError> {
+            Ok(())
+        }
+
+        fn stage_persistent_filter(
+            &self,
+            _filter: crate::tool_scope::ToolFilter,
+            _witnesses: BTreeMap<crate::types::ToolName, crate::ToolVisibilityWitness>,
+        ) -> Result<crate::tool_scope::ToolScopeRevision, crate::tool_scope::ToolScopeStageError>
+        {
+            Ok(crate::tool_scope::ToolScopeRevision(0))
+        }
+
+        fn stage_requested_deferred_names(
+            &self,
+            _names: BTreeSet<crate::types::ToolName>,
+        ) -> Result<crate::tool_scope::ToolScopeRevision, crate::tool_scope::ToolScopeStageError>
+        {
+            Ok(crate::tool_scope::ToolScopeRevision(0))
+        }
+
+        fn request_deferred_tools(
+            &self,
+            _authorities: Vec<crate::DeferredToolLoadAuthority>,
+        ) -> Result<crate::tool_scope::ToolScopeRevision, crate::tool_scope::ToolScopeStageError>
+        {
+            Ok(crate::tool_scope::ToolScopeRevision(0))
+        }
+
+        fn boundary_applied(
+            &self,
+        ) -> Result<crate::SessionToolVisibilityState, crate::tool_scope::ToolScopeApplyError>
+        {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A grant opens its subject's gate only: the parent sees the
+    /// grant-opened name, but neither its snapshot nor the ceiling it hands
+    /// an inheriting child carries it.
+    #[test]
+    fn inherit_parent_snapshot_excludes_grant_opened_names() {
+        let tools: Arc<[Arc<ToolDef>]> = ["read_file", "shell", "shell_jobs"]
+            .into_iter()
+            .map(|name| {
+                Arc::new(ToolDef::new(
+                    name,
+                    format!("test tool {name}"),
+                    serde_json::json!({ "type": "object" }),
+                ))
+            })
+            .collect();
+        let projection = crate::SessionToolVisibilityState {
+            tool_grant_gated_names: ["shell", "shell_jobs"]
+                .into_iter()
+                .map(crate::types::ToolName::from)
+                .collect(),
+            tool_grant_open_names: ["shell"]
+                .into_iter()
+                .map(crate::types::ToolName::from)
+                .collect(),
+            ..Default::default()
+        };
+        let owner = crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::new(
+            FixedVisibilityOwner(projection),
+        ));
+        let scope = crate::ToolScope::new_with_visibility_owner(
+            tools,
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+            owner,
+        )
+        .expect("tool scope");
+        let visible = scope.visible_tool_names().expect("visible names");
+        assert!(
+            visible.contains("shell"),
+            "the grant opened shell for the parent"
+        );
+        assert!(
+            !visible.contains("shell_jobs"),
+            "a gated name no grant opened stays hidden"
+        );
+
+        let authority = ParentToolCompositionAuthority::new_from_agent_factory_composition(None);
+        authority.set_tool_scope_from_agent_factory_composition(&scope);
+        let snapshot = authority
+            .snapshot_visible_tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(snapshot, ["read_file"]);
+
+        let ceiling = authority
+            .authorize_inherited_tool_visibility_with_overlays(None, None)
+            .expect("inherited ceiling");
+        match ceiling.filter() {
+            crate::tool_scope::ToolFilter::Allow(names) => {
+                assert!(names.contains("read_file"));
+                assert!(
+                    !names.contains("shell"),
+                    "a child never inherits a grant-opened tool"
+                );
+            }
+            other => panic!("expected an allow ceiling, got {other:?}"),
+        }
+    }
 
     fn settlement_marker() -> crate::ToolDispatchSettlementFailure {
         crate::ToolDispatchSettlementFailure {

@@ -260,15 +260,17 @@ fn github_rate_limited(status: u16, remaining: Option<&str>, has_retry_after: bo
 
 pub struct CopilotRuntime {
     accounts: Mutex<BTreeMap<CopilotAccountCacheKey, Weak<CopilotAccountState>>>,
-    /// Rate-limit pacing per credential account, held for the runtime's life
-    /// so it outlives the account states that read it. The key is the
-    /// account alone (the credential identity the routes share and the
-    /// AuthMachine lease key comes from), not the persistence authority:
-    /// every account state of one account shares one pause, whichever
-    /// credential store it was built over. The map stays bounded: it holds
-    /// one small entry per credential account a route was resolved for, a
-    /// set the realm configuration fixes, and nothing per request, session or
-    /// persistence instance.
+    /// Pacing per credential account (GitHub's rate limits on the identity
+    /// lookup, and the pause on re-reads of a source whose token the lease
+    /// withdrew), held for the runtime's life so it outlives the account
+    /// states that read it. The key is the account alone (the credential
+    /// identity the routes share and the AuthMachine lease key comes from),
+    /// not the persistence authority: every account state of one account
+    /// shares one pacing, whichever credential store it was built over. The
+    /// map stays bounded: it holds one small entry per credential account a
+    /// route was resolved for, a set the realm configuration fixes, and
+    /// nothing per request, session or persistence instance; an entry's
+    /// re-read pauses exist only while a lease registry withdraws the token.
     pacing: Mutex<BTreeMap<AuthCredentialIdentity, Arc<CopilotAccountPacing>>>,
     transport: Arc<dyn CopilotHttpTransport>,
 }
@@ -1283,14 +1285,17 @@ struct CopilotAccountState {
     next_refresh_flight: AtomicU64,
     last_refresh_outcome: Mutex<Option<CopilotRefreshOutcome>>,
     next_generation: AtomicU64,
-    /// Operator-token mode: the account's rate-limit pacing, shared with
-    /// every later account state of the same account.
+    /// Operator-token mode: the account's pacing (rate limits and withdrawn
+    /// re-reads), shared with every later account state of the same account.
     pacing: Arc<CopilotAccountPacing>,
 }
 
-/// Rate-limit pacing of an operator-token account. The runtime keeps it per
-/// account for its own life: a resolve that fails on GitHub's rate limit
-/// drops its account state, and the next one must still wait.
+/// Pacing of an operator-token account: GitHub's rate limits on its identity
+/// lookup, and re-reads of a source that runs something while the lease
+/// withdraws the token it gave (GitHub refused it, or a logout released it).
+/// The runtime keeps it per account for its own life: a resolve that fails
+/// on a rate limit or on a withdrawn token drops its account state, and the
+/// next one must still wait.
 #[derive(Default)]
 struct CopilotAccountPacing {
     /// No identity lookup before this instant: GitHub rate limited the last

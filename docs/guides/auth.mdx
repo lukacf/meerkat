@@ -344,12 +344,15 @@ source = { kind = "external_resolver", handle = "copilot-token" }
 ```
 
 A command source with `refresh_interval_ms` publishes each token with that
-lifetime: a minute before it ends, the next request runs the command again.
-`refresh_interval_ms` must therefore be at least `61000`: the lifetime counts
-in whole seconds and must outlast that minute. A shorter one is refused before
-the command runs, as `unsupported_combination` (see below), rather than
-running it on every request. An external resolver is asked again after the
-Copilot API refuses a token, so a rotated token heals that request.
+lifetime: a minute before it ends, the next request runs the command again,
+so the command runs again `refresh_interval_ms` minus one minute after each
+run. `refresh_interval_ms` must therefore be at least `61000` (the lifetime
+counts in whole seconds and must outlast that minute), and several minutes
+serve better: `61000` runs the command again about every second, `600000`
+about every nine minutes. A shorter one is refused before the command runs,
+as `unsupported_combination` (see below), rather than running it on every
+request. An external resolver is asked again after the Copilot API refuses a
+token, so a rotated token heals that request.
 
 Token kinds (read from the documented prefix only):
 

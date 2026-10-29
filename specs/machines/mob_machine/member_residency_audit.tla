@@ -753,14 +753,15 @@ SSeatAs(id, ep, ex) ==
     CommitDormantSeatRunning(id, SIncarnation(id).rid, SIncarnation(id).fence, 0, FALSE, AuditMode,
                              SIncarnation(id).session, ep, FALSE, FALSE, id = Id2, TRUE, ex)
 SSeat ==
-    \E id \in {Id1, Id2}, ep \in {Some(E1Inproc), Some(E2Inproc), None}, ex \in SExemptInputs(id) :
-        SSeatAs(id, ep, ex)
+    \E id \in {Id1, Id2} :
+        \E ep \in {Some(E1Inproc), Some(E2Inproc), None}, ex \in SExemptInputs(id) :
+            SSeatAs(id, ep, ex)
 
 \* The embodied spawn commit, its input naming the member's exemption (ex).
 SCommitAs(id, ex) ==
     CommitSpawnMembershipFresh(id, SIncarnation(id).rid, SIncarnation(id).fence, 0, AuditDigest, FALSE, AuditMode,
                                Some(SIncarnation(id).session), None, None, None, None, None, None, ex)
-SCommit == \E id \in {Id1, Id2}, ex \in SExemptInputs(id) : SCommitAs(id, ex)
+SCommit == \E id \in {Id1, Id2} : \E ex \in SExemptInputs(id) : SCommitAs(id, ex)
 
 SReady == \E id \in {Id1, Id2} : ObserveRuntimeReady(SIncarnation(id).rid, SIncarnation(id).fence, Epoch1)
 

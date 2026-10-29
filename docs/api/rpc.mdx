@@ -2118,8 +2118,10 @@ Errors use the standard codes: invalid params for a window that is past,
 empty, longer than the maximum or given twice or not at all, a target the
 session does not gate, family `names` in a request, and an unknown or
 malformed grant id; `SESSION_NOT_FOUND` for a grant to a session that does not
-exist or is archived; capability unavailable for an `identity` subject (this
-server grants to sessions only) or a store without grant support.
+exist or is archived; `SESSION_BUSY` when concurrent writers changed the grant
+under a grant or revoke twice, which a retry resolves; capability unavailable
+for an `identity` subject (this server grants to sessions only) or a store
+without grant support.
 
 The stock governed stdio pipe serves a fixed method set: it does not serve the
 `tool_grants/*` methods, and its `session/create` refuses `grant_gated_tools`

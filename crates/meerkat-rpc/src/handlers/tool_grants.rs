@@ -44,11 +44,14 @@ fn grant_error_to_response(id: Option<RpcId>, error_value: ToolGrantServiceError
         ToolGrantServiceError::InvalidWindow { .. }
         | ToolGrantServiceError::EmptyTarget
         | ToolGrantServiceError::NotFound { .. } => error::INVALID_PARAMS,
+        // Concurrent writers changed the row under this one twice: the
+        // busy class, which a retry resolves by reading the row afresh.
+        ToolGrantServiceError::Conflict { .. } => error::SESSION_BUSY,
         ToolGrantServiceError::Store(RuntimeStoreError::Unsupported(_)) => {
             meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
         }
-        // A concurrent writer twice, the clock, a row this binary cannot
-        // read, the machine or the store: the server's fault.
+        // The clock, a row this binary cannot read, the machine or the
+        // store: the server's fault.
         _ => error::INTERNAL_ERROR,
     };
     RpcResponse::error(id, code, error_value.to_string())
@@ -370,5 +373,27 @@ mod tests {
                 "{refused:?} must be refused"
             );
         }
+    }
+
+    /// A grant row that concurrent writers kept changing answers the busy
+    /// class, which a retry resolves; the other service faults stay
+    /// internal.
+    #[test]
+    fn a_contended_grant_write_answers_busy() {
+        let code = |error_value| {
+            grant_error_to_response(None, error_value)
+                .error
+                .map(|error| error.code)
+        };
+        assert_eq!(
+            code(ToolGrantServiceError::Conflict {
+                grant_id: "g1".to_string()
+            }),
+            Some(error::SESSION_BUSY)
+        );
+        assert_eq!(
+            code(ToolGrantServiceError::Clock),
+            Some(error::INTERNAL_ERROR)
+        );
     }
 }

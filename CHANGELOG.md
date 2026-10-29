@@ -188,7 +188,8 @@ them.
   `WireUnreadableToolGrant` and `WireUnreadableToolGrantAuditRow`. A request's
   subject and target (`ToolGrantSubjectRequest`, `ToolGrantTargetRequest`)
   refuse a kind or a field the server does not know, and every vocabulary a
-  result carries decodes a value a later version adds as `unknown`.
+  result carries decodes a value a later version adds as `unknown`. A grant or
+  revoke that concurrent writers keep changing answers `SESSION_BUSY`.
   `meerkat-runtime` adds `tool_grant::wire`, the
   projection of grants, listings and audit rows onto them, and `meerkat`'s
   `StagedSessionRegistry` gains `grant_gated_tools`. Python (`grant_tool`,

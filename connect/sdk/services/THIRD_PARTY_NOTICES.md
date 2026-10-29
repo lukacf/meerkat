@@ -18,7 +18,7 @@ code was copied. Contract references and scope are in the packaged GUIDE.md.
 The Calendar Events transport is an original Toolkit implementation informed
 by Google's REST contracts and existing Toolkit HTTP/cancellation patterns.
 Its source is copied unchanged. It contains no Google client-library or
-The paired host implementation body. Its original provenance is recorded in
+host implementation body. Its original provenance is recorded in
 `sdk/python/GOOGLE-CALENDAR.md` and
 `docs/coordination/20260930-upstream-review/calendar-transport-adoption` in the
 Toolkit repository. The standalone MCP profile exposes its list/get reads and
@@ -28,9 +28,9 @@ The Drive transport is likewise original Toolkit code using public Drive REST
 contracts and the existing borrowed-client request owner. Its provenance is in
 `sdk/python/GOOGLE-DRIVE.md`. The configured profile selects list/get metadata
 and bounded content reads, not its write or disk-publication methods. No Google
-CLI implementation bytes or the paired host private code are included.
+CLI implementation bytes or private host code are included.
 
-This wheel does not contain the paired host's private Gmail MIME builder, other private
+This wheel does not contain any host's private Gmail MIME builder, other private
 modules, Agno source or Activepieces source. It does not vendor its runtime
 dependencies. MCP, HTTPX, AnyIO, jsonschema, referencing and their transitive
 dependencies are separate distributions whose own installed metadata and license

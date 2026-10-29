@@ -8,12 +8,12 @@ strategy. No heuristic selector, automatic upgrade or fallback is supplied.
 
 | Explicit strategy | Available material | Boundary |
 | --- | --- | --- |
-| `toolkit-rest` | Python `GoogleDriveOperations` and a paired host adapter with bounded local source evidence | Guidance-only catalog activation; existing host owners supply authenticated account, policy, schemas and service binding |
+| `toolkit-rest` | Python `GoogleDriveOperations` and a host adapter with bounded local source evidence | Guidance-only catalog activation; existing host owners supply authenticated account, policy, schemas and service binding |
 
 This package declares no remote MCP endpoint or agent frontend. That says nothing
 about other products an agent might separately investigate. `guidance_only`
 means the current library selection API cannot activate this recipe; it does not
-mean the operation library or the paired host adapter is missing.
+mean the operation library or a host adapter is missing.
 
 ## Select the transport and its owners
 
@@ -95,8 +95,8 @@ Google's [upload guide](https://developers.google.com/workspace/drive/api/guides
 recommends resumable uploads for large or interruption-prone transfers. This
 transport does not implement resumable sessions, and local large-stream tests
 do not prove arbitrary live upload-size acceptance. Provider-specific export
-and operation limits still apply. Paths are fixed before suspension, but existing
-The paired host upload approval binds a path, not an immutable snapshot of file bytes.
+and operation limits still apply. Paths are fixed before suspension, but a host
+upload approval that names a path binds that path, not an immutable snapshot of file bytes.
 
 ## Authorization handoff and safe resumption
 
@@ -153,7 +153,7 @@ runner or new receipt store. Essential handoff/probe instructions also appear in
 the serialized strategy and prerequisites because discovery does not return
 this support document.
 
-## Outcomes and the paired host composition
+## Outcomes and host composition
 
 There is no automatic retry after auth failure, redirect, malformed response,
 lost reply or cancellation. Typed local write refusal before entry is
@@ -164,14 +164,14 @@ a cooperative deadline can be exceeded by cleanup. Success is the accepted
 operation response, not proof of downstream business completion. The host owns
 reconciliation, and uncertainty never authorizes a replacement write or fallback.
 
-The actual paired host adapter routes supported Drive commands through Toolkit
-before the generic subprocess/auth-retry path. Its owned HTTPX clients prepare
-at construction; borrowed clients must be prepared by their composing host
-before broker lookup. The existing GoogleTokenBroker supplies the selected
-credential and quota project. A typed 401 invalidates only that selected cached
+A host adapter routes supported Drive commands through Toolkit before any
+generic subprocess/auth-retry path. Its owned HTTPX clients prepare at
+construction; borrowed clients must be prepared by their composing host before
+broker lookup. The host's token broker supplies the selected credential and
+quota project. A typed 401 invalidates only that selected cached
 credential for a later explicit call, without replaying the failed operation.
 
-The paired host retains its account resolution, grants, approvals, query modes, manual
+The host retains its account resolution, grants, approvals, query modes, manual
 continuation maps, projection limits, source collection and ingestion. Catalog
 metadata does not change those owners or claim native account attestation,
 binding-generation continuity or complete host migration.
@@ -187,17 +187,16 @@ The [author source report](../../../../../../docs/coordination/20260930-upstream
 and [independent source closure](../../../../../../docs/coordination/20260930-upstream-review/drive-rest-transport-independent-review/REPORT-checkpoint-2.md)
 record 223 author cases and 59 independent cases respectively. Their scopes
 include preserved predecessor failures, local protocol/file cleanup and actual
-The paired host composition with synthetic or loopback providers. Overlapping cases
+host composition with synthetic or loopback providers. Overlapping cases
 are not additive evidence.
 
 The [combined private-artifact acceptance](../../../../../../docs/coordination/20260930-upstream-review/drive-rest-transport-independent-review/installed-proof/root-acceptance.json)
-binds the final combined HTTPX/Drive and the paired host composition, with receipt SHA256
+binds the final combined HTTPX/Drive and host composition, with receipt SHA256
 `6b43fcf88de0b71f202219954ef56fea3a2f89015984ad32f45c89bc7bf64f03`.
 
 | Accepted private artifact | SHA256 |
 | --- | --- |
 | Toolkit wheel | `155531563a87bec0f8ed6ac89af08824d1276efb52cc7bf480698370fd8c8a32` |
-| The paired host wheel | `e68e60495eef87ead970ceccd0d5b9818dcbd6e9fe348abe9a91e5c812befef7` |
 
 That receipt records 630 distinct installed cases plus 170 subtests, both wheel
 RECORD/payload checks and actual installed origins. The selected graph contains
@@ -225,6 +224,6 @@ Apache-2.0. Google's pages state CC BY 4.0 for prose and Apache-2.0 for samples,
 subject to page exceptions; service terms are separate. No Google CLI source or
 sample code was ported. The inspected gws executor informed the existing
 multipart/MIME contract and revealed the JSON media-output defect. That
-inspection is not a license grant for the paired host code. The complete private SDK
+inspection is not a license grant for any host's code. The complete private SDK
 artifact retains its existing mixed-source declaration and license files; this
 catalog entry does not relicense other modules.

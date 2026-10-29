@@ -21,7 +21,7 @@ CREATE TABLE egress_outputs (
                     created_at_ms INTEGER NOT NULL, cancel_requested INTEGER NOT NULL DEFAULT 0, thread_id TEXT,
                     UNIQUE (issuer_id, logical_key)
                 );
-INSERT INTO "egress_outputs" VALUES('19782917-fc07-4142-8599-077dc19e2337','hc-notify-v1:host/person/prior-request','host/person','prior-request','ae3b087411d78f3f77674e4e316ff92f7f199c4fbf62d1ca363ad237978ee51b','s','chat',5,0,1000,0,'47');
+INSERT INTO "egress_outputs" VALUES('19782917-fc07-4142-8599-077dc19e2337','notify-v1:host/person/prior-request','host/person','prior-request','ae3b087411d78f3f77674e4e316ff92f7f199c4fbf62d1ca363ad237978ee51b','s','chat',5,0,1000,0,'47');
 CREATE TABLE egress_parts (
                     output_id TEXT NOT NULL,
                     part_index INTEGER NOT NULL,

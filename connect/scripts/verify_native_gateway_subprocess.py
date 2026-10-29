@@ -5,7 +5,7 @@ This script builds nothing. The installed positive uses a controlled loopback
 model, acquires an offline public library package, and requests one live public
 Hacker News read through that package. Other cases send no model turn.
 Business acceptance requires the exact fresh input's finalized native result.
-Canonical test policy artifacts are NOT PairedHost compiler output.
+Canonical test policy artifacts are NOT host compiler output.
 Raw member construction proves native registration composition, not Scoped use.
 The held module proves actual constructor entry, not pre-module registration.
 """
@@ -483,7 +483,7 @@ def write_artifacts(root, mapped_member):
         {"path": "toolkit-local-policy.json", "sha256": digest(local)}]}))
     activation = root / "shared/activations/1.json"
     activation.write_bytes(canonical({"activation_id": "1", "policy_bundle": {
-        "path": "shared/policy/bundle.1", "policy_digest": "hc-policy-v1:sha256:" + digest(manifest)}}))
+        "path": "shared/policy/bundle.1", "policy_digest": "policy-v1:sha256:" + digest(manifest)}}))
     (root / "current").symlink_to("shared/activations/1.json")
     issuer = root / "issuer.key"
     issuer.write_bytes(bytes([17]) * 32)
@@ -897,7 +897,7 @@ def run_case(args, name, native=True, mismatch=False, loss=None):
     directory = args.output / name
     directory.mkdir()
     report = {"case": name, "status": "running", "native": native,
-              "fixture_policy_source": "canonical native test artifact shape; not PairedHost compiler",
+              "fixture_policy_source": "canonical native test artifact shape; not a host compiler",
               "scoped_execution_proven": False, "registration_before_held_module_proven": False}
     gateways = []
     try:
@@ -1015,7 +1015,7 @@ async def _run_shutdown_reader(args):
     directory.mkdir()
     events = EventLog(directory)
     report = {"case": "native-shutdown-held-reader", "status": "running",
-              "fixture_policy_source": "canonical native test artifact shape; not PairedHost compiler",
+              "fixture_policy_source": "canonical native test artifact shape; not a host compiler",
               "scoped_execution_proven": False, "production_observation_horizon_s": 312,
               "production_sdk_horizon_s": 347, "forced_cleanup": False}
     progress_event = asyncio.Event()
@@ -3344,7 +3344,7 @@ def main():
               "toolkit_gateway_sha256": digest(args.toolkit_gateway),
               "raw_gateway": str(args.raw_gateway) if args.raw_gateway is not None else None,
               "raw_gateway_sha256": digest(args.raw_gateway) if args.raw_gateway is not None else None,
-              "execution_claim": "local subprocess composition only; no public Scoped/PairedHost support claim",
+              "execution_claim": "local subprocess composition only; no public scoped or paired host support claim",
               "cases": [], "status": "running"}
     try:
         sys.path[0:0] = [str(args.toolkit_python), str(args.mobkit_python)]

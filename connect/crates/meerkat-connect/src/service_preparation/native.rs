@@ -156,7 +156,7 @@ impl NativeSetup {
         let mut options =
             crate::setup::compose_paired_host_session(options, &self.paired_host, allowed)?;
         // All tools are returned by the native adapter composer. No second
-        // router or inline duplicate of the PairedHost dispatcher is installed.
+        // router or inline duplicate of the paired host dispatcher is installed.
         options.build.external_tools = None;
         options.build.mcp_servers.push(server.clone());
         options.build.tool_dispatch_admission = Some(self.admission.clone());

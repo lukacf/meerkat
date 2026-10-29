@@ -1,7 +1,7 @@
 # Durable frontend delivery
 
 `meerkat_toolkit.frontend.egress.ProactiveEgress` is the shared SQLite output
-owner extracted from the paired host. Hosts supply their recipient policy, formatting
+owner, extracted from an existing host. Hosts supply their recipient policy, formatting
 normalizer and provider adapters. Service connectors
 remain a separate role: this module delivers an agent's output through a frontend;
 it does not authorize a service action or admit an inbound request.
@@ -65,7 +65,7 @@ legacy owners. Default `authorization_mode="legacy"` preserves existing callers
 and makes no current-authorization guarantee. The mode is host configuration,
 not a persisted grant or a downgrade-prevention marker. Enabling this callback
 does not establish native admission, live provider visibility evidence or full
-The paired host/an organizational host adoption by itself.
+host adoption by itself.
 
 ## API and composition
 
@@ -84,8 +84,10 @@ is explicit host policy, not agent-intent inference.
 incident_delivery=...)` commits output before any provider call. Repeating the
 same issuer/key returns the same output ID only for the same candidate list,
 normalized parts and incident flag. Changing those inputs raises `ValueError`.
-The established `hc-notify-v1:` root and request digest remain compatible with
-The paired host's existing database.
+Each output's durable root is `<prefix>:<issuer_id>/<logical_key>`. The prefix
+is host configuration, `root_prefix=` (default `notify-v1`): a host adopting an
+existing database passes the prefix its rows already carry, on every reopening
+and to `migrate_format`. The request digest does not depend on it.
 
 `spawn_dispatch(output_id)` starts a retained task. A host with a short request
 budget can stop waiting while that task continues; caller abandonment must not
@@ -140,7 +142,7 @@ from the request. Changed payload still conflicts. Concurrent first commits
 converge on the winning row; replay cannot change its caller, recipient, policy,
 receipt, uncertainty history or consumed quota.
 
-For the paired host's historical encoding, the host codec contributes
+For a host's historical encoding, its codec contributes
 `{"delivery_class": "ordinary_reply"}` only for the retained ordinary-reply
 class; its governed branch contributes nothing. The generic owner does not
 choose that classification or accept either digest indiscriminately. Retained
@@ -222,9 +224,9 @@ sequence, including `entities` and `caption_entities`. The owner freezes the
 result before computing its digest and preserves the host's text and entity
 offsets together, without further Unicode normalization. Without a host
 normalizer, plain text retains its existing NFC normalization. Historical rows
-are not rewritten; replay with a different rich payload is refused. The paired host
+are not rewritten; replay with a different rich payload is refused. An adopting host
 supplies its original normalizer; provider-specific formatting and media storage
-stay in the paired host.
+stay in the host.
 
 ## Outcomes and retry evidence
 
@@ -262,7 +264,7 @@ argument is omitted or `None`; an explicit `EgressDeliveryPolicy()` can select
 conservative behavior on an owner with an opted-in default. The bounded profile accepts 1-3 resends,
 always inside four total provider attempts per part and the existing
 5/30/120-second backoff. It is a bounded delivery effort, not a guarantee that
-the recipient receives a message. The paired host's selected contract uses exactly one
+the recipient receives a message. A host can select exactly one, for example
 for conversational Telegram replies only. It does not cover consent- or
 approval-governed effects, which still require resolved uncertainty or applicable
 idempotency. This frontend policy is not a retry policy for connector writes.
@@ -342,7 +344,7 @@ settles an open reservation.
 Neither a successful health callback nor a failed callback proves durable host
 acknowledgement. Exactly-once incident handling requires the host's existing
 durable deduplication and reconciliation, not a synchronous Toolkit return.
-The paired host owns its outbox and IncidentDrain cycle/repeat-window keys. Callback
+The host owns its outbox and incident drain cycle/repeat-window keys. Callback
 failure cannot authorize another business send.
 
 For host reconciliation, `report_terminal_uncertainty(output_id) -> int` re-emits
@@ -384,13 +386,12 @@ terminal failures make it `failed`. `part_states` retains mixed outcomes and
 accepted output remains `provider_accepted` after Stop. Provider acceptance does
 not prove transport delivery or that a person read the message.
 
-The paired host's durable `NotifyResult.ok` has the same all-parts-accepted meaning.
-Its public result includes `delivery_state`, `output_id` and `part_states`.
-The API-v1 notification facade preserves its existing return signature and error
-code allowlist: unconfirmed durable output raises non-retryable `provider_error`
-with those observations and same-key guidance. Callers may observe the same key
-and exact payload; they must not automatically manufacture a fresh send after
-uncertainty or partial acceptance.
+A host's durable notification result can carry the same all-parts-accepted
+meaning, with `delivery_state`, `output_id` and `part_states`. A host facade that
+keeps an older return signature should report unconfirmed durable output as a
+non-retryable error with those observations and same-key guidance. Callers may
+observe the same key and exact payload; they must not automatically manufacture
+a fresh send after uncertainty or partial acceptance.
 
 ## Persistence and lifecycle boundary
 
@@ -399,8 +400,8 @@ For unmarked databases, default construction performs schema inspection, table/i
 and legacy row backfills in one `BEGIN IMMEDIATE` transaction. A failed migration
 rolls back that whole change; competing constructors wait before inspecting the
 schema. This is local SQLite migration atomicity, not deployment quiescence or
-permission to roll back shared state. The previously accepted private paired host
-wheel retains the predecessor until an explicit successor is built and adopted.
+permission to roll back shared state. A host that pinned an earlier wheel retains
+the predecessor until it builds and adopts an explicit successor.
 See the [failure and crash verification](../../docs/verification/20261003-egress-atomic-migration/REVIEW.md).
 Migration adds nullable `last_outcome`; it never backfills a refusal for old
 attempted rows. Existing receipts, uncertainty counters, errors and terminal rows
@@ -424,7 +425,8 @@ Hosts integrating package updates use the same owner's explicit format API:
   manifest, owner artifact and migration artifact digests, with an optional
   previous manifest digest. The host must first verify those selections and
   quiesce every relevant writer. The binding is historical correlation, not
-  proof of verification or authority.
+  proof of verification or authority. Adoption also requires every existing
+  output root to carry the host's `root_prefix=`.
 - `ProactiveEgress(..., schema_mode="managed")` requires an existing valid
   committed v4 format and performs no DDL or backfill. Subsequent connections
   cannot recreate a removed database. Default construction also validates a
@@ -454,30 +456,29 @@ table loses history for legacy callers, so managed startup must refuse unmarked
 state. Fresh Toolkit predecessor constructors reject v4, but old host code can
 ignore new fields or alter old counters while leaving history stale; quiesce and
 fence every writer before migration. Additive SQL readability does not prove
-semantic rollback compatibility. The paired host's `channels.sqlite3` migration and
+semantic rollback compatibility. A host's own channel database migration and
 old/new read-write rollback remain host adoption requirements, separate from
 this Toolkit format contract. Compatible code
 rollback retains the progressed database and its transition evidence. Fresh-file
 failure can leave an empty file. SQLite journal and WAL behavior remains subject
 to the filesystem environment.
 
-For host extensions, accepted the paired host transition policy supports only a
-stopped-writer domain with a known retained `egress_format` and admitted
-activation-199 legacy writes. Re-adoption must preserve unchanged managed state,
-merge consumed quota by maximum, union uncertainty/history, and keep cancellation
-sticky. A terminal managed row contradicted by later legacy state must refuse.
-The format marker and counters alone may not reveal overwritten terminal facts:
-The paired host must retain enough owner evidence to detect those contradictions or
-refuse the unsupported domain. It has selected an adoption-time per-output
-snapshot approach, which remains host-owned and unwired. The descriptor and
-generic migration API do not implement that transition, prove the old/new reader
-roundtrip, or authorize deployment.
+For host extensions, a supported transition policy covers only a stopped-writer
+domain with a known retained `egress_format` and admitted legacy writes.
+Re-adoption must preserve unchanged managed state, merge consumed quota by
+maximum, union uncertainty/history, and keep cancellation sticky. A terminal
+managed row contradicted by later legacy state must refuse. The format marker
+and counters alone may not reveal overwritten terminal facts: the host must
+retain enough owner evidence to detect those contradictions or refuse the
+unsupported domain, for example with an adoption-time per-output snapshot. The
+descriptor and generic migration API do not implement that transition, prove
+the old/new reader roundtrip, or authorize deployment.
 
 [64 source cases and two real process-kill checks](../../docs/verification/20261003-egress-owner-format/REVIEW.md)
 verified the predecessor v1 owner contract. A separate private wheel passed all 64 owner
 cases after offline installation with verified parent and child imports.
-Existing library and the paired host archives retain their earlier wheels;
-The paired host's activation/startup integration remains unfinished. This component
+Existing library archives retain their earlier wheels, and a host's
+activation/startup integration is its own work. This component
 verification does not validate every SDK change in the new wheel.
 
 Timeout and shutdown behavior assumes cooperative asynchronous provider adapters.
@@ -548,7 +549,7 @@ The [sender replacement verification](../../docs/verification/20261004-sender-st
 records local SQLite, failure, cancellation and stale-handle evidence. Existing
 host installations retain their previous bytes until explicitly updated.
 
-## The paired host caller adoption
+## Caller adoption by a host
 
 Approval prompts persist one delivery key per actual pending occurrence. Duplicate
 observations reuse it. Before sending, the existing ledger owner synchronizes and
@@ -565,6 +566,4 @@ receipts for all failed parts, can create the next occurrence.
 
 This extraction is implemented and locally tested. It does not establish live
 provider delivery, publication, installation, native C1 availability or completion
-of the Toolkit's full end-state requirements. Exact source provenance, migration
-and adverse-case evidence are retained under
-`docs/coordination/20260930-upstream-review/frontend-egress-extraction/`.
+of the Toolkit's full end-state requirements.

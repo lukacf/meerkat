@@ -1,6 +1,6 @@
 //! Explicit opt-in against a disposable Linux Secret Service only.
 //! The fixture owns collection setup and backend lifetime. This test never
-//! contacts PairedHost or supplies a real cookie, account, or desktop bus.
+//! contacts the paired host or supplies a real cookie, account, or desktop bus.
 #![cfg(target_os = "linux")]
 
 use dbus_secret_service::{EncryptionType, SecretService};

@@ -56,7 +56,7 @@ def derive_values(output_id, values, parts):
 
 
 def host_extension(**overrides):
-    """Test-only PairedHost-shaped declaration; no production host policy import."""
+    """Test-only host-shaped declaration; no production host policy import."""
     values = dict(
         output_columns={"delivery_class": "text not null default 'governed'",
                         "caller_identity": "text", "recipient_member": "text", "choice_ref": "text"},

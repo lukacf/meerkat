@@ -50,7 +50,7 @@
         {
           "id": "toolkit-rest",
           "kind": "configuration_recipe",
-          "instructions": "Explicitly select Python GoogleCalendarOperations in sdk/python with the google-calendar optional profile. Read GOOGLE-CALENDAR.md and this version's SUPPORT.md for the exact retained source checkpoint. The host supplies an authenticated HTTPX client, API base and selected calendar. Coverage is one-page event listing, get, insert, patch and delete; unsupported Calendar options refuse. Preserve exact provider event IDs, ETags and returned versions. A write error or cancellation carries unknown outcome and permits no automatic retry, replacement event ID or fallback. Preserve PairedHost internal-calendar restrictions, origin stamping, version ledger, deterministic IDs and final readback in their existing owners. This is a separately selected REST strategy; the library does not store credentials, perform OAuth or activate tools.",
+          "instructions": "Explicitly select Python GoogleCalendarOperations in sdk/python with the google-calendar optional profile. Read GOOGLE-CALENDAR.md and this version's SUPPORT.md for the exact retained source checkpoint. The host supplies an authenticated HTTPX client, API base and selected calendar. Coverage is one-page event listing, get, insert, patch and delete; unsupported Calendar options refuse. Preserve exact provider event IDs, ETags and returned versions. A write error or cancellation carries unknown outcome and permits no automatic retry, replacement event ID or fallback. Preserve a host's internal-calendar restrictions, origin stamping, version ledger, deterministic IDs and final readback in their existing owners. This is a separately selected REST strategy; the library does not store credentials, perform OAuth or activate tools.",
           "sources": [
             "https://developers.google.com/workspace/calendar/api/auth",
             "https://developers.google.com/workspace/calendar/api/guides/version-resources"
@@ -59,7 +59,7 @@
           "unresolved_details": [
             "The host must bind the selected Python SDK source or separately verified artifact, selected account/calendar, operation schemas and lifecycle to the existing service export. The operation library is not an activated tool surface.",
             "The existing host credential owner must supply OAuth registration, account consent, minimal operation scopes and credential refresh/revoke. This recipe adds no credential storage, OAuth flow or authentication fallback.",
-            "The retained source checkpoint and local protocol tests do not establish public package availability, live Google access, current account authorization or complete PairedHost adoption."
+            "The retained source checkpoint and local protocol tests do not establish public package availability, live Google access, current account authorization or complete host adoption."
           ]
         }
       ],
@@ -73,7 +73,7 @@
       "assessments": [
         {
           "status": "experimental",
-          "scope": "Retained setup inputs and official documentation inspection. The linked Python source checkpoint has local protocol and PairedHost composition evidence, not live Google readiness, preview enrollment, activation or complete application migration.",
+          "scope": "Retained setup inputs and official documentation inspection. The linked Python source checkpoint has local protocol and host composition evidence, not live Google readiness, preview enrollment, activation or complete application migration.",
           "source_revision": "sha256:c5958f3dfe6d0f7c295f0ee6464dbc0ac42a5c6f715c71df01cf0b19a610e11a",
           "assessed_at_unix_ms": 1790852643258,
           "evidence": [

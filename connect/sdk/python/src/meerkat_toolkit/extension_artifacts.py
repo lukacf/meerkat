@@ -2,7 +2,7 @@
 
 Package compatibility and selection belong to the canonical package inspector
 and host. This module does not install, resolve dependencies, authorize access,
-activate a frontend, or own the loaded extension's lifetime. PairedHost-derived
+activate a frontend, or own the loaded extension's lifetime. The extracted
 verification is licensed under MIT OR Apache-2.0 (see LICENSE-EXTRACTED and
 EXTENSIONS.md).
 """
@@ -55,10 +55,15 @@ class SelectedWheel:
 
 @dataclass(frozen=True)
 class ExtensionArtifacts:
-    """Primary wheel and the complete, already selected dependency wheel set."""
+    """Primary wheel and the complete, already selected dependency wheel set.
+
+    ``reserved_import_roots`` names the trusted host's own top-level packages.
+    A selected wheel that provides one of them is refused before any import.
+    """
 
     primary: SelectedWheel
     dependencies: tuple[SelectedWheel, ...] = ()
+    reserved_import_roots: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,7 +92,12 @@ class _Wheel:
     archive_bytes: int
 
 
-def _inspect(selected: SelectedWheel, environment: dict[str, str]) -> _Wheel:
+# Import roots of the Meerkat platform and the verifier's own dependency.
+_PLATFORM_ROOTS = frozenset({"meerkat", "meerkat_meta", "meerkat_mobkit", "meerkat_toolkit", "packaging"})
+
+
+def _inspect(selected: SelectedWheel, environment: dict[str, str],
+             host_roots: frozenset[str] = frozenset()) -> _Wheel:
     if not isinstance(selected, SelectedWheel):
         raise ExtensionArtifactError("expected an exact selected wheel")
     path = Path(selected.path)
@@ -141,7 +151,7 @@ def _inspect(selected: SelectedWheel, environment: dict[str, str]) -> _Wheel:
     import_roots = []
     for root in roots - {info}:
         import_name = root[:-3] if root.endswith(".py") else root
-        reserved = sys.stdlib_module_names | {"paired_host", "meerkat", "meerkat_meta", "meerkat_mobkit", "meerkat_toolkit", "packaging"}
+        reserved = sys.stdlib_module_names | _PLATFORM_ROOTS | host_roots
         if (not import_name.isidentifier() or import_name.casefold() in {name.casefold() for name in reserved}
                 or (not root.endswith(".py") and f"{root}/__init__.py" not in files)):
             raise ExtensionArtifactError("wheel import root is unsupported")
@@ -245,6 +255,10 @@ def _import_ownership(wheels: list[_Wheel], site: Path) -> None:
 def _verify(selection: ExtensionArtifacts, site_packages: Path) -> list[_Wheel]:
     if not isinstance(selection, ExtensionArtifacts) or not isinstance(selection.dependencies, tuple):
         raise ExtensionArtifactError("expected an immutable artifact selection")
+    host_roots = selection.reserved_import_roots
+    if (not isinstance(host_roots, tuple) or len(host_roots) > 64
+            or any(not isinstance(root, str) or not root.isidentifier() for root in host_roots)):
+        raise ExtensionArtifactError("reserved import roots must be identifiers")
     selected = (selection.primary, *selection.dependencies)
     if not 1 <= len(selected) <= 256:
         raise ExtensionArtifactError("selected wheel count exceeds its limit")
@@ -255,7 +269,7 @@ def _verify(selection: ExtensionArtifacts, site_packages: Path) -> list[_Wheel]:
     wheels = []
     total = archive_total = 0
     for artifact in selected:
-        wheel = _inspect(artifact, environment)
+        wheel = _inspect(artifact, environment, frozenset(host_roots))
         total += sum(len(data) for data in wheel.files.values())
         archive_total += wheel.archive_bytes
         if max(total, archive_total) > MAX_TOTAL_BYTES:

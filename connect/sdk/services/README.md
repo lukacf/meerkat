@@ -19,7 +19,7 @@ Version `0.1.19` adds opt-in readable Gmail content. `read_message` decodes
 available inline text and describes omitted parts; `read_text_part` reads one
 explicitly selected text part using the same account and transport. The new
 public formatter uses Gmail's JSON contracts and Python's standard library.
-It does not include the paired host's private message formatter.
+It does not include any host's private message formatter.
 
 Version `0.1.18` makes the existing Calendar `insert_event`, `patch_event` and
 `delete_event` operations available through explicit configuration. Read-only
@@ -522,7 +522,7 @@ The implementation is new original Toolkit code based on the
 [format scope restrictions](https://developers.google.com/workspace/gmail/api/reference/rest/v1/Format),
 [MIME charset defaults](https://datatracker.ietf.org/doc/html/rfc2045#section-5.2),
 and Python's standard-library email/base64 APIs, checked 2026-10-04. No private
-The paired host formatter code or third-party implementation was copied.
+host formatter code or third-party implementation was copied.
 
 `slack_read_interval` requires explicit `start`, `end`, `root_oldest`,
 `max_requests` and `max_messages`. Requests above the configured caps are rejected

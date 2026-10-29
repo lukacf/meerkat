@@ -1,4 +1,4 @@
-//! Human-only PairedHost pairing presentation. This is not a model tool, native
+//! Human-only paired host pairing presentation. This is not a model tool, native
 //! approval or frontend activation. Device persistence delegates to the OS adapter.
 
 use std::{
@@ -62,9 +62,9 @@ pub async fn pair_paired_host_with_store(
                 forget_selected(store.clone(), &client, interrupted.as_mut(), output).await?;
                 return Ok(None);
             }
-            client
-                .restore_device(record)
-                .map_err(|error| ConnectError::native("restore saved PairedHost pairing", error))?;
+            client.restore_device(record).map_err(|error| {
+                ConnectError::native("restore saved paired host pairing", error)
+            })?;
             let admitted = tokio::select! {
                 biased;
                 signal = &mut interrupted => return Err(unconfirmed_interruption(signal, "checking saved pairing; the saved credential was retained")),
@@ -72,21 +72,21 @@ pub async fn pair_paired_host_with_store(
             };
             match admitted {
                 Ok(FrontendInventoryRead::Inventory(_)) => {
-                    say(output, "PairedHost accepted the saved pairing. Current frontend choices will be read again when needed.")?;
+                    say(output, "The paired host accepted the saved pairing. Current frontend choices will be read again when needed.")?;
                     return Ok(Some(client));
                 }
                 Err(PairedHostError::Refused { operation: PairedHostOperation::FrontendInventory,
                     reason: PairedHostRefusal::ConsoleOwnerRequired }) => {
-                    say(output, "PairedHost did not accept the saved pairing. It was not deleted or treated as revoked. A new code requires your explicit request.")?;
+                    say(output, "The paired host did not accept the saved pairing. It was not deleted or treated as revoked. A new code requires your explicit request.")?;
                 }
-                Err(error) => return Err(ConnectError::native("check saved PairedHost pairing; the saved credential was retained", error)),
+                Err(error) => return Err(ConnectError::native("check saved paired host pairing; the saved credential was retained", error)),
                 Ok(FrontendInventoryRead::Rejected(_)) => return Err(ConnectError::InvalidInput(
-                    "PairedHost could not provide its current inventory. The saved pairing was retained; no code request was sent.".into())),
+                    "The paired host could not provide its current inventory. The saved pairing was retained; no code request was sent.".into())),
             }
         }
         Ok(LoadedDevice::Missing) => say(
             output,
-            "No saved pairing was found for this PairedHost origin.",
+            "No saved pairing was found for this paired host origin.",
         )?,
         Ok(LoadedDevice::Expired) => {
             let Some(choice) = device_choice(input, output, interrupted.as_mut(),
@@ -131,7 +131,7 @@ pub async fn pair_paired_host_with_store(
     if remember {
         say(
             output,
-            "A confirmed pairing will be saved in this OS user's credential store for this exact PairedHost origin.",
+            "A confirmed pairing will be saved in this OS user's credential store for this exact paired host origin.",
         )?;
     }
     // Start a fresh client: a refused saved cookie cannot participate in the new
@@ -154,13 +154,13 @@ pub async fn pair_paired_host_with_store(
         match saved {
             Ok(()) => say(
                 output,
-                "This pairing was remembered in the OS credential store until its original expiry. PairedHost still checks every request.",
+                "This pairing was remembered in the OS credential store until its original expiry. The paired host still checks every request.",
             )?,
             Err(error) => {
                 say(
                     output,
                     &format!(
-                        "Remembering this pairing was not confirmed: {error}. PairedHost's enrollment remains; no save or pairing retry was started."
+                        "Remembering this pairing was not confirmed: {error}. The paired host's enrollment remains; no save or pairing retry was started."
                     ),
                 )?;
                 let Some(_) = device_choice(
@@ -183,7 +183,7 @@ pub async fn pair_paired_host_with_store(
 fn say(output: &mut impl Write, message: &str) -> Result<(), ConnectError> {
     writeln!(output, "{message}")
         .and_then(|_| output.flush())
-        .map_err(|error| ConnectError::native("write PairedHost device custody status", error))
+        .map_err(|error| ConnectError::native("write paired host device custody status", error))
 }
 
 async fn forget_selected<F: Future<Output = io::Result<()>>>(
@@ -201,13 +201,13 @@ async fn forget_selected<F: Future<Output = io::Result<()>>>(
     {
         result.map_err(|error| {
             ConnectError::native(
-                "forget local PairedHost device; host enrollment is unchanged",
+                "forget local paired host device; host enrollment is unchanged",
                 error,
             )
         })?;
         say(
             output,
-            "The local device credential is absent. PairedHost's enrollment was not revoked.",
+            "The local device credential is absent. The paired host's enrollment was not revoked.",
         )?;
     }
     Ok(())
@@ -228,10 +228,10 @@ async fn device_choice<F: Future<Output = io::Result<()>>>(
             line = input.recv() => line.transpose(),
         };
         input.check_cleanup().map_err(|error| {
-            ConnectError::native("restore PairedHost device choice input", error)
+            ConnectError::native("restore paired host device choice input", error)
         })?;
-        let Some(choice) =
-            choice.map_err(|error| ConnectError::native("read PairedHost device choice", error))?
+        let Some(choice) = choice
+            .map_err(|error| ConnectError::native("read paired host device choice", error))?
         else {
             return Ok(None);
         };
@@ -307,7 +307,7 @@ pub async fn pair_paired_host(
         )
     })
     .and_then(|_| output.flush())
-    .map_err(|error| ConnectError::native("write PairedHost pairing choice", error))?;
+    .map_err(|error| ConnectError::native("write paired host pairing choice", error))?;
 
     tokio::pin!(interrupted);
     let terminal = loop {
@@ -315,12 +315,12 @@ pub async fn pair_paired_host(
             biased;
             signal = &mut interrupted => {
                 input.check_cleanup()
-                    .map_err(|error| ConnectError::native("restore PairedHost pairing choice input", error))?;
+                    .map_err(|error| ConnectError::native("restore paired host pairing choice input", error))?;
                 signal.map_err(|error| ConnectError::native("listen for pairing cancellation", error))?;
                 return Ok(None);
             }
             line = input.recv() => line.transpose()
-                .map_err(|error| ConnectError::native("read PairedHost pairing choice", error))?,
+                .map_err(|error| ConnectError::native("read paired host pairing choice", error))?,
         };
         let Some(line) = line else { return Ok(None) };
         match line.trim() {
@@ -332,7 +332,7 @@ pub async fn pair_paired_host(
                 "Type 'request' to send a code, 'terminal' to enter a host-terminal code, or /quit."
             )
             .and_then(|_| output.flush())
-            .map_err(|error| ConnectError::native("explain PairedHost pairing choice", error))?,
+            .map_err(|error| ConnectError::native("explain paired host pairing choice", error))?,
         }
     };
 
@@ -346,7 +346,7 @@ pub async fn pair_paired_host(
             biased;
             signal = &mut interrupted => return Err(unconfirmed_interruption(signal, "requesting a code")),
             result = client.request_pairing(DEVICE_LABEL) => result
-                .map_err(|error| ConnectError::native("request PairedHost pairing", error))?,
+                .map_err(|error| ConnectError::native("request paired host pairing", error))?,
         }
         say(
             output,
@@ -393,11 +393,11 @@ pub async fn pair_paired_host(
                 EnteredCode::Terminal(code) => client.confirm_terminal_pairing(code).await,
             }
         } => result
-            .map_err(|error| ConnectError::native("confirm PairedHost pairing", error))?,
+            .map_err(|error| ConnectError::native("confirm paired host pairing", error))?,
     }
-    writeln!(output, "Paired for this Connect process. PairedHost keeps the paired device after Connect exits. Frontend activation remains a separate host action.")
+    writeln!(output, "Paired for this Connect process. The paired host keeps the paired device after Connect exits. Frontend activation remains a separate host action.")
         .and_then(|_| output.flush())
-        .map_err(|error| ConnectError::native("write PairedHost pairing result after confirmed enrollment", error))?;
+        .map_err(|error| ConnectError::native("write paired host pairing result after confirmed enrollment", error))?;
     Ok(Some(client))
 }
 
@@ -408,6 +408,6 @@ fn unconfirmed_interruption(signal: io::Result<()>, operation: &'static str) -> 
         "The cancellation listener failed"
     };
     ConnectError::InvalidInput(format!(
-        "{reason} while {operation}. The PairedHost outcome is unconfirmed; nothing was rolled back and no automatic retry was started."
+        "{reason} while {operation}. The paired host outcome is unconfirmed; nothing was rolled back and no automatic retry was started."
     ))
 }

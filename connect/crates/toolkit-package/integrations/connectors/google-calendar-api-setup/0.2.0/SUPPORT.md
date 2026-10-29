@@ -77,13 +77,13 @@ switch, rollback or exactly-once guarantee. The host reconciles against the
 selected operation identity. Host authentication, hooks and transports are trusted
 components and must not replay or retarget requests themselves.
 
-The paired host's existing Calendar dispatch consumes these operations while retaining
-internal-calendar raw-write denial, origin stamping, write-version ledger,
-semantic publisher, deterministic event IDs and final readback. A typed mutation
-failure reaches the existing publisher receipt as `write_outcome: "unknown"`.
-The existing best-effort version ledger is not crash-safe fencing and does not
-isolate identical event IDs across accounts/calendars. This catalog neither
-changes that policy nor certifies complete the paired host adoption.
+A host's Calendar dispatch can consume these operations while keeping its own
+write policy, for example raw-write denial for internal calendars, origin
+stamping, a write-version ledger, deterministic event IDs and final readback. A
+typed mutation failure should reach the host's own receipt as an unknown write
+outcome. A best-effort version ledger is not crash-safe fencing and does not
+isolate identical event IDs across accounts or calendars. This catalog neither
+defines that policy nor certifies any host's adoption.
 
 The retained source checkpoint is
 [calendar-transport-adoption/source-checkpoint-1](../../../../../../docs/coordination/20260930-upstream-review/calendar-transport-adoption/source-checkpoint-1/manifest.json):
@@ -99,7 +99,7 @@ binds that source to SDK wheel SHA256
 `a2e7ffe92f03d8cf23759891b7a4895e07053bcc45e66b1e0f090d0a0ead9d0e`
 and sdist SHA256
 `43ebc23c299c01ceaf26a4e52464b90f5bb4080a238ed1c3d68ce30f76f915e1`.
-It records installed SDK tests and actual isolated the paired host composition with
+It records installed SDK tests and an isolated host composition with
 Python 3.11.15, HTTPX 0.28.1 and AnyIO 4.15.1. The acceptance receipt itself has
 SHA256 `6231daa3b3bb0d649dd73409c361806ce54f51f19ce6970a2aa93f89c827d2e4`.
 This is verified local installation evidence for those private bytes. Reverify

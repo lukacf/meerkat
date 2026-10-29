@@ -2,7 +2,7 @@
 
 The optional `meerkat-toolkit[extensions]` SDK surface verifies a host-selected
 Python extension and its selected dependency wheels before importing its
-entrypoint. A standalone host can use it without the paired host. It does not install
+entrypoint. Any host can use it, paired with Connect or standalone. It does not install
 software or select packages, and it does not change the MCP installer.
 
 The canonical package inspector remains responsible for package meaning,
@@ -70,12 +70,15 @@ Native wheels, namespace-only packages, extras, direct-URL dependency edges,
 startup hooks, `.pth`, `.data`, precompiled wheel bytecode, shared import roots
 and extensions replacing host/runtime modules are not supported. Dependencies
 must be selected wheels, not implicit imports from the host environment.
-Host API imports remain an explicit host contract. The private paired host
-candidate now verifies the actual robot extension, which declares no
-third-party dependencies, while the paired host provides its API. Robotd's separate
-native dependency graph stays outside this verifier. Neither the installed
-extension checks nor synthetic facades establish a completed the robot or
-The paired host migration.
+Host API imports remain an explicit host contract: an extension can declare no
+third-party dependencies while the host provides its API. A separately run
+device daemon's native dependency graph stays outside this verifier. Neither the
+installed extension checks nor synthetic facades establish a completed host
+migration.
+
+The host lists its own top-level packages in
+`ExtensionArtifacts(..., reserved_import_roots=(...))`. A selected wheel that
+provides one of them, or a Meerkat platform package, is refused before import.
 
 ## Trust and ownership
 
@@ -94,19 +97,14 @@ Activation, admission, audiences, routing, cleanup, readiness and revocation
 remain with the application and Meerkat/MobKit owners. Service connectors and
 agent frontends can share these artifact checks without sharing their roles.
 
-## The paired host migration boundary and provenance
+## Host migration boundary and provenance
 
-The paired host can delegate artifact and import checks here after its existing
-release/lock, selected activation, contract and policy validation. It must retain
-those host decisions and its runtime lifecycle. An explicit candidate adapter
-and source-only migration notes accompany the verification evidence; canonical
-The paired host and the earlier frozen acceptance snapshots are unchanged.
+A host can delegate artifact and import checks here after its own release/lock,
+selected activation, contract and policy validation. It must retain those host
+decisions and its runtime lifecycle.
 
-The extracted checks originate in the private accepted the paired host candidate at
-`docs/verification/20261003-host-service-dependencies/author/snapshot/src/paired_host/extensions/artifacts.py`,
-SHA-256 `0d134552e9fc0cd4abf04a098a432c10f6a0c9ea46bacdbb7398c89924229841`.
+The checks were extracted by their author from the author's own host project.
 The two extracted Toolkit modules are licensed under MIT OR Apache-2.0 as
-stated in `LICENSE-EXTRACTED`. The original paired host project remains unchanged.
-The separate `packaging>=25.0` dependency follows the paired host's existing declared
-minimum; this candidate's tests run with packaging 26.3. No packaging source is
-copied into these modules.
+stated in `LICENSE-EXTRACTED`; the original project is unchanged. The separate
+`packaging>=25.0` dependency is the declared minimum; the tests run with
+packaging 26.3. No packaging source is copied into these modules.

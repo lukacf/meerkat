@@ -753,7 +753,7 @@ async fn explicit_model_mismatch_recovery_preserves_selection_and_original_start
     unchanged(&root, "work", &child);
     pty.restored();
     // Consume the original startup after correction, without a second auth
-    // owner, PairedHost pairing, setup tool, model request or credential write.
+    // owner, the paired host pairing, setup tool, model request or credential write.
     let (frontend, _host) = PairedHostFrontend::deferred();
     let (lazy, _service) = LazySetup::new(frontend);
     let (approvals, _decisions) = LocalApprovals::create_paired_host(&root).unwrap();
@@ -1168,7 +1168,7 @@ async fn browser_login(profile: BrowserProfile, cancel_on_completion: bool) {
         assert!(
             output
                 .text()
-                .contains("Connect stopped before PairedHost pairing or setup session creation.")
+                .contains("Connect stopped before paired host pairing or setup session creation.")
         );
         assert_eq!(
             std::fs::read(root.join("state/work/config.toml")).unwrap(),

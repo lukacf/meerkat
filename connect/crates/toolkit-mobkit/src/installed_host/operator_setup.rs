@@ -1371,7 +1371,7 @@ mod tests {
         let mut activation: serde_json::Value =
             serde_json::from_slice(&fs::read(&selection.activation.path).unwrap()).unwrap();
         activation["policy_bundle"]["policy_digest"] = serde_json::json!(format!(
-            "hc-policy-v1:sha256:{}",
+            "policy-v1:sha256:{}",
             selection.policy_manifest.sha256
         ));
         activation["application_metadata"] = serde_json::json!({"preserve":true});

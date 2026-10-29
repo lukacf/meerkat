@@ -189,5 +189,5 @@ disruption; preserved configuration fields do not establish runtime isolation.
 
 The bounded example and actual offline Git/schema acceptance are retained in
 `docs/verification/20261004-gitops-preparation`. This is a native Kubernetes
-JSON profile. An organizational host's private Helm chart, composite deployment and native
+JSON profile. A host's own private Helm chart, composite deployment and native
 activation still require their own implementations and acceptance.

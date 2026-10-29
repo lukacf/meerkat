@@ -1599,7 +1599,7 @@ mod tests {
         let manifest = canonical_json(&serde_json::json!({"artifacts": artifacts})).unwrap();
         let manifest = artifact(&bundle, "manifest.json", &manifest);
         let activation = canonical_json(&serde_json::json!({"activation_id":"1","policy_bundle":{
-            "path":"shared/policy/bundle.1", "policy_digest":format!("hc-policy-v1:sha256:{}",manifest.sha256)
+            "path":"shared/policy/bundle.1", "policy_digest":format!("policy-v1:sha256:{}",manifest.sha256)
         }})).unwrap();
         let activation_path = root.join("shared/activations/1.json");
         fs::write(&activation_path, &activation).unwrap();
@@ -1679,7 +1679,7 @@ mod tests {
         let mut activation: serde_json::Value =
             serde_json::from_slice(&fs::read(&selection.activation.path).unwrap()).unwrap();
         activation["policy_bundle"]["policy_digest"] =
-            format!("hc-policy-v1:sha256:{}", selection.policy_manifest.sha256).into();
+            format!("policy-v1:sha256:{}", selection.policy_manifest.sha256).into();
         let bytes = canonical_json(&activation).unwrap();
         fs::write(&selection.activation.path, &bytes).unwrap();
         selection.activation.sha256 = digest(&bytes);
@@ -1738,7 +1738,7 @@ mod tests {
     /// Laptop-only owner fixture. Ordinary portable runs report this ignored;
     /// explicit selection requires a path and never substitutes sample bytes.
     #[test]
-    #[ignore = "requires an explicitly selected external PairedHost policy artifact"]
+    #[ignore = "requires an explicitly selected external paired host policy artifact"]
     fn external_paired_host_policy_uses_actual_native_provider_parser() {
         let path = std::env::var_os("MEERKAT_TOOLKIT_APPLICATION_POLICY_FIXTURE")
             .expect("set MEERKAT_TOOLKIT_APPLICATION_POLICY_FIXTURE for this explicit check");
@@ -2023,7 +2023,7 @@ mod tests {
         let mut activation: serde_json::Value =
             serde_json::from_slice(&fs::read(&selection.activation.path).unwrap()).unwrap();
         activation["policy_bundle"]["policy_digest"] =
-            format!("hc-policy-v1:sha256:{}", selection.policy_manifest.sha256).into();
+            format!("policy-v1:sha256:{}", selection.policy_manifest.sha256).into();
         let activation_bytes = canonical_json(&activation).unwrap();
         fs::write(&selection.activation.path, &activation_bytes).unwrap();
         selection.activation.sha256 = digest(&activation_bytes);

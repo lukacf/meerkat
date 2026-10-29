@@ -1,7 +1,8 @@
-"""Bounded image input to the existing PairedHost lease-authenticated live route.
+"""Bounded image input to a paired host's lease-authenticated live route.
 
-The host owns the lease, agent, channel, admission and native content commit.
-An HTTP response from this module is not a content-commit or delivery receipt.
+The host names its route and its lease authorization scheme, and owns the lease,
+agent, channel, admission and native content commit. An HTTP response from this
+module is not a content-commit or delivery receipt.
 """
 
 from __future__ import annotations
@@ -43,11 +44,14 @@ class ImageSubmissionError(Exception):
         self.kind = kind
         self.request_entered = request_entered
         self.status = status
-        super().__init__(f"PairedHost image input: {kind.value}")
+        super().__init__(f"Paired host image input: {kind.value}")
 
 
-_AUTHORIZATION = re.compile(r"PairedHostLease [A-Za-z0-9\-._~+/]{32,512}={0,2}\Z")
-_ROUTE = "/api/paired_host/robot/live/send_image"
+# A host-named path: slash-separated unreserved segments, no dot segments,
+# query, fragment, percent-encoding or empty segment.
+_ROUTE = re.compile(r"(?:/[A-Za-z0-9_~-][A-Za-z0-9._~-]{0,63}){1,8}\Z")
+# An RFC 9110 auth-scheme token chosen by the host.
+_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]{0,63}\Z")
 
 
 def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -77,7 +81,7 @@ def _positive_integer(value: object, label: str) -> int:
 
 
 class PairedHostLiveImageClient:
-    """One selected loopback route, with current authorization supplied by its host.
+    """One host-named loopback route, with current authorization supplied by its host.
 
     No construction or import effect opens a connection or live session. Each
     explicit submission owns an isolated HTTPX client with no ambient proxy,
@@ -91,6 +95,8 @@ class PairedHostLiveImageClient:
         base_url: str,
         authorization_provider: Callable[[], str | None],
         *,
+        route: str,
+        authorization_scheme: str,
         timeout_seconds: float = 30.0,
         max_request_bytes: int = 8_388_608,
         max_response_bytes: int = 65_536,
@@ -119,6 +125,12 @@ class PairedHostLiveImageClient:
             or "\\" in base_url
         ):
             raise ValueError("base_url must be an explicit loopback HTTP origin")
+        if not isinstance(route, str) or not _ROUTE.fullmatch(route):
+            raise ValueError("route must be the host's absolute path")
+        if not isinstance(authorization_scheme, str) or not _SCHEME.fullmatch(
+            authorization_scheme
+        ):
+            raise ValueError("authorization_scheme must be one auth-scheme token")
         if not callable(authorization_provider):
             raise TypeError("authorization_provider must be callable")
         if (
@@ -128,7 +140,10 @@ class PairedHostLiveImageClient:
             or timeout_seconds <= 0
         ):
             raise ValueError("timeout_seconds must be finite and positive")
-        self._url = base_url.rstrip("/") + _ROUTE
+        self._url = base_url.rstrip("/") + route
+        self._authorization = re.compile(
+            re.escape(authorization_scheme) + r" [A-Za-z0-9\-._~+/]{32,512}={0,2}\Z"
+        )
         self._authorization_provider = authorization_provider
         self._timeout = float(timeout_seconds)
         self._max_request = _positive_integer(max_request_bytes, "max_request_bytes")
@@ -174,7 +189,7 @@ class PairedHostLiveImageClient:
             authorization = self._authorization_provider()
         except Exception:
             pass
-        if not isinstance(authorization, str) or not _AUTHORIZATION.fullmatch(
+        if not isinstance(authorization, str) or not self._authorization.fullmatch(
             authorization
         ):
             raise ImageSubmissionError(

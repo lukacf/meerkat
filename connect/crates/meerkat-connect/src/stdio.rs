@@ -327,6 +327,7 @@ async fn open(mut binding: Initialize, bridge: PromptBridge) -> Result<Opened, &
             .ok_or("invalid_binding")?;
         let client = crate::paired_host::PairedHostClient::for_presenter(
             &binding.application.origin,
+            &credential.header,
             &credential.value,
         )
         .map_err(|_| "invalid_binding")?;

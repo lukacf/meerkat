@@ -258,7 +258,7 @@ only applies in that case; it is not yet proof that the next revision fixes this
 failure. The next native run must retain the new typed refusal evidence.
 
 A separate admission-recovery gap remains: retaining an uncertain Original does
-not schedule recovery. The [reviewed #14 contract](/private/tmp/connect-lead-healthy-watch-pusq5c_i/20261018T225357.132122-claude-gcp-lead-f82ce4.json.txt)
+not schedule recovery. The reviewed #14 contract
 (`e85a4dda`) now fixes the owner obligation. Only a Candidate enrolled in the
 source owner's bounded settlement may answer AdmissionPending; unenrolled
 candidates, including `retain_unresolved`, remain NotRetained. The owner must
@@ -305,20 +305,20 @@ failures remain recorded. The scoped 23-path commits include only this qualified
 slice; nothing was pushed or released.
 
 The first input remains recorded before Candidate staging, and exact retry
-rebuilds current native authentication. The [15-control handoff run](/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/connect-c1-settlement-fifteen-ylf0f1pl/FINAL.json)
+rebuilds current native authentication. The 15-control handoff run
 (`db915f80`) now passes on r6: 14 native controls and one source-guard control.
 It retains the exact native receipt through later callback failures, preserves
 bounded same-input reprepare and never infers a new admission from a source row.
 The six reviewed paths are committed locally as private `717de80b` and
 public-follow-up `54a30ebc`; all recorded owners joined and source was restored.
 
-The earlier [combined helper and admission execution](/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/connect-helper-currentness-twenty-five-mpd2m19p/FINAL.json)
+The earlier combined helper and admission execution
 (`c2d6fb3d`) compiles successfully and runs all 23 selected Toolkit controls:
 20 pass and three fail. The failures are the three new helper cold-recovery
 controls, all at the check that the old source, runtime, service, lifetime and
 history owners have been released. They reach this check after the explicit
 close/join assertions and before reopening. The logs do not identify which owner
-survives. The [outcome review](/private/tmp/connect-combined25-root-outcome-9eodxj9q/REVIEW.json)
+survives. The outcome review
 (`3121f7d8`) confirms the exact results, restored 800-file source, unchanged lock,
 and 25 runner plus 23 child process groups absent. Process cleanup does not
 prove the failed Rust-owner release condition. Both Driver controls remain
@@ -326,46 +326,46 @@ unlisted and unentered; the gateway, installed product and adoption stay held.
 The currentness, original cold/wake/tamper and writer families all pass, together
 with eleven retained helper controls.
 
-The preceding [recovery and writer-contention execution](/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/connect-cold-contention-driver-eight-y1qfj_hc/FINAL.json)
+The preceding recovery and writer-contention execution
 (`25271039`) compiles both libraries and runs six Toolkit controls: five pass
 and one fails. Cold completion wake, coherent-input tamper refusal, and all three
 writer-contention controls pass. The first cold restoration control fails earlier
 at original-task completion, before teardown or restoration. Its raw log does not
 identify the native outcome; diagnosis remains open. Both Driver controls remain
-unentered under the batch's prerequisite rule. The [outcome review](/private/tmp/connect-combined8-root-outcome-jel0f1w3/REVIEW.json)
+unentered under the batch's prerequisite rule. The outcome review
 (`87f960a0`) confirms these results and all recorded process joins.
 
 A stale source-count assertion also interrupts the runner's final restoration
 check. The original failed receipt remains unchanged. A separate
-[bookkeeping verification](/private/tmp/connect-combined8-root-outcome-jel0f1w3/RESTORATION-ADDENDUM.json)
+bookkeeping verification
 (`5585a478`) verifies all 798 selected files, modes, unchanged native lock and
 absent process groups under exclusive ownership. The correction derives the
 count from the selected manifest. This qualifies cleanup only.
 
-The preceding [focused recovery run](/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/connect-c1-retired-affected-six-laqknsj1/FINAL.json)
+The preceding focused recovery run
 (`ff8468cd`) completes all six selected checks: three pass and three fail.
 Compilation and exact listing pass. The stopped helper publication, 33-entry
 stopped traversal and cold failed-write controls pass. The two positive cold
 restore controls fail on custody-state assertions; the tamper control reaches
 native replay refusal and restore Conflict, then fails its no-custody assertion.
-The [independent contract review](/private/tmp/connect-cold-custody-contract-tyqtj95i/REVIEW.json)
+The independent contract review
 (`faefb4a3`) confirms incorrect fixture expectations. The real issued-access bind
 starts at `(false, false)`; restoration preserves its issuer and changes custody
 to `(true, false)`. Tamper refusal must preserve the preexisting binding. The
-[fixture correction](/private/tmp/connect-cold-tuple-independent-272j4exe/REVIEW.json)
+fixture correction
 (`280d528e`) is included in the preceding combined8 execution. In that run, the
 wake and tamper controls pass; the first cold control fails before reaching
 restoration. Both older batches remain failed, with no source adoption.
 
-The [independent outcome review](/private/tmp/connect-affected6-root-outcome-r3ti_pbi/REVIEW.json)
+The independent outcome review
 (`77c08279`) verifies all six raw results, eight absent runner groups, six absent
 child groups, 797 restored source records, unchanged native lock, and joined
 cache and outer transport. External cleanup does not establish assertions skipped
 after a test-body failure. The first-round gates used by the two stopped-worker
 controls do not explain the earlier live `Denied` and `Bind` observations.
 
-The preceding [46-control run](/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/connect-c1-corrected-forty-six-h2t_q8o5/FINAL.json)
-(`49b05a21`) remains 41 pass and five fail. The [earlier 43-control run](/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/connect-c1-recovery-wake-forty-three-g_7hiq35/FINAL.json)
+The preceding 46-control run
+(`49b05a21`) remains 41 pass and five fail. The earlier 43-control run
 (`757f9db8`) remains 26 pass, 16 fail and one timeout; three compiler failures
 also remain recorded. These results are separate runs, not one all-pass suite.
 
@@ -375,7 +375,7 @@ admission operation owned, and source closure refuses a new Candidate after the
 wait. These passes do not qualify the whole recovery composition or attribute the
 earlier raw Bind failure.
 
-The [helper payload correction](/private/tmp/connect-helper-cold-payload-r1-j59wo8pp/MANIFEST.json)
+The helper payload correction
 (`2580b607`) has independent source and cleanup review. Its eleven retained
 helper controls now pass; the three new cold controls fail before reopening.
 Version 5 retains the exact prepared Input in the existing canonical helper row
@@ -386,7 +386,7 @@ A further admission race has an independently reviewed source correction: legiti
 custody receipt progress can change the canonical revision while the acquisition
 host awaits admission. The correction permits only typed, reachable progress of
 the same attempt, with all other source facts unchanged. Cancellation and actual
-request changes still refuse admission. The [source review](/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/connect-acquisition-progress-independent-ehufpxps/REVIEW.json)
+request changes still refuse admission. The source review
 (`e111405d`) is now followed by three passing native controls: legitimate custody
 progress succeeds, cancellation refuses, and substantive source change refuses.
 These results do not attribute the historical Denied failure.
@@ -415,15 +415,15 @@ report. Their two verifier files are checkpointed locally as private `4ecfd6e2`
 and public `742f281d`.
 
 Reset after an initialized helper now progresses further. The healthy Initial
-correction passes [six actual native controls](/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/connect-healthy-initial-six-uxxhr5gd/FINAL.json)
-with [independent review](/private/tmp/connect-healthy-six-outcome-7unm14pq/REVIEW.json).
+correction passes six actual native controls
+with independent review.
 It returns custody without repeating the full resource scan during healthy Initial
 closure; exact native settlement and validation before every next use remain.
 The controls require refusal of changed resources before another spawn and a real
 Offered successor after restoring the bytes.
 
 A fresh production gateway (`5b38d2df`) builds and stages with the complete resource
-bundle. The [installed reset rerun](/var/folders/9q/3xq99h1s29g68492lry5f3rm0000gn/T/connect-healthy-initialized-reset-n3ijlsh_/FINAL.json)
+bundle. The installed reset rerun
 (`d364b3f7`) runs both old Initial and replacement Offered transports, reaches the
 schema tool in both phases, and records four native Begin/Settle completions and a
 clean local drain. Initial finish returns within the same logged millisecond;
@@ -432,7 +432,7 @@ this is a callback observation, not an isolated benchmark.
 The overall reset case still fails: reset and `/console/identities` report the new
 helper, while the final `/console/experience` identity and sidebar report the old
 helper. The original agent's identity is unchanged. The strict identity assertion
-is retained. [Independent outcome review](/private/tmp/connect-healthy-initialized-outcome-tqm912mx/REVIEW.json)
+is retained. Independent outcome review
 (`9ccdd210`) separates the observed transport success from the skipped final
 historical-source and reader/listener checks. The gateway exits normally, its
 provider joins and all outer command owners settle. The Meta lead's real-router
@@ -981,7 +981,7 @@ installed repeat-acquisition result.
   pending work spends no attempts, and B remains usable. The same nonempty Reading
   service fixture, store, export and database bytes stay unchanged; all owned
   tasks and the process are joined. Two fixture-only preparation refusals remain
-  recorded. Actual the paired host or Reading frontend adoption and live provider
+  recorded. Actual host or Reading frontend adoption and live provider
   delivery remain pending.
 - **Supplied schema evidence:** The optional metadata inspector computes a digest
   of exact supplied JSON bytes and rejects malformed or oversized input within
@@ -1034,7 +1034,7 @@ needed. PKG-006 and the remaining D3 breadth stay open.
 
 | Area | Practical limit in 0.9.0 |
 | --- | --- |
-| Frontends and custom extensions | Source components and role contracts remain available for explicit host adoption. There is no general Telegram, Slack frontend, the paired host, the robot or an organizational host migration promise. A persistent application must own identity, audience, routing and delivery. |
+| Frontends and custom extensions | Source components and role contracts remain available for explicit host adoption. There is no general Telegram or Slack frontend migration promise, and no migration promise for any existing host. A persistent application must own identity, audience, routing and delivery. |
 | Existing application upgrades | Application host support is scoped to fresh composition. Updating an existing application's selected gateway requires the host's replacement-selection wiring; automatic upgrade across arbitrary hosts remains follow-up work. If Fresh startup fails before producing completed setup and its finalizer, same-installation Restore/update has no admissible completion or replacement envelope. Preserve that failed installation and use the normal fresh path with an empty sibling target. |
 | Forge-generated Console | The preserved-design refresh failed acceptance before Install and the original question. Forge must honor an explicit no-account-request brief in the initial helper policy, and omit unsupported optional analyst edges and delegation text while keeping peer tools denied. Complete fresh real-model task acceptance remains unproven. |
 | Predecessor application stores | Adoption of an existing nonempty MobKit 0.8 store under authoritative Meta 0.9 startup is deferred when its composition manifest has only the legacy `created_by_mobkit` writer field. Fresh Meta 0.9 Console installations and Core realm/session CLI use are separate paths. |

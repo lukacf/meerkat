@@ -1269,7 +1269,7 @@ class _Preparation:
                 {key: item for key, item in template.items() if key != "policy_bundle"},
                 {key: item for key, item in activation.items() if key != "policy_bundle"})
                 or activation.get("policy_bundle") != {"path": self.bundle_path.name,
-                    "policy_digest": "hc-policy-v1:sha256:" + outputs[1].sha256}):
+                    "policy_digest": "policy-v1:sha256:" + outputs[1].sha256}):
             raise CustodyError("The prepared activation changed its selected template metadata or bundle binding.")
         return selected
 

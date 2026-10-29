@@ -288,7 +288,7 @@ impl Fixture {
             json!({"path":name,"sha256":hash(bytes)})).collect::<Vec<_>>()}))
         .unwrap();
         let activation = canonical_json(&json!({"policy_bundle":{"path":"original-bundle",
-            "policy_digest":format!("hc-policy-v1:sha256:{}",hash(&manifest))}}))
+            "policy_digest":format!("policy-v1:sha256:{}",hash(&manifest))}}))
         .unwrap();
         self.selection.predecessor = HostBootstrapSelection {
             deployment_root: self.root.clone(),

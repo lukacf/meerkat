@@ -45,7 +45,7 @@ const DEVICE: &str = "fixture-private-status-device";
 
 fn digest(character: char) -> String {
     format!(
-        "hc-frontend-change-v1:sha256:{}",
+        "paired-host-change-v1:sha256:{}",
         character.to_string().repeat(64)
     )
 }
@@ -97,7 +97,7 @@ impl Host {
                 assert_eq!(path, reply.path);
                 if !path.starts_with("/console/pair/") {
                     assert_eq!(headers["origin"], expected_origin);
-                    assert!(headers["cookie"].contains(&format!("hc_console_device={DEVICE}")));
+                    assert!(headers["cookie"].contains(&format!("paired_host_device={DEVICE}")));
                     if method == "GET" {
                         assert_eq!(headers["cache-control"], "no-store");
                     } else {
@@ -110,8 +110,8 @@ impl Host {
                     continue;
                 }
                 let cookie = match path.as_str() {
-                    "/console/pair/request" => "Set-Cookie: hc_console_pair=fixture-private-status-pair; Path=/console/pair; HttpOnly; SameSite=Strict\r\n".into(),
-                    "/console/pair/confirm" => format!("Set-Cookie: hc_console_device={DEVICE}; Path=/; HttpOnly; SameSite=Lax\r\nSet-Cookie: hc_console_pair=; Max-Age=0; Path=/console/pair\r\n"),
+                    "/console/pair/request" => "Set-Cookie: paired_host_pair=fixture-private-status-pair; Path=/console/pair; HttpOnly; SameSite=Strict\r\n".into(),
+                    "/console/pair/confirm" => format!("Set-Cookie: paired_host_device={DEVICE}; Path=/; HttpOnly; SameSite=Lax\r\nSet-Cookie: paired_host_pair=; Max-Age=0; Path=/console/pair\r\n"),
                     _ => String::new(),
                 };
                 let bytes = serde_json::to_vec(&reply.body).unwrap();
@@ -280,7 +280,7 @@ async fn fresh_native_sessions_read_prior_requests_without_recovering_submission
     let prepared = json!({"state":"prepared","base_current":false,"change":{
         "change_digest":reference,
         "base":{"activation_id":"214","policy_digest":"sha256:fixture","ledger_digest":"sha256:fixture"},
-        "ledger_patch":{"path":"deployment/extensions.toml","extension_id":"telegram","channel_id":"telegram:primary",
+        "ledger_patch":{"path":"host/extensions.toml","extension_id":"telegram","channel_id":"telegram:primary",
             "before":null,"after":{"id":"telegram:primary","ingress":"polling","approved_groups":[]}},
         "unified_diff":"fixture exact draft diff"}});
     let mut replies = Vec::new();
@@ -352,7 +352,7 @@ async fn fresh_native_sessions_read_prior_requests_without_recovering_submission
         approvals.bind_session(session.id()).unwrap();
         let (admission, completion) = session
             .submit(format!(
-                "Please check my earlier PairedHost request {reference}."
+                "Please check my earlier paired host request {reference}."
             ))
             .await
             .unwrap();
@@ -420,8 +420,8 @@ async fn call(
 #[tokio::test]
 async fn new_extension_attempt_readback_keeps_lost_submission_spent_and_status_only() {
     let own = digest('6');
-    let proposal = json!({"distribution":"paired-host-ext-signal","version":"0.1.0",
-        "source":{"repo":"https://github.com/fixture/paired-host-ext-signal.git","tag":"v0.1.0","commit":"a".repeat(40)},
+    let proposal = json!({"distribution":"example-ext-signal","version":"0.1.0",
+        "source":{"repo":"https://github.com/fixture/example-signal.git","tag":"v0.1.0","commit":"a".repeat(40)},
         "channel":{"ingress":"polling","approved_groups":["fixture-group"]}});
     let change = json!({"change_digest":own,"kind":"new_extension",
         "base":{"activation_id":"214","policy_digest":"fixture-policy","ledger_digest":"fixture-ledger"},
@@ -575,10 +575,10 @@ async fn unrelated_and_unknown_status_cannot_clear_an_uncertain_submission() {
     // is sufficient for the immutable transport/approval contract being tested.
     let change = json!({"change_digest":own,
         "base":{"activation_id":"214","policy_digest":"sha256:fixture","ledger_digest":format!("sha256:{}", "1".repeat(64))},
-        "ledger_patch":{"path":"deployment/extensions.toml","extension_id":"telegram","channel_id":"telegram:primary",
+        "ledger_patch":{"path":"host/extensions.toml","extension_id":"telegram","channel_id":"telegram:primary",
             "before":{"id":"telegram:primary","ingress":"polling","approved_groups":[]},
             "after":{"id":"telegram:primary","ingress":"polling","approved_groups":["-1001234567890"]}},
-        "unified_diff":"--- a/deployment/extensions.toml\n+++ b/deployment/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = [\"-1001234567890\"]\n"});
+        "unified_diff":"--- a/host/extensions.toml\n+++ b/host/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = [\"-1001234567890\"]\n"});
     let mut replies = Reply::pairing().into_iter().collect::<Vec<_>>();
     replies.extend([
         Reply { method: "POST", path: "/console/extensions/frontend/prepare".into(), status: 200,

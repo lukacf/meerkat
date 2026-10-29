@@ -87,14 +87,6 @@
     "observed_at": "2026-09-29T21:59:25.771004+00:00",
     "purpose": "Documentation identity only; not a pinned server artifact or runtime validation."
   },
-  "robot": {
-    "url": "https://github.com/fixture/paired-host-robot/blob/0418a8b4e69a84f94adccd703a6060b9c293a49a/extension/contract.py",
-    "commit": "0418a8b4e69a84f94adccd703a6060b9c293a49a",
-    "sha256": "0dd53aebd585a924ffae2fd80d2b7d7e2bd6c4032d62912d33e0007a19264487",
-    "bytes": 5216,
-    "observed_at": "2026-09-29T22:03:30.034240+00:00",
-    "purpose": "Local clean source contract only; no runtime, package license or hardware validation."
-  },
   "telegram-api-20261004": {
     "url": "https://core.telegram.org/bots/api",
     "final_url": "https://core.telegram.org/bots/api",
@@ -110,32 +102,5 @@
     "bytes": 116992,
     "observed_at": "2026-10-04T05:35:54.935389+00:00",
     "purpose": "Official provider documentation observation only; not an installed artifact or authenticated service."
-  },
-  "paired-host-telegram-readme-20261007": {
-    "url": "https://github.com/fixture/paired-host-telegram/blob/49f53a27a4535f80a357ee13e8150776ed02886b/README.md",
-    "git_path": "README.md",
-    "commit": "49f53a27a4535f80a357ee13e8150776ed02886b",
-    "sha256": "9dff5f0e5cc4b2b13cf409743dbd6202587aa4c1f3dcae90dd1a02b429b8d0b7",
-    "bytes": 1515,
-    "observed_at": "2026-10-07T03:08:16.303223+00:00",
-    "purpose": "Immutable local Git source read only. No import, build, network access, host compatibility, distribution entitlement, authentication or runtime qualification."
-  },
-  "paired-host-telegram-package-20261007": {
-    "url": "https://github.com/fixture/paired-host-telegram/blob/49f53a27a4535f80a357ee13e8150776ed02886b/pyproject.toml",
-    "git_path": "pyproject.toml",
-    "commit": "49f53a27a4535f80a357ee13e8150776ed02886b",
-    "sha256": "4bc764ed4fa3332bc9a45cd82ea91532b3c35145956ba1b740684311b5d2877f",
-    "bytes": 1287,
-    "observed_at": "2026-10-07T03:08:16.303223+00:00",
-    "purpose": "Immutable local Git source read only. No import, build, network access, host compatibility, distribution entitlement, authentication or runtime qualification."
-  },
-  "paired-host-telegram-extension-20261007": {
-    "url": "https://github.com/fixture/paired-host-telegram/blob/49f53a27a4535f80a357ee13e8150776ed02886b/src/paired_host_ext_telegram/extension.py",
-    "git_path": "src/paired_host_ext_telegram/extension.py",
-    "commit": "49f53a27a4535f80a357ee13e8150776ed02886b",
-    "sha256": "3c57a43b1d97d64afd04571bcf7dc3fd0e0139d4ca8be18a2bd7e8d93e99d3bd",
-    "bytes": 52250,
-    "observed_at": "2026-10-07T03:08:16.303223+00:00",
-    "purpose": "Immutable local Git source read only. No import, build, network access, host compatibility, distribution entitlement, authentication or runtime qualification."
   }
 }

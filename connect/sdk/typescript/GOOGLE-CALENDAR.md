@@ -159,7 +159,7 @@ rollback, execution journal or exactly-once guarantee.
 
 Original Toolkit implementation under MIT OR Apache-2.0, informed by the linked
 Google documentation, existing Toolkit Python Calendar behavior and Toolkit
-TypeScript Fetch/JSON conventions. No Google SDK or the paired host implementation body
+TypeScript Fetch/JSON conventions. No Google SDK or host implementation body
 is included. The package retains its existing license texts and notices.
 
 `tests/google-calendar.test.mjs` imports the public package surface and exercises
@@ -167,7 +167,7 @@ real loopback HTTP plus controlled host cleanup. Its cancellation assertions
 observe local response cleanup separately from remote handler completion.
 Source and installed-artifact checks remain distinct. These fixtures establish
 neither live Google/OAuth readiness nor native admission, grant association,
-catalog activation, full M4/M8 coverage or the paired host TypeScript adoption. No test
+catalog activation, full M4/M8 coverage or a host's TypeScript adoption. No test
 result is implied by this guide or these commands:
 
 ```sh

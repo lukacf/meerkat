@@ -1668,7 +1668,7 @@ where
 }
 
 fn device_stopped<W: Write>(output: &mut W) -> Result<bool, ConnectError> {
-    writeln!(output, "Device sign-in polling stopped. This does not revoke provider authorization. Connect stopped before PairedHost pairing or setup session creation.")
+    writeln!(output, "Device sign-in polling stopped. This does not revoke provider authorization. Connect stopped before paired host pairing or setup session creation.")
         .and_then(|()| output.flush())
         .map_err(|e| ConnectError::native("Write device sign-in cancellation result", e))?;
     Ok(false)
@@ -1786,11 +1786,11 @@ async fn device_login_presented<F: Future<Output = io::Result<()>>, W: Write>(
                 return Ok(true);
             }
             HostAuthDevicePoll::AccessDenied => return Err(combined(
-                ConnectError::InvalidInput("Native device sign-in was denied. No retry, PairedHost pairing or setup session was started.".into()),
+                ConnectError::InvalidInput("Native device sign-in was denied. No retry, paired host pairing or setup session was started.".into()),
                 interrupted.unwrap_or(Ok(())),
             )),
             HostAuthDevicePoll::Expired => return Err(combined(
-                ConnectError::InvalidInput("Native device sign-in expired. No retry, PairedHost pairing or setup session was started.".into()),
+                ConnectError::InvalidInput("Native device sign-in expired. No retry, paired host pairing or setup session was started.".into()),
                 interrupted.unwrap_or(Ok(())),
             )),
             HostAuthDevicePoll::Pending | HostAuthDevicePoll::SlowDown => {
@@ -1989,7 +1989,7 @@ async fn browser_login_presented<F: Future<Output = io::Result<()>>, W: Write>(
         signal.map_err(|e| ConnectError::native("Listen for sign-in cancellation", e))?;
         writeln!(
             output,
-            "Connect stopped before PairedHost pairing or setup session creation."
+            "Connect stopped before paired host pairing or setup session creation."
         )
         .and_then(|()| output.flush())
         .map_err(|e| ConnectError::native("Write sign-in cancellation result", e))?;

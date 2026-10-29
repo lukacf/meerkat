@@ -6,7 +6,7 @@ requires a simpler default: normal product installation, enable Connect,
 choose or ask for a tool, sign in if needed, approve requested access and finish the
 original task. The product must package and manage local helpers, attachment and
 recovery through the existing runtime, without a user-operated Connect server.
-The paired host HTTPS/Tailscale is an optional remote topology, not a baseline dependency.
+Remote host access over HTTPS or Tailscale is an optional topology, not a baseline dependency.
 
 The current manual registration, process and recovery-file procedures below stay
 valid for this advanced interface. They do not establish the required packaged

@@ -1,4 +1,4 @@
-"""Durable channel inbox storage, migrated from PairedHost's existing owner.
+"""Durable channel inbox storage, migrated from an existing host's owner.
 
 The database and its existing tables remain authoritative. Provider admission,
 identity policy, secret handling and media I/O belong to the host adapters.

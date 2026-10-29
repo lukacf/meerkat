@@ -125,7 +125,7 @@ impl Fixture {
             bundle.join("manifest.json"),
             &canonical_json(&manifest).unwrap(),
         );
-        let revision = format!("hc-policy-v1:sha256:{}", policy_manifest.sha256);
+        let revision = format!("policy-v1:sha256:{}", policy_manifest.sha256);
         let activation = artifact(
             root.join("shared/activations/1.json"),
             &canonical_json(&serde_json::json!({

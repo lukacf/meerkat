@@ -72,7 +72,7 @@
             "pages": [
               "examples/remembered-tool",
               "examples/slack-summary",
-              "examples/robot-extension",
+              "examples/device-extension",
               "examples/organizational-host"
             ]
           }

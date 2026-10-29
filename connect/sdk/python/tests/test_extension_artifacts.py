@@ -1,6 +1,6 @@
 """Real local wheel installations at the extension import boundary.
 
-No PairedHost, network, provider or native agent runtime is involved. Fixture
+No paired host, network, provider or native agent runtime is involved. Fixture
 packages write a marker when imported, so negative cases prove import refusal.
 """
 
@@ -112,6 +112,32 @@ class ReservedImportRootTests(unittest.TestCase):
                                                                 "^wheel import root is unsupported$"):
                                         verify_extension_artifacts(selection, site_packages=directory)
                                     ownership.assert_not_called()
+
+    def test_host_declared_roots_are_refused_before_import_ownership(self):
+        for dependency in (False, True):
+            with self.subTest(dependency=dependency):
+                with tempfile.TemporaryDirectory(prefix="toolkit-host-root-") as work:
+                    directory = Path(work).resolve()
+                    base = self.selection(directory, "tkfixture_hostroot", dependency=dependency,
+                                          single_module=False)
+                    selection = ExtensionArtifacts(base.primary, base.dependencies, ("tkfixture_hostroot",))
+                    with patch.object(extension_owner, "_import_ownership",
+                                      side_effect=AssertionError("reserved root reached ownership")) as ownership:
+                        with self.assertRaisesRegex(ExtensionArtifactError,
+                                                    "^wheel import root is unsupported$"):
+                            verify_extension_artifacts(selection, site_packages=directory)
+                        ownership.assert_not_called()
+
+    def test_reserved_roots_must_be_identifiers(self):
+        with tempfile.TemporaryDirectory(prefix="toolkit-host-root-") as work:
+            directory = Path(work).resolve()
+            base = self.selection(directory, "tkfixture_normal", dependency=False, single_module=False)
+            for roots in (["tkfixture_hostroot"], ("not-a-root",), ("",), (1,)):
+                with self.subTest(roots=roots):
+                    selection = ExtensionArtifacts(base.primary, base.dependencies, roots)
+                    with self.assertRaisesRegex(ExtensionArtifactError,
+                                                "^reserved import roots must be identifiers$"):
+                        verify_extension_artifacts(selection, site_packages=directory)
 
     def test_normal_name_reaches_import_ownership(self):
         class ReachedOwnership(Exception):

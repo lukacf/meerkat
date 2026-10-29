@@ -1,6 +1,6 @@
 """Telegram frontend transport and provider observations, without host policy.
 
-Extracted from user-owned paired-host-ext-telegram at f187bf89. Source provenance
+Extracted by its author from the author's own Telegram host extension. Provenance
 and the MIT OR Apache-2.0 grant for this copy are recorded in TELEGRAM.md. The
 host still owns credentials, recipients, admission, durable rows and retries.
 """
@@ -626,7 +626,7 @@ class TelegramBotApiTransport:
         _validate_message_thread_id(message_thread_id)
         if not re.fullmatch(r"[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+", mime_type):
             raise ValueError("Telegram media MIME has an invalid shape")
-        boundary = f"paired-host-{secrets.token_hex(16)}"
+        boundary = f"meerkat-toolkit-{secrets.token_hex(16)}"
         chunks: list[bytes] = []
 
         def field(name: str, value: str) -> None:

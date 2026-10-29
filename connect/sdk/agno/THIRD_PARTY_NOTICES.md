@@ -1,6 +1,6 @@
 # Agno component source and notices
 
-This distribution packages the canonical Toolkit Agno adapter modules without modifying their bytes. `PACKAGE-SOURCES.json` maps every module to its monorepo source and digest. It includes no the paired host frontend, message-formatting or live-transport modules and does not depend on the combined `meerkat-toolkit` distribution.
+This distribution packages the canonical Toolkit Agno adapter modules without modifying their bytes. `PACKAGE-SOURCES.json` maps every module to its monorepo source and digest. It includes no paired host frontend, message-formatting or live-transport modules and does not depend on the combined `meerkat-toolkit` distribution.
 
 `agno_transports.py` adapts request/client construction helpers from Agno revision `8c3d8ec52b4a13c410fca97d07fbd507790cf29a`:
 

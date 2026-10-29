@@ -82,8 +82,8 @@ fn response(received: &Request) -> String {
         .iter()
         .filter_map(|t| t["function"]["name"].as_str())
         .collect();
-    // Ordinary NativeSetup keeps the unselected, protected PairedHost chooser.
-    // Its offer does not pair a host or authorize a PairedHost change.
+    // Ordinary NativeSetup keeps the unselected, protected paired host chooser.
+    // Its offer does not pair a host or authorize a paired host change.
     assert!(
         !names.iter().any(
             |n| (n.starts_with("paired_host_") && *n != "paired_host_select_host")
@@ -330,7 +330,7 @@ async fn start_provider(evidence: &Path, private_origin: String) -> Server {
 }
 
 async fn start_cli(provider: &Server, prefix: &Path) -> Cli {
-    // None selects standalone Forge. Some(origin) would select PairedHost instead.
+    // None selects standalone Forge. Some(origin) would select the paired host instead.
     let mut cli = Cli::spawn_supplied(None, &provider.origin, prefix);
     cli.shown("New realm: ", 0).await;
     cli.send(&format!("{REALM}\n"));

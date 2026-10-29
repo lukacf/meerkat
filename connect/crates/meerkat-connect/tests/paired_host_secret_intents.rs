@@ -1,5 +1,5 @@
 //! Synthetic loopback intent observations only. No secret entry, owner confirmation,
-//! provider authentication, host feature enabling or live PairedHost qualification.
+//! provider authentication, host feature enabling or live paired host qualification.
 
 use meerkat_connect::paired_host::*;
 use serde_json::{Value, json};
@@ -197,7 +197,7 @@ fn ledger_request() -> ExtensionSecretIntentRequest {
         binding_name: "telegram_bot_token".into(),
         base: FrontendChangeBase {
             activation_id: Some("214".into()),
-            policy_digest: Some("hc-policy-v1:sha256:fixture-policy".into()),
+            policy_digest: Some("fixture-policy-v1:sha256:fixture-policy".into()),
             ledger_digest: "sha256:fixture-ledger".into(),
         },
     }
@@ -207,7 +207,7 @@ fn candidate_request() -> ExtensionSecretIntentRequest {
     ExtensionSecretIntentRequest::Candidate {
         candidate: ExtensionSecretIntentCandidate {
             change_digest: FrontendChangeDigest::new(&format!(
-                "hc-frontend-change-v1:sha256:{}",
+                "paired-host-change-v1:sha256:{}",
                 "a".repeat(64)
             ))
             .unwrap(),
@@ -248,7 +248,7 @@ fn pairing() -> Reply {
     Reply::json(200, json!({"ok":true})).header(
         "Set-Cookie",
         &format!(
-            "hc_console_device={DEVICE_COOKIE}; Max-Age=15552000; Path=/; HttpOnly; SameSite=Lax"
+            "paired_host_device={DEVICE_COOKIE}; Max-Age=15552000; Path=/; HttpOnly; SameSite=Lax"
         ),
     )
 }
@@ -325,7 +325,7 @@ async fn exact_ledger_intent_status_and_cancellation_use_only_captured_pairing_a
     );
     for request in &requests[1..] {
         assert!(request.headers["cookie"].contains(DEVICE_COOKIE));
-        assert!(!request.headers.contains_key("x-paired-host-dev-token"));
+        assert!(!request.headers.contains_key("x-host-dev-token"));
         assert_eq!(request.headers["cache-control"], "no-store");
         if request.method == "POST" {
             assert_eq!(request.headers["origin"], origin);
@@ -794,7 +794,7 @@ async fn independent_client_has_no_inherited_device_and_redirects_are_not_follow
         other
             .iter()
             .all(|request| !request.headers.contains_key("cookie")
-                && !request.headers.contains_key("x-paired-host-dev-token"))
+                && !request.headers.contains_key("x-host-dev-token"))
     );
     assert_eq!(own.len(), 2);
     assert_eq!(other.len(), 2);

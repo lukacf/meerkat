@@ -1,5 +1,5 @@
 //! Synthetic store, newly allocated PTYs and loopback HTTP only. These tests
-//! never construct OsDeviceStore, access user stdin or contact a real PairedHost.
+//! never construct OsDeviceStore, access user stdin or contact a real paired host.
 use meerkat_connect::{
     paired_host_device::{DeviceStore, DeviceStoreError},
     pairing::pair_paired_host_with_store,
@@ -214,7 +214,7 @@ async fn pair_server(listener: &TcpListener, duplicate: bool, confirmed_body: Va
         200,
         json!({"ok":true}),
         &[format!(
-            "hc_console_pair={PAIR}; Max-Age=600; Path=/console/pair; HttpOnly; SameSite=Strict"
+            "paired_host_pair={PAIR}; Max-Age=600; Path=/console/pair; HttpOnly; SameSite=Strict"
         )],
     )
     .await;
@@ -227,10 +227,10 @@ async fn pair_server(listener: &TcpListener, duplicate: bool, confirmed_body: Va
         json!({"code":CODE})
     );
     let mut cookies = vec![format!(
-        "hc_console_device={DEVICE}; Max-Age=3600; Path=/; HttpOnly; SameSite=Lax"
+        "paired_host_device={DEVICE}; Max-Age=3600; Path=/; HttpOnly; SameSite=Lax"
     )];
     if duplicate {
-        cookies.push("hc_console_device=contradictory-later-device; Max-Age=3600; Path=/; HttpOnly; SameSite=Lax".into());
+        cookies.push("paired_host_device=contradictory-later-device; Max-Age=3600; Path=/; HttpOnly; SameSite=Lax".into());
     }
     reply(&mut stream, 200, confirmed_body, &cookies).await;
 }
@@ -268,7 +268,7 @@ async fn terminal_pairing_uses_the_same_origin_store_and_reuses_the_saved_device
             200,
             json!({"ok":true}),
             &[format!(
-                "hc_console_device={DEVICE}; Max-Age=3600; Path=/; HttpOnly; SameSite=Lax"
+                "paired_host_device={DEVICE}; Max-Age=3600; Path=/; HttpOnly; SameSite=Lax"
             )],
         )
         .await;
@@ -402,7 +402,7 @@ async fn confirmed_cookie_is_saved_once_and_a_fresh_client_reuses_it_only_after_
         let (mut stream, _) = listener.accept().await.unwrap();
         let (head, body) = request(&mut stream).await;
         assert!(head.starts_with("GET /console/extensions/frontend/inventory "));
-        assert!(head.contains(&format!("hc_console_device={DEVICE}")));
+        assert!(head.contains(&format!("paired_host_device={DEVICE}")));
         assert!(!head.contains(PAIR));
         assert!(body.is_empty());
         reply(&mut stream, 200, json!({"current":{"activation_id":"210","policy_digest":"sha256:fixture"},"extensions":[],"routing":"sender_identity"}), &[]).await;

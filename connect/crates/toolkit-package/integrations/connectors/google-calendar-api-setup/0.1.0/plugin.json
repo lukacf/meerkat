@@ -32,7 +32,7 @@
         {
           "id": "setup",
           "kind": "configuration_recipe",
-          "instructions": "The official Python quickstart requires Calendar API enablement, consent configuration and OAuth client credentials. Select the intended calendars and least required scopes with the host owner. Package a maintained connector separately. Preserve application calendar restrictions and returned-version write receipts when migrating PairedHost; the generic API route cannot bypass them.",
+          "instructions": "The official Python quickstart requires Calendar API enablement, consent configuration and OAuth client credentials. Select the intended calendars and least required scopes with the host owner. Package a maintained connector separately. Preserve application calendar restrictions and returned-version write receipts when migrating a host; the generic API route cannot bypass them.",
           "sources": [
             "https://developers.google.com/workspace/calendar/api/quickstart/python"
           ],

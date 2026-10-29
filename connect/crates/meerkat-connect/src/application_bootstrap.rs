@@ -370,7 +370,7 @@ pub(super) fn prepare(args: &[String], progress: &mut InstallerProgress) -> Resu
         .ok_or("activation template must be an object")?;
     object.insert("policy_bundle".into(), serde_json::json!({
         "path":bundle.strip_prefix(&root).map_err(|error| error.to_string())?.to_str().ok_or("invalid bundle path")?,
-        "policy_digest":format!("hc-policy-v1:sha256:{manifest_digest}")
+        "policy_digest":format!("policy-v1:sha256:{manifest_digest}")
     }));
     let activation_bytes =
         toolkit_package::canonical_json(&activation_value).map_err(|error| error.to_string())?;

@@ -1,5 +1,5 @@
 //! Local HTTP fixtures only. These exercise the actual client transport and
-//! protocol, not PairedHost deployment, real pairing, Telegram or activation.
+//! protocol, not the paired host deployment, real pairing, Telegram or activation.
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -200,14 +200,14 @@ async fn read_request(stream: &mut TcpStream) -> Request {
 
 fn pairing_requested() -> Reply {
     Reply::json(200, json!({"ok":true})).header("Set-Cookie", &format!(
-        "hc_console_pair={PAIR_COOKIE}; Max-Age=600; Path=/console/pair; HttpOnly; SameSite=Strict"
+        "paired_host_pair={PAIR_COOKIE}; Max-Age=600; Path=/console/pair; HttpOnly; SameSite=Strict"
     ))
 }
 
 fn pairing_confirmed() -> Reply {
     Reply::json(200, json!({"ok":true})).header("Set-Cookie", &format!(
-        "hc_console_device={DEVICE_COOKIE}; Max-Age=15552000; Path=/; HttpOnly; SameSite=Lax"
-    )).header("Set-Cookie", "hc_console_pair=; Max-Age=0; Path=/console/pair")
+        "paired_host_device={DEVICE_COOKIE}; Max-Age=15552000; Path=/; HttpOnly; SameSite=Lax"
+    )).header("Set-Cookie", "paired_host_pair=; Max-Age=0; Path=/console/pair")
 }
 
 fn request() -> FrontendCandidateRequest {
@@ -228,7 +228,7 @@ fn receipt() -> Value {
         "missing_prerequisites":[{"kind":"secret","name":"telegram_bot_token"}],
         "current":{"activation_id":"210","policy_digest":"sha256:current-fixture"},
         "candidate":{"channel_row_digest":"sha256:row-fixture",
-            "policy_digest":"hc-policy-content-v1:sha256:policy-fixture","compile_depth":"policy_bundle"},
+            "policy_digest":"fixture-policy-v1:sha256:policy-fixture","compile_depth":"policy_bundle"},
         "compiled_is_not_ready":true
     })
 }
@@ -489,7 +489,7 @@ async fn inventory_get_is_fresh_typed_and_does_not_infer_mode_prerequisites_or_r
         assert_eq!(records[index].headers["cache-control"], "no-store");
         assert_eq!(
             records[index].headers["cookie"],
-            format!("hc_console_device={DEVICE_COOKIE}")
+            format!("paired_host_device={DEVICE_COOKIE}")
         );
         assert!(!records[index].headers.contains_key("authorization"));
     }
@@ -664,7 +664,7 @@ async fn inventory_has_bounded_bodies_and_no_redirect_or_origin_credential_fallb
     assert_eq!(first.len(), 6);
     assert_eq!(
         first[2].headers["cookie"],
-        format!("hc_console_device={DEVICE_COOKIE}")
+        format!("paired_host_device={DEVICE_COOKIE}")
     );
     let second = second.finish().await;
     assert!(!second[0].headers.contains_key("cookie"));
@@ -741,11 +741,11 @@ async fn actual_transport_pairs_privately_and_preserves_valid_but_not_ready() {
     assert!(!requests[0].headers.contains_key("cookie"));
     assert_eq!(
         requests[1].headers["cookie"],
-        format!("hc_console_pair={PAIR_COOKIE}")
+        format!("paired_host_pair={PAIR_COOKIE}")
     );
     assert_eq!(
         requests[2].headers["cookie"],
-        format!("hc_console_device={DEVICE_COOKIE}")
+        format!("paired_host_device={DEVICE_COOKIE}")
     );
     assert_eq!(
         serde_json::from_slice::<Value>(&requests[1].body).unwrap(),
@@ -798,7 +798,7 @@ async fn independent_origins_do_not_share_device_credentials_and_revocation_is_h
     );
     assert_eq!(
         owner_requests[2].headers["cookie"],
-        format!("hc_console_device={DEVICE_COOKIE}")
+        format!("paired_host_device={DEVICE_COOKIE}")
     );
 }
 
@@ -839,7 +839,7 @@ async fn redirect_is_unconfirmed_and_never_sends_code_or_cookie_to_destination()
 #[tokio::test]
 async fn current_snapshot_problems_and_typed_request_rejection_are_preserved() {
     let problems = json!([
-        {"code":"surfaces_lock_stale","path":"policy","message":"The candidate changes the desired extension surfaces; deployment/surfaces.lock must be regenerated and reviewed first."},
+        {"code":"surfaces_lock_stale","path":"policy","message":"The candidate changes the desired extension surfaces; the host's surfaces lock must be regenerated and reviewed first."},
         {"code":"snapshot_changed","path":"","message":"The current activation, policy or ledger changed during validation."}
     ]);
     let mut changed = receipt();
@@ -908,7 +908,7 @@ async fn bounded_parser_refuses_ambiguous_or_secret_bearing_protocol_data() {
         json!([{"kind":"identity","name":"identity:parent-1"}]);
     let mut obsolete_problem = base.clone();
     obsolete_problem["valid"] = json!(false);
-    obsolete_problem["problems"] = json!([{"code":"target_identity_unknown","path":"target_identity","message":"The target identity is not in PairedHost's roster."}]);
+    obsolete_problem["problems"] = json!([{"code":"target_identity_unknown","path":"target_identity","message":"The target identity is not in the host's roster."}]);
     let duplicate = serde_json::to_string(&base).unwrap().replacen(
         "\"valid\":true",
         "\"valid\":false,\"valid\":true",
@@ -961,7 +961,7 @@ async fn size_limits_cover_declared_streamed_and_cookie_responses_without_retry(
     streamed.chunked = true;
     let oversized_cookie = Reply::json(200, receipt()).header(
         "Set-Cookie",
-        &format!("hc_console_device={}; Path=/", "x".repeat(4096)),
+        &format!("paired_host_device={}; Path=/", "x".repeat(4096)),
     );
     let fixture = Fixture::new(vec![
         Reply::bytes(200, oversized),
@@ -990,11 +990,11 @@ async fn acknowledged_pairing_requires_the_expected_scoped_cookie_and_true_body(
         Reply::json(200, json!({"ok":true})),
         Reply::json(200, json!({"ok":true})).header(
             "Set-Cookie",
-            "hc_console_pair=private-marker; Path=/foreign; HttpOnly",
+            "paired_host_pair=private-marker; Path=/foreign; HttpOnly",
         ),
         Reply::json(200, json!({"ok":false})).header(
             "Set-Cookie",
-            "hc_console_pair=private-marker; Path=/console/pair; HttpOnly",
+            "paired_host_pair=private-marker; Path=/console/pair; HttpOnly",
         ),
     ])
     .await;
@@ -1202,17 +1202,17 @@ async fn invalid_local_input_stays_local_and_request_schema_is_closed() {
 }
 
 const CHANGE_DIGEST: &str =
-    "hc-frontend-change-v1:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    "paired-host-change-v1:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const OTHER_CHANGE_DIGEST: &str =
-    "hc-frontend-change-v1:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    "paired-host-change-v1:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const CHANGES_PATH: &str = "/console/extensions/frontend/change-requests";
 
 fn new_extension_request() -> FrontendNewExtensionRequest {
     FrontendNewExtensionRequest {
-        distribution: "paired-host-ext-signal".into(),
+        distribution: "example-ext-signal".into(),
         version: "0.1.0".into(),
         source: FrontendExtensionSource {
-            repo: "https://github.com/fixture/paired-host-ext-signal.git".into(),
+            repo: "https://github.com/fixture/example-signal.git".into(),
             tag: "v0.1.0".into(),
             commit: "a".repeat(40),
             package_path: None,
@@ -1231,7 +1231,7 @@ fn new_extension_raw() -> String {
     // Synthetic owner output. The client retains this exact summary and does
     // not calculate a summary, version or digest of its own.
     format!(
-        r#"{{ "change_digest":"{CHANGE_DIGEST}","kind":"new_extension","base":{{"activation_id":"214","policy_digest":"fixture-policy","ledger_digest":"fixture-ledger"}},"proposal":{proposal},"unverified":["manifest","facades","channel_template","secrets"],"prerequisites":[{{"kind":"build_and_review","state":"pending"}}],"unified_summary":"new extension paired-host-ext-signal 0.1.0\nsource commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nchannel: polling, fixture-group\nunverified until built and reviewed\nsubmitting activates nothing\n"}}"#
+        r#"{{ "change_digest":"{CHANGE_DIGEST}","kind":"new_extension","base":{{"activation_id":"214","policy_digest":"fixture-policy","ledger_digest":"fixture-ledger"}},"proposal":{proposal},"unverified":["manifest","facades","channel_template","secrets"],"prerequisites":[{{"kind":"build_and_review","state":"pending"}}],"unified_summary":"new extension example-ext-signal 0.1.0\nsource commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nchannel: polling, fixture-group\nunverified until built and reviewed\nsubmitting activates nothing\n"}}"#
     )
 }
 
@@ -1256,7 +1256,7 @@ async fn capture_new_extension(client: &mut PairedHostClient) -> FrontendNewExte
 
 fn new_extension_built() -> Value {
     json!({
-        "extension_id":"signal", "distribution":"paired-host-ext-signal", "version":"0.1.0",
+        "extension_id":"signal", "distribution":"example-ext-signal", "version":"0.1.0",
         "source_commit":"a".repeat(40), "wheel_sha256":"b".repeat(64),
         "release_evidence_sha256":"c".repeat(64), "facades":["channel_ingress.v1","sender.v1"],
         "channel_template":{"id":"signal:primary","extension_defined":{"threshold":0.125}},
@@ -1359,7 +1359,7 @@ async fn new_extension_request_captures_exact_summary_and_submits_only_to_the_pa
         assert_eq!(request.headers["origin"], client.selected_origin());
         assert_eq!(
             request.headers["cookie"],
-            format!("hc_console_device={DEVICE_COOKIE}")
+            format!("paired_host_device={DEVICE_COOKIE}")
         );
         assert!(!request.headers.contains_key("authorization"));
         assert!(
@@ -1764,7 +1764,7 @@ async fn new_extension_canonical_spelling_refusal_and_host_problems_do_not_submi
     let fixture = Fixture::new(replies).await;
     let mut client = PairedHostClient::new(&fixture.origin).unwrap();
     let mut noncanonical = new_extension_request();
-    noncanonical.distribution = "PairedHost_Ext_Signal".into();
+    noncanonical.distribution = "Example_Ext_Signal".into();
     assert_eq!(
         client
             .prepare_new_extension(&noncanonical)
@@ -1987,7 +1987,7 @@ async fn fresh_authenticated_digest_read_preserves_all_new_extension_stages_and_
         assert_eq!(request.headers["cache-control"], "no-store");
         assert_eq!(
             request.headers["cookie"],
-            format!("hc_console_device={DEVICE_COOKIE}")
+            format!("paired_host_device={DEVICE_COOKIE}")
         );
         assert!(request.body.is_empty());
     }
@@ -2111,7 +2111,7 @@ fn change_raw() -> String {
         "\"approved_groups\":[\"-1001234567890\"]",
     );
     format!(
-        r#"{{"change_digest":"{CHANGE_DIGEST}","base":{{"activation_id":"210","policy_digest":"sha256:current-fixture","ledger_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"ledger_patch":{{"path":"deployment/extensions.toml","extension_id":"telegram","channel_id":"telegram:primary","before":{before},"after":{after}}},"unified_diff":"--- a/deployment/extensions.toml\n+++ b/deployment/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = [\"-1001234567890\"]\n"}}"#
+        r#"{{"change_digest":"{CHANGE_DIGEST}","base":{{"activation_id":"210","policy_digest":"sha256:current-fixture","ledger_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"ledger_patch":{{"path":"host/extensions.toml","extension_id":"telegram","channel_id":"telegram:primary","before":{before},"after":{after}}},"unified_diff":"--- a/host/extensions.toml\n+++ b/host/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = [\"-1001234567890\"]\n"}}"#
     )
 }
 
@@ -2580,7 +2580,7 @@ async fn submitted_review_redisplay_preserves_status_attempts_and_the_original_p
                 "a retained request page remains useful after submission"
             );
             let private = String::from_utf8(private).unwrap();
-            assert!(private.contains("PairedHost change review"));
+            assert!(private.contains("Paired host change review"));
             assert!(private.contains("this change's current review and activation status"));
             assert!(!private.contains("draft review"));
             assert_eq!(private.matches(&format!("{origin}{path}")).count(), 1);
@@ -2660,7 +2660,7 @@ async fn missing_invalid_and_conflicting_review_candidates_never_create_a_notice
 #[tokio::test]
 async fn full_and_disconnected_review_queues_preserve_the_particular_retained_draft() {
     use meerkat_connect::paired_host_tool::PairedHostFrontend;
-    let second_digest = format!("hc-frontend-change-v1:sha256:{}", "b".repeat(64));
+    let second_digest = format!("paired-host-change-v1:sha256:{}", "b".repeat(64));
     assert_ne!(second_digest, CHANGE_DIGEST);
     let first_path = format!("/console/extensions/frontend/review/{CHANGE_DIGEST}");
     let second_path = format!("/console/extensions/frontend/review/{second_digest}");
@@ -3230,7 +3230,7 @@ async fn prepared_draft_readback_preserves_owner_bytes_but_never_recovers_client
         assert_eq!(record.headers["cache-control"], "no-store");
         assert_eq!(
             record.headers["cookie"],
-            format!("hc_console_device={DEVICE_COOKIE}")
+            format!("paired_host_device={DEVICE_COOKIE}")
         );
         assert!(record.body.is_empty());
     }
@@ -3346,7 +3346,7 @@ async fn prepared_change_submission_preserves_exact_owner_bytes_and_only_acknowl
         .unwrap();
     let change = capture_change(&mut client).await;
     assert_eq!(change.change_digest().as_str(), CHANGE_DIGEST);
-    assert_eq!(change.ledger_patch().path, "deployment/extensions.toml");
+    assert_eq!(change.ledger_patch().path, "host/extensions.toml");
     assert_eq!(change.base().activation_id.as_deref(), Some("210"));
     assert_eq!(serde_json::to_string(&change).unwrap(), raw);
     assert!(
@@ -3391,7 +3391,7 @@ async fn prepared_change_submission_preserves_exact_owner_bytes_and_only_acknowl
         assert_eq!(record.headers["origin"], client.selected_origin());
         assert_eq!(
             record.headers["cookie"],
-            format!("hc_console_device={DEVICE_COOKIE}")
+            format!("paired_host_device={DEVICE_COOKIE}")
         );
         assert!(!record.headers.contains_key("authorization"));
         let body = std::str::from_utf8(&record.body).unwrap();
@@ -3634,8 +3634,15 @@ async fn submission_preserves_stale_base_and_closed_host_refusals_without_reprep
             409,
             "candidate_invalid",
             "change_not_reproducible",
-            "The submitted change is not the change PairedHost derives for this candidate from the current snapshot.",
+            "The submitted change is not the change the host derives for this candidate from the current snapshot.",
             FrontendChangeRejectionKind::CandidateInvalid,
+        ),
+        (
+            409,
+            "change_rejected",
+            "change_rejected",
+            "The change was rejected in the host's approval flow and cannot be submitted.",
+            FrontendChangeRejectionKind::ChangeRejected,
         ),
     ];
     let mut replies = vec![prepared_change_reply(&change_raw())];
@@ -3659,7 +3666,7 @@ async fn submission_preserves_stale_base_and_closed_host_refusals_without_reprep
         assert_eq!(rejection.problems[0].code, code);
     }
     let requests = fixture.finish().await;
-    assert_eq!(requests.len(), 5);
+    assert_eq!(requests.len(), 6);
     assert_eq!(
         requests
             .iter()
@@ -3671,6 +3678,31 @@ async fn submission_preserves_stale_base_and_closed_host_refusals_without_reprep
 }
 
 #[tokio::test]
+async fn approval_rejection_requires_its_exact_host_text() {
+    let fixture = Fixture::new(vec![
+        prepared_change_reply(&change_raw()),
+        Reply::json(
+            409,
+            json!({"error":"change_rejected","problems":[{"code":"change_rejected","path":"change",
+                "message":"Rejected by the owner."}]}),
+        ),
+    ])
+    .await;
+    let mut client = PairedHostClient::new(&fixture.origin).unwrap();
+    let change = capture_change(&mut client).await;
+    let error = client.submit_frontend_change(&change).await.unwrap_err();
+    assert_eq!(
+        error,
+        unconfirmed(
+            PairedHostOperation::SubmitFrontendChange,
+            UnconfirmedReason::UnexpectedResponse
+        )
+    );
+    assert_safe(&error);
+    assert_eq!(fixture.finish().await.len(), 2);
+}
+
+#[tokio::test]
 async fn malformed_or_crossed_prepare_changes_never_become_submit_capable() {
     let base: Value = serde_json::from_str(&change_raw()).unwrap();
     let mut unknown = base.clone();
@@ -3678,7 +3710,7 @@ async fn malformed_or_crossed_prepare_changes_never_become_submit_capable() {
     let mut crossed = base.clone();
     crossed["base"]["activation_id"] = json!("999");
     let mut path = base.clone();
-    path["ledger_patch"]["path"] = json!("deployment/senders.toml");
+    path["ledger_patch"]["path"] = json!("../host/extensions.toml");
     let mut extension = base.clone();
     extension["ledger_patch"]["extension_id"] = json!("whatsapp");
     let mut channel = base.clone();
@@ -3720,6 +3752,37 @@ async fn malformed_or_crossed_prepare_changes_never_become_submit_capable() {
         assert_safe(&error);
     }
     assert_eq!(fixture.finish().await.len(), count);
+}
+
+#[test]
+fn ledger_patch_names_the_hosts_own_ledger_file_by_shape() {
+    let base: Value = serde_json::from_str(&change_raw()).unwrap();
+    let with_path = |path: &str| {
+        let mut change = base.clone();
+        change["ledger_patch"]["path"] = json!(path);
+        serde_json::from_str::<FrontendChange>(&change.to_string())
+    };
+    for path in [
+        "host/extensions.toml",
+        "extensions.toml",
+        "config/a-b_c/ledger.v2.toml",
+    ] {
+        assert!(with_path(path).is_ok(), "{path}");
+    }
+    for path in [
+        "",
+        "/host/extensions.toml",
+        "../extensions.toml",
+        "host/../extensions.toml",
+        "host/./extensions.toml",
+        "host//extensions.toml",
+        "host/extensions.toml/",
+        "host/extensions.json",
+        "host\\extensions.toml",
+        "host/exten sions.toml",
+    ] {
+        assert!(with_path(path).is_err(), "{path}");
+    }
 }
 
 #[tokio::test]
@@ -3812,7 +3875,7 @@ async fn status_requires_exact_correlation_closed_states_fresh_json_and_bounded_
     );
     for text in [
         "private-marker",
-        "hc-frontend-change-v1:sha256:../private-marker",
+        "paired-host-change-v1:sha256:../private-marker",
         &format!("{CHANGE_DIGEST}/../private-marker"),
         &CHANGE_DIGEST.to_uppercase(),
     ] {

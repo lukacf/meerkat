@@ -13,8 +13,9 @@ inside this package. Protocol and outcome rules were checked against
 [Home Assistant core 6cd7e61bad577dd450e26dca2680fd80770543b1](https://github.com/home-assistant/core/tree/6cd7e61bad577dd450e26dca2680fd80770543b1),
 notably `homeassistant/components/api/__init__.py` and its API tests. Home
 Assistant core is Apache-2.0. In particular, its service route shields the
-service task from client disconnect. The paired host is an eventual Toolkit consumer,
-not a separately copied runtime or authentication implementation.
+service task from client disconnect. A home-automation host that uses these
+operations is a Toolkit consumer, not a separately copied runtime or
+authentication implementation.
 
 Runtime dependency `jsonc-parser` is pinned to 3.3.1, maintained by Microsoft,
 and MIT licensed. The reviewed source corresponds to
@@ -25,7 +26,7 @@ fault-tolerant parse result is never used. The pinned npm artifact integrity is
 retained in the staging provenance; installation must preserve it in a lockfile.
 
 The build-only dependency TypeScript is pinned to 5.8.3, Apache-2.0. It is not a
-runtime dependency. There are no MobKit, Meerkat, the paired host or credential-store
+runtime dependency. There are no MobKit, Meerkat, host or credential-store
 runtime dependencies.
 
 The Microsoft dependency license follows for attribution.

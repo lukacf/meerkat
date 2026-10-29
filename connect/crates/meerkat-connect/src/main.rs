@@ -113,7 +113,7 @@ impl Cli {
                 || self.paired_host_memory_only)
         {
             return Err(ConnectError::InvalidInput(
-                "Credential commands use the selected local realm and cannot select setup, a model or PairedHost.".into(),
+                "Credential commands use the selected local realm and cannot select setup, a model or the paired host.".into(),
             ));
         }
         Ok(())
@@ -291,7 +291,7 @@ async fn run(cli: Cli) -> Result<(), ConnectError> {
         );
         let paired = if cli.paired_host_memory_only {
             println!(
-                "Pairing is kept only for this process. The OS credential store will not be read or written. PairedHost enrollment is not revoked when this process ends."
+                "Pairing is kept only for this process. The OS credential store will not be read or written. Paired host enrollment is not revoked when this process ends."
             );
             pair_paired_host(
                 &origin,
@@ -314,7 +314,7 @@ async fn run(cli: Cli) -> Result<(), ConnectError> {
             return Ok(None);
         };
         println!(
-            "The setup agent can check current extension choices or propose a new package from a pinned source, preserving its selected service and frontend roles. For channel frontends, PairedHost routes each message to its sender's own agent; no destination-agent choice is needed. The terminal asks for approval before submitting the exact proposal for host operator review, creating a secret-entry intent or cancelling one. Secret values are entered only in PairedHost through a private terminal link, with independent browser pairing and host owner confirmation. A new package request queues PairedHost's build and review workflow. Its receipt confirms the request was recorded; installation, activation and readiness require later host evidence."
+            "The setup agent can check current extension choices or propose a new package from a pinned source, preserving its selected service and frontend roles. For channel frontends, the paired host routes each message to its sender's own agent; no destination-agent choice is needed. The terminal asks for approval before submitting the exact proposal for host operator review, creating a secret-entry intent or cancelling one. Secret values are entered only in the paired host through a private terminal link, with independent browser pairing and host owner confirmation. A new package request queues the paired host's build and review workflow. Its receipt confirms the request was recorded; installation, activation and readiness require later host evidence."
         );
         PairedHostFrontend::with_research(client)
     } else {
@@ -323,7 +323,7 @@ async fn run(cli: Cli) -> Result<(), ConnectError> {
         paired_host
     };
     if paired_host.bind_recovery_artifacts(&storage.locator, &artifacts).is_err() {
-        println!("PairedHost setup history could not be opened. PairedHost preparation is unavailable in this invocation; other setup remains available.");
+        println!("Paired host setup history could not be opened. Paired host preparation is unavailable in this invocation; other setup remains available.");
     }
     let secret_presenter = Some(paired_host.take_secret_entry_presenter()?);
     let session_options = SessionOptions {
@@ -332,7 +332,7 @@ async fn run(cli: Cli) -> Result<(), ConnectError> {
     };
     let connectors = TerminalConnectors::open(&mut startup).await?;
     println!(
-        "The agent can prepare and inspect an exact service package, then request approval for its checked installation. The terminal handles connector sign-in and the verified account access review. After setup closes, native finalization rechecks the approved connector and reports what was saved; login or an approval alone is not service readiness. PairedHost and Forge keep their existing protected setup presenters. Never enter credential values into the conversation."
+        "The agent can prepare and inspect an exact service package, then request approval for its checked installation. The terminal handles connector sign-in and the verified account access review. After setup closes, native finalization rechecks the approved connector and reports what was saved; login or an approval alone is not service readiness. Paired host and Forge keep their existing protected setup presenters. Never enter credential values into the conversation."
     );
     let (forge, forge_presenter) = main_connector::standalone_forge(None)?;
     let setup = NativeSetup::with_forge(session_id.clone(), storage.locator.clone(), paired_host.clone(),
@@ -580,7 +580,7 @@ async fn run(cli: Cli) -> Result<(), ConnectError> {
     paired_host = fresh_paired_host;
     host_presenter = fresh_host_presenter;
     if paired_host.bind_recovery_artifacts(&storage.locator, &artifacts).is_err() {
-        println!("PairedHost setup history could not be opened. PairedHost preparation is unavailable in this invocation; other setup remains available.");
+        println!("Paired host setup history could not be opened. Paired host preparation is unavailable in this invocation; other setup remains available.");
     }
     secret_presenter = Some(paired_host.take_secret_entry_presenter()?);
     let mut resumed = continuation.reopen().await?;

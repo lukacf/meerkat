@@ -1,6 +1,6 @@
 //! Native external-tool and loopback HTTP qualification. Ordinary cases use a
 //! synthetic model; the explicitly ignored judgment trial uses the native public
-//! provider. No real PairedHost, packaged MCP worker, installation or activation.
+//! provider. No real paired host, packaged MCP worker, installation or activation.
 
 use std::{
     collections::BTreeMap,
@@ -127,8 +127,8 @@ impl Host {
                     continue;
                 }
                 let (status, headers, body) = match request.path.as_str() {
-                    "/console/pair/request" => (200, "Set-Cookie: hc_console_pair=fixture-private-pair-cookie; Path=/console/pair; HttpOnly; SameSite=Strict\r\n".to_owned(), json!({"ok":true})),
-                    "/console/pair/confirm" => (200, format!("Set-Cookie: hc_console_device={DEVICE}; Path=/; HttpOnly; SameSite=Lax\r\nSet-Cookie: hc_console_pair=; Max-Age=0; Path=/console/pair\r\n"), json!({"ok":true})),
+                    "/console/pair/request" => (200, "Set-Cookie: paired_host_pair=fixture-private-pair-cookie; Path=/console/pair; HttpOnly; SameSite=Strict\r\n".to_owned(), json!({"ok":true})),
+                    "/console/pair/confirm" => (200, format!("Set-Cookie: paired_host_device={DEVICE}; Path=/; HttpOnly; SameSite=Lax\r\nSet-Cookie: paired_host_pair=; Max-Age=0; Path=/console/pair\r\n"), json!({"ok":true})),
                     "/console/extensions/frontend/inventory" if revoked => (403, String::new(), json!({"error":"forbidden","code":"console_owner_required"})),
                     "/console/extensions/frontend/inventory" => (200, String::new(), if new_extension { absent_inventory() } else { inventory() }),
                     "/console/extensions/frontend/prepare" if revoked => (403, String::new(), json!({"error":"forbidden","code":"console_owner_required"})),
@@ -264,7 +264,7 @@ fn new_extension_candidate() -> Value {
     // This is synthetic proposal evidence, not a claim that this fixture pin
     // exists or that any real source discovery, package build or install ran.
     json!({"new_extension":{"distribution":"paired-host-telegram","version":"0.2.6",
-        "source":{"repo":"https://github.com/fixture/paired-host-telegram.git","tag":"v0.2.6","commit":"a".repeat(40)},
+        "source":{"repo":"https://github.com/fixture/example-telegram.git","tag":"v0.2.6","commit":"a".repeat(40)},
         "channel":{"ingress":"polling","approved_groups":[]}}})
 }
 
@@ -282,7 +282,7 @@ fn new_extension_receipt(proposal: Value) -> Value {
         "prerequisites":[{"kind":"build_and_review","state":"pending"}],
         "unified_summary":"Synthetic owner summary: request a pinned Telegram package for build and review.\nNo channel template or secrets have been verified.\n"});
     change["change_digest"] = json!(format!(
-        "hc-frontend-change-v1:sha256:{:x}",
+        "paired-host-change-v1:sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&change).unwrap())
     ));
     json!({"valid":true,"problems":[],"change":change})
@@ -304,7 +304,7 @@ fn receipt() -> Value {
         "missing_prerequisites":[{"kind":"secret","name":"telegram_bot_token"}],
         "current":{"activation_id":"210","policy_digest":"sha256:current-fixture"},
         "candidate":{"channel_row_digest":"sha256:row-fixture",
-            "policy_digest":"hc-policy-content-v1:sha256:policy-fixture","compile_depth":"policy_bundle"},
+            "policy_digest":"fixture-policy-v1:sha256:policy-fixture","compile_depth":"policy_bundle"},
         "compiled_is_not_ready":true})
 }
 
@@ -322,11 +322,11 @@ fn change_receipt(groups: Value) -> Value {
     before["approved_groups"] = groups;
     let mut change = json!({"base":{"activation_id":"210","policy_digest":"sha256:current-fixture",
         "ledger_digest":format!("sha256:{}", "1".repeat(64))},
-        "ledger_patch":{"path":"deployment/extensions.toml","extension_id":"telegram",
+        "ledger_patch":{"path":"host/extensions.toml","extension_id":"telegram",
             "channel_id":"telegram:primary","before":original,"after":before},
-        "unified_diff":format!("--- a/deployment/extensions.toml\n+++ b/deployment/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = {}\n", before["approved_groups"])});
+        "unified_diff":format!("--- a/host/extensions.toml\n+++ b/host/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = {}\n", before["approved_groups"])});
     let digest = format!(
-        "hc-frontend-change-v1:sha256:{:x}",
+        "paired-host-change-v1:sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&change).unwrap())
     );
     change["change_digest"] = json!(digest);
@@ -812,7 +812,7 @@ async fn native_external_inventory_then_candidate_without_mcp_launch_preserves_e
         }
         assert_eq!(
             requests[2].headers["cookie"],
-            format!("hc_console_device={DEVICE}")
+            format!("paired_host_device={DEVICE}")
         );
     }
 }
@@ -1174,14 +1174,14 @@ mod real_model_judgment {
         PAIRED_HOST_FRONTEND_SUBMIT,
         PAIRED_HOST_FRONTEND_STATUS,
     ];
-    const PROMPT: &str = "I want my family to talk to PairedHost through Telegram. Use polling for the one Telegram group the selected host already declares, with messages going to each sender's own agent. Please work out the available setup and prepare a change for the host operator to review. If credentials are still missing, explain what needs finishing rather than asking for them here; I still want the review request prepared. Let me review and approve the exact change in the terminal before you submit it, then check the request's status and tell me what happened and what remains. Do not activate anything or send messages.";
-    const NEW_EXTENSION_PROMPT: &str = "I want my family to talk to PairedHost through Telegram, with messages going to each sender's own agent. I have researched this package: distribution paired-host-ext-telegram, version 0.2.8, repository https://github.com/fixture/paired-host-telegram.git, tag v0.2.8, commit 49f53a27a4535f80a357ee13e8150776ed02886b. Use this exact source with polling and no approved groups initially. Please check whether the selected host already has it and prepare the appropriate request for host-owned build and review. Let me review and approve the exact pinned proposal in the terminal before you submit it, then check its status and explain what is confirmed and what still needs the host's work. Do not ask for credentials here, claim installation from a recorded request, or send messages.";
+    const PROMPT: &str = "I want my family to talk to the paired host through Telegram. Use polling for the one Telegram group the selected host already declares, with messages going to each sender's own agent. Please work out the available setup and prepare a change for the host operator to review. If credentials are still missing, explain what needs finishing rather than asking for them here; I still want the review request prepared. Let me review and approve the exact change in the terminal before you submit it, then check the request's status and tell me what happened and what remains. Do not activate anything or send messages.";
+    const NEW_EXTENSION_PROMPT: &str = "I want my family to talk to the paired host through Telegram, with messages going to each sender's own agent. I have researched this package: distribution example-ext-telegram, version 0.2.8, repository https://github.com/fixture/example-telegram.git, tag v0.2.8, commit 49f53a27a4535f80a357ee13e8150776ed02886b. Use this exact source with polling and no approved groups initially. Please check whether the selected host already has it and prepare the appropriate request for host-owned build and review. Let me review and approve the exact pinned proposal in the terminal before you submit it, then check its status and explain what is confirmed and what still needs the host's work. Do not ask for credentials here, claim installation from a recorded request, or send messages.";
 
     fn researched_new_extension_candidate() -> Value {
         // Genuine owner-accepted metadata. The host responses below remain
         // synthetic; this trial does not perform discovery or source verification.
-        json!({"new_extension":{"distribution":"paired-host-ext-telegram","version":"0.2.8",
-            "source":{"repo":"https://github.com/fixture/paired-host-telegram.git","tag":"v0.2.8",
+        json!({"new_extension":{"distribution":"example-ext-telegram","version":"0.2.8",
+            "source":{"repo":"https://github.com/fixture/example-telegram.git","tag":"v0.2.8",
                 "commit":"49f53a27a4535f80a357ee13e8150776ed02886b"},
             "channel":{"ingress":"polling","approved_groups":[]}}})
     }
@@ -1560,7 +1560,7 @@ mod real_model_judgment {
             Err(std::env::VarError::NotPresent) => false,
             _ => {
                 return Err(io::Error::other(
-                    "unsupported finite PairedHost trial scenario",
+                    "unsupported finite paired host trial scenario",
                 ));
             }
         };

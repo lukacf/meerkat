@@ -2430,7 +2430,7 @@ for name in os.listdir('/dev/fd'):
             .unwrap(),
         );
         let activation = artifact(root.join("shared/activations/1.json"), toolkit_package::canonical_json(&serde_json::json!({
-            "activation_id":"1", "policy_bundle":{"path":"shared/policy/bundle.1", "policy_digest":format!("hc-policy-v1:sha256:{}",policy_manifest.sha256)}
+            "activation_id":"1", "policy_bundle":{"path":"shared/policy/bundle.1", "policy_digest":format!("policy-v1:sha256:{}",policy_manifest.sha256)}
         })).unwrap());
         std::os::unix::fs::symlink("shared/activations/1.json", root.join("current")).unwrap();
         HostBootstrapSelection {

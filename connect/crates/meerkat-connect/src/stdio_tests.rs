@@ -880,6 +880,7 @@ async fn paired_host_preparation_declares_exact_installed_tools_and_native_ceili
     let binding: Initialize = serde_json::from_value(paired_host_binding(root.path())).unwrap();
     let client = crate::paired_host::PairedHostClient::for_presenter(
         "https://paired-host.example",
+        "x-paired-host-presenter-credential",
         "private-test-only",
     )
     .unwrap();
@@ -1083,7 +1084,7 @@ async fn joined_notices_fence_next_send_and_keep_original_private_custody() {
     let (entries, reviews, presenter) = crate::secret_presenter::channel();
     d.secret_presenter = Some(presenter);
     let digest = crate::paired_host::FrontendChangeDigest::new(&format!(
-        "hc-frontend-change-v1:sha256:{}",
+        "paired-host-change-v1:sha256:{}",
         "a".repeat(64)
     ))
     .unwrap();
@@ -1386,7 +1387,7 @@ async fn private_pairing_corrects_locally_and_joins_actual_http_before_retiremen
     use meerkat_core::types::ToolCallView;
     use tokio::net::TcpListener;
     // Controlled HTTP acknowledgements exercise transport custody. Actual
-    // PairedHost enrollment/secret ownership remains a separate qualification.
+    // Paired host enrollment/secret ownership remains a separate qualification.
     for (method, held) in [
         ("request", None),
         ("terminal", None),
@@ -1432,7 +1433,7 @@ async fn private_pairing_corrects_locally_and_joins_actual_http_before_retiremen
                     };
                     assert!(body == json!({"code":code}));
                     assert_eq!(
-                        lower.contains("hc_console_pair=fixture-pair"),
+                        lower.contains("paired_host_pair=fixture-pair"),
                         operation == "confirm"
                     );
                 }
@@ -1442,9 +1443,9 @@ async fn private_pairing_corrects_locally_and_joins_actual_http_before_retiremen
                     release.take().unwrap().await.unwrap();
                 }
                 let cookie = if operation == "request" {
-                    "hc_console_pair=fixture-pair; Path=/console/pair; HttpOnly; SameSite=Strict"
+                    "paired_host_pair=fixture-pair; Path=/console/pair; HttpOnly; SameSite=Strict"
                 } else {
-                    "hc_console_device=fixture-device; Path=/; HttpOnly; SameSite=Lax"
+                    "paired_host_device=fixture-device; Path=/; HttpOnly; SameSite=Lax"
                 };
                 socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nSet-Cookie: {cookie}\r\nConnection: close\r\n\r\n{{\"ok\":true}}").as_bytes()).await.unwrap();
                 socket.shutdown().await.unwrap();

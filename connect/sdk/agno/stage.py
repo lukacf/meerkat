@@ -96,7 +96,7 @@ def stage(destination: Path) -> dict[str, object]:
             "sha256": hashlib.sha256(selected_bytes).hexdigest(),
             "scope": "Build-time exact profile projection; installed validator remains authoritative",
         },
-        "scope": "Exact shared adapter sources only. No PairedHost-derived modules or parent distribution.",
+        "scope": "Exact shared adapter sources only. No host-derived modules or parent distribution.",
     }
     payloads["src/meerkat_toolkit_agno/PACKAGE-SOURCES.json"] = (
         json.dumps(manifest, indent=2) + "\n"

@@ -1475,9 +1475,9 @@ export audit records that exact projection.
 ## Distribution boundaries
 
 The root licenses cover original Toolkit code as stated in each component.
-The nine extracted PairedHost-derived Python modules are licensed under MIT OR
+The nine extracted Python modules are licensed under MIT OR
 Apache-2.0 for their Toolkit copies, with exact provenance in
-`sdk/python/LICENSE-EXTRACTED`. This does not change the original paired host projects.
+`sdk/python/LICENSE-EXTRACTED`. This does not change the original projects.
 Upstream donor notices and optional dependency terms remain alongside their
 source and retain their own scope.
 

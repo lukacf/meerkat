@@ -150,10 +150,10 @@ def test_pending_join_does_not_block_concurrent_begin_close():
         joining = executor.submit(client.join_close, close)
         join_request = receive(reader)
         assert join_request["command"]["kind"] == "join_close"
-        disabling = executor.submit(client.begin_close_component, "robot", HostCloseReason.QUARANTINE)
+        disabling = executor.submit(client.begin_close_component, "device", HostCloseReason.QUARANTINE)
         begin_request = receive(reader)
         assert begin_request["command"]["kind"] == "begin_close_component"
-        component_close = HostCloseHandle(close.incarnation, uuid4(), HostCloseScope("component", "robot"))
+        component_close = HostCloseHandle(close.incarnation, uuid4(), HostCloseScope("component", "device"))
         respond(writer, begin_request, {"kind": "close", "observation": observation(component_close, "closing")})
         assert disabling.result(timeout=2).state == HostCloseState.CLOSING
         assert not joining.done()
@@ -203,7 +203,7 @@ def test_unknown_response_correlation_closes_command_endpoint():
     client._reader.join(timeout=2)
     assert not client._reader.is_alive()
     with pytest.raises(HostControlError):
-        client.open_component("robot")
+        client.open_component("device")
     assert reader.read() == b""
     client.close()
     reader.close()
@@ -236,7 +236,7 @@ def test_oversize_response_closes_pipe_and_wakes_waiter():
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
             try:
-                pending = executor.submit(client.open_component, "robot")
+                pending = executor.submit(client.open_component, "device")
                 deadline = time.monotonic() + 2
                 command = bytearray()
                 while not command.endswith(b"\n"):

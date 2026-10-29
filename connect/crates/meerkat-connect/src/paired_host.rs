@@ -1,4 +1,4 @@
-//! A captured-origin client for PairedHost's existing console pairing and
+//! A captured-origin client for the paired host's existing console pairing and
 //! frontend inventory, source inspection, preparation, owner change requests and nonsecret
 //! extension-secret intents.
 //!
@@ -9,9 +9,9 @@
 //! remember only a confirmed device cookie through the OS custody adapter.
 //!
 //! Each call is a single attempt. Dropping its future stops local observation,
-//! not work already accepted by PairedHost. In particular, a lost pairing reply
+//! not work already accepted by the paired host. In particular, a lost pairing reply
 //! can follow a delivered code or a registered device. Do not automatically
-//! retry or describe cancellation as host rollback. PairedHost rechecks pairing,
+//! retry or describe cancellation as host rollback. The paired host rechecks pairing,
 //! network eligibility and current configuration on every candidate request.
 
 use std::{
@@ -25,7 +25,7 @@ use crate::paired_host_device::{ConfirmedDevice, DeviceStoreError};
 use reqwest::{
     Client, Response, Url,
     cookie::{CookieStore, Jar},
-    header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, HeaderValue, ORIGIN, SET_COOKIE},
+    header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, HeaderName, HeaderValue, ORIGIN, SET_COOKIE},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::value::RawValue;
@@ -50,7 +50,7 @@ const MAX_SOURCE_BODY_BYTES: usize = 256 * 1024;
 const SOURCE_INSPECT_TIMEOUT: Duration = Duration::from_secs(120);
 const SECRET_INTENTS: &str = "/console/extensions/secrets/intents";
 const MAX_SECRET_INTENT_REQUEST_BYTES: usize = 8 * 1024;
-const CHANGE_DIGEST_PREFIX: &str = "hc-frontend-change-v1:sha256:";
+const CHANGE_DIGEST_PREFIX: &str = "paired-host-change-v1:sha256:";
 
 /// A human-entered code, deliberately neither serializable nor printable.
 /// This does not promise memory zeroization or protection from the process owner.
@@ -147,9 +147,9 @@ pub enum PairedHostRefusal {
 pub enum PairedHostError {
     #[error("select an HTTP or HTTPS origin without credentials, path, query or fragment")]
     InvalidOrigin,
-    #[error("the private PairedHost presenter credential is invalid")]
+    #[error("the private paired host presenter credential is invalid")]
     InvalidPresenterCredential,
-    #[error("the PairedHost presenter credential does not admit this operation")]
+    #[error("the paired host presenter credential does not admit this operation")]
     PresenterOperationUnavailable,
     #[error("the pairing label must contain 1-60 characters and no control characters")]
     InvalidPairingLabel,
@@ -173,23 +173,23 @@ pub enum PairedHostError {
     InvalidSecretIntentId,
     #[error("the extension secret intent request is not in the supported form")]
     InvalidSecretIntentRequest,
-    #[error("the frontend change was not captured by this PairedHost client")]
+    #[error("the frontend change was not captured by this paired host client")]
     UnboundFrontendChange,
     #[error(
-        "PairedHost returned a different new-extension proposal; no change was captured; use the owner's canonical distribution, version and repository spellings"
+        "The paired host returned a different new-extension proposal; no change was captured; use the owner's canonical distribution, version and repository spellings"
     )]
     NewExtensionProposalMismatch,
     #[error("the frontend request exceeds the supported size limit")]
     RequestTooLarge,
-    #[error("the PairedHost HTTP client could not be constructed")]
+    #[error("the paired host HTTP client could not be constructed")]
     ClientUnavailable,
-    #[error("PairedHost refused {operation:?}: {reason:?}")]
+    #[error("The paired host refused {operation:?}: {reason:?}")]
     Refused {
         operation: PairedHostOperation,
         reason: PairedHostRefusal,
     },
     #[error(
-        "the PairedHost {operation:?} outcome is unconfirmed ({reason:?}); do not retry automatically"
+        "the paired host {operation:?} outcome is unconfirmed ({reason:?}); do not retry automatically"
     )]
     Unconfirmed {
         operation: PairedHostOperation,
@@ -198,7 +198,7 @@ pub enum PairedHostError {
 }
 
 /// The closed host request. Identifiers, roster membership, group validity and
-/// compilation remain PairedHost judgments, not a duplicate Toolkit policy.
+/// compilation remain judgments of the paired host, not a duplicate Toolkit policy.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FrontendCandidateRequest {
@@ -228,7 +228,7 @@ pub struct FrontendParticipants {
 
 /// An acquisition proposal, not a wheel, ledger row or installation command.
 /// Use the owner's canonical spellings: capture requires the returned proposal
-/// to equal these inputs. PairedHost owns source eligibility and normalization.
+/// to equal these inputs. The paired host owns source eligibility and normalization.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(try_from = "NewExtensionRequestWire")]
 pub struct FrontendNewExtensionRequest {
@@ -347,7 +347,7 @@ pub struct FrontendRoleDaemon {
     pub voice_mode: String,
 }
 
-/// Shape only. PairedHost's role owner judges eligibility and host bindings.
+/// Shape only. The paired host's role owner judges eligibility and host bindings.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(try_from = "ExtensionRolesWire")]
 pub struct FrontendExtensionRoles {
@@ -483,7 +483,7 @@ pub struct FrontendSourceTag {
     pub commit: String,
 }
 
-/// Static metadata read by PairedHost at its resolved commit. This neither
+/// Static metadata read by the paired host at its resolved commit. This neither
 /// executes package code nor proves the wheel manifest or frontend readiness.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -982,7 +982,7 @@ pub enum FrontendVaultSecretSource {
     Vault,
 }
 
-/// PairedHost's process-local binding observation, not provider authentication.
+/// The paired host's process-local binding observation, not provider authentication.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FrontendSecretBindingStatus {
@@ -1415,7 +1415,7 @@ fn required_nullable_secret_base<'de, D: serde::Deserializer<'de>>(
 }
 
 /// Opaque owner rows remain JSON, including extension-defined registration
-/// values. Only PairedHost compiles them and renders their canonical TOML diff.
+/// values. Only the paired host compiles them and renders their canonical TOML diff.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrontendLedgerPatch {
@@ -1496,7 +1496,7 @@ impl<'de> Deserialize<'de> for FrontendChange {
             .map_err(|_| serde::de::Error::custom("invalid change JSON"))?;
         let metadata: FrontendChangeMetadata = serde_json::from_str(raw.get())
             .map_err(|_| serde::de::Error::custom("unsupported change shape"))?;
-        if metadata.ledger_patch.path != "deployment/extensions.toml"
+        if !valid_ledger_path(&metadata.ledger_patch.path)
             || !json_object(&metadata.ledger_patch.after)
             || metadata
                 .ledger_patch
@@ -2153,6 +2153,7 @@ pub enum FrontendChangeRejectionKind {
     DigestMismatch,
     CandidateInvalid,
     StaleBase,
+    ChangeRejected,
     Conflict,
     Unavailable,
     InternalError,
@@ -2215,7 +2216,7 @@ pub enum FrontendPrerequisiteKind {
     Route,
 }
 
-/// PairedHost promises static messages, never compiler exception text. Checking
+/// Paired host promises static messages, never compiler exception text. Checking
 /// that wire promise prevents a mismatched endpoint from returning raw errors.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -2258,7 +2259,7 @@ impl FrontendProblem {
             "secret_binding_out_of_scope" => "A secret binding belongs to a different consumer.",
             "policy_compile_failed" => "The candidate policy does not compile.",
             "surfaces_lock_stale" => {
-                "The candidate changes the desired extension surfaces; deployment/surfaces.lock must be regenerated and reviewed first."
+                "The candidate changes the desired extension surfaces; the host's surfaces lock must be regenerated and reviewed first."
             }
             "baseline_policy_compile_failed" => {
                 "The current policy inputs do not compile in isolation, so the candidate cannot be judged at full depth."
@@ -2301,10 +2302,10 @@ impl FrontendProblem {
             "voice_map_invalid" => "The voice map does not fit the selected roles.",
             "roles_incompatible" => "The role owner refuses this role configuration.",
             "not_a_paired_host_extension" => {
-                "The source declares no PairedHost extension entry point."
+                "The source declares no extension entry point for this host."
             }
             "metadata_invalid" => {
-                "The source's package metadata is not static, valid PairedHost extension metadata."
+                "The source's package metadata is not static, valid extension metadata for this host."
             }
             "tag_unresolved" => {
                 "The tag could not be resolved to a commit in the source repository."
@@ -2317,8 +2318,11 @@ impl FrontendProblem {
                 "The distribution name collides with a declared extension id."
             }
             "stale_base" => "The change was prepared against a snapshot that is no longer current.",
+            "change_rejected" => {
+                "The change was rejected in the host's approval flow and cannot be submitted."
+            }
             "change_not_reproducible" => {
-                "The submitted change is not the change PairedHost derives for this candidate from the current snapshot."
+                "The submitted change is not the change the host derives for this candidate from the current snapshot."
             }
             "internal_error" => "Validation stopped on an unexpected error.",
             _ => return false,
@@ -2372,10 +2376,10 @@ pub struct PairedHostClient {
     origin_header: HeaderValue,
     http: Client,
     cookies: Arc<OriginCookies>,
-    presenter_credential: Option<HeaderValue>,
+    presenter_credential: Option<(HeaderName, HeaderValue)>,
     confirmed_device: Option<ConfirmedDevice>,
     // Correlates immutable preparations with this exact client. This is not
-    // authorization: PairedHost rechecks the live credentials on every call.
+    // authorization: the paired host rechecks the live credentials on every call.
     change_binding: Arc<()>,
 }
 
@@ -2387,23 +2391,29 @@ impl fmt::Debug for PairedHostClient {
 
 impl PairedHostClient {
     /// Host/presenter composition must obtain this origin directly from the
-    /// human, not from tool arguments. HTTP is supported for PairedHost's trusted
+    /// human, not from tool arguments. HTTP is supported for the paired host's trusted
     /// LAN profile; it does not provide TLS confidentiality. Eligibility and
-    /// any HTTPS/network rollout are the PairedHost owner's decisions.
+    /// any HTTPS/network rollout are the paired host owner's decisions.
     pub fn new(human_selected_origin: &str) -> Result<Self, PairedHostError> {
         Self::with_credential(human_selected_origin, None)
     }
 
     /// Private host bootstrap only. No cookie store is attached to this client;
-    /// PairedHost owns credential expiry, live-device checks and retirement.
-    pub(crate) fn for_presenter(origin: &str, value: &str) -> Result<Self, PairedHostError> {
+    /// the paired host owns credential expiry, live-device checks and retirement.
+    /// The host names the request header that carries its credential.
+    pub(crate) fn for_presenter(
+        origin: &str,
+        header: &str,
+        value: &str,
+    ) -> Result<Self, PairedHostError> {
+        let name = presenter_credential_header(header)?;
         let mut credential = HeaderValue::from_str(value)
             .map_err(|_| PairedHostError::InvalidPresenterCredential)?;
         if value.is_empty() || value.chars().any(char::is_whitespace) {
             return Err(PairedHostError::InvalidPresenterCredential);
         }
         credential.set_sensitive(true);
-        let client = Self::with_credential(origin, Some(credential))?;
+        let client = Self::with_credential(origin, Some((name, credential)))?;
         if client.selected_origin() != origin {
             return Err(PairedHostError::InvalidOrigin);
         }
@@ -2412,7 +2422,7 @@ impl PairedHostClient {
 
     fn with_credential(
         human_selected_origin: &str,
-        presenter_credential: Option<HeaderValue>,
+        presenter_credential: Option<(HeaderName, HeaderValue)>,
     ) -> Result<Self, PairedHostError> {
         let origin =
             Url::parse(human_selected_origin).map_err(|_| PairedHostError::InvalidOrigin)?;
@@ -2482,7 +2492,7 @@ impl PairedHostClient {
         operation: PairedHostOperation,
         request: reqwest::RequestBuilder,
     ) -> Result<reqwest::RequestBuilder, PairedHostError> {
-        let Some(credential) = &self.presenter_credential else {
+        let Some((header, credential)) = &self.presenter_credential else {
             return Ok(request);
         };
         if !matches!(
@@ -2495,7 +2505,7 @@ impl PairedHostClient {
         ) {
             return Err(PairedHostError::PresenterOperationUnavailable);
         }
-        Ok(request.header("x-paired-host-presenter-credential", credential.clone()))
+        Ok(request.header(header.clone(), credential.clone()))
     }
 
     /// The nonsecret, canonical human-selected origin for protected review.
@@ -2522,7 +2532,7 @@ impl PairedHostClient {
         self.confirmed_device.take()
     }
 
-    /// PairedHost sends a code to its owner. This is a real host-side effect,
+    /// The paired host sends a code to its owner. This is a real host-side effect,
     /// intended for an explicit presenter action, never an automatic probe.
     pub async fn request_pairing(&mut self, label: &str) -> Result<(), PairedHostError> {
         if label.trim().is_empty()
@@ -2550,7 +2560,7 @@ impl PairedHostClient {
     }
 
     /// Consume a code already issued on the host terminal. This neither asks
-    /// Telegram for a code nor enables PairedHost's feature flag. The same
+    /// Telegram for a code nor enables the paired host's feature flag. The same
     /// captured origin, scoped cookie and optional OS custody owner apply.
     pub async fn confirm_terminal_pairing(
         &mut self,
@@ -2564,7 +2574,7 @@ impl PairedHostClient {
     }
 
     /// Read the host's bounded tag observations in its own order. Repository
-    /// input must already be canonical; PairedHost owns allowlisting and access.
+    /// input must already be canonical; the paired host owns allowlisting and access.
     pub async fn frontend_source_tags(
         &mut self,
         repo: &str,
@@ -2595,7 +2605,7 @@ impl PairedHostClient {
         Ok(FrontendSourceRead::Observed(observed))
     }
 
-    /// Ask PairedHost to inspect static metadata at its resolved tag. No source
+    /// Ask the paired host to inspect static metadata at its resolved tag. No source
     /// code, metadata compiler, Git process or credential fallback runs here.
     pub async fn inspect_frontend_source(
         &mut self,
@@ -2632,7 +2642,7 @@ impl PairedHostClient {
             || !lower_hex(&observed.commit, 40)
             || observed.distribution.is_empty()
             || observed.version.is_empty()
-            || observed.entry_point.group != "paired_host.extensions"
+            || !valid_entry_point_group(&observed.entry_point.group)
             || observed.entry_point.name.is_empty()
             || observed.entry_point.object.is_empty()
             || !observed.has_configuration_shape()
@@ -3180,7 +3190,7 @@ impl PairedHostClient {
     }
 
     /// Create one nonsecret entry intent. This can supersede an older pending
-    /// intent. Authorization belongs to the caller and PairedHost; no retry, secret
+    /// intent. Authorization belongs to the caller and the paired host; no retry, secret
     /// entry, browser pairing or owner confirmation is performed here.
     pub async fn create_extension_secret_intent(
         &mut self,
@@ -3332,8 +3342,8 @@ impl PairedHostClient {
         let response = self.post(operation, body).await?;
         let status = response.status().as_u16();
         let (name, path) = match operation {
-            PairedHostOperation::RequestPairing => ("hc_console_pair", "/console/pair"),
-            _ => ("hc_console_device", "/"),
+            PairedHostOperation::RequestPairing => ("paired_host_pair", "/console/pair"),
+            _ => ("paired_host_device", "/"),
         };
         let cookie_present = response
             .cookies()
@@ -3363,7 +3373,7 @@ impl PairedHostClient {
                 .filter_map(|header| {
                     let text = header.to_str().ok()?;
                     let parsed = cookie::Cookie::parse(text).ok()?;
-                    (parsed.name() == "hc_console_device").then_some(text)
+                    (parsed.name() == "paired_host_device").then_some(text)
                 });
             match (headers.next(), headers.next(), received_at) {
                 (Some(header), None, Some(at)) => {
@@ -3437,6 +3447,23 @@ impl PairedHostClient {
     }
 }
 
+/// The trusted host chooses the header that carries its presenter credential.
+/// Only a lowercase `x-` extension header is accepted, so the credential can
+/// never replace a standard header such as authorization, cookie or origin.
+fn presenter_credential_header(name: &str) -> Result<HeaderName, PairedHostError> {
+    let valid = (3..=64).contains(&name.len())
+        && name.starts_with("x-")
+        && !name.ends_with('-')
+        && !name.contains("--")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if !valid {
+        return Err(PairedHostError::InvalidPresenterCredential);
+    }
+    HeaderName::from_bytes(name.as_bytes()).map_err(|_| PairedHostError::InvalidPresenterCredential)
+}
+
 fn validate_source_repo(repo: &str) -> Result<(), PairedHostError> {
     let parsed = Url::parse(repo).map_err(|_| PairedHostError::InvalidSourceRepository)?;
     // A deliberately canonical input contract, not an implementation of the
@@ -3462,6 +3489,45 @@ fn validate_source_repo(repo: &str) -> Result<(), PairedHostError> {
         return Err(PairedHostError::InvalidSourceRepository);
     }
     Ok(())
+}
+
+/// The host names its own extension entry-point group; Connect checks only that
+/// it is a bounded dotted name, never that it equals one host's group.
+fn valid_entry_point_group(group: &str) -> bool {
+    group.len() <= 128
+        && group.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+        })
+}
+
+/// The host's extension ledger file, by the host's own relative path. The host
+/// derives and re-derives every change, so Connect checks only the shape.
+fn valid_ledger_path(path: &str) -> bool {
+    path.len() <= 128
+        && path.ends_with(".toml")
+        && path.split('/').count() <= 8
+        && path.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        })
+}
+
+/// The host's build-recipe file at the repository root, by the host's own name.
+fn valid_release_recipe_name(path: &str) -> bool {
+    path.strip_suffix(".json").is_some_and(|stem| {
+        (1..=64).contains(&stem.len())
+            && (stem.as_bytes()[0].is_ascii_lowercase() || stem.as_bytes()[0].is_ascii_digit())
+            && stem.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+            })
+    })
 }
 
 fn valid_source_tag(tag: &str) -> bool {
@@ -3521,18 +3587,20 @@ fn source_rejection(
         }
         (422, Kind::Unprocessable, "metadata_invalid", path) => {
             operation == PairedHostOperation::FrontendSourceInspect
-                && (path == "paired-host-release-v1.json"
+                && (valid_release_recipe_name(path)
                     || [
                         "",
                         ":project",
                         ":project.dynamic",
                         ":project.version",
                         ":project.entry-points",
-                        ":project.entry-points.paired_host.extensions",
                         ":project.name",
                     ]
                     .iter()
-                    .any(|suffix| path == format!("{metadata_path}{suffix}")))
+                    .any(|suffix| path == format!("{metadata_path}{suffix}"))
+                    || path
+                        .strip_prefix(&format!("{metadata_path}:project.entry-points."))
+                        .is_some_and(valid_entry_point_group))
         }
         (502, Kind::BadGateway, "repo_unreachable", "repo") => true,
         (503, Kind::Unavailable, "extension_sources_invalid" | "current_inputs_invalid", "") => {
@@ -3554,11 +3622,11 @@ fn source_rejection(
             problem.message == "The source repository has no tags a request can pin."
         }
         "not_a_paired_host_extension" => {
-            problem.message == "The source declares no PairedHost extension entry point."
+            problem.message == "The source declares no extension entry point for this host."
         }
         "metadata_invalid" => {
             problem.message
-                == "The source's package metadata is not static, valid PairedHost extension metadata."
+                == "The source's package metadata is not static, valid extension metadata for this host."
         }
         _ => FrontendProblem {
             code: problem.code.clone(),
@@ -3847,6 +3915,9 @@ fn change_rejection(
             Some("digest_mismatch")
         }
         (PairedHostOperation::SubmitFrontendChange, 409, Kind::StaleBase) => Some("stale_base"),
+        (PairedHostOperation::SubmitFrontendChange, 409, Kind::ChangeRejected) => {
+            Some("change_rejected")
+        }
         (PairedHostOperation::SubmitFrontendChange, 409, Kind::CandidateInvalid) => None,
         (_, 409, Kind::Conflict) => Some("snapshot_changed"),
         (_, 503, Kind::Unavailable) => Some("current_inputs_invalid"),
@@ -4189,7 +4260,12 @@ mod presenter_transport_tests {
     async fn presenter_credential_is_route_limited_and_never_adopts_cookies() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        let mut client = PairedHostClient::for_presenter(&origin, "private-test-only").unwrap();
+        let mut client = PairedHostClient::for_presenter(
+            &origin,
+            "x-paired-host-presenter-credential",
+            "private-test-only",
+        )
+        .unwrap();
         let server = tokio::spawn(async move {
             let mut requests = Vec::new();
             for _ in 0..2 {
@@ -4202,7 +4278,7 @@ mod presenter_transport_tests {
                 requests.push(String::from_utf8(request).unwrap());
                 let body = r#"{"error":"forbidden","code":"console_owner_required"}"#;
                 let reply = format!(
-                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nSet-Cookie: hc_console_device=unselected; Path=/; HttpOnly\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nSet-Cookie: paired_host_device=unselected; Path=/; HttpOnly\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 socket.write_all(reply.as_bytes()).await.unwrap();
@@ -4300,13 +4376,18 @@ mod presenter_transport_tests {
             socket.read_exact(&mut body).await.unwrap();
             assert_eq!(&body, b"{}");
             let reply = format!(
-                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {redirect}\r\nSet-Cookie: hc_console_device=unselected; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {redirect}\r\nSet-Cookie: paired_host_device=unselected; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             );
             socket.write_all(reply.as_bytes()).await.unwrap();
             socket.shutdown().await.unwrap();
             String::from_utf8(request).unwrap()
         });
-        let client = PairedHostClient::for_presenter(&origin, "private-test-only").unwrap();
+        let client = PairedHostClient::for_presenter(
+            &origin,
+            "x-paired-host-presenter-credential",
+            "private-test-only",
+        )
+        .unwrap();
         let error = client
             .post(
                 PairedHostOperation::PrepareCandidate,
@@ -4338,5 +4419,38 @@ mod presenter_transport_tests {
         );
         assert!(!error.to_string().contains("private-test-only"));
         assert!(!error.to_string().contains("private-destination"));
+    }
+
+    #[test]
+    fn presenter_credential_travels_in_the_extension_header_the_host_names() {
+        let origin = "https://paired-host.example";
+        for header in [
+            "x-paired-host-presenter-credential",
+            "x-host-session",
+            "x-a1",
+        ] {
+            let client = PairedHostClient::for_presenter(origin, header, "private-test-only")
+                .expect("a lowercase x- header is the host's choice");
+            let (name, _) = client.presenter_credential.as_ref().unwrap();
+            assert_eq!(name.as_str(), header);
+        }
+        for header in [
+            "authorization",
+            "cookie",
+            "origin",
+            "X-Upper",
+            "x-",
+            "x--double",
+            "x-trailing-",
+            "x-with space",
+            "x-under_score",
+            "",
+        ] {
+            assert_eq!(
+                PairedHostClient::for_presenter(origin, header, "private-test-only").unwrap_err(),
+                PairedHostError::InvalidPresenterCredential,
+                "{header}"
+            );
+        }
     }
 }

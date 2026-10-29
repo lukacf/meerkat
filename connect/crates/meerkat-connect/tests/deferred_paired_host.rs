@@ -1,5 +1,5 @@
 //! Public-boundary controls for one host chosen inside an existing conversation.
-//! Only fresh PTYs, a synthetic model and loopback PairedHost responses are used.
+//! Only fresh PTYs, a synthetic model and loopback paired host responses are used.
 
 use std::{
     io::{self, Write},
@@ -120,7 +120,7 @@ fn send(master: &OwnedFd, text: &str) {
     assert_eq!(write(master, text.as_bytes()).unwrap(), text.len());
 }
 async fn human(master: &OwnedFd, observer: &OwnedFd, output: &Output, origin: &str) {
-    shown(output, "PairedHost origin: ").await;
+    shown(output, "Paired host origin: ").await;
     send(master, &format!("{origin}\n"));
     shown(output, "'memory' for this process only").await;
     send(master, "memory\n");
@@ -221,8 +221,8 @@ async fn host_response(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    assert!(!headers.contains_key("x-paired-host-dev-token"));
-    assert!(!headers.contains_key("x-paired-host-harness-token"));
+    assert!(!headers.contains_key("x-host-dev-token"));
+    assert!(!headers.contains_key("x-host-harness-token"));
     assert!(body.len() < 8192);
     if method == Method::POST {
         assert_eq!(headers["origin"].to_str().unwrap(), state.origin);
@@ -241,7 +241,7 @@ async fn host_response(
             );
             (
                 StatusCode::OK,
-                format!("hc_console_device={DEVICE}; Path=/; HttpOnly; SameSite=Lax"),
+                format!("paired_host_device={DEVICE}; Path=/; HttpOnly; SameSite=Lax"),
                 json!({"ok":true}),
             )
         }
@@ -264,7 +264,7 @@ async fn host_response(
                 json!({"error":"internal_error"}),
             )
         }
-        _ => panic!("unexpected method or route in bounded PairedHost fixture"),
+        _ => panic!("unexpected method or route in bounded paired host fixture"),
     };
     let mut response = (status, [("cache-control", "no-store")], axum::Json(value)).into_response();
     if !cookie.is_empty() {

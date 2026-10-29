@@ -12,7 +12,7 @@ This is not a browser flow, credential store, refresh scheduler, account picker,
 native completion handle or tool grant. The production downstream credential
 binding remains with the native owner under #1631. A local signed fixture test
 does not establish a real Google login or protected browser integration.
-The [native owner's accepted contract](../../docs/coordination/20261004T003359.800515-claude-gcp-lead-45cc8b.txt)
+The [native owner's accepted contract](https://github.com/lukacf/meerkat/issues/1631#issuecomment-5975028207)
 puts nonce custody in the flow authority. It generates and retains the nonce
 at start, returns it for the authorization URL, then supplies it from the
 admitted attempt at completion. Toolkit and application hosts never generate,

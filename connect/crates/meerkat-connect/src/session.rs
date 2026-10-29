@@ -356,7 +356,7 @@ impl ConnectSession {
             || options.build.tool_dispatch_admission.is_none()
         {
             return Err(ConnectError::InvalidInput(
-                "PairedHost research requires its exact local composition and dispatch admission"
+                "Paired host research requires its exact local composition and dispatch admission"
                     .into(),
             ));
         }

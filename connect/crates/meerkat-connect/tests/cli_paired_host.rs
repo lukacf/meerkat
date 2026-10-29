@@ -1,5 +1,5 @@
 //! Actual CLI in an owned PTY, with ordinary native self-hosted configuration.
-//! Model and PairedHost fixtures use loopback endpoints. The explicitly ignored
+//! Model and the paired host fixtures use loopback endpoints. The explicitly ignored
 //! public-service case also reads live public Hacker News through the supplied
 //! integration. No OS store, user terminal or provider account. PTY cases require the
 //! assembled, pin-built synthetic resource prefix. Explicit supplied-library cases
@@ -57,20 +57,20 @@ const DEFAULT_REQUEST: &str =
 const SERVICE_REQUEST: &str =
     "Read supplied service setup guidance first, then help me set up my Telegram frontend.";
 const LIBRARY_REQUEST: &str = "Read the supplied integration catalog and one exact entry, then help me set up my Telegram frontend. Do not install any service integration.";
-const PREBOUND_LIBRARY_REQUEST: &str = "Check my selected PairedHost's frontend inventory, then read the supplied integration catalog and one exact entry before preparing my Telegram frontend. Do not install any service integration.";
+const PREBOUND_LIBRARY_REQUEST: &str = "Check my selected paired host's frontend inventory, then read the supplied integration catalog and one exact entry before preparing my Telegram frontend. Do not install any service integration.";
 const FOLLOWUP: &str = "Keep the same host and confirm the frontend inventory once more.";
 const FOLLOWUP_ANSWER: &str =
     "The same captured host still reports its frontend inventory. No second pairing was started.";
-const ANSWER: &str = "The review request was submitted. PairedHost activation is separate.";
+const ANSWER: &str = "The review request was submitted. Paired host activation is separate.";
 const INTENTS: &str = "/console/extensions/secrets/intents";
 const INTENT_ID: &str = "esi_aaaaaaaaaaaaaaaaaaaa";
 const ENTRY_PATH: &str = "/console/extensions/secrets/intents/esi_aaaaaaaaaaaaaaaaaaaa/entry";
-const SECRET_ANSWER: &str = "PairedHost reports generation 1 committed but not live. Provider authentication and message delivery remain unverified.";
+const SECRET_ANSWER: &str = "The paired host reports generation 1 committed but not live. Provider authentication and message delivery remain unverified.";
 const REVIEW_REQUEST: &str = "Show that prepared frontend draft's private review link again. Do not prepare or submit it again.";
-const REVIEW_ANSWER: &str = "PairedHost still retains the draft. Its review link was queued for the terminal; no preparation or submission was repeated.";
+const REVIEW_ANSWER: &str = "The paired host still retains the draft. Its review link was queued for the terminal; no preparation or submission was repeated.";
 const RECOVERY_REQUEST: &str = "Prepare and submit my frontend review request once.";
 const STATUS_REQUEST: &str = "Check only that exact request's status. Do not submit it again.";
-const STATUS_ANSWER: &str = "PairedHost reports the review request submitted. The lost POST remains uncertain; it was not sent again.";
+const STATUS_ANSWER: &str = "The paired host reports the review request submitted. The lost POST remains uncertain; it was not sent again.";
 const RECIPE_REQUEST: &str = "Show the first supplied integration recipe and its exact service capabilities, then look at the next entry. Investigate only.";
 const RECIPE_ANSWER: &str = "The supplied recipe metadata describes scoped service capabilities. Installation and account readiness remain unverified.";
 const RECIPE_FAILED_REQUEST: &str =
@@ -86,11 +86,11 @@ const RECIPE_FOLLOWUP_ANSWER: &str =
     "Only the exact public recipe metadata was read in this conversation.";
 const EXISTING_REALM: &str = "kept-family";
 const EXISTING_REALM_HISTORY: &str = "Keep this original realm's private conversation unchanged.";
-const ROLE_REPO: &str = "https://github.com/fixture/paired-host-robot.git";
-const ROLE_REQUEST: &str = "Inspect the Robot extension at https://github.com/fixture/paired-host-robot.git tag v0.1.0 in package extension on my PairedHost. Ask me which supported roles to use before preparing anything.";
-const ROLE_QUESTION: &str = "PairedHost offers service connector only, agent frontend only, or both. Which roles do you want? The frontend choices also need your identity-to-robot map.";
-const ROLE_CHOICE: &str = "Use both advertised roles and map identity:member-2 to robot:robot-room. Prepare and submit that exact proposal for review.";
-const ROLE_ANSWER: &str = "PairedHost reports attempt 2 built for both requested roles. Build and review evidence does not establish activation, daemon operation or live voice readiness.";
+const ROLE_REPO: &str = "https://github.com/fixture/example-device.git";
+const ROLE_REQUEST: &str = "Inspect the device extension at https://github.com/fixture/example-device.git tag v0.1.0 in package extension on my paired host. Ask me which supported roles to use before preparing anything.";
+const ROLE_QUESTION: &str = "The paired host offers service connector only, agent frontend only, or both. Which roles do you want? The frontend choices also need your identity-to-device map.";
+const ROLE_CHOICE: &str = "Use both advertised roles and map identity:member-2 to device:fixture-room. Prepare and submit that exact proposal for review.";
+const ROLE_ANSWER: &str = "The paired host reports attempt 2 built for both requested roles. Build and review evidence does not establish activation, daemon operation or live voice readiness.";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DeferredMode {
@@ -222,17 +222,17 @@ fn prepared() -> Value {
     after["approved_groups"] = candidate()["participants"]["approved_groups"].clone();
     let mut change = json!({"base":{"activation_id":"210","policy_digest":"sha256:cli-fixture",
         "ledger_digest":format!("sha256:{}", "1".repeat(64))},
-        "ledger_patch":{"path":"deployment/extensions.toml","extension_id":"telegram",
+        "ledger_patch":{"path":"host/extensions.toml","extension_id":"telegram",
             "channel_id":"telegram:primary","before":before,"after":after},
-        "unified_diff":"--- a/deployment/extensions.toml\n+++ b/deployment/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = [\"-1001234567890\"]\n"});
+        "unified_diff":"--- a/host/extensions.toml\n+++ b/host/extensions.toml\n@@ -1 +1 @@\n-approved_groups = []\n+approved_groups = [\"-1001234567890\"]\n"});
     change["change_digest"] = json!(format!(
-        "hc-frontend-change-v1:sha256:{:x}",
+        "paired-host-change-v1:sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&change).unwrap())
     ));
     json!({"valid":true,"problems":[],
         "missing_prerequisites":[{"kind":"secret","name":"TELEGRAM_BOT_TOKEN"}],
         "current":{"activation_id":"210","policy_digest":"sha256:cli-fixture"},
-        "candidate":{"channel_row_digest":"sha256:row","policy_digest":"hc-policy-content-v1:sha256:policy",
+        "candidate":{"channel_row_digest":"sha256:row","policy_digest":"fixture-policy-v1:sha256:policy",
             "compile_depth":"policy_bundle"},"compiled_is_not_ready":true,"change":change})
 }
 
@@ -249,9 +249,9 @@ fn tool_result(body: &Value, id: &str) -> Value {
 // Synthetic PR457 host observations only. No source fetch, build or device use.
 fn role_inspection() -> Value {
     json!({"repo":ROLE_REPO,"tag":"v0.1.0","commit":"b".repeat(40),
-        "package_path":"extension","distribution":"paired-host-ext-robot","version":"0.1.0",
-        "entry_point":{"group":"paired_host.extensions","name":"robot",
-            "object":"paired_host_ext_robot.extension:RobotExtension"},
+        "package_path":"extension","distribution":"example-ext-device","version":"0.1.0",
+        "entry_point":{"group":"example_host.extensions","name":"device",
+            "object":"example_ext_device.extension:DeviceExtension"},
         "declared":{},"already_declared":false,
         "unverified":["manifest","facades","role_contract","host_bindings","secrets"],
         "roles":{"selections":[
@@ -262,7 +262,7 @@ fn role_inspection() -> Value {
             {"selected_roles":["agent_frontend","service_connector"],"daemon":{"voice_mode":"gateway"},
                 "required_facades":["daemon_control.v1","live.v1","media.v1","notify.v1"],"voice_map_entries":1}
         ]},
-        "prepare":{"new_extension":{"distribution":"paired-host-ext-robot","version":"0.1.0",
+        "prepare":{"new_extension":{"distribution":"example-ext-device","version":"0.1.0",
             "source":{"repo":ROLE_REPO,"tag":"v0.1.0","commit":"b".repeat(40),"package_path":"extension"},
             "roles":{"selected_roles":null,"daemon":{"voice_mode":null},"required_facades":null,"voice_map":null}}}})
 }
@@ -278,12 +278,12 @@ fn combined_role_proposal(observed: &Value) -> Value {
     let mut proposal = observed["prepare"]["new_extension"].clone();
     proposal["roles"] = json!({"selected_roles":selected["selected_roles"],
         "daemon":selected["daemon"],"required_facades":selected["required_facades"],
-        "voice_map":{"identity:member-2":"robot:robot-room"}});
+        "voice_map":{"identity:member-2":"device:fixture-room"}});
     proposal
 }
 
 fn role_prepared() -> Value {
-    let digest = format!("hc-frontend-change-v1:sha256:{}", "a".repeat(64));
+    let digest = format!("paired-host-change-v1:sha256:{}", "a".repeat(64));
     json!({"valid":true,"problems":[],
         "review_url":format!("/console/extensions/frontend/review/{digest}"),
         "change":{"change_digest":digest,"kind":"new_extension",
@@ -298,7 +298,7 @@ fn role_built() -> Value {
     let proposal = combined_role_proposal(&role_inspection());
     json!({"request_id":role_prepared()["change"]["change_digest"],"state":"built","kind":"new_extension",
         "submitted_at":"fixture-time","staged_at":"fixture-stage","attempt":2,
-        "built":{"extension_id":"robot","distribution":proposal["distribution"],"version":proposal["version"],
+        "built":{"extension_id":"device","distribution":proposal["distribution"],"version":proposal["version"],
             "source_commit":proposal["source"]["commit"],"package_path":proposal["source"]["package_path"],
             "wheel_sha256":"c".repeat(64),"release_evidence_sha256":"d".repeat(64),
             "channel_template":null,"facades":proposal["roles"]["required_facades"],"secret_names":[]},
@@ -1009,7 +1009,7 @@ fn secret_prepared() -> Value {
     }
     change.as_object_mut().unwrap().remove("change_digest");
     change["change_digest"] = json!(format!(
-        "hc-frontend-change-v1:sha256:{:x}",
+        "paired-host-change-v1:sha256:{:x}",
         Sha256::digest(serde_json::to_vec(change).unwrap())
     ));
     observed["review_url"] = json!(format!(
@@ -1240,7 +1240,7 @@ fn recovery_model_response(request: &Request, phase: usize) -> String {
                 "unrelated-status",
                 "paired_host_frontend_status",
                 json!({
-                    "change_digest":format!("hc-frontend-change-v1:sha256:{}", "a".repeat(64))
+                    "change_digest":format!("paired-host-change-v1:sha256:{}", "a".repeat(64))
                 }),
             ))
         }
@@ -1504,7 +1504,7 @@ impl Server {
                             (
                                 200,
                                 format!(
-                                    "Set-Cookie: hc_console_pair={PAIR}; Path=/console/pair; HttpOnly; SameSite=Strict\r\n"
+                                    "Set-Cookie: paired_host_pair={PAIR}; Path=/console/pair; HttpOnly; SameSite=Strict\r\n"
                                 ),
                                 json!({"ok":true}),
                             )
@@ -1513,12 +1513,12 @@ impl Server {
                             assert_eq!(received.body, json!({"code":CODE}));
                             assert_eq!(
                                 received.headers["cookie"],
-                                format!("hc_console_pair={PAIR}")
+                                format!("paired_host_pair={PAIR}")
                             );
                             (
                                 200,
                                 format!(
-                                    "Set-Cookie: hc_console_device={DEVICE}; Path=/; HttpOnly; SameSite=Lax\r\nSet-Cookie: hc_console_pair=; Max-Age=0; Path=/console/pair\r\n"
+                                    "Set-Cookie: paired_host_device={DEVICE}; Path=/; HttpOnly; SameSite=Lax\r\nSet-Cookie: paired_host_pair=; Max-Age=0; Path=/console/pair\r\n"
                                 ),
                                 json!({"ok":true}),
                             )
@@ -1654,12 +1654,12 @@ impl Server {
                                 },
                             )
                         }
-                        _ => panic!("unexpected PairedHost route or retry"),
+                        _ => panic!("unexpected paired host route or retry"),
                     };
                     if received.path.starts_with("/console/extensions/") {
                         assert_eq!(
                             received.headers["cookie"],
-                            format!("hc_console_device={DEVICE}")
+                            format!("paired_host_device={DEVICE}")
                         );
                     }
                     (status, headers, "application/json", value.to_string())
@@ -3087,12 +3087,12 @@ async fn actual_cli_failed_uncertain_submission_allows_only_explicit_exact_statu
         {
             assert_eq!(
                 request.headers["cookie"],
-                format!("hc_console_device={DEVICE}")
+                format!("paired_host_device={DEVICE}")
             );
             if request.method == "POST" {
                 assert_eq!(request.headers["origin"], host.origin);
             }
-            assert!(!request.headers.contains_key("x-paired-host-dev-token"));
+            assert!(!request.headers.contains_key("x-host-dev-token"));
         }
     }
     for request in provider.requests.lock().unwrap().iter() {
@@ -3297,8 +3297,8 @@ async fn actual_cli_secret_intent_approval_hands_entry_only_to_terminal_and_read
     cli.shown("You: ", after_approval).await;
     let result = &cli.transcript[after_approval..];
     let entry_url = format!("{}{ENTRY_PATH}", host.origin);
-    assert_eq!(result.matches("PairedHost secret entry").count(), 1);
-    assert_eq!(result.matches("PairedHost change review").count(), 1);
+    assert_eq!(result.matches("Paired host secret entry").count(), 1);
+    assert_eq!(result.matches("Paired host change review").count(), 1);
     assert_eq!(result.matches(&review_url).count(), 1);
     assert!(result.contains("Kind: channel_config"));
     assert!(
@@ -3314,9 +3314,9 @@ async fn actual_cli_secret_intent_approval_hands_entry_only_to_terminal_and_read
         1,
         "default status reads must not redisplay the entry link"
     );
-    assert!(result.contains("Pair that browser with PairedHost independently."));
+    assert!(result.contains("Pair that browser with the paired host independently."));
     assert!(result.contains("Never enter the secret in this conversation."));
-    assert!(result.contains("Entry and owner confirmation happen in PairedHost."));
+    assert!(result.contains("Entry and owner confirmation happen in the paired host."));
     assert!(
         result.contains(
             "This link does not prove the secret was committed or the selected extension roles are ready."
@@ -3334,7 +3334,7 @@ async fn actual_cli_secret_intent_approval_hands_entry_only_to_terminal_and_read
     cli.shown(REVIEW_ANSWER, repeat_start).await;
     cli.shown("You: ", repeat_start).await;
     let repeated = &cli.transcript[repeat_start..];
-    assert_eq!(repeated.matches("PairedHost change review").count(), 1);
+    assert_eq!(repeated.matches("Paired host change review").count(), 1);
     assert_eq!(repeated.matches(&review_url).count(), 1);
     assert!(!repeated.contains("Type 'approve "));
     assert!(!repeated.contains(&entry_url));
@@ -4477,7 +4477,7 @@ async fn recipe_discovery_cli(existing_inventory: bool, failed_turn: bool, docum
         },
     );
     assert_eq!(cli.transcript.matches("Setup session: ").count(), 1);
-    for marker in ["PairedHost origin: ", "Enter the six-digit code"] {
+    for marker in ["Paired host origin: ", "Enter the six-digit code"] {
         assert!(!cli.transcript.contains(marker));
     }
     assert_eq!(cli.transcript.matches("Type 'approve ").count(), 2);
@@ -4899,7 +4899,7 @@ async fn actual_cli_combined_roles_preserve_inspection_choice_and_exact_approval
     assert!(host.requests.lock().unwrap().is_empty());
     assert!(provider.requests.lock().unwrap().is_empty());
     cli.send(&format!("{ROLE_REQUEST}\n"));
-    cli.shown("PairedHost origin: ", 0).await;
+    cli.shown("Paired host origin: ", 0).await;
     assert!(host.requests.lock().unwrap().is_empty());
     cli.send(&format!("{}\n", host.origin));
     cli.shown("Type 'remember'", 0).await;
@@ -4948,7 +4948,7 @@ async fn actual_cli_combined_roles_preserve_inspection_choice_and_exact_approval
             .contains(&format!("{}{review_path}", host.origin))
     );
     assert_eq!(
-        cli.transcript.matches("PairedHost change review").count(),
+        cli.transcript.matches("Paired host change review").count(),
         1
     );
     assert_eq!(cli.transcript.matches("Type 'approve ").count(), 3);
@@ -4959,7 +4959,7 @@ async fn actual_cli_combined_roles_preserve_inspection_choice_and_exact_approval
     host.finish().await;
     provider.finish().await;
     assert_eq!(cli.transcript.matches("Setup session: ").count(), 1);
-    assert_eq!(cli.transcript.matches("PairedHost origin: ").count(), 1);
+    assert_eq!(cli.transcript.matches("Paired host origin: ").count(), 1);
     assert_eq!(
         cli.transcript
             .matches("Enter the six-digit code (hidden)")
@@ -4988,10 +4988,10 @@ async fn actual_cli_combined_roles_preserve_inspection_choice_and_exact_approval
         for request in host_requests.iter().skip(2) {
             assert_eq!(
                 request.headers["cookie"],
-                format!("hc_console_device={DEVICE}")
+                format!("paired_host_device={DEVICE}")
             );
             assert!(!request.headers.contains_key("authorization"));
-            assert!(!request.headers.contains_key("x-paired-host-dev-token"));
+            assert!(!request.headers.contains_key("x-host-dev-token"));
             if request.method == "POST" {
                 assert_eq!(request.headers["origin"], host.origin);
             }
@@ -5288,7 +5288,7 @@ async fn deferred_cli(mode: DeferredMode, fixture: Option<&Path>) {
     let turn_start = cli.transcript.len();
     cli.send(&format!("{}\n", mode.prompt()));
     if !prebound {
-        cli.shown("PairedHost origin: ", 0).await;
+        cli.shown("Paired host origin: ", 0).await;
         assert!(host.requests.lock().unwrap().is_empty());
         cli.send(&format!("{}\n", host.origin));
         cli.shown("Type 'remember'", 0).await;
@@ -5324,7 +5324,7 @@ async fn deferred_cli(mode: DeferredMode, fixture: Option<&Path>) {
     provider.finish().await;
     assert_eq!(cli.transcript.matches("Setup session: ").count(), 1);
     assert_eq!(
-        cli.transcript.matches("PairedHost origin: ").count(),
+        cli.transcript.matches("Paired host origin: ").count(),
         usize::from(!prebound)
     );
     assert_eq!(
@@ -6130,7 +6130,7 @@ async fn actual_cli_forge_sign_in_reports_unsupported_without_paired_host_or_rep
         1
     );
     assert!(
-        !cli.transcript.contains("PairedHost origin:")
+        !cli.transcript.contains("Paired host origin:")
             && !cli.transcript.contains("Type 'request'")
     );
     assert_eq!(preparation_output_count(&cli.state), 1);
@@ -6734,9 +6734,6 @@ async fn actual_cli_forge_configuration_recovers_after_process_restart_without_r
 
 /// Private JSONL peer for the actual copied executable. No terminal simulation,
 /// browser auth, native override, injected dispatcher or second runtime.
-#[path = "fixtures/paired-host-role/runner.rs"]
-mod paired_host_role_owner;
-
 struct StdioCli {
     root: tempfile::TempDir,
     child: Option<Child>,
@@ -7423,584 +7420,6 @@ async fn actual_stdio_forge_configuration_remount_cancel_and_retire() {
     println!(
         "Stdio Forge composition: {}",
         json!({"scope":"copied_stdio_native_frozen_owner_scripted_model","candidate_binary":cli.binary,"cli_sha256":file_digest(&cli.binary),"test_sha256":file_digest(&std::env::current_exe().unwrap()),"resources_sha256":option_env!("MEERKAT_CONNECT_RESOURCES_SHA256"),"native_sessions":1,"native_inputs":3,"native_completions":native_completions,"cancel_status":cancel_one["result"]["status"],"completion_before_retire_before_close":true,"prepare_posts":1,"submit_posts":1,"revision":1,"service_preparations":0,"closed_with_stdin_open":true,"live_activation":false,"all_owned_processes_joined":true})
-    );
-    let _ = &cli.root;
-}
-
-#[tokio::test]
-#[ignore = "requires frozen PairedHost source, isolated Python and fresh pin-built candidate output"]
-async fn actual_stdio_paired_host_role_secret_and_private_notices() {
-    use meerkat_core::{ApprovalRecord, ApprovalStatus, types::Message};
-    use meerkat_runtime::{completion::CompletionOutcome, identifiers::LogicalRuntimeId};
-    const FIRST: &str = "Configure the offered combined Robot roles, mapping identity:member-2 to robot:robot-room. Prepare and submit for my approval, then create the declared secret entry intent.";
-    const SECOND: &str =
-        "Read the exact secret intent after my private entry and host confirmation.";
-    const WAITING: &str = "The host built the candidate and created a private secret-entry intent. This does not prove activation or robot readiness.";
-    const FINISHED: &str = "The exact secret intent is committed at generation 1. Activation and live readiness remain separate.";
-    let mut owner = paired_host_role_owner::Owner::start().await;
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let origin = format!("http://{}", listener.local_addr().unwrap());
-    let (stop, mut stopped) = oneshot::channel();
-    let requests = Arc::new(Mutex::new(Vec::<Request>::new()));
-    let observed = requests.clone();
-    let private_origin = owner.origin.clone();
-    let private_code = owner.code.clone();
-    let (submitted, submitted_observed) = oneshot::channel();
-    let (build_ready, build_observed) = oneshot::channel();
-    let mut submitted = Some(submitted);
-    let mut build_observed = Some(build_observed);
-    let task = tokio::spawn(async move {
-        loop {
-            let mut stream = tokio::select! {biased; _=&mut stopped=>break, accepted=listener.accept()=>accepted.unwrap().0};
-            let received = timeout(BOUND, request(&mut stream)).await.unwrap();
-            assert_eq!(received.path, "/v1/chat/completions");
-            assert_eq!(received.headers["authorization"], format!("Bearer {TOKEN}"));
-            assert_eq!(received.body["model"], "cli-fixture-remote");
-            for value in [
-                private_origin.as_str(),
-                private_code.as_str(),
-                TOKEN,
-                "fixture-role-secret-never-model-729afe16",
-            ] {
-                assert!(!received.body.to_string().contains(value));
-            }
-            let tools = received.body["tools"].as_array().unwrap();
-            assert!(
-                tools
-                    .iter()
-                    .any(|t| t["function"]["name"] == "paired_host_select_host")
-            );
-            assert!(
-                !tools
-                    .iter()
-                    .any(|t| t["function"]["name"] == "toolkit_prepare_services")
-            );
-            let phase = observed.lock().unwrap().len();
-            let humans = received.body["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|m| m["role"] == "user")
-                .filter_map(|m| m["content"].as_str())
-                .filter(|text| [FIRST, SECOND].contains(text))
-                .collect::<Vec<_>>();
-            assert_eq!(
-                humans,
-                if phase < 7 {
-                    vec![FIRST]
-                } else {
-                    vec![FIRST, SECOND]
-                }
-            );
-            let call = match phase {
-                0 => Some(("host", "paired_host_select_host", json!({}))),
-                1 => {
-                    assert_eq!(tool_result(&received.body, "host")["state"], "selected");
-                    Some((
-                        "inspect",
-                        "paired_host_frontend_source_inspect",
-                        json!({"repo":"https://github.com/fixture/paired-host-robot.git","tag":"v0.5.6-fixture","package_path":"extension"}),
-                    ))
-                }
-                2 => {
-                    let inspected = tool_result(&received.body, "inspect");
-                    assert_eq!(inspected["already_declared"], false);
-                    let mut proposal = inspected["prepare"].clone();
-                    let mut roles = inspected["roles"]["selections"][2].clone();
-                    assert_eq!(
-                        roles.as_object_mut().unwrap().remove("voice_map_entries"),
-                        Some(json!(1))
-                    );
-                    roles["voice_map"] = json!({"identity:member-2":"robot:robot-room"});
-                    proposal["new_extension"]["roles"] = roles;
-                    Some(("prepare", "paired_host_frontend_prepare", proposal))
-                }
-                3 => {
-                    let prepared = tool_result(&received.body, "prepare");
-                    assert_eq!(prepared["valid"], true);
-                    assert_eq!(prepared["review_presentation"], "queued");
-                    Some((
-                        "submit",
-                        "paired_host_frontend_submit",
-                        json!({"change_digest":prepared["change"]["change_digest"]}),
-                    ))
-                }
-                4 => {
-                    let result = tool_result(&received.body, "submit");
-                    assert_eq!(result["state"], "submitted");
-                    submitted.take().unwrap().send(()).unwrap();
-                    timeout(BOUND, build_observed.take().unwrap())
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    Some((
-                        "status",
-                        "paired_host_frontend_status",
-                        json!({"change_digest":result["request_id"]}),
-                    ))
-                }
-                5 => {
-                    let status = tool_result(&received.body, "status");
-                    assert_eq!(status["state"], "built");
-                    assert_eq!(status["built"]["channel_template"], Value::Null);
-                    assert_eq!(
-                        status["built"]["role_consumers"]["api_key"],
-                        json!({"consumer":"extension","consumer_id":"robot"})
-                    );
-                    Some((
-                        "secret",
-                        "paired_host_extension_secret_create",
-                        json!({"candidate":{"change_digest":status["request_id"],"wheel_sha256":status["built"]["wheel_sha256"]},"binding_name":status["built"]["secret_names"][0]}),
-                    ))
-                }
-                6 => {
-                    let result = tool_result(&received.body, "secret");
-                    assert_eq!(result["outcome"], "created");
-                    assert_eq!(result["entry_presentation"], "queued");
-                    assert_eq!(
-                        result["result"]["intent"]["target"]["channel_ids"],
-                        json!([])
-                    );
-                    assert_eq!(
-                        result["result"]["intent"]["target"]["consumer"],
-                        "extension:robot"
-                    );
-                    None
-                }
-                7 => {
-                    let result = tool_result(&received.body, "secret");
-                    Some((
-                        "secret-status",
-                        "paired_host_extension_secret_status",
-                        json!({"intent_id":result["result"]["intent"]["intent_id"]}),
-                    ))
-                }
-                8 => {
-                    let result = tool_result(&received.body, "secret-status");
-                    assert_eq!(result["outcome"], "status");
-                    assert_eq!(result["result"]["state"], "committed");
-                    assert_eq!(result["result"]["generation"], 1);
-                    None
-                }
-                _ => panic!("unexpected model replay"),
-            };
-            observed.lock().unwrap().push(received);
-            let body = if let Some((id, name, args)) = call {
-                deferred_call_response(id, name, args)
-            } else {
-                format!(
-                    "data: {}\n\ndata: [DONE]\n\n",
-                    json!({"choices":[{"delta":{"content":if phase == 6 { WAITING } else { FINISHED }},"finish_reason":"stop"}]})
-                )
-            };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).await.unwrap();
-            stream.shutdown().await.unwrap();
-        }
-    });
-    let mut provider = Server {
-        origin,
-        requests,
-        stop: Some(stop),
-        task: Some(task),
-    };
-    let mut cli = StdioCli::start(&provider.origin);
-    let config = fs::read(cli.state.join(REALM).join("config.toml")).unwrap();
-    cli.request("h:init", "connect/initialize", json!({"protocol_version":2,"adapter":"forge_reading",
-        "application":{"application_id":"reading-fixture","instance_id":"paired-host-v2-fixture","origin":"http://127.0.0.1:31337"},
-        "viewer":{"principal_id":"fixture-human","login_scope_id":"paired-host-v2-login","expires_at_ms":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64+120_000},
-        "realm":{"realm_id":REALM,"state_root":cli.state,"context_root":cli.context,"user_config_root":cli.home},"model":"cli-fixture",
-        "paired_host":{"targets":[{"target_id":"selected-paired-host","origin":owner.origin}]}}));
-    let initialized = cli.response("h:init").await;
-    assert!(initialized.get("error").is_none(), "{initialized}");
-    assert_eq!(initialized["result"]["capabilities"]["paired_host"], true);
-    assert_eq!(
-        initialized["result"]["capabilities"]["service_preparation"],
-        false
-    );
-    let scope = initialized["result"]["scope"].as_str().unwrap().to_owned();
-    let session =
-        meerkat_core::SessionId::parse(initialized["result"]["session_id"].as_str().unwrap())
-            .unwrap();
-    cli.request(
-        "h:first",
-        "connect/send",
-        json!({"scope":scope,"text":FIRST}),
-    );
-    let target = cli.prompt("paired_host_target").await;
-    let target_id = target["id"].as_str().unwrap();
-    cli.answer(
-        target_id,
-        json!({"kind":"paired_host_target","target_id":"not-offered"}),
-    );
-    assert_eq!(
-        cli.response(target_id).await["error"]["data"]["code"],
-        "invalid_answer"
-    );
-    cli.answer(
-        target_id,
-        json!({"kind":"paired_host_target","target_id":"selected-paired-host"}),
-    );
-    let method = cli.prompt("paired_host_pairing_method").await;
-    cli.answer(
-        method["id"].as_str().unwrap(),
-        json!({"kind":"paired_host_pairing_method","method":"terminal"}),
-    );
-    let code = cli.prompt("paired_host_pairing_code").await;
-    cli.answer(
-        code["id"].as_str().unwrap(),
-        json!({"kind":"paired_host_pairing_code","code":owner.code}),
-    );
-    let first_approval = cli.prompt("approval").await;
-    cli.answer("p:wrong", json!({"kind":"approval","decision":"approve"}));
-    assert_eq!(
-        cli.response("p:wrong").await["error"]["data"]["code"],
-        "stale_prompt"
-    );
-    assert_eq!(
-        owner.control("observe").await["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|r| r["method"] == "POST"
-                && r["path"] == "/console/extensions/frontend/change-requests")
-            .count(),
-        0
-    );
-    cli.answer(
-        first_approval["id"].as_str().unwrap(),
-        json!({"kind":"approval","decision":"approve"}),
-    );
-    timeout(BOUND, submitted_observed).await.unwrap().unwrap();
-    let built_record = owner.control("build").await;
-    assert_eq!(
-        built_record["built"]["role_consumers"]["api_key"]["consumer_id"],
-        "robot"
-    );
-    // Release the model only after the actual operator-stage owner recorded it.
-    build_ready.send(()).unwrap();
-    let secret_approval = cli.prompt("approval").await;
-    let approval_ids = [&first_approval, &secret_approval].map(|prompt| {
-        prompt["params"]["prompt"]["approval_id"]
-            .as_str()
-            .unwrap()
-            .to_owned()
-    });
-    assert_ne!(approval_ids[0], approval_ids[1]);
-    assert_eq!(
-        owner.control("observe").await["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|r| r["method"] == "POST" && r["path"] == "/console/extensions/secrets/intents")
-            .count(),
-        0
-    );
-    cli.answer(
-        secret_approval["id"].as_str().unwrap(),
-        json!({"kind":"approval","decision":"approve"}),
-    );
-
-    let secret_notice = cli.prompt("paired_host_notice").await;
-    let completed = cli.response("h:first").await;
-    assert_eq!(completed["result"]["completion"], "completed");
-    let notice_prompt = secret_notice["params"]["prompt"].clone();
-    assert_eq!(notice_prompt["send_request_id"], "h:first");
-    assert_eq!(notice_prompt["notice"]["kind"], "secret_entry");
-    let intent_id = notice_prompt["notice"]["intent_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let entry_url = notice_prompt["notice"]["url"].as_str().unwrap().to_owned();
-    assert_eq!(
-        entry_url,
-        format!(
-            "{}/console/extensions/secrets/intents/{intent_id}/entry",
-            owner.origin
-        )
-    );
-    let completion_position = cli
-        .rows
-        .iter()
-        .position(|r| r["id"] == "h:first" && r.get("method").is_none())
-        .unwrap();
-    let notice_position = cli.rows.iter().position(|r| r == &secret_notice).unwrap();
-    assert!(completion_position < notice_position);
-    let secret_request = secret_notice["id"].as_str().unwrap().to_owned();
-    let mut notices = vec![secret_notice.clone()];
-    for index in 0..2 {
-        let notice = notices[index].clone();
-        let request_id = notice["id"].as_str().unwrap().to_owned();
-        cli.request(
-            &format!("h:remount{index}"),
-            "connect/history",
-            json!({"scope":scope}),
-        );
-        let remount = cli.response(&format!("h:remount{index}")).await;
-        assert_eq!(remount["result"]["state"]["active_send"], Value::Null);
-        assert_eq!(
-            remount["result"]["state"]["last_completion"],
-            json!({"send_request_id":"h:first","completion":"completed"})
-        );
-        assert_eq!(remount["result"]["state"]["private_notice_pending"], true);
-        assert_eq!(remount["result"]["state"]["can_send"], false);
-        assert_eq!(remount["result"]["state"]["can_stop"], false);
-        // The trusted host retains the exact private p: request across remount;
-        // canonical history never republishes its body or creates a replacement.
-        assert_eq!(
-            cli.rows
-                .iter()
-                .filter(|r| r["method"] == "connect/prompt" && r["id"] == request_id)
-                .collect::<Vec<_>>(),
-            vec![&notice]
-        );
-        cli.request(
-            &format!("h:busy{index}"),
-            "connect/send",
-            json!({"scope":scope,"text":"must not enter while private notice waits"}),
-        );
-        assert_eq!(
-            cli.response(&format!("h:busy{index}")).await["error"]["data"]["code"],
-            "busy"
-        );
-        for answer in [
-            json!({"kind":"approval","decision":"approve"}),
-            json!({"kind":"paired_host_notice","dismiss":false}),
-        ] {
-            let offset = cli.rows.len();
-            cli.answer(&request_id, answer);
-            assert_eq!(
-                cli.response_since(&request_id, offset).await["error"]["data"]["code"],
-                "invalid_answer"
-            );
-        }
-        if index == 0 {
-            let committed = owner.control(&format!("complete:{intent_id}")).await;
-            assert_eq!(committed["state"], "committed");
-            assert_eq!(committed["generation"], 1);
-        }
-        cli.answer(
-            &request_id,
-            json!({"kind":"paired_host_notice","dismiss":true}),
-        );
-        if index == 0 {
-            let review = cli.prompt("paired_host_notice").await;
-            assert_eq!(review["params"]["prompt"]["send_request_id"], "h:first");
-            assert_eq!(review["params"]["prompt"]["notice"]["kind"], "review");
-            assert_eq!(
-                review["params"]["prompt"]["notice"]["change_digest"],
-                built_record["request_id"]
-            );
-            assert_ne!(review["id"], secret_request);
-            notices.push(review);
-        }
-        let offset = cli.rows.len();
-        cli.answer(
-            &request_id,
-            json!({"kind":"paired_host_notice","dismiss":true}),
-        );
-        assert_eq!(
-            cli.response_since(&request_id, offset).await["error"]["data"]["code"],
-            "stale_prompt"
-        );
-    }
-    cli.request("h:idle", "connect/history", json!({"scope":scope}));
-    let idle = cli.response("h:idle").await;
-    assert_eq!(idle["result"]["state"]["private_notice_pending"], false);
-    assert_eq!(idle["result"]["state"]["can_send"], true);
-    cli.request(
-        "h:second",
-        "connect/send",
-        json!({"scope":scope,"text":SECOND}),
-    );
-    assert_eq!(
-        cli.response("h:second").await["result"]["completion"],
-        "completed"
-    );
-    cli.request("h:history", "connect/history", json!({"scope":scope}));
-    let history = cli.response("h:history").await;
-    assert_eq!(
-        history["result"]["state"]["last_completion"],
-        json!({"send_request_id":"h:second","completion":"completed"})
-    );
-    assert_eq!(history["result"]["state"]["private_notice_pending"], false);
-    cli.request(
-        "h:retire",
-        "connect/retire",
-        json!({"target":{"scope":scope},"retirement_id":"paired-host-fixture-retire","reason":"application_stopping"}),
-    );
-    assert_eq!(
-        cli.response("h:retire").await["result"]["entered_work"],
-        "settled"
-    );
-    cli.request(
-        "h:close",
-        "connect/close",
-        json!({"target":{"scope":scope}}),
-    );
-    assert_eq!(
-        cli.response("h:close").await["result"]["resources_closed"],
-        true
-    );
-    let response_position = |id: &str| {
-        cli.rows
-            .iter()
-            .position(|row| row["id"] == id && row.get("method").is_none())
-            .unwrap()
-    };
-    assert!(response_position("h:second") < response_position("h:retire"));
-    assert!(response_position("h:retire") < response_position("h:close"));
-    assert!(cli.finish().await.success());
-    provider.finish().await;
-    let (owner_result, canaries) = owner.finish().await;
-    for path in [
-        "/console/extensions/frontend/prepare",
-        "/console/extensions/frontend/change-requests",
-        "/console/extensions/secrets/intents",
-    ] {
-        assert_eq!(
-            owner_result["requests"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|r| r["method"] == "POST" && r["path"] == path)
-                .count(),
-            1,
-            "{path}"
-        );
-    }
-    assert_eq!(owner_result["built"].as_array().unwrap().len(), 1);
-    assert_eq!(owner_result["committed"].as_array().unwrap().len(), 1);
-    assert_eq!(owner_result["committed"][0]["generation"], 1);
-    assert_eq!(provider.requests.lock().unwrap().len(), 9);
-    assert_eq!(preparation_output_count(&cli.state), 0);
-    assert_eq!(
-        fs::read(cli.state.join(REALM).join("config.toml")).unwrap(),
-        config
-    );
-    let artifact_root = cli.state.join(".meerkat-connect").join(REALM);
-    let mut decisions = vec![];
-    for setup in fs::read_dir(artifact_root).unwrap() {
-        for entry in fs::read_dir(setup.unwrap().path()).unwrap() {
-            let path = entry.unwrap().path().join("native-decisions.json");
-            if path.is_file() {
-                let value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-                decisions.extend(
-                    serde_json::from_value::<Vec<ApprovalRecord>>(value["approvals"].clone())
-                        .unwrap(),
-                );
-            }
-        }
-    }
-    assert_eq!(decisions.len(), 2);
-    for decision in &decisions {
-        assert_eq!(decision.status, ApprovalStatus::Approved);
-        assert!(approval_ids.contains(&decision.approval_id.to_string()));
-        assert_eq!(
-            decision.decision.as_ref().unwrap().actor.as_str(),
-            "fixture-human"
-        );
-    }
-    let storage = meerkat_connect::RealmOptions {
-        context_root: cli.context.clone(),
-        state_root: Some(cli.state.clone()),
-        user_config_root: Some(cli.home.clone()),
-    }
-    .resolve(REALM)
-    .unwrap();
-    let (_, persistence) = meerkat::storage_provider::open_realm_persistence_with_layout(
-        storage.layout,
-        REALM,
-        None,
-        Some(meerkat_store::RealmOrigin::Explicit),
-    )
-    .await
-    .unwrap();
-    let stored = persistence
-        .session_store()
-        .load(&session)
-        .await
-        .unwrap()
-        .unwrap();
-    let users = stored
-        .messages()
-        .iter()
-        .filter_map(|m| {
-            if let Message::User(u) = m {
-                Some(u.text_content())
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(users, vec![FIRST, SECOND]);
-    let mut inputs = persistence
-        .runtime_store()
-        .load_input_states_strict(&LogicalRuntimeId::for_session(&session))
-        .await
-        .unwrap();
-    assert_eq!(inputs.len(), 2);
-    inputs.sort_by_key(|input| {
-        input
-            .seed
-            .admission_sequence
-            .expect("native admission sequence")
-    });
-    for (input, id) in inputs.iter().zip(["h:first", "h:second"]) {
-        let value = serde_json::to_value(input).unwrap();
-        let completion: CompletionOutcome =
-            serde_json::from_value(value["terminal_completion"]["outcome"].clone()).unwrap();
-        let completion = serde_json::to_value(completion).unwrap();
-        let wire = cli
-            .rows
-            .iter()
-            .find(|r| r["id"] == id && r.get("method").is_none())
-            .unwrap();
-        assert_eq!(completion["completion_type"], wire["result"]["completion"]);
-        assert_eq!(completion["completion_type"], "completed");
-        assert_eq!(input.seed.attempt_count, 1);
-        assert_eq!(input.state.recovery_count, 0);
-    }
-    let public_history = serde_json::to_string(stored.messages()).unwrap();
-    let calls = provider.requests.lock().unwrap();
-    let review_url = notices[1]["params"]["prompt"]["notice"]["url"]
-        .as_str()
-        .unwrap();
-    for secret in canaries
-        .iter()
-        .chain(approval_ids.iter())
-        .map(String::as_str)
-        .chain([
-            owner.origin.as_str(),
-            owner.code.as_str(),
-            entry_url.as_str(),
-            review_url,
-        ])
-    {
-        assert!(!public_history.contains(secret));
-        for call in calls.iter() {
-            assert!(!call.body.to_string().contains(secret));
-        }
-        for row in &cli.rows {
-            if row["method"] != "connect/prompt" {
-                assert!(!row.to_string().contains(secret));
-            }
-        }
-    }
-    assert_eq!(
-        cli.rows
-            .iter()
-            .filter(|r| r["method"] == "connect/prompt"
-                && r["params"]["prompt"]["kind"] == "paired_host_notice")
-            .count(),
-        2
-    );
-    println!(
-        "Stdio PairedHost role-secret composition: {}",
-        json!({"scope":"copied_stdio_native_actual_paired_host_management_scripted_model","candidate_binary":cli.binary,"cli_sha256":file_digest(&cli.binary),"test_sha256":file_digest(&std::env::current_exe().unwrap()),"resources_sha256":option_env!("MEERKAT_CONNECT_RESOURCES_SHA256"),"owner_commit":"8131ab12162bc65d77e6fc4454f6573681b57c67","native_sessions":1,"native_inputs":2,"native_approvals":2,"private_notices":2,"notice_order":["secret_entry","review"],"prepare_posts":1,"submit_posts":1,"intent_posts":1,"secret_generation":1,"service_preparations":0,"closed_with_stdin_open":true,"actual_wheel_build":false,"live_activation":false,"all_owned_processes_joined":true})
     );
     let _ = &cli.root;
 }

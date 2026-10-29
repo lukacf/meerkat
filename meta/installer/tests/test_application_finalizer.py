@@ -58,7 +58,7 @@ class FinalizerFixture:
                 {"path": p.path.name, "sha256": p.sha256} for p in artifacts]}))
             value = json.loads(Path(arguments["--activation-template"]).read_bytes())
             value["policy_bundle"] = {"path": bundle.name,
-                "policy_digest": "hc-policy-v1:sha256:" + manifest.sha256}
+                "policy_digest": "policy-v1:sha256:" + manifest.sha256}
             activation = write(Path(arguments["--activation"]), encoded(value))
             self.selection = {"deployment_root": str(self.f.root), "activation": activation.pin(),
                 "policy_manifest": manifest.pin(), "local_policy": policy.pin()}

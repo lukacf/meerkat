@@ -316,9 +316,9 @@ async fn request(socket: &mut TcpStream) -> Request {
 
 async fn acknowledgement(socket: &mut TcpStream, confirmed: bool) {
     let cookie = if confirmed {
-        "hc_console_device=synthetic-device-cookie; Path=/; HttpOnly; SameSite=Lax"
+        "paired_host_device=synthetic-device-cookie; Path=/; HttpOnly; SameSite=Lax"
     } else {
-        "hc_console_pair=synthetic-pair-cookie; Path=/console/pair; HttpOnly; SameSite=Strict"
+        "paired_host_pair=synthetic-pair-cookie; Path=/console/pair; HttpOnly; SameSite=Strict"
     };
     let bytes = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nSet-Cookie: {cookie}\r\nConnection: close\r\n\r\n{{\"ok\":true}}"
@@ -376,7 +376,7 @@ async fn local_pairing_code_correction(terminal: bool, accepted: bool) {
             assert!(
                 received
                     .head
-                    .contains("hc_console_pair=synthetic-pair-cookie")
+                    .contains("paired_host_pair=synthetic-pair-cookie")
             );
         }
         if accepted {
@@ -438,7 +438,7 @@ async fn local_pairing_code_correction(terminal: bool, accepted: bool) {
         use meerkat_connect::paired_host::{PairedHostError, PairedHostRefusal};
         match result.unwrap_err() {
             meerkat_connect::ConnectError::Native { operation, source } => {
-                assert_eq!(operation, "confirm PairedHost pairing");
+                assert_eq!(operation, "confirm paired host pairing");
                 assert!(matches!(
                     source.downcast_ref::<PairedHostError>(),
                     Some(PairedHostError::Refused {
@@ -673,7 +673,7 @@ async fn explicit_pairing_uses_hidden_entry_and_never_returns_secret_input_to_th
         assert!(
             second
                 .head
-                .contains("hc_console_pair=synthetic-pair-cookie")
+                .contains("paired_host_pair=synthetic-pair-cookie")
         );
         assert_eq!(second.body, json!({"code":CODE}));
         acknowledgement(&mut socket, true).await;
@@ -702,7 +702,7 @@ async fn explicit_pairing_uses_hidden_entry_and_never_returns_secret_input_to_th
     assert!(!text.contains(CODE));
     assert!(!text.contains("synthetic-pair-cookie"));
     assert!(!text.contains("synthetic-device-cookie"));
-    assert!(text.contains("PairedHost keeps the paired device after Connect exits"));
+    assert!(text.contains("The paired host keeps the paired device after Connect exits"));
     send(&pty.master, b"my frontend request\n");
     assert_eq!(
         timeout(BOUND, pty.input.recv())
@@ -803,7 +803,7 @@ async fn pending_http_interruption_is_unconfirmed_and_never_retried() {
             .await
             .unwrap();
         let error = result.unwrap_err().to_string();
-        assert!(error.contains("PairedHost outcome is unconfirmed"));
+        assert!(error.contains("paired host outcome is unconfirmed"));
         assert!(error.contains("nothing was rolled back"));
         assert!(!error.contains(CODE));
         assert!(!output.text().contains(CODE));

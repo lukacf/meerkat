@@ -1,14 +1,14 @@
 ---
-title: "A custom Robot-style extension"
+title: "A device and voice extension"
 description: "Model device operations, a voice frontend and shared services without embedding another agent runtime."
-icon: "robot"
+icon: "microchip"
 ---
 
-A Robot-style integration can expose both device operations and a voice frontend while sharing one daemon and domain service.
+A device integration can expose both device operations and a voice frontend while sharing one daemon and domain service.
 
 ```mermaid
 flowchart TB
-  PKG["Selected Robot package"] --> DEVICE["Device service export"]
+  PKG["Selected device package"] --> DEVICE["Device service export"]
   PKG --> VOICE["Voice frontend export"]
   DEVICE --> DOMAIN["Device domain owner"]
   VOICE --> LIVE["Admission, conversation and live owner"]
@@ -50,4 +50,4 @@ A lost socket does not authorize routing images into a replacement session. Reco
 
 The package describes shared dependencies and state migrations. Pause the frontend according to its admission/live policy; revoke device access through its grant/domain owner. Stop the shared daemon only when its remaining dependants permit it. Preserve durable state required for recovery.
 
-This example should remain implementable in another host. Keep the robot domain behavior in its adapter and application while reusing Connect packaging, delivery and transport pieces and the existing Meerkat/Meta runtime.
+This example should remain implementable in another host. Keep the device domain behavior in its adapter and application while reusing Connect packaging, delivery and transport pieces and the existing Meerkat/Meta runtime.

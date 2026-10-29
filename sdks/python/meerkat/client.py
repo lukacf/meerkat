@@ -494,6 +494,11 @@ _CALLER_IDEMPOTENCY_KEY_MIN_CONTRACT = (0, 9, 5)
 # sends it only to a server that reports this contract or later.
 _TURN_SESSION_EVENTS_OPT_OUT_MIN_CONTRACT = (0, 9, 5)
 
+# The first server contract that takes `grant_gated_tools` on session/create.
+# An older server ignores the field and builds the session with the gated
+# tools ungated, so the SDK refuses to send a gate to it.
+_GRANT_GATED_TOOLS_MIN_CONTRACT = (0, 9, 8)
+
 
 def _contract_parts(version: str) -> tuple[int, ...] | None:
     core = version.split("-", 1)[0].split("+", 1)[0]
@@ -1577,8 +1582,14 @@ class MeerkatClient:
         app_context: dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         external_tools: list[dict[str, Any]] | None = None,
+        grant_gated_tools: dict[str, list[str]] | None = None,
     ) -> Session:
         """Create a new session, run the first turn, and return a :class:`Session`.
+
+        ``grant_gated_tools`` (``{"families": [...], "tools": [...]}``) gates
+        built-in tool families and tool names: the session mounts them hidden
+        and refuses them until :meth:`grant_tool` opens them. It is sent only
+        to a server whose contract (0.9.8 or later) takes it.
 
         Example::
 
@@ -1588,6 +1599,7 @@ class MeerkatClient:
             )
             print(session.text)
         """
+        self._require_grant_gate_support(grant_gated_tools)
         params = self._build_create_params(
             prompt,
             injected_context=injected_context,
@@ -1619,6 +1631,7 @@ class MeerkatClient:
             app_context=app_context,
             shell_env=shell_env,
             external_tools=external_tools,
+            grant_gated_tools=grant_gated_tools,
         )
         self._opt_out_of_turn_session_events(params)
         raw = await self._request("session/create", params)
@@ -1658,6 +1671,7 @@ class MeerkatClient:
         app_context: dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         external_tools: list[dict[str, Any]] | None = None,
+        grant_gated_tools: dict[str, list[str]] | None = None,
     ) -> EventStream:
         """Create a new session and stream typed events from the first turn.
 
@@ -1673,6 +1687,7 @@ class MeerkatClient:
         """
         if not self._dispatcher or not self._process or not self._process.stdin:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
+        self._require_grant_gate_support(grant_gated_tools)
         params = self._build_create_params(
             prompt,
             injected_context=injected_context,
@@ -1704,6 +1719,7 @@ class MeerkatClient:
             app_context=app_context,
             shell_env=shell_env,
             external_tools=external_tools,
+            grant_gated_tools=grant_gated_tools,
         )
         self._request_id += 1
         request_id = self._request_id
@@ -1758,6 +1774,7 @@ class MeerkatClient:
         app_context: dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         external_tools: list[dict[str, Any]] | None = None,
+        grant_gated_tools: dict[str, list[str]] | None = None,
     ) -> DeferredSession:
         """Create a new session without running the first turn.
 
@@ -1773,6 +1790,7 @@ class MeerkatClient:
             )
             result = await deferred.start_turn("Begin")
         """
+        self._require_grant_gate_support(grant_gated_tools)
         params = self._build_create_params(
             prompt,
             injected_context=injected_context,
@@ -1803,6 +1821,7 @@ class MeerkatClient:
             app_context=app_context,
             shell_env=shell_env,
             external_tools=external_tools,
+            grant_gated_tools=grant_gated_tools,
         )
         params["initial_turn"] = "deferred"
         raw = await self._request("session/create", params)
@@ -1893,6 +1912,21 @@ class MeerkatClient:
             raise CapabilityUnavailableError(
                 "CAPABILITY_UNAVAILABLE",
                 f"idempotency_key needs a server contract >= {minimum}; "
+                f"this server reports {self._server_contract_version or 'none'}",
+            )
+
+    def _require_grant_gate_support(
+        self, grant_gated_tools: dict[str, list[str]] | None
+    ) -> None:
+        """Refuse a grant gate before sending it to a server that would drop it."""
+        if grant_gated_tools is None:
+            return
+        parts = _contract_parts(self._server_contract_version)
+        if parts is None or parts < _GRANT_GATED_TOOLS_MIN_CONTRACT:
+            minimum = ".".join(str(part) for part in _GRANT_GATED_TOOLS_MIN_CONTRACT)
+            raise CapabilityUnavailableError(
+                "CAPABILITY_UNAVAILABLE",
+                f"grant_gated_tools needs a server contract >= {minimum}; "
                 f"this server reports {self._server_contract_version or 'none'}",
             )
 
@@ -2579,6 +2613,95 @@ class MeerkatClient:
 
     async def decide_approval(self, params: ApprovalDecideParams) -> dict[str, Any]:
         return await self._request("approval/decide", _wire_params(params))
+
+    async def grant_tool(
+        self,
+        session_id: str,
+        *,
+        tool: str | None = None,
+        family: str | None = None,
+        duration_ms: int | None = None,
+        expires_at_ms: int | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Grant one of a session's grant-gated tool names or tool families.
+
+        Name exactly one of ``tool`` and ``family``: the session's build must
+        gate it (``create_session(grant_gated_tools=...)``). Bound the grant
+        by exactly one of ``duration_ms`` and ``expires_at_ms`` (UNIX ms), at
+        most the server's maximum lifetime. Returns the ``tool_grants/grant``
+        result, ``{"grant": {...}}``: a family grant's ``target.names`` are
+        the names the server took for it.
+        """
+        if (tool is None) == (family is None):
+            raise ValueError("exactly one of tool or family must be provided")
+        target: dict[str, Any] = (
+            {"kind": "tool", "name": tool}
+            if tool is not None
+            else {"kind": "family", "family": family}
+        )
+        params: dict[str, Any] = {
+            "subject": {"kind": "session", "session_id": session_id},
+            "target": target,
+        }
+        if duration_ms is not None:
+            params["duration_ms"] = duration_ms
+        if expires_at_ms is not None:
+            params["expires_at_ms"] = expires_at_ms
+        if reason is not None:
+            params["reason"] = reason
+        return await self._request("tool_grants/grant", params)
+
+    async def revoke_tool_grant(
+        self, grant_id: str, *, reason: str | None = None
+    ) -> dict[str, Any]:
+        """Revoke a scoped tool grant before its deadline.
+
+        Idempotent: revoking a grant that already ended answers it as it
+        stands. Returns ``{"grant": {...}, "changed": bool}``, ``changed``
+        true only when this revoke ended the grant.
+        """
+        params: dict[str, Any] = {"grant_id": grant_id}
+        if reason is not None:
+            params["reason"] = reason
+        return await self._request("tool_grants/revoke", params)
+
+    async def list_tool_grants(
+        self, session_id: str, *, include_ended: bool = False
+    ) -> dict[str, Any]:
+        """List a session's scoped tool grants, each due one read as expired.
+
+        Ended (expired or revoked) grants are listed only with
+        ``include_ended``. Returns ``{"grants": [...]}``, with an
+        ``"unreadable"`` list naming any stored grant the server cannot read.
+        """
+        params: dict[str, Any] = {
+            "subject": {"kind": "session", "session_id": session_id},
+            "include_ended": include_ended,
+        }
+        return await self._request("tool_grants/list", params)
+
+    async def tool_grant_audit(
+        self,
+        session_id: str,
+        *,
+        after_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Read a page of the audit log of a session's scoped tool grants.
+
+        Rows come in sequence order, after ``after_sequence`` when given.
+        Returns ``{"rows": [...]}``, with ``"next_sequence"`` while more rows
+        may follow: pass it as the next page's ``after_sequence``.
+        """
+        params: dict[str, Any] = {
+            "subject": {"kind": "session", "session_id": session_id},
+        }
+        if after_sequence is not None:
+            params["after_sequence"] = after_sequence
+        if limit is not None:
+            params["limit"] = limit
+        return await self._request("tool_grants/audit", params)
 
     async def list_artifacts(
         self, params: dict[str, Any] | None = None
@@ -6050,6 +6173,7 @@ class MeerkatClient:
         app_context: dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         external_tools: list[dict[str, Any]] | None = None,
+        grant_gated_tools: dict[str, list[str]] | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"prompt": prompt}
         if injected_context is not None:
@@ -6111,6 +6235,8 @@ class MeerkatClient:
             params["shell_env"] = shell_env
         if external_tools is not None:
             params["external_tools"] = external_tools
+        if grant_gated_tools is not None:
+            params["grant_gated_tools"] = grant_gated_tools
         return params
 
     @staticmethod

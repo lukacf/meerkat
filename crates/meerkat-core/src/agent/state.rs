@@ -22021,6 +22021,80 @@ mod tests {
         }
     }
 
+    /// An agent's grant gate lets a closed gated name through its visibility
+    /// precheck to the dispatcher, the gated name's one refusal site. A
+    /// dispatcher that does not adjudicate tool grants would run the call's
+    /// tool instead, so the build refuses the pair; the same gate over a
+    /// grant-adjudicating dispatcher builds.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_grant_gate_over_a_dispatcher_that_does_not_adjudicate_grants_is_refused() {
+        /// A session with no live grant.
+        struct NoLiveGrant;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
+            async fn open_names(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn admit_call(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+                _call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+        }
+
+        let gate = crate::tool_grant::ToolGrantGate::new(
+            Arc::new(NoLiveGrant) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            crate::tool_grant::GatedToolTable::new(
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::from([crate::types::ToolName::from("deploy")]),
+            ),
+        );
+
+        let refused = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate.clone())
+            .try_build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(crate::agent::builder::AgentBuildPolicyError::ToolGrantGateWithoutAdjudication)
+            ),
+            "a gate over a dispatcher that does not adjudicate grants is refused"
+        );
+
+        let adjudicating = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(NoTools),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        assert!(
+            with_test_turn_state_handle(AgentBuilder::new())
+                .with_tool_visibility_owner(explicit_test_visibility_owner())
+                .with_tool_grant_gate(gate)
+                .try_build_standalone(Arc::new(StaticLlmClient), adjudicating, Arc::new(NoopStore))
+                .await
+                .is_ok(),
+            "the same gate over a grant-adjudicating dispatcher builds"
+        );
+    }
+
     /// A model call naming a gated tool that its closed gate hides passes the
     /// visibility precheck to the dispatch gate, the gated name's one refusal
     /// site. The grants are adjudicated exactly once, and that adjudication

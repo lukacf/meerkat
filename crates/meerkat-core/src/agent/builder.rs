@@ -157,6 +157,12 @@ pub enum AgentBuildPolicyError {
     CompactionMemoryReconcile { message: String },
     #[error("durable compaction-memory stages require a resultful runtime commit coordinator")]
     MissingCompactionCommitCoordinator,
+    /// The agent carries a scoped tool grant gate, but its dispatcher does
+    /// not adjudicate tool grants, so a closed gated call would reach its tool.
+    #[error(
+        "an agent with a scoped tool grant gate requires a dispatcher that adjudicates tool grants"
+    )]
+    ToolGrantGateWithoutAdjudication,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -567,6 +573,12 @@ impl AgentBuilder {
         let capability_base_filter_override = self.capability_base_filter_override.clone();
         let policy_base_filter = self.policy_base_filter.clone();
         let tool_grant_gate = self.tool_grant_gate.clone();
+        // A grant gate's closed names pass the agent's visibility precheck to
+        // the dispatcher, which must refuse them: only a dispatcher that
+        // adjudicates tool grants may carry one.
+        if tool_grant_gate.is_some() && !tools.adjudicates_tool_grants() {
+            return Err(AgentBuildPolicyError::ToolGrantGateWithoutAdjudication);
+        }
         let tool_grant_gated_names = tool_grant_gate
             .as_ref()
             .map(|gate| gate.table().gated_names())

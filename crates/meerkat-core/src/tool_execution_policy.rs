@@ -691,6 +691,12 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
         self.inner.pending_catalog_sources()
     }
 
+    /// The gate adjudicates scoped tool grants when it carries a grant gate;
+    /// otherwise as far as its inner dispatcher does.
+    fn adjudicates_tool_grants(&self) -> bool {
+        self.tool_grant_gate.is_some() || self.inner.adjudicates_tool_grants()
+    }
+
     fn execution_binding_fingerprint(
         &self,
         tool_name: &str,

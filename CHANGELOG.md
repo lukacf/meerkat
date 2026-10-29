@@ -41,7 +41,9 @@ them.
   `SessionTooling` gains `grant_gated`, and `SessionToolVisibilityState` gains
   `tool_grant_gated_names` and `tool_grant_open_names` (struct literals need
   them; `Default` fills them). Metadata persisted before reads as before: the
-  fields default to empty.
+  fields default to empty. `AgentBuildPolicyError` gains
+  `ToolGrantGateWithoutAdjudication`: an agent with a scoped tool grant gate
+  requires a dispatcher whose `adjudicates_tool_grants` answers true.
 
 - `meerkat`: `AgentBuildConfig` gains `grant_gated_tools`, and
   `BuildAgentError` gains `GrantGate(GrantGateBuildError)`. `BuildAgentError`
@@ -118,7 +120,10 @@ them.
   `tool_grant_open_names_are_gated`. `ExecutionPolicyGatedDispatcher` gains
   `with_tool_grant_gate`, which adjudicates each gated call again as the last
   check before the hand-off, so a call at or after the deadline is refused
-  even when the tool was shown. A refusal is a `policy_denied` tool error
+  even when the tool was shown. `AgentToolDispatcher` gains
+  `adjudicates_tool_grants` (default false; true on a gated dispatcher with a
+  grant gate), and an agent builder refuses a grant gate over a dispatcher
+  that does not adjudicate grants. A refusal is a `policy_denied` tool error
   with the code `tool_grant_required`, `tool_grant_expired`,
   `tool_grant_revoked` or `tool_grant_unavailable`; a gate that cannot read
   its grants stays closed. Each runtime's deadline driver expires its served

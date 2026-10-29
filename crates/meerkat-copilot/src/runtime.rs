@@ -269,8 +269,10 @@ pub struct CopilotRuntime {
     /// shares one pacing, whichever credential store it was built over. The
     /// map stays bounded: it holds one small entry per credential account a
     /// route was resolved for, a set the realm configuration fixes, and
-    /// nothing per request, session or persistence instance; an entry's
-    /// re-read pauses exist only while a lease registry withdraws the token.
+    /// nothing per request, session or persistence instance. An entry's
+    /// re-read pauses are removed by the first claim that finds its lease
+    /// published again; there is at most one per registry, and production
+    /// registries live for the process.
     pacing: Mutex<BTreeMap<AuthCredentialIdentity, Arc<CopilotAccountPacing>>>,
     transport: Arc<dyn CopilotHttpTransport>,
 }
@@ -1305,10 +1307,10 @@ struct CopilotAccountPacing {
     /// `auth_lifecycle_restore_instance_id`): while that registry's lease
     /// withdraws the token (GitHub refused it, or a logout released it), a
     /// source that runs something is not read again before the entry's
-    /// instant. Two registries for one account (two credential stores, two
-    /// hosts' runtime machines) pause apart. An entry lives only while its
-    /// pause may still apply: the claim that finds its lease published again
-    /// removes it.
+    /// instant. Two registries for one account (two runtime stores) pause
+    /// apart. An entry is removed by the first claim that finds its lease
+    /// published again; there is at most one per registry, and production
+    /// registries live for the process.
     withdrawn_source_rereads: Mutex<BTreeMap<usize, WithdrawnSourceReread>>,
 }
 
@@ -2353,8 +2355,8 @@ impl CopilotAuthorizer {
     /// on the lease ends the pause at once, so a value another session,
     /// machine or login published heals this account state on its next
     /// request. The pause belongs to the lease's AuthMachine registry, and is
-    /// checked and moved under its own lock, so of concurrent account states
-    /// over one registry only one reads at each paced instant.
+    /// checked and moved under its own lock, so of this runtime's account
+    /// states over one registry only one reads at each paced instant.
     fn claim_withdrawn_source_reread(
         &self,
     ) -> Result<Option<ProviderAuthError>, ProviderAuthError> {

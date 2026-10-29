@@ -77,7 +77,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Transitions
 ### `Acquire`
-- From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
+- From: `Valid`, `Refreshing`, `ReauthRequired`, `Released`
 - On: `Acquire`(expires_at_ts, credential_published_at_millis, credential_material_fingerprint)
 - Guards:
   - `credential_material_publishable`
@@ -1618,6 +1618,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `source_credential_material_recorded`
 - Emits: `SourceCredentialPublicationResolved`
 - To: `Released`
+
+### `AcquireFromExpiring`
+- From: `Expiring`
+- On: `Acquire`(expires_at_ts, credential_published_at_millis, credential_material_fingerprint)
+- Emits: `EmitLifecycleEvent`
+- To: `Valid`
+
+### `AcquireFromExpired`
+- From: `Expired`
+- On: `Acquire`(expires_at_ts, credential_published_at_millis, credential_material_fingerprint)
+- Emits: `EmitLifecycleEvent`
+- To: `Valid`
 
 ## Coverage
 ### Code Anchors

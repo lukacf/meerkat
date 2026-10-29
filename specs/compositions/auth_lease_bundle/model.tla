@@ -165,7 +165,7 @@ auth_machine_Acquire(arg_expires_at_ts, arg_credential_published_at_millis, arg_
        /\ packet.payload.credential_published_at_millis = arg_credential_published_at_millis
        /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
        /\ ~HigherPriorityReady("auth_machine_authority")
-       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
+       /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
        /\ (IF (packet.payload.credential_material_fingerprint = None) THEN TRUE ELSE (auth_machine_credential_material_fingerprint # packet.payload.credential_material_fingerprint))
        /\ auth_machine_phase' = "Valid"
        /\ auth_machine_expires_at' = packet.payload.expires_at_ts
@@ -4722,12 +4722,68 @@ auth_machine_ResolveSourceCredentialPublicationAlreadyPublishedReleased(arg_cred
        /\ model_step_count' = model_step_count + 1
 
 
+auth_machine_AcquireFromExpiring(arg_expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "Acquire"
+       /\ packet.payload.expires_at_ts = arg_expires_at_ts
+       /\ packet.payload.credential_published_at_millis = arg_credential_published_at_millis
+       /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expiring"
+       /\ auth_machine_phase' = "Valid"
+       /\ auth_machine_expires_at' = packet.payload.expires_at_ts
+       /\ auth_machine_refresh_attempt' = 0
+       /\ auth_machine_credential_present' = TRUE
+       /\ auth_machine_credential_generation' = (auth_machine_credential_generation + 1)
+       /\ auth_machine_credential_published_at_millis' = Some(packet.payload.credential_published_at_millis)
+       /\ auth_machine_credential_material_fingerprint' = packet.payload.credential_material_fingerprint
+       /\ UnchangedFrame_c72cb1d65d4e320f
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> (auth_machine_credential_generation + 1), credential_published_at_millis |-> Some(packet.payload.credential_published_at_millis), expires_at |-> packet.payload.expires_at_ts, new_state |-> "Valid"], effect_id |-> (model_step_count + 1), source_transition |-> "AcquireFromExpiring"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "AcquireFromExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Valid"]}
+       /\ obligation_auth_machine_auth_lease_lifecycle_publication' = obligation_auth_machine_auth_lease_lifecycle_publication \cup {[effect_id |-> (model_step_count + 1), new_state |-> "Valid", expires_at |-> packet.payload.expires_at_ts, credential_generation |-> (auth_machine_credential_generation + 1), credential_published_at_millis |-> Some(packet.payload.credential_published_at_millis)]}
+       /\ UnchangedFrame_87048e7ba4c974a0
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_AcquireFromExpired(arg_expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "Acquire"
+       /\ packet.payload.expires_at_ts = arg_expires_at_ts
+       /\ packet.payload.credential_published_at_millis = arg_credential_published_at_millis
+       /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ auth_machine_phase' = "Valid"
+       /\ auth_machine_expires_at' = packet.payload.expires_at_ts
+       /\ auth_machine_refresh_attempt' = 0
+       /\ auth_machine_credential_present' = TRUE
+       /\ auth_machine_credential_generation' = (auth_machine_credential_generation + 1)
+       /\ auth_machine_credential_published_at_millis' = Some(packet.payload.credential_published_at_millis)
+       /\ auth_machine_credential_material_fingerprint' = packet.payload.credential_material_fingerprint
+       /\ UnchangedFrame_c72cb1d65d4e320f
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> (auth_machine_credential_generation + 1), credential_published_at_millis |-> Some(packet.payload.credential_published_at_millis), expires_at |-> packet.payload.expires_at_ts, new_state |-> "Valid"], effect_id |-> (model_step_count + 1), source_transition |-> "AcquireFromExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "AcquireFromExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Valid"]}
+       /\ obligation_auth_machine_auth_lease_lifecycle_publication' = obligation_auth_machine_auth_lease_lifecycle_publication \cup {[effect_id |-> (model_step_count + 1), new_state |-> "Valid", expires_at |-> packet.payload.expires_at_ts, credential_generation |-> (auth_machine_credential_generation + 1), credential_published_at_millis |-> Some(packet.payload.credential_published_at_millis)]}
+       /\ UnchangedFrame_87048e7ba4c974a0
+       /\ model_step_count' = model_step_count + 1
+
+
 auth_machine_oauth_flow_membership_consistent == ((DOMAIN auth_machine_oauth_browser_flow_providers = auth_machine_oauth_browser_flow_ids) /\ (DOMAIN auth_machine_oauth_browser_flow_redirect_uris = auth_machine_oauth_browser_flow_ids) /\ (DOMAIN auth_machine_oauth_browser_flow_expires_at_millis = auth_machine_oauth_browser_flow_ids) /\ (DOMAIN auth_machine_oauth_device_flow_providers = auth_machine_oauth_device_flow_ids) /\ (DOMAIN auth_machine_oauth_device_flow_expires_at_millis = auth_machine_oauth_device_flow_ids) /\ (\A flow_id \in auth_machine_oauth_device_poll_ids : (flow_id \in auth_machine_oauth_device_flow_ids)) /\ (auth_machine_oauth_outstanding_flow_count = (Cardinality(auth_machine_oauth_browser_flow_ids) + Cardinality(auth_machine_oauth_device_flow_ids))))
 auth_machine_released_oauth_membership_drained == (IF (auth_machine_phase # "Released") THEN TRUE ELSE (auth_machine_oauth_outstanding_flow_count = 0))
 auth_machine_released_not_release_draining == (IF (auth_machine_phase # "Released") THEN TRUE ELSE (auth_machine_release_draining = FALSE))
 
 EntryPacketAdmissible_auth_machine(packet) ==
-    \/ /\ (packet.variant = "Acquire") /\ (auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released") /\ ((IF (packet.payload.credential_material_fingerprint = None) THEN TRUE ELSE (auth_machine_credential_material_fingerprint # packet.payload.credential_material_fingerprint)))
+    \/ /\ (packet.variant = "Acquire") /\ (auth_machine_phase = "Valid" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released") /\ ((IF (packet.payload.credential_material_fingerprint = None) THEN TRUE ELSE (auth_machine_credential_material_fingerprint # packet.payload.credential_material_fingerprint)))
     \/ /\ (packet.variant = "MarkExpiring") /\ (auth_machine_phase = "Valid")
     \/ /\ (packet.variant = "ObserveCredentialFreshness") /\ (auth_machine_phase = "Valid") /\ ((IF (auth_machine_expires_at = None) THEN TRUE ELSE ((packet.payload.now_ts < (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)) /\ ((packet.payload.now_ts + packet.payload.refresh_window_secs) <= (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)))))
     \/ /\ (packet.variant = "ObserveCredentialFreshness") /\ (auth_machine_phase = "Valid") /\ ((IF (auth_machine_expires_at = None) THEN FALSE ELSE ((packet.payload.now_ts < (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)) /\ ((IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None) < (packet.payload.now_ts + packet.payload.refresh_window_secs)))))
@@ -4912,6 +4968,8 @@ EntryPacketAdmissible_auth_machine(packet) ==
     \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "Refreshing") /\ ((auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint)))
     \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "ReauthRequired") /\ ((auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint)))
     \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "Released") /\ ((auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint)))
+    \/ /\ (packet.variant = "Acquire") /\ (auth_machine_phase = "Expiring")
+    \/ /\ (packet.variant = "Acquire") /\ (auth_machine_phase = "Expired")
 
 EntryPacketAdmissible(packet) ==
     CASE
@@ -5308,6 +5366,8 @@ CoreNext ==
     \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationAlreadyPublishedRefreshing(arg_credential_material_fingerprint)
     \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired(arg_credential_material_fingerprint)
     \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationAlreadyPublishedReleased(arg_credential_material_fingerprint)
+    \/ \E arg_expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : \E arg_credential_material_fingerprint \in OptionStringValues : auth_machine_AcquireFromExpiring(arg_expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint)
+    \/ \E arg_expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : \E arg_credential_material_fingerprint \in OptionStringValues : auth_machine_AcquireFromExpired(arg_expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint)
     \/ OwnerFeedback_auth_machine_auth_release_oauth_flow_drain_ExpireOAuthBrowserFlow
     \/ OwnerFeedback_auth_machine_auth_release_oauth_flow_drain_ExpireOAuthDeviceFlow
     \/ QuiescentStutter

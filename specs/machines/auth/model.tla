@@ -71,7 +71,7 @@ UnchangedFrame_e68d2f8d143b21b0 == UNCHANGED << oauth_browser_flow_ids, oauth_br
 UnchangedFrame_e9fda9e62fb02e30 == UNCHANGED << oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
 
 Acquire(expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint) ==
-    /\ phase = "Valid" \/ phase = "Expiring" \/ phase = "Expired" \/ phase = "Refreshing" \/ phase = "ReauthRequired" \/ phase = "Released"
+    /\ phase = "Valid" \/ phase = "Refreshing" \/ phase = "ReauthRequired" \/ phase = "Released"
     /\ (IF (arg_credential_material_fingerprint = None) THEN TRUE ELSE (credential_material_fingerprint # arg_credential_material_fingerprint))
     /\ phase' = "Valid"
     /\ model_step_count' = model_step_count + 1
@@ -2054,8 +2054,34 @@ ResolveSourceCredentialPublicationAlreadyPublishedReleased(arg_credential_materi
     /\ UnchangedFrame_117129097f16be0f
 
 
+AcquireFromExpiring(expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint) ==
+    /\ phase = "Expiring"
+    /\ phase' = "Valid"
+    /\ model_step_count' = model_step_count + 1
+    /\ expires_at' = expires_at_ts
+    /\ refresh_attempt' = 0
+    /\ credential_present' = TRUE
+    /\ credential_generation' = (credential_generation + 1)
+    /\ credential_published_at_millis' = Some(arg_credential_published_at_millis)
+    /\ credential_material_fingerprint' = arg_credential_material_fingerprint
+    /\ UnchangedFrame_406de655613c82f8
+
+
+AcquireFromExpired(expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint) ==
+    /\ phase = "Expired"
+    /\ phase' = "Valid"
+    /\ model_step_count' = model_step_count + 1
+    /\ expires_at' = expires_at_ts
+    /\ refresh_attempt' = 0
+    /\ credential_present' = TRUE
+    /\ credential_generation' = (credential_generation + 1)
+    /\ credential_published_at_millis' = Some(arg_credential_published_at_millis)
+    /\ credential_material_fingerprint' = arg_credential_material_fingerprint
+    /\ UnchangedFrame_406de655613c82f8
+
+
 Next ==
-    \/ (phase = "Valid" \/ phase = "Expiring" \/ phase = "Expired" \/ phase = "Refreshing" \/ phase = "ReauthRequired" \/ phase = "Released") /\ \E expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : \E arg_credential_material_fingerprint \in OptionStringValues : Acquire(expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint)
+    \/ (phase = "Valid" \/ phase = "Refreshing" \/ phase = "ReauthRequired" \/ phase = "Released") /\ \E expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : \E arg_credential_material_fingerprint \in OptionStringValues : Acquire(expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint)
     \/ MarkExpiring
     \/ (phase = "Valid") /\ \E now_ts \in 0..2 : \E refresh_window_secs \in 0..2 : ObserveCredentialFreshnessValid(now_ts, refresh_window_secs)
     \/ (phase = "Valid") /\ \E now_ts \in 0..2 : \E refresh_window_secs \in 0..2 : ObserveCredentialFreshnessExpiringFromValid(now_ts, refresh_window_secs)
@@ -2240,6 +2266,8 @@ Next ==
     \/ (phase = "Refreshing") /\ \E arg_credential_material_fingerprint \in StringValues : ResolveSourceCredentialPublicationAlreadyPublishedRefreshing(arg_credential_material_fingerprint)
     \/ (phase = "ReauthRequired") /\ \E arg_credential_material_fingerprint \in StringValues : ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired(arg_credential_material_fingerprint)
     \/ (phase = "Released") /\ \E arg_credential_material_fingerprint \in StringValues : ResolveSourceCredentialPublicationAlreadyPublishedReleased(arg_credential_material_fingerprint)
+    \/ (phase = "Expiring") /\ \E expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : \E arg_credential_material_fingerprint \in OptionStringValues : AcquireFromExpiring(expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint)
+    \/ (phase = "Expired") /\ \E expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : \E arg_credential_material_fingerprint \in OptionStringValues : AcquireFromExpired(expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint)
     \/ TerminalStutter
 
 oauth_flow_membership_consistent == ((DOMAIN oauth_browser_flow_providers = oauth_browser_flow_ids) /\ (DOMAIN oauth_browser_flow_redirect_uris = oauth_browser_flow_ids) /\ (DOMAIN oauth_browser_flow_expires_at_millis = oauth_browser_flow_ids) /\ (DOMAIN oauth_device_flow_providers = oauth_device_flow_ids) /\ (DOMAIN oauth_device_flow_expires_at_millis = oauth_device_flow_ids) /\ (\A flow_id \in oauth_device_poll_ids : (flow_id \in oauth_device_flow_ids)) /\ (oauth_outstanding_flow_count = (Cardinality(oauth_browser_flow_ids) + Cardinality(oauth_device_flow_ids))))

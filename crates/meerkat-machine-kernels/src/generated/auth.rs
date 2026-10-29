@@ -936,6 +936,8 @@ pub enum TransitionId {
     ResolveSourceCredentialPublicationAlreadyPublishedRefreshing,
     ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired,
     ResolveSourceCredentialPublicationAlreadyPublishedReleased,
+    AcquireFromExpiring,
+    AcquireFromExpired,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

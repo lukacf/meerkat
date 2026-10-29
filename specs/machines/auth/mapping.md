@@ -574,6 +574,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveSourceCredentialPublicationAlreadyPublishedReleased`
   - anchors: `auth_lease_handle`
   - scenarios: `source_credential_publication`
+- `AcquireFromExpiring`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
+- `AcquireFromExpired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `source_credential_publication`
 
 ### Effects
 - `EmitLifecycleEvent`

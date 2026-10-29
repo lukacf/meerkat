@@ -2031,13 +2031,18 @@ impl CopilotAuthorizer {
     /// Read the operator's GitHub token from the route's source, refuse a
     /// classic personal access token before any request, publish the token
     /// to the account lease when this account state is the lease's
-    /// publisher, and take the AuthMachine's admission. A source that runs
-    /// something is not read while GitHub rate limits the account's identity
-    /// lookup, and while the lease withdraws the token (GitHub refused it,
-    /// or a logout released it) it is read again only at its paced instant
-    /// ([`Self::claim_withdrawn_source_reread`]).
+    /// publisher, and take the AuthMachine's admission. While the lease
+    /// withdraws the token (GitHub refused it, or a logout released it) a
+    /// source that runs something is read again only at its paced instant
+    /// ([`Self::claim_withdrawn_source_reread`]), and a request inside the
+    /// pause gets the withdrawn token's own error. A read that the pause
+    /// lets through is still not run while GitHub rate limits the account's
+    /// identity lookup.
     async fn load_operator_token(&self) -> Result<OperatorTokenMaterial, ProviderAuthError> {
         let source = &self.binding.auth_profile().source;
+        if let Some(withdrawn) = self.claim_withdrawn_source_reread()? {
+            return Err(withdrawn);
+        }
         // The identity lookup the token is read for could not run before
         // GitHub's stated time, so a command or a resolver is not run for it.
         let identity_retry_at = *self.state.pacing.identity_retry_at.lock();
@@ -2046,9 +2051,6 @@ impl CopilotAuthorizer {
             && (self.env.now)() < until
         {
             return Err(OperatorRefusal::RateLimited { until }.into_provider_error());
-        }
-        if let Some(withdrawn) = self.claim_withdrawn_source_reread()? {
-            return Err(withdrawn);
         }
         let resolved = resolve_simple_secret(source, &self.env, &self.binding).await?;
         let token = resolved.trim_matches(|character: char| character.is_ascii_whitespace());
@@ -6166,6 +6168,64 @@ mod tests {
                 .await
                 .expect("the lookup runs again after the wait");
             assert_eq!(command_runs(directory.path()), 2);
+            assert_eq!(harness.transport.request_count(), 3);
+        }
+
+        /// A logout during GitHub's rate-limit window keeps its own error:
+        /// the read the pause lets through is refused for the rate limit
+        /// without running the command, and the requests inside the pause
+        /// it started fail as `lease_absent`, not as the rate limit, still
+        /// without running the command.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_logout_during_a_rate_limit_keeps_lease_absent() {
+            let directory = tempfile::tempdir().expect("command directory");
+            std::fs::write(
+                directory.path().join("token"),
+                user_token("logged-out-while-limited"),
+            )
+            .expect("write the token");
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(models_response()),
+                Ok(rate_limited(403, 600)),
+            ]);
+            let source = token_file_command(directory.path());
+            let resolve = || harness.resolve_from(CopilotProviderRoute::OpenAi, source.clone());
+            resolve().await.expect("the token resolves");
+            // A later account state's identity lookup is rate limited.
+            let detail = refresh_failure(
+                resolve()
+                    .await
+                    .err()
+                    .expect("the identity lookup is rate limited"),
+            );
+            assert!(detail.contains("rate limited"), "{detail}");
+            assert_eq!(command_runs(directory.path()), 2);
+
+            harness
+                .operator
+                .auth_lease
+                .release_lease(&lease_key())
+                .expect("log out");
+            let detail = refresh_failure(
+                resolve()
+                    .await
+                    .err()
+                    .expect("the read the pause lets through waits for GitHub"),
+            );
+            assert!(detail.contains("rate limited"), "{detail}");
+            let absent = Some(ProviderAuthError::Auth(AuthError::LeaseAbsent));
+            for _ in 0..3 {
+                assert_eq!(resolve().await.err(), absent);
+            }
+            harness.operator.advance(59);
+            assert_eq!(resolve().await.err(), absent);
+            assert_eq!(
+                command_runs(directory.path()),
+                2,
+                "no command run after the logout"
+            );
             assert_eq!(harness.transport.request_count(), 3);
         }
 

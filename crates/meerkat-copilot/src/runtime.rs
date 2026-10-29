@@ -1755,11 +1755,7 @@ impl CopilotAuthorizer {
             .endpoints()
             .map_err(|error| ProviderAuthError::SourceResolutionFailed(error.to_string()))?;
         let mut headers = HeaderMap::new();
-        insert_header(
-            &mut headers,
-            "Authorization",
-            &format!("token {github_token}"),
-        )?;
+        insert_authorization_header(&mut headers, &format!("token {github_token}"))?;
         insert_header(&mut headers, "Accept", "application/json")?;
         insert_header(
             &mut headers,
@@ -1876,11 +1872,7 @@ fn copilot_inference_headers(
     intent: CopilotRequestIntent,
 ) -> Result<HeaderMap, ProviderAuthError> {
     let mut headers = HeaderMap::new();
-    insert_header(
-        &mut headers,
-        "Authorization",
-        &format!("{BEARER_SCHEME} {token}"),
-    )?;
+    insert_authorization_header(&mut headers, &format!("{BEARER_SCHEME} {token}"))?;
     insert_header(
         &mut headers,
         "X-GitHub-Api-Version",
@@ -2599,11 +2591,7 @@ fn copilot_user_headers(
     token: &str,
 ) -> Result<HeaderMap, ProviderAuthError> {
     let mut headers = HeaderMap::new();
-    insert_header(
-        &mut headers,
-        "Authorization",
-        &format!("{BEARER_SCHEME} {token}"),
-    )?;
+    insert_authorization_header(&mut headers, &format!("{BEARER_SCHEME} {token}"))?;
     insert_header(&mut headers, "Accept", "application/json")?;
     insert_header(
         &mut headers,
@@ -2974,6 +2962,24 @@ fn model_discovery_deadline(now: DateTime<Utc>, delay: StdDuration) -> DateTime<
     };
     now.checked_add_signed(delta)
         .unwrap_or(DateTime::<Utc>::MAX_UTC)
+}
+
+/// Insert the `Authorization` header, its value (the credential) marked
+/// sensitive so the HTTP stack keeps it out of HPACK tables and its own
+/// `Debug` output.
+fn insert_authorization_header(
+    headers: &mut HeaderMap,
+    value: &str,
+) -> Result<(), ProviderAuthError> {
+    let mut value = HeaderValue::from_str(value).map_err(|error| {
+        ProviderAuthError::SourceResolutionFailed(format!(
+            "invalid Copilot header {}: {error}",
+            reqwest::header::AUTHORIZATION
+        ))
+    })?;
+    value.set_sensitive(true);
+    headers.insert(reqwest::header::AUTHORIZATION, value);
+    Ok(())
 }
 
 fn insert_header(
@@ -4180,6 +4186,41 @@ mod tests {
         );
     }
 
+    /// The device sign-in's credentials travel in `Authorization` values
+    /// marked sensitive: the GitHub token on the exchange and the derived
+    /// token on the model listing.
+    #[tokio::test]
+    async fn device_credential_headers_are_sensitive() {
+        let (auth_binding, binding) = validated_binding();
+        let (env, _) = resolver_environment(&auth_binding).await;
+        let transport = Arc::new(ScriptedTransport::new([
+            token_response("derived-sensitive"),
+            models_response(),
+        ]));
+        let authorizer = CopilotAuthorizer {
+            state: Arc::new(CopilotAccountState::new(
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )),
+            binding,
+            env,
+            transport: transport.clone(),
+        };
+
+        authorizer.prime().await.expect("the device token resolves");
+
+        let requests = transport.requests.lock();
+        assert_eq!(requests.len(), 2);
+        for (url, headers) in requests.iter() {
+            assert!(
+                headers
+                    .get("authorization")
+                    .is_some_and(|value| value.is_sensitive()),
+                "{url}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn concurrent_authorization_uses_one_derived_token_flight() {
         let (auth_binding, binding) = validated_binding();
@@ -5160,6 +5201,32 @@ mod tests {
             let identity = authorizer.account_identity().expect("account identity");
             assert_eq!(identity.api_base, BUSINESS_API);
             assert!(!identity.installation);
+        }
+
+        /// The operator's token travels in `Authorization` values marked
+        /// sensitive (the identity lookup and the model listing), so the HTTP
+        /// stack keeps it out of HPACK tables.
+        #[tokio::test]
+        async fn operator_bearer_headers_are_sensitive() {
+            let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("sensitive"));
+            harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the operator token resolves");
+
+            let requests = harness.transport.requests.lock();
+            assert_eq!(requests.len(), 2);
+            for (url, headers) in requests.iter() {
+                assert!(
+                    headers
+                        .get("authorization")
+                        .is_some_and(|value| value.is_sensitive()),
+                    "{url}"
+                );
+            }
         }
 
         /// T2: the documented route reads `COPILOT_GITHUB_TOKEN`, then

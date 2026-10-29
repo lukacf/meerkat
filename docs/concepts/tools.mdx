@@ -234,11 +234,12 @@ confinement all still apply to every call it opens.
   session records its gate, and a resume that names none restores it. The
   factory refuses a gate that no grant could honour with
   `BuildAgentError::GrantGate`: an unknown family, a gated family the build
-  disables, a gated name no tool source of the build provides (a name a still
-  connecting MCP server may provide is gated from the moment it appears), a
-  name the build's tool policy refuses, a capability the provider serves
-  natively (such as provider-native web search), and a build without the
-  runtime's grant service.
+  disables, a gated family none of whose tools the build mounts (comms tools
+  mount only with a comms runtime), a gated name the build does not mount (a
+  name a still connecting MCP server may provide is gated from the moment it
+  appears), a name the build's tool policy refuses, a capability the provider
+  serves natively (such as provider-native web search), and a build without
+  the runtime's grant service.
 - **Granting.** `MeerkatMachine::grant_tool` issues a grant for a subject (a
   session), a target (one tool name, or a built-in family with the names it
   provides, which `meerkat::tool_family_names` answers) and a window of at most

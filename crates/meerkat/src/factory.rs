@@ -1708,6 +1708,15 @@ pub enum GrantGateBuildError {
     /// closed, never disabled.
     #[error("the tool family '{family}' is both disabled and grant-gated")]
     FamilyDisabled { family: String },
+    /// A gated family none of whose names this build's final dispatcher
+    /// mounts: no grant could ever open it.
+    #[error("the tool family '{family}' is grant-gated, but this build mounts none of its tools")]
+    FamilyNotMounted { family: String },
+    /// A gated name a known tool source can provide, that this build's final
+    /// dispatcher does not mount and no pending source could provide once it
+    /// connects.
+    #[error("'{tool}' is grant-gated, but this build does not mount it")]
+    ToolNotMounted { tool: String },
     /// A gated tool name that no tool source of this build provides, and no
     /// pending source could provide once it connects.
     #[error("'{tool}' is grant-gated, but no tool source of this build provides it")]
@@ -1754,10 +1763,12 @@ impl RecordedToolOverrides {
 }
 
 /// A build's grant gate, rules 1 and 2: every gated family is a built-in
-/// tool family, and a gated family with a category of its own is mounted as
-/// if enabled; the build may not disable it. A family that shares its
-/// category with ungated tools (the builtins) or has none is not mounted by
-/// the gate: its gated names stay closed wherever the build mounts them.
+/// tool family, and a gated family whose category override mounts it is
+/// mounted as if enabled; the build may not disable it. A family that shares
+/// its category with ungated tools (the builtins), or whose tools mount only
+/// with a runtime of their own (comms needs a comms runtime), is not mounted
+/// by the gate. Every gated family must still reach the final dispatcher
+/// (`grant_gate_for_build`), or the build is refused.
 fn mount_grant_gated_families(
     build_config: &mut AgentBuildConfig,
     gated: &meerkat_core::tool_grant::GrantGatedTools,
@@ -1770,7 +1781,6 @@ fn mount_grant_gated_families(
         }
         let category = match family.as_str() {
             "shell" => &mut build_config.override_shell,
-            "comms" => &mut build_config.override_comms,
             "memory" => &mut build_config.override_memory,
             "schedule" => &mut build_config.override_schedule,
             "workgraph" => &mut build_config.override_workgraph,
@@ -1792,12 +1802,11 @@ fn mount_grant_gated_families(
 }
 
 /// A build's grant gate, rules 3 to 6, over the build's final dispatcher:
-/// every gated tool name is one a tool source of the build provides (a name
-/// a pending source may provide once it connects is gated from the moment
-/// it appears), the build's tool policy refuses no gated name, no gated
-/// name is a capability the provider serves natively, and the runtime
-/// carries the session's grants. Answers the gate to install, or `None` for
-/// an empty gate.
+/// every gated tool name is mounted (a name a pending source may provide once
+/// it connects is gated from the moment it appears), the build's tool policy
+/// refuses no gated name, every gated family has a mounted name, and the
+/// runtime carries the session's grants. Answers the gate to install, or
+/// `None` for an empty gate.
 fn grant_gate_for_build(
     gated: &meerkat_core::tool_grant::GrantGatedTools,
     tools: &Arc<dyn AgentToolDispatcher>,
@@ -1857,7 +1866,7 @@ fn grant_gate_for_build(
             .is_some_and(|restriction| !restriction.deferred_mcp_servers.is_empty());
     for name in table.tools() {
         let name = name.as_str();
-        if mounted.contains(name) || vocabulary.contains(name) || declared(name) {
+        if mounted.contains(name) {
             continue;
         }
         if pending_sources {
@@ -1867,8 +1876,14 @@ fn grant_gate_for_build(
             );
             continue;
         }
-        return Err(GrantGateBuildError::UnknownTool {
-            tool: name.to_string(),
+        return Err(if vocabulary.contains(name) || declared(name) {
+            GrantGateBuildError::ToolNotMounted {
+                tool: name.to_string(),
+            }
+        } else {
+            GrantGateBuildError::UnknownTool {
+                tool: name.to_string(),
+            }
         });
     }
 
@@ -1898,6 +1913,17 @@ fn grant_gate_for_build(
                     tool: (*name).to_string(),
                 });
             }
+        }
+    }
+
+    // Every gated family reaches the final dispatcher: a family none of whose
+    // names this build mounts (comms without a comms runtime, a builtin
+    // family the build leaves off) could never open.
+    for (family, names) in table.families() {
+        if !names.iter().any(|name| mounted.contains(name.as_str())) {
+            return Err(GrantGateBuildError::FamilyNotMounted {
+                family: family.clone(),
+            });
         }
     }
 

@@ -6041,6 +6041,101 @@ mod scoped_tool_grants {
         );
     }
 
+    /// A gate that names a family or a tool the final dispatcher does not
+    /// mount could never open, so the build refuses it.
+    async fn standalone_gate_error(
+        factory: AgentFactory,
+        gate: GrantGatedTools,
+    ) -> BuildAgentError {
+        factory
+            .build_agent(
+                AgentBuildConfig {
+                    llm_client_override: Some(Arc::new(MockLlmClient)),
+                    grant_gated_tools: Some(gate),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                &Config::default(),
+            )
+            .await
+            .err()
+            .expect("the gate is refused")
+    }
+
+    #[tokio::test]
+    async fn a_gated_comms_family_without_a_comms_runtime_is_refused() {
+        // Comms tools mount only with a comms runtime, which this build has
+        // not: the gate does not mount the family itself.
+        let temp = tempfile::tempdir().unwrap();
+        let err = standalone_gate_error(
+            temp_factory(&temp),
+            GrantGatedTools::default().with_family("comms"),
+        )
+        .await;
+        assert!(
+            matches!(
+                &err,
+                BuildAgentError::GrantGate(GrantGateBuildError::FamilyNotMounted { family })
+                    if family == "comms"
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unmounted_builtin_name_cannot_be_grant_gated() {
+        // The factory's own default leaves the shell family off, and a gated
+        // name (unlike a gated family) mounts nothing.
+        let temp = tempfile::tempdir().unwrap();
+        let err = standalone_gate_error(
+            temp_factory(&temp),
+            GrantGatedTools::default().with_tool("shell"),
+        )
+        .await;
+        assert!(
+            matches!(
+                &err,
+                BuildAgentError::GrantGate(GrantGateBuildError::ToolNotMounted { tool })
+                    if tool == "shell"
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gated_family_the_build_does_not_mount_is_refused() {
+        // The tasks family shares the builtins' category, so the gate does not
+        // mount it: with the builtins off it mounts nowhere.
+        let temp = tempfile::tempdir().unwrap();
+        let err = standalone_gate_error(
+            temp_factory(&temp),
+            GrantGatedTools::default().with_family("tasks"),
+        )
+        .await;
+        assert!(
+            matches!(
+                &err,
+                BuildAgentError::GrantGate(GrantGateBuildError::FamilyNotMounted { family })
+                    if family == "tasks"
+            ),
+            "got: {err:?}"
+        );
+
+        // With the builtins on the family is mounted, and only the missing
+        // grant service refuses this standalone build.
+        let err = standalone_gate_error(
+            temp_factory(&temp).builtins(true),
+            GrantGatedTools::default().with_family("tasks"),
+        )
+        .await;
+        assert!(
+            matches!(
+                &err,
+                BuildAgentError::GrantGate(GrantGateBuildError::NoGrantService)
+            ),
+            "got: {err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_statically_denied_or_read_only_refused_name_cannot_be_grant_gated() {
         let temp = tempfile::tempdir().unwrap();

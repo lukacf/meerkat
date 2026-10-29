@@ -385,10 +385,52 @@ pub(crate) struct BoundaryAdjudication {
 /// A subject's grants, settled at one clock reading.
 pub(crate) struct SettledGrants {
     pub(crate) grants: Vec<StoredToolGrant>,
-    /// The earliest deadline still ahead of the reading, among every row:
-    /// when the deadline driver looks again. A row that already ended
-    /// makes that look a no-op.
+    /// The rows of the subject this binary cannot read.
+    pub(crate) unreadable: Vec<UnreadableToolGrant>,
+    /// The earliest deadline of the grants still live at the reading: when
+    /// the deadline driver looks again. An ended grant arms nothing.
     pub(crate) next_deadline_ms: Option<u64>,
+}
+
+/// A stored grant row this binary cannot read: written by a newer binary, or
+/// damaged. It admits nothing and blocks nothing: every other grant of its
+/// subject is adjudicated as before, a list reports it, and a revoke of it
+/// is refused with [`ToolGrantServiceError::CorruptRow`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableToolGrant {
+    /// The grant id the row is stored under.
+    pub grant_id: String,
+    /// Why the row could not be read.
+    pub detail: String,
+}
+
+/// A subject's grants as a list answers them: every readable grant, settled
+/// at one clock reading, and every row this binary cannot read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolGrantListing {
+    pub grants: Vec<StoredToolGrant>,
+    pub unreadable: Vec<UnreadableToolGrant>,
+}
+
+/// The rows filed under some subjects: the readable ones, and the ones this
+/// binary cannot read.
+struct SubjectRows {
+    readable: Vec<ReadRow>,
+    unreadable: Vec<UnreadableToolGrant>,
+}
+
+impl SubjectRows {
+    /// Log the rows this binary cannot read: they admit nothing.
+    fn warn_unreadable(&self, adjudication: &'static str) {
+        for row in &self.unreadable {
+            tracing::warn!(
+                grant_id = %row.grant_id,
+                detail = %row.detail,
+                adjudication,
+                "an unreadable tool grant row admits nothing"
+            );
+        }
+    }
 }
 
 /// Scoped tool grants over a [`RuntimeStore`]. See the module docs.
@@ -574,18 +616,22 @@ impl ToolGrantService {
         Ok(row)
     }
 
-    /// Every grant of `subject`, each due one settled as expired first.
+    /// Every grant of `subject`, each due one settled as expired first, and
+    /// every row of the subject this binary cannot read.
     ///
     /// # Errors
-    /// Store and clock failures, and a row that does not decode.
+    /// Store and clock failures.
     pub async fn list(
         &self,
         subject: &ToolGrantSubject,
-    ) -> Result<Vec<StoredToolGrant>, ToolGrantServiceError> {
-        Ok(self
+    ) -> Result<ToolGrantListing, ToolGrantServiceError> {
+        let settled = self
             .settle(&subject.key(), ToolGrantExpiryDriver::Read)
-            .await?
-            .grants)
+            .await?;
+        Ok(ToolGrantListing {
+            grants: settled.grants,
+            unreadable: settled.unreadable,
+        })
     }
 
     /// At most `limit` of `subject`'s audit rows, after `after` when given,
@@ -593,7 +639,7 @@ impl ToolGrantService {
     /// expired first, so the log records its expiry.
     ///
     /// # Errors
-    /// Store and clock failures, and a row that does not decode.
+    /// Store and clock failures, and an audit row that does not decode.
     pub async fn audit(
         &self,
         subject: &ToolGrantSubject,
@@ -618,25 +664,50 @@ impl ToolGrantService {
     }
 
     /// Settle `subject_key`'s due grants as expired, observed by `driver`,
-    /// and answer every grant with the next deadline still ahead.
+    /// and answer every readable grant with the next deadline of the grants
+    /// still live. A grant is live when its own `AdmitUse` at the reading
+    /// admits: an ended grant arms no deadline.
     pub(crate) async fn settle(
         &self,
         subject_key: &ToolGrantSubjectKey,
         driver: ToolGrantExpiryDriver,
     ) -> Result<SettledGrants, ToolGrantServiceError> {
         let rows = self.subject_rows(std::slice::from_ref(subject_key)).await?;
+        rows.warn_unreadable("settle");
         let now_ms = self.now_ms()?;
-        let mut grants = Vec::with_capacity(rows.len());
+        let mut grants = Vec::with_capacity(rows.readable.len());
+        let mut unreadable = rows.unreadable;
         let mut next_deadline_ms: Option<u64> = None;
-        for read in rows {
-            let (row, _) = self
+        for read in rows.readable {
+            let (row, _) = match self
                 .apply_and_commit(
                     read,
                     &|| ToolGrantLifecycleInput::Expire { now_ms },
                     AuditContext::Expiry(driver),
                 )
-                .await?;
-            if row.expires_at_ms > now_ms {
+                .await
+            {
+                Ok(applied) => applied,
+                // A row whose machine refuses to rebuild is reported, not
+                // settled.
+                Err(ToolGrantServiceError::CorruptRow { grant_id, detail }) => {
+                    tracing::warn!(
+                        %grant_id,
+                        %detail,
+                        adjudication = "settle",
+                        "an unreadable tool grant row admits nothing"
+                    );
+                    unreadable.push(UnreadableToolGrant { grant_id, detail });
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let live = matches!(
+                apply(&row, ToolGrantLifecycleInput::AdmitUse { now_ms })
+                    .and_then(|applied| use_verdict(&row, &applied.effects)),
+                Ok(Ok(()))
+            );
+            if live {
                 next_deadline_ms = Some(
                     next_deadline_ms.map_or(row.expires_at_ms, |next| next.min(row.expires_at_ms)),
                 );
@@ -645,13 +716,15 @@ impl ToolGrantService {
         }
         Ok(SettledGrants {
             grants,
+            unreadable,
             next_deadline_ms,
         })
     }
 
     /// A model-request boundary: the gated names of `gated` a live grant of
     /// `subjects` opens at this moment. A grant the boundary finds past its
-    /// deadline is settled as expired.
+    /// deadline is settled as expired; a row this binary cannot read opens
+    /// nothing.
     ///
     /// # Errors
     /// `Unavailable` when the grants cannot be read or settled: the gate
@@ -665,9 +738,10 @@ impl ToolGrantService {
             .subject_rows(subjects)
             .await
             .map_err(|error| unavailable(&error))?;
+        rows.warn_unreadable("boundary");
         let now_ms = self.now_ms().map_err(|error| unavailable(&error))?;
         let mut adjudication = BoundaryAdjudication::default();
-        for read in rows {
+        for read in rows.readable {
             let covered: Vec<_> = read
                 .row
                 .record
@@ -679,14 +753,27 @@ impl ToolGrantService {
             if covered.is_empty() {
                 continue;
             }
-            let (row, effects) = self
+            let (row, effects) = match self
                 .apply_and_commit(
                     read,
                     &|| ToolGrantLifecycleInput::AdmitUse { now_ms },
                     AuditContext::Expiry(ToolGrantExpiryDriver::Boundary),
                 )
                 .await
-                .map_err(|error| unavailable(&error))?;
+            {
+                Ok(applied) => applied,
+                // A row whose machine refuses to rebuild opens nothing.
+                Err(ToolGrantServiceError::CorruptRow { grant_id, detail }) => {
+                    tracing::warn!(
+                        %grant_id,
+                        %detail,
+                        adjudication = "boundary",
+                        "an unreadable tool grant row admits nothing"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(unavailable(&error)),
+            };
             if use_verdict(&row, &effects)
                 .map_err(|error| unavailable(&error))?
                 .is_ok()
@@ -727,6 +814,7 @@ impl ToolGrantService {
                 return Err(refusal);
             }
         };
+        rows.warn_unreadable("dispatch");
         let now_ms = match self.now_ms() {
             Ok(now_ms) => now_ms,
             Err(error) => {
@@ -742,7 +830,7 @@ impl ToolGrantService {
         // The subject whose log records the refusal: the explaining grant's,
         // else the session's.
         let mut refusal_subject = subjects.first().cloned();
-        for read in rows {
+        for read in rows.readable {
             if !read.row.record.target.covers(call.name) {
                 continue;
             }
@@ -847,19 +935,29 @@ impl ToolGrantService {
     }
 
     /// Every row filed under `subjects`.
+    /// Every row filed under `subjects`: the readable ones, and the ones this
+    /// binary cannot decode, which admit nothing and block nothing.
     async fn subject_rows(
         &self,
         subjects: &[ToolGrantSubjectKey],
-    ) -> Result<Vec<ReadRow>, ToolGrantServiceError> {
-        let mut rows = Vec::new();
+    ) -> Result<SubjectRows, ToolGrantServiceError> {
+        let mut rows = SubjectRows {
+            readable: Vec::new(),
+            unreadable: Vec::new(),
+        };
         for subject in subjects {
             for (grant_id, bytes) in self.store.list_tool_grants(subject.as_str()).await? {
-                let row = StoredToolGrant::decode(&grant_id, &bytes)?;
-                rows.push(ReadRow {
-                    grant_id,
-                    bytes,
-                    row,
-                });
+                match StoredToolGrant::decode(&grant_id, &bytes) {
+                    Ok(row) => rows.readable.push(ReadRow {
+                        grant_id,
+                        bytes,
+                        row,
+                    }),
+                    Err(error) => rows.unreadable.push(UnreadableToolGrant {
+                        grant_id,
+                        detail: error.to_string(),
+                    }),
+                }
             }
         }
         Ok(rows)

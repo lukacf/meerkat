@@ -14,7 +14,7 @@ use meerkat_core::types::SessionId;
 use super::MeerkatMachine;
 use crate::tool_grant::{
     RuntimeSessionToolGrants, StoredToolGrant, ToolGrantAuditRecord, ToolGrantClock,
-    ToolGrantDeadlines, ToolGrantExpiryDriver, ToolGrantPolicy, ToolGrantRequest,
+    ToolGrantDeadlines, ToolGrantExpiryDriver, ToolGrantListing, ToolGrantPolicy, ToolGrantRequest,
     ToolGrantRevocation, ToolGrantService, ToolGrantServiceError,
 };
 
@@ -72,7 +72,8 @@ impl MeerkatMachine {
         self.tool_grant_service.revoke(grant_id, revocation).await
     }
 
-    /// Every grant of `subject`, each due one settled as expired first
+    /// Every grant of `subject`, each due one settled as expired first, and
+    /// every row of the subject this binary cannot read
     /// ([`ToolGrantService::list`]). When the subject's session is served
     /// here, its deadline driver is armed with its next deadline.
     ///
@@ -81,7 +82,7 @@ impl MeerkatMachine {
     pub async fn list_tool_grants(
         &self,
         subject: &ToolGrantSubject,
-    ) -> Result<Vec<StoredToolGrant>, ToolGrantServiceError> {
+    ) -> Result<ToolGrantListing, ToolGrantServiceError> {
         let settled = self
             .tool_grant_service
             .settle(&subject.key(), ToolGrantExpiryDriver::Read)
@@ -89,7 +90,10 @@ impl MeerkatMachine {
         if let Some(deadline_ms) = settled.next_deadline_ms {
             self.arm_if_served(subject, deadline_ms).await;
         }
-        Ok(settled.grants)
+        Ok(ToolGrantListing {
+            grants: settled.grants,
+            unreadable: settled.unreadable,
+        })
     }
 
     /// The audit rows of `subject`'s grants ([`ToolGrantService::audit`]).

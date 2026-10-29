@@ -127,15 +127,16 @@ impl ToolGrantDeadlines {
     }
 
     /// Arm `session_id` with `deadline_ms` (UNIX ms), keeping the session's
-    /// earliest armed deadline. Call it from a task: the first arm starts
-    /// the driver's task.
+    /// earliest armed deadline. Call it from a task: an arm with no driver
+    /// task running starts one, the first arm and any arm after the task
+    /// ended (its runtime shut down) alike.
     pub fn arm(&self, session_id: &SessionId, deadline_ms: u64) {
         if self.shared.closed.load(Ordering::Acquire) {
             return;
         }
         let earlier = self.shared.armed().arm(session_id, deadline_ms);
         if !self.shared.started.swap(true, Ordering::AcqRel) {
-            crate::tokio::spawn(run(Arc::clone(&self.shared)));
+            spawn_driver(Arc::clone(&self.shared));
         }
         if earlier {
             self.shared.changed.notify_one();
@@ -158,6 +159,27 @@ impl ToolGrantDeadlines {
     pub fn armed_deadline(&self, session_id: &SessionId) -> Option<u64> {
         self.shared.armed().by_session.get(session_id).copied()
     }
+}
+
+/// Clears the driver's started latch when its task ends, however it ends: a
+/// return, a panic, or the runtime dropping the task (polled or not). The
+/// next arm then starts a new task.
+struct StartedLatch(Arc<Shared>);
+
+impl Drop for StartedLatch {
+    fn drop(&mut self) {
+        self.0.started.store(false, Ordering::Release);
+    }
+}
+
+/// Start the driver's task. The latch moves into the task's future before it
+/// is first polled, so dropping the task always clears it.
+fn spawn_driver(shared: Arc<Shared>) {
+    let latch = StartedLatch(Arc::clone(&shared));
+    crate::tokio::spawn(async move {
+        let _latch = latch;
+        run(shared).await;
+    });
 }
 
 async fn run(shared: Arc<Shared>) {
@@ -244,5 +266,43 @@ mod tests {
         );
         armed.by_session.remove(&second);
         assert_eq!(armed.earliest(), None);
+    }
+
+    /// A driver whose task ended (here its runtime shut down before the task
+    /// ever ran) starts a new task on the next arm, and a closed driver never
+    /// does.
+    #[test]
+    fn a_driver_whose_task_ended_starts_again_on_the_next_arm() {
+        let deadlines = ToolGrantDeadlines::new(Arc::new(ToolGrantService::new(Arc::new(
+            crate::store::InMemoryRuntimeStore::new(),
+        ))));
+        let session = SessionId::new();
+        let runtime = || {
+            crate::tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+        };
+        let started =
+            |deadlines: &ToolGrantDeadlines| deadlines.shared.started.load(Ordering::Acquire);
+
+        let first = runtime();
+        first.block_on(async { deadlines.arm(&session, u64::MAX) });
+        assert!(started(&deadlines), "the first arm starts the driver");
+        drop(first);
+        assert!(
+            !started(&deadlines),
+            "the runtime's shutdown ended the task, which clears the latch"
+        );
+
+        let second = runtime();
+        second.block_on(async { deadlines.arm(&session, u64::MAX - 1) });
+        assert!(started(&deadlines), "the next arm starts a new driver");
+        drop(second);
+
+        deadlines.close();
+        let third = runtime();
+        third.block_on(async { deadlines.arm(&session, u64::MAX - 2) });
+        assert!(!started(&deadlines), "a closed driver never starts again");
     }
 }

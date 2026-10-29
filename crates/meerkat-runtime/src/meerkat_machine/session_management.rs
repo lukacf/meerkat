@@ -5449,6 +5449,8 @@ impl MeerkatMachine {
                     Err(reason) => {
                         if let Some(removed) = sessions.remove(&session_id) {
                             removed.notify_registration_removed();
+                            // The session is no longer served here.
+                            self.tool_grant_deadlines.disarm(&session_id);
                         }
                         break ExistingExecutorClaim::Rejected(reason);
                     }

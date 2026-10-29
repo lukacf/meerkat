@@ -128,7 +128,10 @@ them.
   `tool_grant_revoked` or `tool_grant_unavailable`; a gate that cannot read
   its grants stays closed. Each runtime's deadline driver expires its served
   sessions' grants on time without waking or registering anything, and a list
-  or audit read settles due grants of any session without loading it.
+  or audit read settles due grants of any session without loading it. A grant
+  row this binary cannot read (written by a newer binary, or damaged) admits
+  nothing and blocks none of its subject's readable grants: a list reports it
+  (`ToolGrantListing::unreadable`), and a revoke of it is refused.
   `RuntimeStore` gains `load_tool_grant`, `list_tool_grants`,
   `put_tool_grant_if_absent`, `compare_and_put_tool_grant`,
   `append_tool_grant_audit` and `read_tool_grant_audit`, whose defaults answer

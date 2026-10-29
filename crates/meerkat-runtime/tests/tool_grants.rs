@@ -20,7 +20,7 @@ use meerkat_core::session_owner_wake::{
     SessionOwnerWakeFuture, SessionOwnerWakeOutcome, SessionOwnerWakeRegistry, SessionOwnerWaker,
 };
 use meerkat_core::tool_grant::{
-    GatedToolTable, ToolGrantCall, ToolGrantGate, ToolGrantIssuer, ToolGrantRefusal,
+    GatedToolTable, ToolGrantCall, ToolGrantGate, ToolGrantId, ToolGrantIssuer, ToolGrantRefusal,
     ToolGrantSubject, ToolGrantTarget,
 };
 use meerkat_core::types::{SessionId, ToolDef, ToolName, ToolProvenance, ToolSourceKind};
@@ -29,7 +29,7 @@ use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore, SqliteRuntimeSt
 use meerkat_runtime::tool_grant::{
     StoredToolGrant, ToolGrantAuditEvent, ToolGrantAuditRow, ToolGrantClock, ToolGrantClockError,
     ToolGrantExpiryDriver, ToolGrantRefusalKind, ToolGrantRequest, ToolGrantRevocation,
-    ToolGrantService, ToolGrantStatus, ToolGrantWindow,
+    ToolGrantService, ToolGrantServiceError, ToolGrantStatus, ToolGrantWindow,
 };
 
 /// The host clock reading every test starts at, in UNIX ms.
@@ -318,9 +318,9 @@ async fn granted_family_is_visible_until_its_deadline_and_hidden_after() {
             .list_tool_grants(&ToolGrantSubject::session(session_id.clone()))
             .await
             .unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].status, ToolGrantStatus::Expired);
-        assert_eq!(listed[0].ended_at_ms, Some(grant.expires_at_ms));
+        assert_eq!(listed.grants.len(), 1);
+        assert_eq!(listed.grants[0].status, ToolGrantStatus::Expired);
+        assert_eq!(listed.grants[0].ended_at_ms, Some(grant.expires_at_ms));
     }
 }
 
@@ -428,9 +428,9 @@ async fn expired_grant_stays_expired_across_restart_and_clock_rollback() {
             .list_tool_grants(&ToolGrantSubject::session(session_id.clone()))
             .await
             .unwrap();
-        assert_eq!(listed[0].status, ToolGrantStatus::Expired);
+        assert_eq!(listed.grants[0].status, ToolGrantStatus::Expired);
         assert_eq!(
-            listed[0].ended_at_ms,
+            listed.grants[0].ended_at_ms,
             Some(grant.expires_at_ms + 5),
             "{backend:?}: the expiry keeps the reading that observed it"
         );
@@ -461,8 +461,15 @@ async fn live_grant_keeps_its_deadline_across_restart() {
             .list_tool_grants(&ToolGrantSubject::session(session_id.clone()))
             .await
             .unwrap();
-        assert_eq!(listed[0].status, ToolGrantStatus::Active, "{backend:?}");
-        assert_eq!(listed[0].expires_at_ms, grant.expires_at_ms, "{backend:?}");
+        assert_eq!(
+            listed.grants[0].status,
+            ToolGrantStatus::Active,
+            "{backend:?}"
+        );
+        assert_eq!(
+            listed.grants[0].expires_at_ms, grant.expires_at_ms,
+            "{backend:?}"
+        );
 
         let served = serve(&machine, &session_id).await;
         assert_eq!(
@@ -505,8 +512,12 @@ async fn listing_an_unserved_session_settles_due_grants_without_registering_it()
         clock.set(grant.expires_at_ms + 1);
         let subject = ToolGrantSubject::session(session_id.clone());
         let listed = machine.list_tool_grants(&subject).await.unwrap();
-        assert_eq!(listed[0].status, ToolGrantStatus::Expired, "{backend:?}");
-        assert_eq!(listed[0].ended_at_ms, Some(grant.expires_at_ms + 1));
+        assert_eq!(
+            listed.grants[0].status,
+            ToolGrantStatus::Expired,
+            "{backend:?}"
+        );
+        assert_eq!(listed.grants[0].ended_at_ms, Some(grant.expires_at_ms + 1));
         let audit = machine
             .read_tool_grant_audit(&subject, None, 10)
             .await
@@ -768,6 +779,71 @@ async fn lifecycle_audit_rows_commit_with_the_row_and_refusals_append() {
                 .collect::<Vec<_>>(),
             [1, 2],
             "{backend:?}: the log reads from a cursor, at most a limit"
+        );
+    }
+}
+
+/// A row this binary cannot read (written by a newer binary, or damaged)
+/// admits nothing and blocks nothing: the subject's readable live grant still
+/// opens and admits its names, every other gated name stays closed, a list
+/// reports the row as unreadable, and a revoke of it is refused.
+#[tokio::test]
+async fn an_unreadable_row_admits_nothing_and_blocks_no_readable_grant() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let machine = durable.machine(&clock);
+        let session_id = SessionId::new();
+        let subject = ToolGrantSubject::session(session_id.clone());
+        let served = serve(&machine, &session_id).await;
+        let grant = machine
+            .grant_tool(shell_grant(&session_id, Duration::from_secs(60)))
+            .await
+            .unwrap();
+        let unreadable_id = ToolGrantId::mint();
+        assert!(
+            durable
+                .open()
+                .put_tool_grant_if_absent(
+                    &unreadable_id.to_string(),
+                    subject.key().as_str(),
+                    br#"{"written_by":"a newer binary"}"#,
+                    &[],
+                )
+                .await
+                .unwrap()
+        );
+
+        served.boundary().await.unwrap();
+        assert_eq!(
+            served.visible(),
+            OPEN,
+            "{backend:?}: the readable live grant still opens its family"
+        );
+        served.call("shell", "call-covered").await.unwrap();
+        let refusal = served
+            .call("deploy", "call-uncovered")
+            .await
+            .expect_err("no readable grant covers deploy");
+        assert_eq!(refusal, ToolGrantRefusal::Required, "{backend:?}");
+
+        let listed = machine.list_tool_grants(&subject).await.unwrap();
+        assert_eq!(listed.grants.len(), 1, "{backend:?}");
+        assert_eq!(listed.grants[0].record.grant_id, grant.record.grant_id);
+        assert_eq!(listed.unreadable.len(), 1, "{backend:?}");
+        assert_eq!(listed.unreadable[0].grant_id, unreadable_id.to_string());
+
+        let refused = machine
+            .revoke_tool_grant(&unreadable_id, ToolGrantRevocation::default())
+            .await
+            .expect_err("an unreadable row cannot be revoked");
+        assert!(
+            matches!(
+                &refused,
+                ToolGrantServiceError::CorruptRow { grant_id, .. }
+                    if *grant_id == unreadable_id.to_string()
+            ),
+            "{backend:?}: {refused:?}"
         );
     }
 }

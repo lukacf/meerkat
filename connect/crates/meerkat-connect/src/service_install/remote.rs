@@ -21,6 +21,7 @@ pub(crate) struct RemoteSelection {
 }
 
 impl RemoteSelection {
+    #[cfg(feature = "console")]
     pub(crate) fn from_review_source(
         value: &Value,
         realm: &RealmLocator,
@@ -115,6 +116,7 @@ impl From<InstalledConnectorSelection> for PublicServiceSelection {
 }
 
 impl PublicServiceSelection {
+    #[cfg(feature = "console")]
     pub(crate) fn realm(&self) -> &RealmLocator {
         match self {
             Self::Installed(value) => &value.installed.realm,
@@ -153,6 +155,7 @@ impl PublicServiceSelection {
     /// Exact declared raw-name ceiling for model-visible request correction.
     /// Reuse current public-route validation before disclosing any names; this
     /// projection neither translates declaration IDs nor authorizes access.
+    #[cfg(feature = "console")]
     pub(crate) fn public_operations(&self) -> Result<BTreeSet<String>, &'static str> {
         let operations = match self {
             Self::Installed(value) => value.raw_operations.clone(),

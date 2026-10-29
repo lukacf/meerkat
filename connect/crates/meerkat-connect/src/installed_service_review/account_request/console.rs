@@ -2,12 +2,14 @@
 //! This module supplies no HTTP authentication or principal conversion.
 
 use super::*;
+#[cfg(feature = "console")]
 use crate::{
     approval::ApprovalPresenter,
     provider_setup::SignInDisposition,
     stdio::{PromptAnswer, PromptBridge},
 };
 use futures_util::future::BoxFuture;
+#[cfg(feature = "console")]
 use std::{
     future::Future,
     pin::Pin,
@@ -15,9 +17,11 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "console")]
 mod callback;
-#[cfg(test)]
+#[cfg(all(test, feature = "console"))]
 pub(crate) use callback::answer_retained;
+#[cfg(feature = "console")]
 pub(crate) use callback::{
     CallbackDelivery, CallbackResult, answer_retained_authorized,
     cancel_retained_sign_in_authorized,
@@ -36,6 +40,7 @@ pub(crate) type DecisionCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 pub(crate) type CaptureDecision<'a> =
     dyn Fn() -> Result<DecisionCheck, ConnectError> + Send + Sync + 'a;
 
+#[cfg(feature = "console")]
 impl InstalledAccountRequests {
     /// Drive an actual account request without terminal input. The caller must
     /// retain and poll this future through retirement, including native cleanup.
@@ -522,11 +527,13 @@ impl InstalledAccountRequests {
     }
 }
 
+#[cfg(feature = "console")]
 #[derive(Clone, Copy)]
 enum Stop {
     Request,
     Presentation,
 }
+#[cfg(feature = "console")]
 impl Stop {
     fn owner_closed(self, owner_closed: Option<&AtomicBool>) -> bool {
         matches!(self, Self::Presentation)
@@ -534,6 +541,7 @@ impl Stop {
     }
 }
 
+#[cfg(feature = "console")]
 async fn stop<F: Future<Output = ()>, R>(
     response: &mut oneshot::Sender<R>,
     bridge: &PromptBridge,
@@ -546,6 +554,7 @@ async fn stop<F: Future<Output = ()>, R>(
     }
 }
 
+#[cfg(feature = "console")]
 pub(super) async fn checkpoint<F: Future<Output = ()>, R>(
     current: &CurrentRequest,
     response: &mut oneshot::Sender<R>,
@@ -564,6 +573,7 @@ pub(super) async fn checkpoint<F: Future<Output = ()>, R>(
     }
 }
 
+#[cfg(feature = "console")]
 pub(crate) async fn join_on_close<T, F: Future<Output = T>, C: Future<Output = ()>>(
     future: F,
     response: &mut oneshot::Sender<AccountReply>,
@@ -595,7 +605,7 @@ pub(crate) async fn join_on_close<T, F: Future<Output = T>, C: Future<Output = (
 
 // Keep the private account reply channel inside its owning module while the
 // external native fixture exercises the real close-before-first-poll path.
-#[cfg(test)]
+#[cfg(all(test, feature = "console"))]
 pub(crate) async fn fixture_join_on_close<T, F: Future<Output = T>, C: Future<Output = ()>>(
     future: F,
     bridge: &PromptBridge,
@@ -608,6 +618,7 @@ pub(crate) async fn fixture_join_on_close<T, F: Future<Output = T>, C: Future<Ou
 // Explicit cancellation uses the same retained provider notice both before
 // callback delivery and while native completion is entered. It never closes
 // the Console login, the host, a shared account or the original business task.
+#[cfg(feature = "console")]
 async fn sign_in_closed<C: Future<Output = ()>>(
     notice: &mut crate::stdio::ProviderNotice,
     closed: C,
@@ -617,6 +628,7 @@ async fn sign_in_closed<C: Future<Output = ()>>(
 
 // Kept separate to exercise the actual Control cancellation/join in the
 // existing connector fixture. It never drops an entered completion future.
+#[cfg(feature = "console")]
 pub(crate) async fn complete_joined<C: Future<Output = ()>>(
     review: &mut InstalledServiceReview,
     state: String,
@@ -648,7 +660,7 @@ pub(crate) async fn complete_joined<C: Future<Output = ()>>(
     .await
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "console"))]
 async fn drive_review<T, F, C>(
     review: F,
     approvals: &LocalApprovals,
@@ -678,6 +690,7 @@ where
     .await
 }
 
+#[cfg(feature = "console")]
 pub(super) async fn drive_review_cancellable<T, F, C, R>(
     review: F,
     approvals: &LocalApprovals,
@@ -781,5 +794,5 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "console"))]
 mod tests;

@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(feature = "console")]
 fn proposal() -> Value {
     json!({"job_id":"checked-job", "agent":"selected-agent", "expires_in_ms":60000,
         "connector":{"slot_id":"selected-slot", "issuer":"https://issuer.test",
@@ -8,6 +9,7 @@ fn proposal() -> Value {
         "operations":{"list":{"required_scopes":["read"],"destination_origin":"https://api.test"}}})
 }
 
+#[cfg(feature = "console")]
 #[test]
 fn closed_request_preserves_explicit_selection_and_refuses_authority_fields() {
     let raw = proposal();
@@ -37,6 +39,7 @@ fn closed_request_preserves_explicit_selection_and_refuses_authority_fields() {
     assert!(parse(&changed.to_string()).is_err());
 }
 
+#[cfg(feature = "console")]
 #[test]
 fn omitted_duplicate_or_zero_lifetime_never_widens_access() {
     for omitted in ["expires_in_ms", "agent"] {
@@ -59,6 +62,7 @@ fn omitted_duplicate_or_zero_lifetime_never_widens_access() {
     assert!(parse(&changed.to_string()).is_err());
 }
 
+#[cfg(feature = "console")]
 #[test]
 fn public_reply_contains_no_account_or_authority_and_never_claims_ready() {
     let reply =
@@ -94,6 +98,7 @@ async fn current_request_waits_for_its_own_live_response_and_refuses_a_dropped_d
     assert!(!current.check().await);
 }
 
+#[cfg(feature = "console")]
 #[test]
 fn optional_tool_policy_preserves_legacy_selection_and_cannot_supply_candidate_authority() {
     let base = proposal();
@@ -137,6 +142,7 @@ fn optional_tool_policy_preserves_legacy_selection_and_cannot_supply_candidate_a
     );
 }
 
+#[cfg(feature = "console")]
 #[test]
 fn captured_consumer_mismatch_returns_exact_model_visible_guidance_without_resolution() {
     let captured = "mk--fixture_cmain";

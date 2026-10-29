@@ -2,24 +2,31 @@
 //! Only the retained private presenter receives login material.
 
 use super::*;
+#[cfg(feature = "console")]
 use async_trait::async_trait;
+use meerkat_core::{ApprovalId, ToolDef};
+#[cfg(feature = "console")]
 use meerkat_core::{
-    ApprovalId, DynamicToolComposite, RegisteredToolBundleDispatcher, ResolvedToolExecutionPlan,
-    ReviewedEntryTicket, ToolCallView, ToolCatalogCapabilities, ToolDef, ToolDispatchContext,
-    ToolError, ToolMutationClass, ToolResult, ops::ToolDispatchOutcome,
+    DynamicToolComposite, RegisteredToolBundleDispatcher, ResolvedToolExecutionPlan,
+    ReviewedEntryTicket, ToolCallView, ToolCatalogCapabilities, ToolDispatchContext, ToolError,
+    ToolMutationClass, ToolResult, ops::ToolDispatchOutcome,
 };
-use meerkat_toolkit::setup::{
-    SETUP_ACCOUNT_REQUEST, SETUP_ACCOUNTS_BUNDLE, SETUP_PUBLIC_SERVICE_REQUEST,
-};
+use meerkat_toolkit::setup::SETUP_ACCOUNT_REQUEST;
+#[cfg(feature = "console")]
+use meerkat_toolkit::setup::{SETUP_ACCOUNTS_BUNDLE, SETUP_PUBLIC_SERVICE_REQUEST};
+#[cfg(feature = "console")]
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 use toolkit_mobkit::private_originals::ServiceToolPolicySelection;
 
+#[cfg(feature = "console")]
 mod application;
 pub(crate) mod console;
 pub(crate) mod credentials;
+#[cfg(feature = "console")]
 mod present;
 pub(crate) mod public;
+#[cfg(feature = "console")]
 pub(crate) use application::compose_application_policy_requests;
 #[cfg(all(unix, feature = "console"))]
 pub(crate) use application::compose_selected_policy_requests;
@@ -28,6 +35,7 @@ mod tests;
 
 /// Closed proposal data. Native principals, route, realm, original binding,
 /// credential values and a connection revision cannot be supplied here.
+#[cfg(feature = "console")]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Proposal {
@@ -42,6 +50,7 @@ struct Proposal {
     tool_policy: Option<ServiceToolPolicySelection>,
 }
 
+#[cfg(feature = "console")]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Descriptor {
@@ -57,12 +66,14 @@ struct Descriptor {
     client_auth_profile: Option<String>,
 }
 
+#[cfg(feature = "console")]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Operation {
     required_scopes: std::collections::BTreeSet<String>,
     destination_origin: String,
 }
+#[cfg(feature = "console")]
 impl From<Operation> for McpConnectorOperation {
     fn from(operation: Operation) -> Self {
         Self {
@@ -72,20 +83,24 @@ impl From<Operation> for McpConnectorOperation {
         }
     }
 }
+#[cfg(feature = "console")]
 fn profile_name<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     String::deserialize(d).map(Some)
 }
 
+#[cfg(feature = "console")]
 fn explicit_account<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<meerkat_auth_core::connector_oauth::AccountSelection, D::Error> {
     meerkat_auth_core::connector_oauth::AccountSelection::deserialize(d)
 }
 
+#[cfg(feature = "console")]
 fn explicit_lifetime<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
     Option::<u64>::deserialize(d)
 }
 
+#[cfg(feature = "console")]
 impl Descriptor {
     fn into_native(self, realm: meerkat_core::RealmId) -> Result<ConnectorOAuthTarget, ToolError> {
         let account =
@@ -114,6 +129,7 @@ pub struct InstalledAccountSelection {
     pub tool_policy: Option<ServiceToolPolicySelection>,
 }
 
+#[cfg(feature = "console")]
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum AccountState {
@@ -122,6 +138,7 @@ enum AccountState {
     Unavailable,
 }
 
+#[cfg(feature = "console")]
 #[derive(Serialize)]
 pub(crate) struct AccountReply {
     state: AccountState,
@@ -132,6 +149,7 @@ pub(crate) struct AccountReply {
     fresh_instruction_retained: bool,
 }
 
+#[cfg(feature = "console")]
 impl AccountReply {
     fn new(state: AccountState, login_completed: bool, access_reviewed: bool) -> Self {
         Self {
@@ -148,6 +166,7 @@ impl AccountReply {
 /// Process-only request carried from this native registration to its private
 /// presenter. The native ticket retains the actual borrowed dispatch binding;
 /// no call, plan or original authority is reconstructed from these fields.
+#[cfg(feature = "console")]
 pub(crate) struct InstalledAccountRequest {
     job_id: String,
     target: ConnectorOAuthTarget,
@@ -162,6 +181,7 @@ pub(crate) struct InstalledAccountRequest {
 
 /// Retains exactly the review transferred by one native adapter construction.
 /// It is neither a session registry nor a new authentication state machine.
+#[cfg(feature = "console")]
 pub(crate) struct InstalledAccountRequests {
     review: InstalledServiceReview,
     requests: mpsc::Receiver<InstalledAccountRequest>,
@@ -176,6 +196,7 @@ pub(crate) struct InstalledAccountRequests {
     )>,
 }
 
+#[cfg(feature = "console")]
 impl InstalledAccountRequest {
     /// The actual borrowed helper request owns this response channel.
     pub(crate) async fn closed(&mut self) {
@@ -191,6 +212,7 @@ impl InstalledAccountRequest {
     }
 }
 
+#[cfg(feature = "console")]
 impl InstalledAccountRequests {
     pub(crate) fn with_tasks(
         review: InstalledServiceReview,
@@ -253,11 +275,13 @@ impl InstalledAccountRequests {
     }
 }
 
+#[cfg(feature = "console")]
 pub(crate) enum InstalledRequest {
     Account(Box<InstalledAccountRequest>),
     Public(public::InstalledPublicRequest),
     Credentials(Box<credentials::InstalledCredentialRequest>),
 }
+#[cfg(feature = "console")]
 impl InstalledRequest {
     pub(crate) fn console_task(
         &self,
@@ -292,10 +316,12 @@ impl CurrentRequest {
 
 /// Request-local retirement, not a grant or a replacement for native checks.
 /// It remains live through post-decision native work and its final predicate.
+#[cfg(feature = "console")]
 pub(super) struct ReviewControl {
     cancelled: tokio::sync::watch::Sender<bool>,
     created: tokio::sync::watch::Receiver<Option<ApprovalId>>,
 }
+#[cfg(feature = "console")]
 impl ReviewControl {
     fn retire(&self) {
         self.cancelled.send_replace(true);
@@ -320,6 +346,7 @@ pub(crate) struct ReviewCancellation {
     created: tokio::sync::watch::Sender<Option<ApprovalId>>,
 }
 impl ReviewCancellation {
+    #[cfg(feature = "console")]
     fn channel() -> (ReviewControl, Self) {
         let (cancelled, receive) = tokio::sync::watch::channel(false);
         let (created, approval) = tokio::sync::watch::channel(None);
@@ -358,6 +385,7 @@ impl ReviewCancellation {
 /// account identifiers. Native tool feedback remains the existing unavailable
 /// result. Only an already typed cleanup failure gets a cleanup label; all
 /// other errors remain generic rather than inferring meaning from display text.
+#[cfg(feature = "console")]
 pub(crate) fn report_failure(error: &ConnectError) {
     let label = match error {
         ConnectError::Cleanup { .. } => "account request unavailable; cleanup failed",
@@ -367,6 +395,7 @@ pub(crate) fn report_failure(error: &ConnectError) {
     eprintln!("{label}");
 }
 
+#[cfg(feature = "console")]
 fn joined_review<T>(result: Result<T, ConnectError>) -> Result<(), ConnectError> {
     match result {
         Ok(_) | Err(ConnectError::ReviewCancelled) => Ok(()),
@@ -380,6 +409,7 @@ fn consumer_agent_schema() -> Value {
 
 // The caller invokes this only after preparing the captured task and checking
 // the borrowed call again. A mismatch discloses no unrelated member or grant.
+#[cfg(feature = "console")]
 fn require_captured_consumer(
     name: &str,
     proposed: &str,
@@ -394,6 +424,7 @@ fn require_captured_consumer(
     validate_captured_consumer(name, proposed, captured)
 }
 
+#[cfg(feature = "console")]
 fn validate_captured_consumer(name: &str, proposed: &str, captured: &str) -> Result<(), ToolError> {
     if proposed != captured {
         let exact = serde_json::to_string(captured).map_err(|_| unavailable())?;
@@ -407,6 +438,7 @@ fn validate_captured_consumer(name: &str, proposed: &str, captured: &str) -> Res
     Ok(())
 }
 
+#[cfg(feature = "console")]
 struct RequestTool {
     checked: Arc<CheckedInstalls>,
     realm: RealmLocator,
@@ -418,6 +450,7 @@ struct RequestTool {
     application: Option<Arc<application::ApplicationRequestOwner>>,
 }
 
+#[cfg(feature = "console")]
 impl RequestTool {
     async fn request(
         &self,
@@ -562,6 +595,7 @@ impl RequestTool {
     }
 }
 
+#[cfg(feature = "console")]
 #[async_trait]
 impl AgentToolDispatcher for RequestTool {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
@@ -615,6 +649,7 @@ impl AgentToolDispatcher for RequestTool {
     }
 }
 
+#[cfg(feature = "console")]
 fn parse(raw: &str) -> Result<Proposal, ToolError> {
     if raw.len() > 32 * 1024 {
         return Err(invalid());
@@ -660,9 +695,11 @@ fn parse(raw: &str) -> Result<Proposal, ToolError> {
     Ok(proposal)
 }
 
+#[cfg(feature = "console")]
 fn invalid() -> ToolError {
     ToolError::InvalidArguments { name: SETUP_ACCOUNT_REQUEST.into(), reason: "Provide one exact checked job, nonsecret connector descriptor, explicit operations, proposed agent and explicit lifetime. Authority, callbacks and credentials are not accepted.".into() }
 }
+#[cfg(feature = "console")]
 fn unavailable() -> ToolError {
     ToolError::unavailable(
         SETUP_ACCOUNT_REQUEST,
@@ -706,6 +743,7 @@ fn oauth_proposal_schema() -> Value {
 /// successor: native task catalog scope and ordinary exposed-tool invocation.
 /// This validates a proposal only; the existing owner still constructs and
 /// reviews the whole successor and issues any native grant.
+#[cfg(feature = "console")]
 fn require_console_tool_policy(
     name: &str,
     config: &meerkat_core::McpServerConfig,

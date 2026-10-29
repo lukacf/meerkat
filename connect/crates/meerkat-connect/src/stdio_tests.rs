@@ -4504,6 +4504,7 @@ async fn access_review_uses_existing_private_prompt_and_rejects_replacement_scop
     }
 }
 
+#[cfg(feature = "console")]
 #[path = "installed_service_review/account_request/console/native_tests.rs"]
 mod console_account_native;
 #[path = "stdio_forge_application_tests.rs"]
@@ -4597,6 +4598,7 @@ fn independent_remote_declaration_fixture() -> (Value, Value) {
     (request, canonical)
 }
 
+#[cfg(feature = "console")]
 pub(crate) async fn remote_public_fixture(root: &std::path::Path) -> ConnectorInstallFixture {
     remote_public_fixture_kind(root, false).await
 }

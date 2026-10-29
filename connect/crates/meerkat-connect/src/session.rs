@@ -587,7 +587,7 @@ impl ConnectSession {
         .await
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "console"))]
     pub(crate) async fn fixture_controller(
         &self,
     ) -> Result<meerkat_core::ControllerModelClient, ConnectError> {
@@ -602,7 +602,7 @@ impl ConnectSession {
             .map_err(|error| ConnectError::native("pin fixture controller", error))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "console"))]
     pub(crate) async fn fixture_submit_bound(
         &self,
         input: Input,

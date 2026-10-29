@@ -3522,5 +3522,6 @@ mod review_observation;
 #[path = "service_install_tests/warm_reuse.rs"]
 mod warm_reuse;
 
+#[cfg(feature = "console")]
 #[path = "service_install_tests/public_selection_feedback.rs"]
 mod public_selection_feedback;

@@ -46,6 +46,7 @@ pub async fn review_local_controller_parent(
 
 /// Protected application presenter over the same gateway. The selected native
 /// root comes from its trusted bootstrap; login_scope is attribution only.
+#[cfg(feature = "console")]
 pub(crate) async fn review_application_controller_parent(
     host: &ToolkitGatewayHost,
     prepared: LocalControllerSetup,
@@ -153,6 +154,7 @@ pub async fn review_local_setup_request(
     review_setup_request(owner, prepared, approvals, None).await
 }
 
+#[cfg(feature = "console")]
 pub(crate) async fn review_application_setup_request(
     host: &ToolkitGatewayHost,
     prepared: LocalControllerSetup,

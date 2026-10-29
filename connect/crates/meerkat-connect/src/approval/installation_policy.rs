@@ -95,6 +95,7 @@ impl InstalledInstallationPolicy {
             provider,
         })
     }
+    #[cfg(feature = "console")]
     pub(crate) fn lifetime(&self) -> &Arc<NativeHostLifetime> {
         &self.lifetime
     }

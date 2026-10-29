@@ -560,6 +560,7 @@ impl InstalledConnectorSelection {
 
     /// Disclose the declared raw-name ceiling only for a current, checked
     /// credential launch. This neither translates IDs nor authorizes access.
+    #[cfg(feature = "console")]
     pub(crate) fn secret_operations(
         &self,
     ) -> Result<std::collections::BTreeSet<String>, &'static str> {

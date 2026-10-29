@@ -43,6 +43,7 @@ pub(crate) struct Exchange {
     owner_close: Option<oneshot::Receiver<(SignInDisposition, oneshot::Sender<()>)>>,
 }
 
+#[cfg(feature = "console")]
 impl Exchange {
     pub(crate) fn take_owner_close(
         &mut self,
@@ -69,6 +70,7 @@ impl ProviderNotice {
             }
         }
     }
+    #[cfg(feature = "console")]
     pub(crate) fn cancel_requested(&self) -> bool {
         self.cancel_requested
     }
@@ -101,6 +103,7 @@ pub(crate) struct PromptBridge {
 impl PromptBridge {
     /// A retained protected presentation channel, also used by the application
     /// gateway. It conveys choices only; LocalApprovals owns native decisions.
+    #[cfg(any(test, feature = "console"))]
     pub(crate) fn channel() -> (Self, mpsc::Receiver<Exchange>, watch::Sender<bool>) {
         let (prompts, receive) = mpsc::channel(1);
         let (retire, retired) = watch::channel(false);

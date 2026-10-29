@@ -2134,6 +2134,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                 trait_name: "AuthLeaseHandle".into(),
                 method_names: vec![
                     "acquire_lease",
+                    "publish_source_credential",
                     "mark_expiring",
                     "begin_refresh",
                     "complete_refresh",
@@ -3925,6 +3926,21 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "binding appears in auth_valid_leases with the supplied expiry and refresh_attempt reset to 0",
             ],
             &["every phase/expiry write goes through AuthMachineState::transition"],
+            EntryStatus::Closed,
+        ),
+        semantic_operation_entry!(
+            "crates/meerkat-runtime/src/handles/auth_lease.rs",
+            "publish_source_credential",
+            BoundaryKind::TraitImpl,
+            "RuntimeAuthLeaseHandle",
+            &["machines"],
+            "AuthMachine ResolveSourceCredentialPublication verdict, then the Acquire transition it asks for",
+            &[
+                "a credential value read from a source is acquired, with its fingerprint recorded on the lease, only when the machine's classifier answers publish; a refused or logged-out value is never acquired again",
+            ],
+            &[
+                "the verdict and the acquire it asks for run under one registry lock; every write goes through AuthMachineState::transition",
+            ],
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(

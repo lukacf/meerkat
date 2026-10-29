@@ -460,6 +460,7 @@ rkat auth profiles                     # list profiles/backends/bindings
 rkat auth profile <PROFILE_ID>         # inspect one profile
 rkat auth login [<PROVIDER>]           # interactive OAuth/device authorization
 rkat auth login <PROVIDER> --non-interactive [--secret <SECRET>] [--backend <KIND>] [--method <METHOD>]
+rkat auth login copilot --non-interactive [--secret <TOKEN> | --from-env]  # GitHub token, no device sign-in
 rkat auth status <PROFILE_ID>          # realm config shape + AuthMachine lease lifecycle state
 rkat auth test <BINDING_ID>            # dry-run resolve the binding
 rkat auth refresh <PROFILE_ID>         # force-refresh OAuth tokens
@@ -472,7 +473,10 @@ rkat auth connector-client remove <ID>
 ```
 
 `<PROVIDER>` is `anthropic`, `openai`, `gemini`, or `copilot` (GitHub
-Copilot device login, interactive only). `connector-client` manages the
+Copilot: the device sign-in interactively, a GitHub token with
+`--non-interactive`; see
+[GitHub Copilot with a service-account token](/guides/auth#github-copilot-with-a-service-account-token)).
+`connector-client` manages the
 realm's [connector OAuth](/guides/auth#connector-oauth) clients: writes go to
 the realm's own config, and client secrets go to the credential store, read
 from stdin and never from the command line.
@@ -503,6 +507,16 @@ Using that token requires an already-configured matching `managed_store`
 binding; see the [scripted API-key example](/guides/auth#log-in). Alternatively,
 use environment-key auth. If `--secret` is omitted, scripted login reads one
 line from stdin.
+
+`copilot` is the exception. `rkat auth login copilot --non-interactive`
+checks a GitHub token (from `--secret` or one line of stdin), stores it under
+the shared `github_copilot` credential account, and writes the three Copilot
+routes `global:copilot_openai`, `global:copilot_anthropic` and
+`global:copilot_gemini` with `auth_method = "github_copilot_token"`. With
+`--from-env` it stores nothing and writes routes that read
+`COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN`, checking the
+token when one is set. A token that fails the check is never stored, and
+`--backend` and `--method` are refused.
 
 Runtime credential **reads inherit** down the realm chain. CLI auth
 administration differs: `--realm` on profile, status, test, and refresh

@@ -64,6 +64,47 @@ them.
   without the field no longer deserializes. A placed member's membership
   commit refuses `true`.
 
+- `meerkat-core`: the Copilot auth methods gain an operator-supplied GitHub
+  token: `OpenAiAuthMethod::GitHubCopilotToken`,
+  `AnthropicAuthMethod::GitHubCopilotToken` and
+  `GoogleAuthMethod::GitHubCopilotToken` (wire `github_copilot_token`). An
+  exhaustive match on these enums needs the new arm. The Web SDK's generated
+  `WIRE_AUTH_METHODS` and `WIRE_PROVIDER_AUTH_METHODS` list it too.
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`: the
+  AuthMachine records which credential value a source-read publication
+  carries, so a value that was refused or logged out is not published again
+  (see Added). `AuthMachineState` gains `credential_material_fingerprint`,
+  and `AuthMachineInput::Acquire` gains the field
+  `credential_material_fingerprint` (`None` for every existing publisher);
+  `AuthMachineInput` and `AuthMachineInputVariant` gain
+  `ResolveSourceCredentialPublication`, `AuthMachineEffect` and
+  `AuthMachineEffectVariant` gain `SourceCredentialPublicationResolved`, each
+  appended last, and the enum
+  `SourceCredentialPublicationDisposition` (`Publish`, `AlreadyPublished`) is
+  new, in the `auth_machine::dsl` bridge copies (meerkat-runtime) and the
+  catalog types (meerkat-machine-schema `catalog::dsl::auth_machine`). The
+  kernel's `generated::auth` `State` and `inputs::Acquire` gain the field
+  `credential_material_fingerprint`; `inputs::ResolveSourceCredentialPublication`,
+  `effects::SourceCredentialPublicationResolved` and
+  `SourceCredentialPublicationDisposition` are new; `Input` and `InputKind`
+  gain `ResolveSourceCredentialPublication`; `Effect` and `EffectKind` gain
+  `SourceCredentialPublicationResolved`; and `TransitionId` gains, appended
+  last, `ResolveSourceCredentialPublicationNewMaterialValid`,
+  `ResolveSourceCredentialPublicationNewMaterialExpiring`,
+  `ResolveSourceCredentialPublicationNewMaterialExpired`,
+  `ResolveSourceCredentialPublicationNewMaterialRefreshing`,
+  `ResolveSourceCredentialPublicationNewMaterialReauthRequired`,
+  `ResolveSourceCredentialPublicationNewMaterialReleased`,
+  `ResolveSourceCredentialPublicationRenewalExpiring`,
+  `ResolveSourceCredentialPublicationRenewalExpired`,
+  `ResolveSourceCredentialPublicationAlreadyPublishedValid`,
+  `ResolveSourceCredentialPublicationAlreadyPublishedRefreshing`,
+  `ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired` and
+  `ResolveSourceCredentialPublicationAlreadyPublishedReleased`. An `Acquire`
+  that names a value has the new guard `credential_material_publishable`: it
+  refuses the value the lease records unless the lease's declared freshness
+  window ran out. Code that builds `Acquire` sets the new field.
+
 ### Added
 
 - `meerkat-mob`: a spawn can exempt its member from the mob definition's
@@ -87,6 +128,53 @@ them.
   member host cannot be exempt: its spawn is refused typed
   (`MobError::WiringError`). The option is Rust-only; the wire spawn
   contracts do not carry it.
+
+- `meerkat-core`: `AuthLeaseHandle::publish_source_credential` publishes a
+  credential value its caller re-reads from a source (an environment
+  variable, a command, an external resolver) only when the AuthMachine says
+  the lease does not already carry it, as one step with the machine's
+  `Acquire`. A value that was refused (`reauth_required`) or logged out
+  (`released`) stays so until a different value appears, also for every
+  machine that shares the lease's durable store; a declared freshness window
+  that ran out republishes the same value. The record is in-process
+  AuthMachine state: a restart, or a publication that names no value (a
+  login, a stored token, the rollback of a failed login), replaces it, and
+  the refused value is then published once more. `CredentialFingerprint`
+  (an opaque SHA-256 fingerprint with a redacted `Debug` and no `Display`) and
+  `SourceCredentialPublication` are new. The method's default fails closed,
+  so other `AuthLeaseHandle` implementations are unaffected.
+
+- GitHub Copilot with a service-account token: `auth_method =
+  "github_copilot_token"` authenticates the `copilot` backends with a GitHub
+  token from any credential source and no device sign-in, as GitHub Copilot
+  CLI does with `COPILOT_GITHUB_TOKEN`. Fine-grained personal access tokens
+  with the Copilot Requests permission, OAuth and GitHub App user tokens, and
+  GitHub App installation tokens (GitHub's server-to-server preview) are
+  accepted; classic personal access tokens are refused. The token is the
+  Copilot API credential; the account login, plan and API host are looked up
+  on first use; a token GitHub refuses moves the shared credential account to
+  `reauth_required`. `rkat auth login copilot --non-interactive` stores a token
+  read from `--secret` or stdin, and with `--from-env` configures the three
+  Copilot routes to read `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then
+  `GITHUB_TOKEN`, skipping a variable that is set but empty. `rkat auth test`
+  prints the account the token resolves to.
+  For hosts and embedders: `meerkat_copilot::verify_operator_token` checks a
+  token without storing it and returns a `CopilotAccountIdentity`;
+  `CopilotAuthorizer::account_identity` and
+  `CopilotProviderRoute::token_auth_method` are new;
+  `meerkat_auth_core::resolver::{simple_secret_source_publishes_lifecycle,
+  env_credential_variable, BlankEnvValue}` and
+  `meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_URL` are new. The
+  OpenAI, Anthropic and Gemini runtimes report the readiness of a
+  `github_copilot_token` route from its source, without a network request.
+- Zero-config GitHub Copilot: while `[realm.global]` configures no Copilot
+  route, a request that names `global:copilot_openai`,
+  `global:copilot_anthropic` or `global:copilot_gemini` resolves it in token
+  mode from `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN`, with
+  no config, also for a provider switch on the shared account and for
+  `rkat auth test` and `rkat auth status`. Default selection never picks
+  these routes, and any configured Copilot route turns them off.
+  `RealmConnectionSet::copilot_token_default` returns them.
 
 ## [0.9.7] - 2026-10-28
 

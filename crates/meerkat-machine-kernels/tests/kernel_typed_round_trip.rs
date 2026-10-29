@@ -789,6 +789,7 @@ mod auth_freshness_boundary {
                     fields: BTreeMap::from([
                         (field("expires_at_ts"), option_some(KernelValue::U64(1_000))),
                         (field("credential_published_at_millis"), KernelValue::U64(1)),
+                        (field("credential_material_fingerprint"), KernelValue::None),
                     ]),
                 },
             )

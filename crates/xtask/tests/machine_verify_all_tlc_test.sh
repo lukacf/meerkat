@@ -482,6 +482,30 @@ if run_part audits-f; then
   TLC_WORKERS="${tlc_workers}" "${generation_highwater_audit}" "${GENERATION_HIGHWATER_AUDIT_MAX_STEPS:-4}" --mutants
 fi
 
+# The AuthMachine source-credential publication (a publisher that re-reads
+# its credential value from a source asks ResolveSourceCredentialPublication
+# with the value's fingerprint and fires Acquire naming it only on Publish)
+# needs two values to tell a new value from the recorded one, which the auth
+# ci sweep (one string, three steps) never has. A hand-written audit over the
+# same generated model explores every AuthMachine action over two values,
+# OAuth flow membership left out, under every generated invariant plus an
+# action property (a refused or logged-out value is never published again
+# while the lease records it) and an invariant (the classifier's verdict is
+# Publish exactly when Acquire naming the value is enabled). It requires its
+# five witnesses reached (a refusal and a logout healed by another value, a
+# run-out window renewing the same value, a refused and a logged-out value
+# whose Acquire is disabled while another's is enabled). Its --mutants mode
+# (by hand) refuses the Acquire guard removed. 3 steps reach every witness.
+source_credential_publication_audit="${workspace_root}/specs/machines/auth/source_credential_publication_audit.sh"
+if [[ ! -x "${source_credential_publication_audit}" ]]; then
+  echo "error: source-credential publication audit runner is missing from workspace runfiles: ${source_credential_publication_audit}" >&2
+  exit 1
+fi
+if run_part audits-f; then
+  echo "running bounded AuthMachine source-credential publication TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${source_credential_publication_audit}" "${SOURCE_CREDENTIAL_PUBLICATION_AUDIT_MAX_STEPS:-5}"
+fi
+
 # The MobMachine member lifecycle (roster recovery and reset, session
 # binding, progress observations, the local Retire arms, RetireMember, the
 # session ingress detach, the runtime retirement, destroy and archive
@@ -742,7 +766,8 @@ run_machine_verify() {
 # MobMachine arm coverage gate under 1: 376-562 s;
 # audits-f = live media health 147-171, requeue-across-stop 122-147,
 # live-context causal-tail batch with --mutants 98-122, generation high-water
-# with --mutants 56-71: 423-511 s;
+# with --mutants 56-71: 423-511 s, plus the AuthMachine source-credential
+# publication audit, added after these measurements;
 # audits-g = member residency without its mutants, alone: on the push its
 # eight whole-space runs took 165 s and its first 23 of 32 witness runs 173 s
 # before the job timeout cut it off, about 430 s in all, and about 525 s on

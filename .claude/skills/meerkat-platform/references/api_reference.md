@@ -490,6 +490,10 @@ matching `managed_store` binding and select it with `--auth-binding`). With `cop
 provisions `global:copilot_openai`, `global:copilot_anthropic`, and
 `global:copilot_gemini`, all sharing the `github_copilot` credential account.
 These are provider-specific Copilot backends, not a fourth LLM provider family.
+`rkat auth login copilot --non-interactive [--secret <TOKEN> | --from-env]`
+writes the same routes with `github_copilot_token`, an operator GitHub token
+and no device sign-in (`--from-env`: read `COPILOT_GITHUB_TOKEN`, then
+`GH_TOKEN`, then `GITHUB_TOKEN`; otherwise the checked token is stored).
 Legacy `dev`-realm logins migrate to `global` on the
 run path (idempotent, no-clobber). Credential reads inherit down the chain; RPC, REST and `HostAuthService`
 writes are strict-owner and must explicitly address the realm that defines the

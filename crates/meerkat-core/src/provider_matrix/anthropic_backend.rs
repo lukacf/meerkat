@@ -70,7 +70,10 @@ impl AnthropicBackendKind {
                 AnthropicAuthMethod::FoundryAzureAd,
                 AnthropicAuthMethod::ExternalAuthorizer,
             ],
-            Self::Copilot => &[AnthropicAuthMethod::GitHubCopilotOauth],
+            Self::Copilot => &[
+                AnthropicAuthMethod::GitHubCopilotOauth,
+                AnthropicAuthMethod::GitHubCopilotToken,
+            ],
         }
     }
     pub fn default_base_url(self) -> &'static str {
@@ -92,6 +95,29 @@ impl AnthropicBackendKind {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// The operator GitHub token authenticates the Copilot backend and no
+    /// other Anthropic backend.
+    #[test]
+    fn only_the_copilot_backend_accepts_the_operator_token_method() {
+        let token = AnthropicAuthMethod::parse("github_copilot_token");
+        assert!(
+            token.is_some_and(|method| AnthropicBackendKind::Copilot
+                .supported_auth_methods()
+                .contains(&method)),
+            "copilot must accept github_copilot_token"
+        );
+        for kind in AnthropicBackendKind::ALL
+            .iter()
+            .filter(|kind| **kind != AnthropicBackendKind::Copilot)
+        {
+            assert!(
+                token.is_none_or(|method| !kind.supported_auth_methods().contains(&method)),
+                "{}",
+                kind.as_str()
+            );
+        }
+    }
 
     #[test]
     fn parse_roundtrip() {

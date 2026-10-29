@@ -26,7 +26,8 @@ use meerkat_core::auth::{RefreshFailureDisposition, RefreshFailureObservation};
 use meerkat_core::generated::auth_lease_durable_lifecycle_marker::AuthLeaseDurableRestorePublication;
 use meerkat_core::handles::{
     AuthLeaseHandle, AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot,
-    AuthLeaseTransition, DslTransitionError, LeaseKey,
+    AuthLeaseTransition, CredentialFingerprint, DslTransitionError, LeaseKey,
+    SourceCredentialPublication,
 };
 use meerkat_core::time_compat::{SystemTime, UNIX_EPOCH};
 
@@ -1251,6 +1252,9 @@ impl RuntimeAuthLeaseHandle {
             auth_dsl::AuthMachineInput::ResolveOAuthLoginCredentialDisposition { .. } => {
                 "resolve_oauth_login_credential_disposition"
             }
+            auth_dsl::AuthMachineInput::ResolveSourceCredentialPublication { .. } => {
+                "resolve_source_credential_publication"
+            }
         }
     }
 }
@@ -1365,6 +1369,9 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             auth_dsl::AuthMachineInput::Acquire {
                 expires_at_ts,
                 credential_published_at_millis: current_time_millis(),
+                // A login, store or refresh writer names no credential value;
+                // only `publish_source_credential` does.
+                credential_material_fingerprint: None,
             },
             "AuthLeaseHandle::acquire_lease",
             true,
@@ -1824,6 +1831,89 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             })
     }
 
+    fn publish_source_credential(
+        &self,
+        lease_key: &LeaseKey,
+        material: &CredentialFingerprint,
+        expires_at: u64,
+    ) -> Result<SourceCredentialPublication, DslTransitionError> {
+        const CONTEXT: &str = "AuthLeaseHandle::publish_source_credential";
+        let fingerprint = material.machine_material();
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Read-only classification on a transient authority over the live
+        // state (a fresh one for a lease not yet registered). The registry
+        // changes only through the Acquire the verdict asks for, under this
+        // same lock, so callers sharing the lease publish one value once.
+        let mut transient = match guard.authorities.get(lease_key) {
+            Some(authority) => {
+                auth_dsl::AuthMachineAuthority::recover_from_state(authority.state().clone())
+                    .map_err(|err| map_auth_machine_error(err, CONTEXT))?
+            }
+            None => auth_dsl::AuthMachineAuthority::new(),
+        };
+        let classified = auth_dsl::AuthMachineMutator::apply(
+            &mut transient,
+            auth_dsl::AuthMachineInput::ResolveSourceCredentialPublication {
+                credential_material_fingerprint: fingerprint.clone(),
+            },
+        )
+        .map_err(|err| map_auth_machine_error(err, CONTEXT))?;
+        let mut resolved = None;
+        for effect in classified.effects() {
+            if let auth_dsl::AuthMachineEffect::SourceCredentialPublicationResolved { disposition } =
+                effect
+                && resolved.replace(*disposition).is_some()
+            {
+                return Err(DslTransitionError::no_matching(
+                    CONTEXT,
+                    format!(
+                        "AuthMachine emitted multiple source-credential publication verdicts for `{lease_key}`"
+                    ),
+                ));
+            }
+        }
+        match resolved {
+            Some(auth_dsl::SourceCredentialPublicationDisposition::AlreadyPublished) => {
+                Ok(SourceCredentialPublication::AlreadyPublished)
+            }
+            Some(auth_dsl::SourceCredentialPublicationDisposition::Publish) => {
+                let entry = guard
+                    .authorities
+                    .entry(lease_key.clone())
+                    .or_insert_with(auth_dsl::AuthMachineAuthority::new);
+                let from_phase = map_phase(entry.state().lifecycle_phase);
+                let transition = auth_dsl::AuthMachineMutator::apply(
+                    entry,
+                    auth_dsl::AuthMachineInput::Acquire {
+                        expires_at_ts: (expires_at != u64::MAX).then_some(expires_at),
+                        credential_published_at_millis: current_time_millis(),
+                        credential_material_fingerprint: Some(fingerprint),
+                    },
+                )
+                .map_err(|err| map_auth_machine_error(err, CONTEXT))?;
+                auth_lease_transition_from_generated_publication(
+                    lease_key,
+                    entry,
+                    &transition,
+                    CONTEXT,
+                )?;
+                let to_phase = map_phase(entry.state().lifecycle_phase);
+                drop(guard);
+                emit_audit(lease_key, "publish_source_credential", from_phase, to_phase);
+                Ok(SourceCredentialPublication::Published)
+            }
+            None => Err(DslTransitionError::no_matching(
+                CONTEXT,
+                format!(
+                    "AuthMachine emitted no source-credential publication verdict for `{lease_key}`"
+                ),
+            )),
+        }
+    }
+
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot {
         let guard = self
             .machines
@@ -2048,6 +2138,239 @@ mod tests {
 
         // Classification is read-only: the live phase is unchanged after probing.
         assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Refreshing));
+    }
+
+    /// A credential value read from a source is published only when
+    /// AuthMachine says the lease does not carry it: once per distinct value,
+    /// again when a declared freshness window ran out, and never for a value
+    /// that was refused or logged out until another value appears. A
+    /// publisher that names no value (a login) leaves none recorded.
+    #[test]
+    fn source_credential_publication_is_decided_by_authmachine() {
+        use meerkat_core::handles::SourceCredentialPublication as Publication;
+
+        let h = RuntimeAuthLeaseHandle::new();
+        let k = lease("dev", "source_publication");
+        let first = CredentialFingerprint::of_secret("first-source-token");
+        let second = CredentialFingerprint::of_secret("second-source-token");
+        let third = CredentialFingerprint::of_secret("third-source-token");
+        let fourth = CredentialFingerprint::of_secret("fourth-source-token");
+        let publish = |key: &LeaseKey, material: &CredentialFingerprint, expires_at: u64| {
+            h.publish_source_credential(key, material, expires_at)
+                .expect("the classifier answers")
+        };
+
+        assert_eq!(publish(&k, &first, u64::MAX), Publication::Published);
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(h.snapshot(&k).generation, 1);
+        assert_eq!(publish(&k, &first, u64::MAX), Publication::AlreadyPublished);
+        assert_eq!(h.snapshot(&k).generation, 1, "one publication per value");
+        assert_eq!(publish(&k, &second, u64::MAX), Publication::Published);
+        assert_eq!(h.snapshot(&k).generation, 2);
+
+        // A refused value stays refused; a different value heals the lease.
+        h.mark_reauth_required(&k).unwrap();
+        assert_eq!(
+            publish(&k, &second, u64::MAX),
+            Publication::AlreadyPublished
+        );
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::ReauthRequired));
+        assert_eq!(h.snapshot(&k).generation, 2);
+        assert_eq!(publish(&k, &third, u64::MAX), Publication::Published);
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(h.snapshot(&k).generation, 3);
+
+        // A logged-out value stays logged out; a different value heals it.
+        h.release_lease(&k).unwrap();
+        assert_eq!(publish(&k, &third, u64::MAX), Publication::AlreadyPublished);
+        assert_eq!(h.snapshot(&k).phase, None);
+        assert_eq!(publish(&k, &fourth, u64::MAX), Publication::Published);
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(h.snapshot(&k).generation, 4);
+
+        // A declared freshness window that ran out republishes the same value
+        // with its new expiry.
+        let window = lease("dev", "source_publication_window");
+        assert_eq!(
+            publish(&window, &first, 1_800_000_030),
+            Publication::Published
+        );
+        h.observe_credential_freshness(&window, 1_800_000_000, 60)
+            .unwrap();
+        assert_eq!(h.snapshot(&window).phase, Some(AuthLeasePhase::Expiring));
+        assert_eq!(
+            publish(&window, &first, 1_800_003_600),
+            Publication::Published
+        );
+        let renewed = h.snapshot(&window);
+        assert_eq!(renewed.phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(renewed.generation, 2);
+        assert_eq!(renewed.expires_at, Some(1_800_003_600));
+
+        // A login publishes without naming a value, so the source's value is
+        // a new publication again.
+        h.acquire_lease(&window, u64::MAX).unwrap();
+        assert_eq!(publish(&window, &first, u64::MAX), Publication::Published);
+        assert_eq!(h.snapshot(&window).generation, 4);
+    }
+
+    /// The publication verdict is the Acquire guard read ahead: in every
+    /// phase, for the value the lease records and for another one,
+    /// `ResolveSourceCredentialPublication` answers Publish exactly when
+    /// `Acquire` naming that value is accepted, and classifying changes no
+    /// state.
+    #[test]
+    fn source_credential_verdict_matches_the_acquire_guard() {
+        use auth_dsl::SourceCredentialPublicationDisposition::{AlreadyPublished, Publish};
+
+        fn apply(
+            authority: &mut auth_dsl::AuthMachineAuthority,
+            input: auth_dsl::AuthMachineInput,
+        ) {
+            auth_dsl::AuthMachineMutator::apply(authority, input).expect("scenario input applies");
+        }
+        fn copy(authority: &auth_dsl::AuthMachineAuthority) -> auth_dsl::AuthMachineAuthority {
+            auth_dsl::AuthMachineAuthority::recover_from_state(authority.state().clone())
+                .expect("a reachable state recovers")
+        }
+        fn acquire(
+            material: Option<&str>,
+            expires_at_ts: Option<u64>,
+        ) -> auth_dsl::AuthMachineInput {
+            auth_dsl::AuthMachineInput::Acquire {
+                expires_at_ts,
+                credential_published_at_millis: 1,
+                credential_material_fingerprint: material.map(str::to_string),
+            }
+        }
+        fn observe(now_ts: u64) -> auth_dsl::AuthMachineInput {
+            auth_dsl::AuthMachineInput::ObserveCredentialFreshness {
+                now_ts,
+                refresh_window_secs: 60,
+            }
+        }
+
+        let mut valid = auth_dsl::AuthMachineAuthority::new();
+        apply(&mut valid, acquire(Some("recorded"), Some(100)));
+        let mut expiring = copy(&valid);
+        apply(&mut expiring, observe(50));
+        let mut expired = copy(&valid);
+        apply(&mut expired, observe(100));
+        let mut refreshing = copy(&valid);
+        apply(&mut refreshing, auth_dsl::AuthMachineInput::BeginRefresh);
+        let mut refused = copy(&valid);
+        apply(&mut refused, auth_dsl::AuthMachineInput::MarkReauthRequired);
+        let mut released = copy(&valid);
+        apply(&mut released, auth_dsl::AuthMachineInput::BeginRelease);
+        apply(&mut released, auth_dsl::AuthMachineInput::Release);
+        let mut cleared = copy(&valid);
+        apply(
+            &mut cleared,
+            auth_dsl::AuthMachineInput::ClearCredentialLifecycle,
+        );
+        let fresh = auth_dsl::AuthMachineAuthority::new();
+
+        // (state, phase, verdict for the recorded value, for another value)
+        let cases = [
+            (
+                "valid",
+                &valid,
+                auth_dsl::AuthLifecyclePhase::Valid,
+                AlreadyPublished,
+                Publish,
+            ),
+            (
+                "expiring",
+                &expiring,
+                auth_dsl::AuthLifecyclePhase::Expiring,
+                Publish,
+                Publish,
+            ),
+            (
+                "expired",
+                &expired,
+                auth_dsl::AuthLifecyclePhase::Expired,
+                Publish,
+                Publish,
+            ),
+            (
+                "refreshing",
+                &refreshing,
+                auth_dsl::AuthLifecyclePhase::Refreshing,
+                AlreadyPublished,
+                Publish,
+            ),
+            (
+                "refused",
+                &refused,
+                auth_dsl::AuthLifecyclePhase::ReauthRequired,
+                AlreadyPublished,
+                Publish,
+            ),
+            (
+                "released",
+                &released,
+                auth_dsl::AuthLifecyclePhase::Released,
+                AlreadyPublished,
+                Publish,
+            ),
+            (
+                "cleared",
+                &cleared,
+                auth_dsl::AuthLifecyclePhase::ReauthRequired,
+                AlreadyPublished,
+                Publish,
+            ),
+            (
+                "fresh",
+                &fresh,
+                auth_dsl::AuthLifecyclePhase::Valid,
+                Publish,
+                Publish,
+            ),
+        ];
+        for (label, authority, phase, recorded, other) in cases {
+            assert_eq!(authority.state().lifecycle_phase, phase, "{label}");
+            for (material, expected) in [("recorded", recorded), ("other", other)] {
+                let mut classifier = copy(authority);
+                let before = classifier.state().clone();
+                let transition = auth_dsl::AuthMachineMutator::apply(
+                    &mut classifier,
+                    auth_dsl::AuthMachineInput::ResolveSourceCredentialPublication {
+                        credential_material_fingerprint: material.to_string(),
+                    },
+                )
+                .expect("the classifier answers in every phase");
+                assert_eq!(
+                    classifier.state(),
+                    &before,
+                    "{label}/{material}: classifying changes no state"
+                );
+                let verdicts = transition
+                    .effects()
+                    .iter()
+                    .filter_map(|effect| match effect {
+                        auth_dsl::AuthMachineEffect::SourceCredentialPublicationResolved {
+                            disposition,
+                        } => Some(*disposition),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(verdicts, [expected], "{label}/{material}");
+
+                let mut acquirer = copy(authority);
+                let accepted = auth_dsl::AuthMachineMutator::apply(
+                    &mut acquirer,
+                    acquire(Some(material), None),
+                )
+                .is_ok();
+                assert_eq!(
+                    accepted,
+                    expected == Publish,
+                    "{label}/{material}: Acquire naming the value"
+                );
+            }
+        }
     }
 
     // P0 Dogma Invariant 1, FOLD 2: the OAuth-login cached-vs-refresh
@@ -3005,6 +3328,7 @@ mod tests {
             auth_dsl::AuthMachineInput::Acquire {
                 expires_at_ts: Some(2_000_000_000),
                 credential_published_at_millis: 1,
+                credential_material_fingerprint: None,
             },
         )
         .expect("acquire");
@@ -3102,6 +3426,7 @@ mod tests {
             auth_dsl::AuthMachineInput::Acquire {
                 expires_at_ts: Some(2_000_000_000),
                 credential_published_at_millis: 1,
+                credential_material_fingerprint: None,
             },
         )
         .expect("acquire");
@@ -3183,6 +3508,7 @@ mod tests {
             auth_dsl::AuthMachineInput::Acquire {
                 expires_at_ts: Some(2_000_000_000),
                 credential_published_at_millis: 1,
+                credential_material_fingerprint: None,
             },
         )
         .expect("acquire");
@@ -3665,6 +3991,7 @@ mod obligation_member_feedback_tests {
             AuthMachineInput::Acquire {
                 expires_at_ts: Some(2),
                 credential_published_at_millis: 1,
+                credential_material_fingerprint: None,
             },
         )
         .expect("acquire");

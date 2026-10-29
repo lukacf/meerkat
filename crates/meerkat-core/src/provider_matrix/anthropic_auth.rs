@@ -18,6 +18,9 @@ pub enum AnthropicAuthMethod {
     /// Foundry Bearer token via Azure AD (DefaultAzureCredential equivalent).
     FoundryAzureAd,
     GitHubCopilotOauth,
+    /// An operator-supplied GitHub token sent as the Copilot API credential
+    /// (no device sign-in). Stored, when stored, as a static bearer secret.
+    GitHubCopilotToken,
 }
 
 impl AnthropicAuthMethod {
@@ -33,6 +36,7 @@ impl AnthropicAuthMethod {
         Self::FoundryApiKey,
         Self::FoundryAzureAd,
         Self::GitHubCopilotOauth,
+        Self::GitHubCopilotToken,
     ];
 
     pub fn parse(raw: &str) -> Option<Self> {
@@ -48,6 +52,7 @@ impl AnthropicAuthMethod {
             "foundry_api_key" => Some(Self::FoundryApiKey),
             "foundry_azure_ad" => Some(Self::FoundryAzureAd),
             "github_copilot_oauth" => Some(Self::GitHubCopilotOauth),
+            "github_copilot_token" => Some(Self::GitHubCopilotToken),
             _ => None,
         }
     }
@@ -64,6 +69,7 @@ impl AnthropicAuthMethod {
             Self::FoundryApiKey => "foundry_api_key",
             Self::FoundryAzureAd => "foundry_azure_ad",
             Self::GitHubCopilotOauth => "github_copilot_oauth",
+            Self::GitHubCopilotToken => "github_copilot_token",
         }
     }
 
@@ -83,6 +89,7 @@ impl AnthropicAuthMethod {
             | Self::VertexGoogleAuth
             | Self::FoundryAzureAd => None,
             Self::GitHubCopilotOauth => Some(PersistedAuthMode::GithubCopilotOauth),
+            Self::GitHubCopilotToken => Some(PersistedAuthMode::StaticBearer),
         }
     }
 }
@@ -103,6 +110,21 @@ mod tests {
     #[test]
     fn parse_rejects_unknown() {
         assert_eq!(AnthropicAuthMethod::parse("unknown"), None);
+    }
+
+    /// The operator-token method is a wire member of the matrix and stores an
+    /// operator-supplied secret, never an OAuth-login token.
+    #[test]
+    fn github_copilot_token_is_a_static_bearer_wire_method() {
+        let method = AnthropicAuthMethod::parse("github_copilot_token");
+        assert_eq!(
+            method.map(AnthropicAuthMethod::as_str),
+            Some("github_copilot_token")
+        );
+        assert_eq!(
+            method.and_then(AnthropicAuthMethod::persisted_auth_mode),
+            Some(crate::auth::token_store::PersistedAuthMode::StaticBearer)
+        );
     }
 
     #[test]
@@ -134,6 +156,14 @@ mod tests {
             (AnthropicAuthMethod::BedrockAwsSigv4, None),
             (AnthropicAuthMethod::VertexGoogleAuth, None),
             (AnthropicAuthMethod::FoundryAzureAd, None),
+            (
+                AnthropicAuthMethod::GitHubCopilotOauth,
+                Some(PersistedAuthMode::GithubCopilotOauth),
+            ),
+            (
+                AnthropicAuthMethod::GitHubCopilotToken,
+                Some(PersistedAuthMode::StaticBearer),
+            ),
         ];
         for (method, expected) in cases {
             assert_eq!(

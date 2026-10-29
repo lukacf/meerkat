@@ -745,6 +745,60 @@ pub struct OAuthLoginCredentialFacts {
     pub refresh_allowed: bool,
 }
 
+/// Opaque fingerprint of a credential value: equal values give equal
+/// fingerprints, and a fingerprint does not give the value back.
+///
+/// A publisher that re-reads its credential from a source hands AuthMachine
+/// the fingerprint of the value it read
+/// ([`AuthLeaseHandle::publish_source_credential`]), so the machine can tell a
+/// new value from the one the lease already carries (refused or logged out
+/// included) without anyone keeping a copy of the value. In memory only: it
+/// is never serialized, has no `Display`, and its `Debug` is redacted.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CredentialFingerprint([u8; 32]);
+
+impl CredentialFingerprint {
+    /// The SHA-256 fingerprint of `secret`.
+    #[must_use]
+    pub fn of_secret(secret: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        Self(Sha256::digest(secret.as_bytes()).into())
+    }
+
+    /// The opaque value AuthMachine records and compares (the digest as
+    /// lowercase hex). It is the generated machine's input encoding, never a
+    /// rendering: nothing logs or persists it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn machine_material(&self) -> String {
+        use std::fmt::Write as _;
+        let mut material = String::with_capacity(self.0.len() * 2);
+        for byte in self.0 {
+            let _ = write!(material, "{byte:02x}");
+        }
+        material
+    }
+}
+
+impl std::fmt::Debug for CredentialFingerprint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CredentialFingerprint(<redacted>)")
+    }
+}
+
+/// What [`AuthLeaseHandle::publish_source_credential`] did, as the
+/// AuthMachine's source-credential publication classifier decided it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceCredentialPublication {
+    /// The machine answered `Publish` and the lease now carries the value,
+    /// under a new credential generation.
+    Published,
+    /// The machine answered `AlreadyPublished`: the lease's current
+    /// publication carries the value as it is (valid, refused or logged
+    /// out), and nothing changed.
+    AlreadyPublished,
+}
+
 /// Typed classification of why a DSL transition was rejected.
 ///
 /// Emitted by the generated kernel's `apply` / `apply_signal` methods and
@@ -2609,6 +2663,46 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         ))
     }
 
+    /// Publish a credential value the caller read from a source it re-reads
+    /// itself (an environment variable, a command, an external resolver),
+    /// unless the lease's current publication already carries it.
+    ///
+    /// Drives the per-credential AuthMachine's read-only
+    /// `ResolveSourceCredentialPublication` classifier with the value's
+    /// fingerprint and, on its `Publish` verdict, fires `Acquire` with that
+    /// fingerprint and `expires_at` (`u64::MAX` for none), as one step, so
+    /// callers sharing the lease publish one value once. The machine answers
+    /// `Publish` when nothing was published, when the value differs from the
+    /// one the lease records, or when the lease records it and its declared
+    /// freshness window ran out (`Expiring`, `Expired`: feed
+    /// [`Self::observe_credential_freshness`] first). Otherwise the lease
+    /// already carries the value, a value its consumer refused
+    /// (`ReauthRequired`) or the operator logged out (`Released`) included,
+    /// and it is never published again. The caller then takes the usual
+    /// credential-use admission.
+    ///
+    /// The record of the value lives in the lease's in-process AuthMachine
+    /// state only. Any publication that names no value (a login's or a
+    /// store's `acquire_lease`, a completed refresh, a restore, the rollback
+    /// of a failed login) replaces it, so a value refused before such a
+    /// publication is published, and used, once more.
+    ///
+    /// Production handles must implement this through generated AuthMachine
+    /// authority. The default fails closed so a handwritten handle cannot
+    /// become a publication reducer.
+    fn publish_source_credential(
+        &self,
+        lease_key: &LeaseKey,
+        material: &CredentialFingerprint,
+        expires_at: u64,
+    ) -> Result<SourceCredentialPublication, DslTransitionError> {
+        let _ = (lease_key, material, expires_at);
+        Err(DslTransitionError::no_matching(
+            "AuthLeaseHandle::publish_source_credential",
+            "publishing a source credential requires generated AuthMachine authority",
+        ))
+    }
+
     /// Observe the current DSL-level state of a binding.
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot;
 }
@@ -3230,6 +3324,36 @@ mod tests {
         PeerResponseTerminalSource, PeerResponseTerminalTransportIdentity,
     };
     use crate::tool_scope::{ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase};
+
+    /// Equal values give equal fingerprints and different values different
+    /// ones; neither the value nor its prefix is rendered, and the encoding
+    /// the AuthMachine compares is a fixed-width hex digest.
+    #[test]
+    fn credential_fingerprint_compares_values_without_rendering_them() {
+        use super::CredentialFingerprint;
+
+        let first = CredentialFingerprint::of_secret("github_pat_fingerprint_canary");
+        assert_eq!(
+            first,
+            CredentialFingerprint::of_secret("github_pat_fingerprint_canary")
+        );
+        let rotated = CredentialFingerprint::of_secret("github_pat_fingerprint_canary_rotated");
+        assert_ne!(first, rotated);
+        assert_ne!(first.machine_material(), rotated.machine_material());
+        let material = first.machine_material();
+        assert_eq!(material.len(), 64);
+        assert!(
+            material
+                .chars()
+                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+        );
+        let rendered = format!("{first:?} {first:#?}");
+        assert!(
+            !rendered.contains("canary") && !rendered.contains("github_pat"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains(&material), "{rendered}");
+    }
 
     #[test]
     fn recovered_state_rejection_is_not_guard_noop() {

@@ -248,6 +248,193 @@ profiles above, or complete login through REST/RPC with explicit `realm_id`,
 `binding_id`, and `profile_id`. CLI login never populates a `prod` managed-store
 profile; the host/RPC/REST write paths require the true owner.
 
+### GitHub Copilot with a service-account token
+
+The Copilot routes can also authenticate with a GitHub token you supply, with
+no device sign-in, the way GitHub Copilot CLI signs in with
+`COPILOT_GITHUB_TOKEN`: `auth_method = "github_copilot_token"`. Use it for CI
+jobs, servers and service accounts. The token itself is the Copilot API
+credential; the first time a route uses it, Meerkat looks up the GitHub login,
+the Copilot plan and the plan's API host, and nothing is exchanged.
+
+Write the three routes once, then provide the token in the environment:
+
+```bash
+export COPILOT_GITHUB_TOKEN="<GitHub token with Copilot access>"
+rkat auth login copilot --non-interactive --from-env
+rkat run --auth-binding global:copilot_anthropic "Summarize this change"
+rkat auth test copilot_openai
+```
+
+`--from-env` writes these routes to `~/.rkat/config.toml` and stores nothing.
+When one of the variables is set, it checks the token first and prints the
+account, for example `ok: GitHub Copilot ready as svc-bot (plan business) via
+COPILOT_GITHUB_TOKEN; routes global:copilot_openai, global:copilot_anthropic,
+global:copilot_gemini`. The routes read `COPILOT_GITHUB_TOKEN`, then
+`GH_TOKEN`, then `GITHUB_TOKEN`, Copilot CLI's order, and `RKAT_<NAME>` before
+each; a variable that is set but empty is skipped, so an empty
+`COPILOT_GITHUB_TOKEN` does not hide `GH_TOKEN`:
+
+```toml
+[realm.global.backend.copilot_openai]
+provider = "openai"
+backend_kind = "copilot"
+
+[realm.global.backend.copilot_anthropic]
+provider = "anthropic"
+backend_kind = "copilot"
+
+[realm.global.backend.copilot_gemini]
+provider = "gemini"
+backend_kind = "copilot"
+
+[realm.global.auth.copilot_openai]
+provider = "openai"
+auth_method = "github_copilot_token"
+source = { kind = "env", env = "COPILOT_GITHUB_TOKEN", fallback = ["GH_TOKEN", "GITHUB_TOKEN"] }
+
+[realm.global.auth.copilot_anthropic]
+provider = "anthropic"
+auth_method = "github_copilot_token"
+source = { kind = "env", env = "COPILOT_GITHUB_TOKEN", fallback = ["GH_TOKEN", "GITHUB_TOKEN"] }
+
+[realm.global.auth.copilot_gemini]
+provider = "gemini"
+auth_method = "github_copilot_token"
+source = { kind = "env", env = "COPILOT_GITHUB_TOKEN", fallback = ["GH_TOKEN", "GITHUB_TOKEN"] }
+
+[realm.global.binding.copilot_openai]
+backend_profile = "copilot_openai"
+auth_profile = "copilot_openai"
+credential_account = "github_copilot"
+
+[realm.global.binding.copilot_anthropic]
+backend_profile = "copilot_anthropic"
+auth_profile = "copilot_anthropic"
+credential_account = "github_copilot"
+
+[realm.global.binding.copilot_gemini]
+backend_profile = "copilot_gemini"
+auth_profile = "copilot_gemini"
+credential_account = "github_copilot"
+default_model = "gemini-3.8-flash"
+```
+
+Without any config, while `[realm.global]` configures no Copilot route, the
+three routes exist anyway: naming one, as in
+`--auth-binding global:copilot_anthropic`, resolves it in token mode from
+`COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN`, so a CI job needs
+only the variable. Nothing selects these routes by default, so an API-key
+variable such as `ANTHROPIC_API_KEY` keeps its role for requests that name no
+binding. Any Copilot route in `[realm.global]` turns them off: the device
+sign-in's routes, the routes above, a `copilot` backend under another name, or
+a binding on the `github_copilot` account. The zero-config Gemini route has no
+default model, so pass `--model` with it. `rkat auth test` and
+`rkat auth status` read these routes too.
+
+To store the token instead, as `copilot login --with-token` does, pipe it in
+(or pass `--secret`):
+
+```bash
+printf '%s\n' "$COPILOT_TOKEN" | rkat auth login copilot --non-interactive
+```
+
+The token is checked before it is stored, and a token GitHub or Copilot
+refuses is never stored. It is kept as a static bearer under the shared
+`global:account:github_copilot` credential, and the routes read
+`source = { kind = "managed_store" }`. RPC and REST store one with
+`auth/profile/create` (`auth_method = "github_copilot_token"`) on a route with
+that source. Other sources need only a different `source` line, the same on
+all three routes:
+
+```toml
+# Installation token minted by a host script; re-run before its 1 h expiry
+source = { kind = "command", program = "/usr/local/bin/mint-copilot-token", refresh_interval_ms = 3000000 }
+
+# Host secret manager (a Rust or JavaScript resolver registered by the host)
+source = { kind = "external_resolver", handle = "copilot-token" }
+```
+
+A command source with `refresh_interval_ms` publishes each token with that
+lifetime: a minute before it ends, the next request runs the command again,
+so the command runs again `refresh_interval_ms` minus one minute after each
+run. `refresh_interval_ms` must therefore be at least `61000` (the lifetime
+counts in whole seconds and must outlast that minute), and several minutes
+serve better: `61000` runs the command again about every second, `600000`
+about every nine minutes. A shorter one is refused before the command runs,
+as `unsupported_combination` (see below), rather than running it on every
+request. An external resolver is asked again after the Copilot API refuses a
+token, so a rotated token heals that request.
+
+Token kinds (read from the documented prefix only):
+
+| Token | Prefix | Notes |
+|---|---|---|
+| Fine-grained personal access token | `github_pat_` | Owned by a user account, such as a dedicated machine user, with the **Copilot Requests** account permission |
+| OAuth app token | `gho_` | For example the token of a GitHub CLI login (`gh auth token`) |
+| GitHub App user token | `ghu_` | Expires after 8 hours when the App expires user tokens; renew it with a `command` or `external_resolver` source |
+| GitHub App installation token (preview) | `ghs_` | Server-to-server: an App with the **Copilot Requests** organization permission, installed on the organization that pays; no Copilot seat and no user lookup; expires after 1 hour |
+| Classic personal access token | `ghp_` | Refused before any request |
+
+Choosing a token: for automation that belongs to an organization, prefer a
+GitHub App installation token. Its usage is billed to the organization and
+follows its Copilot policies, and it needs no seat. A machine user's
+fine-grained token needs a Copilot seat of its own, and a seat is a license
+for one user: keep machine-user tokens to single-purpose automation rather
+than one token serving many people. Either way, use a dedicated machine user
+or App, grant only Copilot Requests, and set a short expiry.
+
+What each refusal looks like:
+
+| What happened | Error kind | Effect |
+|---|---|---|
+| No token in any of the variables (one that is set but empty counts as unset) | `missing_secret` | none |
+| A classic personal access token | `unsupported_combination` (`auth = "classic_personal_access_token"`) | none |
+| A command source whose `refresh_interval_ms` is below `61000` | `unsupported_combination` (`auth = "command_refresh_interval_within_refresh_window"`) | none: the command does not run |
+| GitHub refused the token itself: revoked, expired or invalid | `user_reauth_required` | the `github_copilot` account is `reauth_required` until a different token value appears or the process restarts: an environment variable is read again on every request and a command or resolver at most once a minute, and a new token heals the account as soon as it is read; replace the token rather than signing in again |
+| Copilot refused the account: no seat, no Copilot Requests permission, an organization policy, chat disabled | `refresh_failed`, with GitHub's message | none: the same token works once that is fixed |
+| Rate limited, or GitHub unavailable | `refresh_failed` | the identity lookup waits for the time GitHub states, for every session of the account, and a command or resolver source is not run meanwhile; a rate-limited model listing fails nothing and is asked again after that time |
+| Logged out (`rkat auth logout global:copilot_openai`) | `lease_absent` | until a different token value appears or the process restarts; meanwhile a command or resolver is read again at most once a minute, as after a refusal |
+
+Which token value was refused or logged out is remembered only in the
+process's memory, by the account's AuthMachine lease. A restart, or any other
+publication on the account that names no token value (a sign-in, a stored
+token, a refresh, the rollback of a failed login), replaces that record: a
+refused token is then sent once more, and refused again, and a logged-out
+token is used again.
+
+`rkat auth status copilot_openai` shows `auth_method: github_copilot_token`
+and the account's lifecycle (`absent` before a process first uses a token from
+the environment, then `valid`, `reauth_required` or `released`).
+`rkat auth test copilot_openai` resolves the route and prints `account:` and
+`plan:`.
+
+The token goes only to `api.github.com` (the identity lookup) and to an
+`https` `githubcopilot.com` API host; a redirect is refused, and the token
+never appears in an error or a log line: a failed lookup or model listing is
+reported by its status and GitHub's own error message, never by the response
+body. Meerkat stores no token it reads
+from the environment, a command or a resolver; a stored token uses the
+configured credential store, like an API key. A token in the host environment
+is inherited by shell tools the host runs without confinement, so hosts that
+run shell tools unconfined should prefer `managed_store`, `command` or
+`external_resolver`. A credential command's stderr becomes error text: a
+minting script must not print the token there.
+
+The three reserved routes and the `github_copilot` account hold one method at
+a time. `rkat auth login copilot` (device sign-in) and
+`rkat auth login copilot --non-interactive` (token) each refuse routes
+configured for the other. To switch, run
+`rkat auth logout global:copilot_openai` and remove the `copilot_openai`,
+`copilot_anthropic` and `copilot_gemini` tables under `[realm.global]`; to use
+both, define more routes on another account, for example
+`credential_account = "github_copilot_ci"`. Client identity headers stay in
+the backend `options` (`integration_id`, `editor_version`, ...), equal on
+every route of the account. A mob member names its route with
+`--auth-binding global:copilot_anthropic`, or
+`{"realm": "global", "binding": "copilot_anthropic"}` on the wire. The warning
+above about GitHub's unpublished Copilot contract applies to this mode too.
+
 ### Use the binding
 
 ```bash
@@ -367,16 +554,16 @@ auth_method)` pairs. The table below summarizes what's wired today.
 | Anthropic | `bedrock`           | `bedrock_bearer`, `bedrock_aws_sigv4`, `external_authorizer` | AWS SigV4, bearer, or host auth |
 | Anthropic | `vertex`            | `vertex_google_auth`, `external_authorizer` | Google auth or host auth |
 | Anthropic | `foundry`           | `foundry_api_key`, `foundry_azure_ad`, `external_authorizer` | Azure AI Foundry |
-| Anthropic | `copilot`           | `github_copilot_oauth` | GitHub Copilot account; Anthropic Messages dialect |
+| Anthropic | `copilot`           | `github_copilot_oauth`, `github_copilot_token` | GitHub Copilot account (device sign-in or an operator GitHub token); Anthropic Messages dialect |
 | OpenAI    | `openai_api`        | `api_key`, `static_bearer`, `external_authorizer` | Direct to api.openai.com or host-resolved auth |
 | OpenAI    | `azure_openai`      | `azure_api_key`       | Azure OpenAI Responses API; `base_url` required; session model is the Azure deployment name |
 | OpenAI    | `chatgpt_backend`   | `managed_chatgpt_oauth` | ChatGPT Plus/Pro OAuth |
 | OpenAI    | `chatgpt_backend`   | `external_chatgpt_tokens` | Host-supplied tokens |
-| OpenAI    | `copilot`           | `github_copilot_oauth` | GitHub Copilot account; Responses or Chat Completions selected from account metadata |
+| OpenAI    | `copilot`           | `github_copilot_oauth`, `github_copilot_token` | GitHub Copilot account (device sign-in or an operator GitHub token); Responses or Chat Completions selected from account metadata |
 | Google    | `google_genai`      | `api_key`, `bearer_api_key`, `external_authorizer` | Direct to Google GenAI or host-resolved auth |
 | Google    | `vertex_ai`         | `api_key_express`, `adc`, `external_authorizer` | Vertex API Express, ADC, or host auth |
 | Google    | `google_code_assist` | `google_oauth`, `compute_adc`, `external_authorizer` | Code Assist OAuth, compute metadata, or host auth |
-| Google    | `copilot`             | `github_copilot_oauth` | GitHub Copilot account; OpenAI-compatible Chat Completions dialect |
+| Google    | `copilot`             | `github_copilot_oauth`, `github_copilot_token` | GitHub Copilot account (device sign-in or an operator GitHub token); OpenAI-compatible Chat Completions dialect |
 | Self-hosted | `self_hosted`, `openai_compatible` | `none`, `api_key`, `static_bearer` | Realm-bound credentials for configured `self_hosted` servers |
 
 External commands (`CredentialSourceSpec::Command`) and file

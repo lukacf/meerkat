@@ -58,6 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   activated and had in effect at the fork are activated in the side chat; any
   other stays inactive and the side chat names it.
 
+- Documentation: GitHub Copilot with a service-account token. From Meerkat
+  0.9.8, Copilot routes with `auth_method = "github_copilot_token"` are
+  `[realm]` tables in the host config like any other binding, so they work in
+  `rpc_gateway` and `meta_gateway` with `COPILOT_GITHUB_TOKEN` (then
+  `GH_TOKEN`, then `GITHUB_TOKEN`) in the gateway's environment, or with a
+  token in the gateway's credential store; name the route with
+  `member_auth_binding`.
+
 ### Changed
 
 - `meta/fork_helper` on the Console answers a source agent the console's

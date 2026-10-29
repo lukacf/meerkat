@@ -5,6 +5,10 @@
 //! input, and runtime model/provider switching.
 //!
 //! Run after `rkat auth login copilot` with `make e2e-copilot-live`.
+//! `copilot_live_operator_token_routes` checks the operator-token sign-in
+//! (`auth_method = "github_copilot_token"`) on its own in-memory routes and
+//! runs only when `COPILOT_LIVE_USER_TOKEN` holds a GitHub token with Copilot
+//! access.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -274,9 +278,11 @@ fn validate_copilot_routes(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve the account through the OpenAI route of `config`'s `global`
+/// realm, in `environment` with a fresh AuthMachine lease.
 async fn resolve_account(
     config: &Config,
-    persistence: ProviderAuthPersistence,
+    environment: ResolverEnvironment,
 ) -> Result<CopilotResolvedAuth, String> {
     let binding_ref = auth_binding(CopilotProviderRoute::OpenAi);
     let realm = RealmConnectionSet::from_config(
@@ -299,13 +305,88 @@ async fn resolve_account(
     )
     .expect("valid Copilot provider binding");
     let machine = meerkat_runtime::MeerkatMachine::ephemeral();
-    let environment = ResolverEnvironment::testing()
-        .with_provider_auth_persistence(persistence)
-        .with_auth_lease_handle(machine.generated_auth_lease_handle());
+    let environment = environment.with_auth_lease_handle(machine.generated_auth_lease_handle());
     CopilotRuntime::new()
         .resolve(&validated, &environment)
         .await
         .map_err(|error| error.to_string())
+}
+
+/// The RPC session runtime the live rows run turns through: in-memory
+/// session, runtime and blob stores, `config` as its config, and the
+/// `global` realm.
+fn live_session_runtime(
+    temp: &TempDir,
+    config: Config,
+    persistence: ProviderAuthPersistence,
+) -> Arc<SessionRuntime> {
+    let factory = AgentFactory::new(temp.path().join("factory-store"))
+        .runtime_root(temp.path().join("runtime"))
+        .with_provider_auth_persistence(persistence);
+    let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let bundle = PersistenceBundle::new(
+        session_store,
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+        blob_store,
+    )
+    .expect("construct runtime authority");
+    let runtime = Arc::new(
+        SessionRuntime::new(factory, config.clone(), 8, bundle, NotificationSink::noop())
+            .expect("compose the RPC session runtime"),
+    );
+    runtime.set_realm_context(
+        Some(RealmId::global()),
+        Some("copilot-live-e2e".to_string()),
+        None,
+    );
+    let config_store: Arc<dyn meerkat_core::ConfigStore> =
+        Arc::new(MemoryConfigStore::new(config, meerkat_models::canonical()));
+    runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+        config_store,
+        temp.path().join("config-state.json"),
+    )));
+    runtime
+}
+
+/// The variable holding the GitHub token of the operator-token row.
+const OPERATOR_TOKEN_VAR: &str = "COPILOT_LIVE_USER_TOKEN";
+
+/// The three Copilot routes of the shared account with `auth_method =
+/// "github_copilot_token"`, reading the token from [`OPERATOR_TOKEN_VAR`]. An
+/// `integration_id` replaces the client integration id on every route.
+fn operator_token_routes(integration_id: Option<&str>) -> meerkat_core::RealmConfigSection {
+    let mut backend = serde_json::Map::new();
+    let mut auth = serde_json::Map::new();
+    let mut binding = serde_json::Map::new();
+    for route in CopilotProviderRoute::ALL {
+        let id = route.binding_id();
+        let provider = route.provider().as_str();
+        let mut backend_profile = json!({"provider": provider, "backend_kind": "copilot"});
+        if let Some(integration_id) = integration_id {
+            backend_profile["options"] = json!({"integration_id": integration_id});
+        }
+        backend.insert(id.to_string(), backend_profile);
+        auth.insert(
+            id.to_string(),
+            json!({
+                "provider": provider,
+                "auth_method": "github_copilot_token",
+                "source": {"kind": "env", "env": OPERATOR_TOKEN_VAR},
+            }),
+        );
+        binding.insert(
+            id.to_string(),
+            json!({
+                "backend_profile": id,
+                "auth_profile": id,
+                "credential_account": GITHUB_COPILOT_CREDENTIAL_ACCOUNT_ID,
+            }),
+        );
+    }
+    serde_json::from_value(json!({"backend": backend, "auth": auth, "binding": binding}))
+        .expect("operator-token Copilot routes")
 }
 
 fn route_models(config: &Config, snapshot: &CopilotModelSnapshot) -> Vec<RouteModel> {
@@ -512,7 +593,10 @@ async fn copilot_live_account_routes_tools_images_and_switches() {
 
     let resolved = timeout(
         Duration::from_secs(90),
-        resolve_account(&config, persistence.clone()),
+        resolve_account(
+            &config,
+            ResolverEnvironment::testing().with_provider_auth_persistence(persistence.clone()),
+        ),
     )
     .await
     .expect("Copilot token exchange/model discovery timed out")
@@ -564,33 +648,7 @@ async fn copilot_live_account_routes_tools_images_and_switches() {
     }
 
     let temp = TempDir::new().expect("Copilot live temp directory");
-    let factory = AgentFactory::new(temp.path().join("factory-store"))
-        .runtime_root(temp.path().join("runtime"))
-        .with_provider_auth_persistence(persistence);
-    let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-    let blob_store: Arc<dyn meerkat_core::BlobStore> =
-        Arc::new(meerkat_store::MemoryBlobStore::new());
-    let bundle = PersistenceBundle::new(
-        session_store,
-        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
-        blob_store,
-    )
-    .expect("construct runtime authority");
-    let runtime = Arc::new(
-        SessionRuntime::new(factory, config.clone(), 8, bundle, NotificationSink::noop())
-            .expect("compose the RPC session runtime"),
-    );
-    runtime.set_realm_context(
-        Some(RealmId::global()),
-        Some("copilot-live-e2e".to_string()),
-        None,
-    );
-    let config_store: Arc<dyn meerkat_core::ConfigStore> =
-        Arc::new(MemoryConfigStore::new(config, meerkat_models::canonical()));
-    runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
-        config_store,
-        temp.path().join("config-state.json"),
-    )));
+    let runtime = live_session_runtime(&temp, config, persistence);
 
     let switch_initial = candidates[0].clone();
     let switch_max_tokens = candidates
@@ -817,4 +875,106 @@ async fn copilot_live_account_routes_tools_images_and_switches() {
         current.provider.as_str(),
         current.model
     );
+}
+
+/// Live probe P1 of the operator-token sign-in: one turn on each Copilot
+/// route with a GitHub token and no device sign-in. The routes are the
+/// documented token routes, in memory, reading `COPILOT_LIVE_USER_TOKEN`
+/// (for example a machine user's fine-grained token with Copilot Requests on
+/// a Business seat); the user's own config and credential store are not
+/// used. `COPILOT_LIVE_INTEGRATION_ID`, when set, replaces the client
+/// integration id on all three routes, to compare client identities. Run by
+/// hand with the repository's Cargo wrapper (`repo-cargo`):
+///
+/// ```text
+/// COPILOT_LIVE_USER_TOKEN=<token> repo-cargo test -p meerkat-integration-tests \
+///     --features integration-real-tests --test copilot_live_e2e \
+///     copilot_live_operator_token_routes -- --ignored --nocapture
+/// ```
+///
+/// Without the variable the row prints a skip and passes, also under
+/// `make e2e-copilot-live`, whose device rows do not need a token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "lane:e2e-live; set COPILOT_LIVE_USER_TOKEN to a GitHub token with Copilot access"]
+async fn copilot_live_operator_token_routes() {
+    let token_set = std::env::var(OPERATOR_TOKEN_VAR).is_ok_and(|token| !token.trim().is_empty());
+    if !token_set {
+        eprintln!("SKIP copilot-live operator token: {OPERATOR_TOKEN_VAR} is not set");
+        return;
+    }
+    let integration_id = std::env::var("COPILOT_LIVE_INTEGRATION_ID").ok();
+    let mut config = Config::default();
+    config.realm.insert(
+        "global".to_string(),
+        operator_token_routes(integration_id.as_deref()),
+    );
+    config.model_fallback.enabled = Some(false);
+    let persistence = ProviderAuthPersistence::new(
+        Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+        Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+    );
+
+    let resolved = timeout(
+        Duration::from_secs(90),
+        resolve_account(
+            &config,
+            ResolverEnvironment::with_process_env()
+                .with_provider_auth_persistence(persistence.clone()),
+        ),
+    )
+    .await
+    .expect("Copilot identity lookup/model discovery timed out")
+    .expect("GitHub and Copilot accept the operator token");
+    let identity = resolved
+        .concrete_authorizer()
+        .account_identity()
+        .expect("the operator token resolved to a Copilot identity");
+    eprintln!(
+        "copilot-live operator token login={:?} plan={:?} api_base={} installation={} integration_id={integration_id:?}",
+        identity.login, identity.plan, identity.api_base, identity.installation
+    );
+    let snapshot = resolved
+        .model_snapshot()
+        .expect("the operator token resolved but listed no models");
+    let candidates = route_models(&config, &snapshot);
+    if candidates.is_empty() {
+        skip_or_fail(
+            "the account exposes no streaming model that is also present in the effective Meerkat model registry",
+        );
+        return;
+    }
+
+    let temp = TempDir::new().expect("Copilot live temp directory");
+    let runtime = live_session_runtime(&temp, config, persistence);
+    let mut covered_providers = Vec::new();
+    for route in CopilotProviderRoute::ALL {
+        let Some(target) = candidates
+            .iter()
+            .find(|candidate| candidate.route == route)
+            .cloned()
+        else {
+            eprintln!(
+                "SKIP copilot-live operator token {} route: no catalog-usable account model",
+                route.provider().as_str()
+            );
+            continue;
+        };
+        let session = stage_session(&runtime, &target, target.max_tokens(), None).await;
+        let result = run_turn(
+            &runtime,
+            &session,
+            "Reply with only: ready".into(),
+            &target,
+            &target,
+        )
+        .await;
+        assert!(
+            !result.text.trim().is_empty(),
+            "Copilot {} route returned empty output with the operator token",
+            route.provider().as_str()
+        );
+        assert_live_identity(&runtime, &session, &target).await;
+        mark_provider_covered(&mut covered_providers, target.provider);
+    }
+    eprintln!("copilot-live operator token PASS providers={covered_providers:?}");
 }

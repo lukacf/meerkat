@@ -832,6 +832,10 @@ pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
                 "RefreshFailureDisposition",
                 &["Transient", "ReauthRequired"],
             ),
+            NamedTypeBinding::string_enum(
+                "SourceCredentialPublicationDisposition",
+                &["Publish", "AlreadyPublished"],
+            ),
         ],
         vec![
             InputVariantId::from_trusted_catalog_literal("RestoreAuthoritySnapshot"),
@@ -842,6 +846,7 @@ pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
             InputVariantId::from_trusted_catalog_literal("ResolveRefreshFailureDisposition"),
             InputVariantId::from_trusted_catalog_literal("ResolveCredentialUseAdmission"),
             InputVariantId::from_trusted_catalog_literal("ResolveOAuthLoginCredentialDisposition"),
+            InputVariantId::from_trusted_catalog_literal("ResolveSourceCredentialPublication"),
         ],
     )
     .with_ci_step_limit(3)

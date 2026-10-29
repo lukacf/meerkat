@@ -336,8 +336,8 @@ page = await client.tool_grant_audit(session.id, limit=50)
 ```
 
 `grant_tool` takes exactly one of `tool` and `family` and one of
-`duration_ms` and `expires_at_ms`. See
-[scoped tool grants](/api/rpc#scoped-tool-grants).
+`duration_ms` and `expires_at_ms`, and raises `ValueError` before sending
+otherwise. See [scoped tool grants](/api/rpc#scoped-tool-grants).
 
 When projection is enabled, use cursor replay or a snapshot after reconnect or
 a typed live-stream lag marker. A live subscriber is an observation surface,

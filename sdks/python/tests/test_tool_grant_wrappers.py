@@ -5,6 +5,7 @@ on a server whose contract takes it."""
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -103,6 +104,18 @@ async def test_grant_tool_needs_exactly_one_of_tool_and_family() -> None:
 
 
 @pytest.mark.asyncio
+async def test_grant_tool_needs_exactly_one_of_duration_and_deadline() -> None:
+    client, calls = fake_client({})
+    with pytest.raises(ValueError):
+        await client.grant_tool(SESSION_ID, family="shell")
+    with pytest.raises(ValueError):
+        await client.grant_tool(
+            SESSION_ID, family="shell", duration_ms=1, expires_at_ms=61_000
+        )
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_revoke_list_and_audit_send_their_params() -> None:
     client, calls = fake_client(
         {
@@ -160,3 +173,21 @@ async def test_a_grant_gate_is_refused_before_an_older_server_could_drop_it() ->
     await client.create_session("hello")
     assert [method for method, _ in calls] == ["session/create"]
     assert "grant_gated_tools" not in calls[0][1]
+
+
+def test_a_streaming_create_refuses_a_grant_gate_on_an_older_server() -> None:
+    client, _ = fake_client({}, contract_version="0.9.7")
+    client._process = MagicMock()
+    client._dispatcher = MagicMock()
+
+    with pytest.raises(CapabilityUnavailableError):
+        client.create_session_streaming(
+            "hello", grant_gated_tools={"families": ["shell"]}
+        )
+    # Nothing was staged for sending.
+    client._dispatcher.subscribe_pending_stream.assert_not_called()
+    client._dispatcher.expect_response.assert_not_called()
+
+    # A streaming create that names no gate is unaffected.
+    client.create_session_streaming("hello")
+    client._dispatcher.subscribe_pending_stream.assert_called_once()

@@ -2635,6 +2635,10 @@ class MeerkatClient:
         """
         if (tool is None) == (family is None):
             raise ValueError("exactly one of tool or family must be provided")
+        if (duration_ms is None) == (expires_at_ms is None):
+            raise ValueError(
+                "exactly one of duration_ms or expires_at_ms must be provided"
+            )
         target: dict[str, Any] = (
             {"kind": "tool", "name": tool}
             if tool is not None

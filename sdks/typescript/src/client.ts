@@ -2204,24 +2204,42 @@ export class MeerkatClient {
    * `{ expiresAtMs }` (UNIX ms), at most the server's maximum lifetime. The
    * session's build must gate the target (`SessionOptions.grantGatedTools`);
    * a family grant's `target.names` are the names the server took for it.
+   * Throws `INVALID_ARGS` unless the target names exactly one of `tool` and
+   * `family`, and the window exactly one of `durationMs` and `expiresAtMs`.
    */
   async grantTool(
     sessionId: string,
-    target: { tool: string } | { family: string },
-    window: { durationMs: number } | { expiresAtMs: number },
+    target: { tool: string; family?: never } | { family: string; tool?: never },
+    window:
+      | { durationMs: number; expiresAtMs?: never }
+      | { expiresAtMs: number; durationMs?: never },
     options?: { reason?: string },
   ): Promise<RpcGrantToolResult> {
+    const { tool, family } = target as { tool?: string; family?: string };
+    if ((tool === undefined) === (family === undefined)) {
+      throw new MeerkatError(
+        "INVALID_ARGS",
+        "grantTool needs exactly one of target.tool and target.family",
+      );
+    }
+    const { durationMs, expiresAtMs } = window as { durationMs?: number; expiresAtMs?: number };
+    if ((durationMs === undefined) === (expiresAtMs === undefined)) {
+      throw new MeerkatError(
+        "INVALID_ARGS",
+        "grantTool needs exactly one of window.durationMs and window.expiresAtMs",
+      );
+    }
     const params: RpcGrantToolParams = {
       subject: { kind: "session", session_id: sessionId },
       target:
-        "tool" in target
-          ? { kind: "tool", name: target.tool }
-          : { kind: "family", family: target.family },
+        tool !== undefined
+          ? { kind: "tool", name: tool }
+          : { kind: "family", family: family as string },
     };
-    if ("durationMs" in window) {
-      params.duration_ms = window.durationMs;
+    if (durationMs !== undefined) {
+      params.duration_ms = durationMs;
     } else {
-      params.expires_at_ms = window.expiresAtMs;
+      params.expires_at_ms = expiresAtMs;
     }
     if (options?.reason !== undefined) params.reason = options.reason;
     return this.request("tool_grants/grant", params);

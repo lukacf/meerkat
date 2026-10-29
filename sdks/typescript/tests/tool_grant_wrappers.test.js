@@ -87,6 +87,24 @@ describe("scoped tool grant wrappers", () => {
     ]);
   });
 
+  it("grantTool refuses both or neither target and window forms", async () => {
+    const { client, calls } = fakeClient({ "tool_grants/grant": { grant: GRANT } });
+
+    for (const [target, window] of [
+      [{ tool: "deploy", family: "shell" }, { durationMs: 60000 }],
+      [{}, { durationMs: 60000 }],
+      [{ family: "shell" }, { durationMs: 60000, expiresAtMs: 61000 }],
+      [{ family: "shell" }, {}],
+    ]) {
+      await assert.rejects(
+        client.grantTool(SESSION_ID, target, window),
+        (error) => error.code === "INVALID_ARGS",
+        JSON.stringify({ target, window }),
+      );
+    }
+    assert.deepEqual(calls, []);
+  });
+
   it("revokeToolGrant, listToolGrants and toolGrantAudit send their params", async () => {
     const { client, calls } = fakeClient({
       "tool_grants/revoke": { grant: GRANT, changed: true },
@@ -140,5 +158,22 @@ describe("scoped tool grant wrappers", () => {
     await client.createSession("hello");
     assert.equal(calls.length, 1);
     assert.equal(calls[0].params.grant_gated_tools, undefined);
+  });
+
+  it("a streaming create refuses a grant gate before writing to an older server", () => {
+    const { client } = fakeClient({}, "0.9.7");
+    const written = [];
+    client.process = { stdin: { write: (line) => written.push(line) } };
+
+    assert.throws(
+      () => client.createSessionStreaming("hello", { grantGatedTools: { families: ["shell"] } }),
+      /grantGatedTools needs a server contract >= 0\.9\.8/,
+    );
+    assert.deepEqual(written, []);
+
+    // A streaming create that names no gate is unaffected.
+    client.createSessionStreaming("hello");
+    assert.equal(written.length, 1);
+    assert.equal(JSON.parse(written[0]).params.grant_gated_tools, undefined);
   });
 });

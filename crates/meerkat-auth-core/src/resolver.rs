@@ -2589,7 +2589,7 @@ mod tests {
             AnthropicAuthMethod, GoogleAuthMethod, OpenAiAuthMethod,
         };
 
-        let fallback = vec!["GH_TOKEN".to_string(), "GITHUB_TOKEN".to_string()];
+        let fallback = ["GH_TOKEN".to_string(), "GITHUB_TOKEN".to_string()];
         let vars = |pairs: &'static [(&'static str, &'static str)]| {
             move |name: &str| {
                 pairs

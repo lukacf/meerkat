@@ -313,6 +313,9 @@ pub(crate) struct LineageParent<'a> {
     /// The session of the parent incarnation the lineage is bound to, when
     /// the labels name one.
     pub(crate) bound_session: Option<&'a str>,
+    /// Whether the parent is the source a side chat was forked from, not the
+    /// agent that spawned the member.
+    pub(crate) side_chat: bool,
 }
 
 /// The lineage parent a member's console labels name: the agent that spawned
@@ -329,19 +332,33 @@ pub(crate) fn lineage_parent(labels: &BTreeMap<String, String>) -> Option<Lineag
             .filter(|value| !value.is_empty())
     };
     [
-        (SPAWNED_BY_LABEL, SPAWNED_BY_SESSION_LABEL),
+        (SPAWNED_BY_LABEL, SPAWNED_BY_SESSION_LABEL, false),
         (
             crate::side_chat::SIDE_CHAT_OF_LABEL,
             crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL,
+            true,
         ),
     ]
     .into_iter()
-    .find_map(|(parent_key, session_key)| {
+    .find_map(|(parent_key, session_key, side_chat)| {
         Some(LineageParent {
             identity: trimmed(parent_key)?,
             bound_session: trimmed(session_key),
+            side_chat,
         })
     })
+}
+
+/// Whether a member's console labels name the source it was forked from as a
+/// side chat (`side_chat_of`). Such a member holds its source's audience
+/// exactly: the access rules decide it as its source, and a grant that
+/// matches the side chat itself grants nothing
+/// ([`crate::access::AccessView::decide_agent`]). Only the console's
+/// projection of Meerkat's fork record writes the label.
+pub(crate) fn names_side_chat_source(labels: &BTreeMap<String, String>) -> bool {
+    labels
+        .get(crate::side_chat::SIDE_CHAT_OF_LABEL)
+        .is_some_and(|source| !source.trim().is_empty())
 }
 
 /// One argument record from a spawn-tool call: top-level args or one entry
@@ -1396,8 +1413,10 @@ mod tests {
             Some(LineageParent {
                 identity: "ops-lead",
                 bound_session: Some("lead-session"),
+                side_chat: false,
             })
         );
+        assert!(!names_side_chat_source(&spawned));
         let side_chat = BTreeMap::from([
             (
                 crate::side_chat::SIDE_CHAT_OF_LABEL.to_string(),
@@ -1413,8 +1432,10 @@ mod tests {
             Some(LineageParent {
                 identity: "alpha",
                 bound_session: Some("alpha-session"),
+                side_chat: true,
             })
         );
+        assert!(names_side_chat_source(&side_chat));
         let unbound = BTreeMap::from([(
             crate::side_chat::SIDE_CHAT_OF_LABEL.to_string(),
             "alpha".to_string(),
@@ -1424,10 +1445,16 @@ mod tests {
             Some(LineageParent {
                 identity: "alpha",
                 bound_session: None,
+                side_chat: true,
             })
         );
         let blank = BTreeMap::from([(SPAWNED_BY_LABEL.to_string(), "  ".to_string())]);
         assert_eq!(lineage_parent(&blank), None);
+        let blank_side_chat = BTreeMap::from([(
+            crate::side_chat::SIDE_CHAT_OF_LABEL.to_string(),
+            " ".to_string(),
+        )]);
+        assert!(!names_side_chat_source(&blank_side_chat));
         assert_eq!(lineage_parent(&BTreeMap::new()), None);
     }
 }

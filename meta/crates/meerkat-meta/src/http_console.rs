@@ -3977,12 +3977,15 @@ fn timeline_event_visible_to(view: &AccessView, event: &ConsoleTimelineEvent) ->
 /// `spawned_by_session`, `via_tool`, `side_chat_of`, `side_chat_of_session`)
 /// give way to theirs. List rows carry labels a caller can set, and a
 /// lineage claim no spawn or fork made must neither list a member nor hide
+/// it. The lineage names each parent in `namespace`, the row's runtime
+/// namespace, as the row's own identity and the access attribute cache name
 /// it.
 fn listed_member_visible(
     view: &AccessView,
     resource: &AccessResource<'_>,
     registered: Option<&BTreeMap<String, String>>,
     side_chat: Option<&crate::side_chat::SideChatLineage>,
+    namespace: &str,
 ) -> bool {
     let Some(identity) = resource.identity else {
         // A row that names no agent has no lineage to follow.
@@ -3994,6 +3997,11 @@ fn listed_member_visible(
         crate::console_spawn::merge_registered_lineage_labels(&mut labels, registered);
     }
     crate::side_chat::project_side_chat_lineage(&mut labels, side_chat);
+    for key in crate::console_spawn::LINEAGE_PARENT_LABELS {
+        if let Some(parent) = labels.get_mut(key) {
+            *parent = namespace_console_identity(parent, namespace);
+        }
+    }
     view.decide_agent_with_attributes(
         ACTION_AGENT_VIEW,
         &AgentResourceAttributes {
@@ -4068,6 +4076,7 @@ async fn retain_visible_member_rows(
             },
             identity.and_then(|identity| registered.get(identity)),
             side_chat,
+            "",
         )
     });
 }
@@ -4100,6 +4109,7 @@ async fn visible_identity_records(
     let side_chats = aggregator
         .side_chat_lineages_for_identities(&identities)
         .await?;
+    let namespaces = aggregator.identity_namespaces()?;
     // In record order: `retain` visits each record once, in order.
     let mut registered = registered.into_iter();
     let mut side_chats = side_chats.into_iter();
@@ -4116,6 +4126,9 @@ async fn visible_identity_records(
             },
             registry_labels.as_ref(),
             side_chat.as_ref(),
+            namespaces
+                .get(&record.runtime_key)
+                .map_or("", String::as_str),
         )
     });
     Ok(identities)
@@ -7217,6 +7230,23 @@ fn fork_source_access_violation(view: Option<&AccessView>, source: &str) -> Opti
     let view = view.filter(|view| view.enforced())?;
     (!view.allows_agent(ACTION_AGENT_VIEW, source))
         .then(|| member_access_denied(ACTION_AGENT_VIEW, Some(source.to_string())))
+}
+
+/// A side chat carries its source's conversation, runs with the source's
+/// tools, and every access decision on it is its source's, so under enforced
+/// access rules forking one needs `agent.view` and `agent.send` on the
+/// source: a caller who may only read the source can neither fork it nor
+/// drive its tools through a side chat. Judged here rather than in the
+/// requirements map, which judges `agent.spawn` on the side chat's own name.
+fn side_chat_source_access_violation(
+    view: Option<&AccessView>,
+    source: &str,
+) -> Option<JsonRpcError> {
+    let view = view.filter(|view| view.enforced())?;
+    [ACTION_AGENT_VIEW, ACTION_AGENT_SEND]
+        .into_iter()
+        .find(|action| !view.allows_agent(action, source))
+        .map(|action| member_access_denied(action, Some(source.to_string())))
 }
 
 /// The members a session belongs to, by console identity: the identity
@@ -12756,7 +12786,7 @@ async fn handle_console_runtime_rpc_with_visibility(
             };
             let source =
                 crate::member_comms_id::runtime_alias_str(&params.source_member_id).into_owned();
-            if let Some(error) = fork_source_access_violation(access_view, &source) {
+            if let Some(error) = side_chat_source_access_violation(access_view, &source) {
                 return response_value(response_id, None, Some(error));
             }
             match Box::pin(crate::side_chat::fork_side_chat(
@@ -15362,9 +15392,22 @@ async fn build_aggregator_live_snapshot(
     let response_phases = aggregator
         .response_phases_for_identities(&identities)
         .await?;
+    let namespaces = aggregator.identity_namespaces()?;
     let mut members = Vec::with_capacity(identities.len());
     for identity in &identities {
         let mut labels = identity.labels.clone();
+        // A row names its lineage parents (its spawner, a side chat's
+        // source) in its runtime's namespace, as it names itself: the
+        // access rules' lineage walk and the sidebar find a parent among
+        // the namespaced rows, and a rule on a prefixed parent reaches the
+        // rows below it.
+        if let Some(namespace) = namespaces.get(&identity.runtime_key) {
+            for key in crate::console_spawn::LINEAGE_PARENT_LABELS {
+                if let Some(parent) = labels.get_mut(key) {
+                    *parent = namespace_console_identity(parent, namespace);
+                }
+            }
+        }
         // The authorized aggregate row already includes its runtime namespace.
         // Preserve that identity when the experience roster reads this label.
         labels.insert("agent_identity".to_string(), identity.identity.clone());

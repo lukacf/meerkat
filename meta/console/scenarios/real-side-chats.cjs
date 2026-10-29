@@ -3,10 +3,11 @@
 // conversation into a new member the human continues in, beside the agent.
 // The scenario proves the acceptance rows: the source's session, transcript
 // and queued work stay as they were; the side chat answers from the source's
-// context; it is unwired, listed under its source, kept across a console
-// reload and a gateway restart; closing it retires it; a viewer who may not
-// spawn members is not offered the fork; and the fork waits while the agent
-// works.
+// context; it is unwired although its source has a peer, listed under its
+// source, kept across a console reload and a gateway restart (restored
+// without being woken, and woken by the first message sent to it); closing
+// it retires it; a viewer who may not spawn members is not offered the fork;
+// and the fork waits while the agent works.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
@@ -211,6 +212,25 @@ async function sideChats() {
     await sidebarRow(alias).click();
     await page.getByTestId(`chat-pane:${alias}`).getByText(`The code word is ${word}.`).waitFor();
     check("the side chat survives a gateway restart with its conversation");
+
+    // The restored side chat is woken by the first message sent to it, and
+    // answers from the conversation it kept.
+    const sourceBeforeWake = await sourceState(fixture);
+    await fixture.control("model", { source: "Still on it.", delay_ms: 0, chunk_chars: 32 });
+    await page.getByTestId(`chat-composer:${alias}`).fill("Are you still there?");
+    await page.getByTestId(`chat-composer:${alias}`).press("Enter");
+    await eventually(async () => {
+      const requests = await modelRequests(fixture);
+      return requests.some(request => {
+        const text = JSON.stringify(request.messages || []);
+        return text.includes("Are you still there?") && text.includes(word);
+      });
+    }, "the restored side chat's model request carries its kept conversation");
+    await completed(fixture, alias, "Still on it.");
+    assert.deepEqual(await sourceState(fixture), sourceBeforeWake, "waking the side chat leaves the source as it was");
+    const woken = await agentRow(fixture, alias);
+    assert.deepEqual(woken?.wired_to || [], [], "the woken side chat is still unwired");
+    check("the restored side chat wakes on its first message");
 
     // Close: retire the side chat; the source stays.
     const sourceBeforeClose = await sourceState(fixture);

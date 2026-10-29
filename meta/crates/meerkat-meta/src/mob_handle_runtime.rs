@@ -10655,6 +10655,27 @@ impl MobRuntime {
         .await
     }
 
+    /// The typed refusal of `method`'s fork of the session
+    /// `source_session_id` into a new member under the launch's member auth
+    /// binding, if the fork may not run (see
+    /// [`crate::native_realm::fork_binding_refusal`]); `None` on a launch
+    /// without one.
+    pub(crate) async fn fork_binding_refusal(
+        &self,
+        method: &str,
+        source_session_id: &meerkat_core::types::SessionId,
+    ) -> Option<crate::native_realm::MemberRouteRefusal> {
+        let binding = self.member_auth_binding.as_ref()?;
+        crate::native_realm::fork_binding_refusal(
+            self.session_service.as_deref(),
+            method,
+            source_session_id,
+            binding,
+            self.member_auth_binding_recorded.as_ref(),
+        )
+        .await
+    }
+
     /// The custody this runtime's member MCP routers are composed under.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn member_mcp_custody(

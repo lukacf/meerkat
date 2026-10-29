@@ -7,10 +7,13 @@
 //! - takes its source's role, profile and model overrides and runtime mode,
 //!   and (through the durable fork) its application labels, context and tool
 //!   overlay, so it runs with the source's tools;
-//! - has its source's audience: the access rules follow a side chat to its
-//!   source, as they follow a spawned member to its spawner, so a rule that
-//!   matches the source (by identity, role or labels) matches its side chats
-//!   for every action, and a deny on the source hides them too;
+//! - has exactly its source's audience: every access decision on a side
+//!   chat is its source's. A rule that matches the source (by identity, role
+//!   or labels) or the source's own lineage covers its side chats for every
+//!   action, a deny on any of them hides them too, and a grant that matches
+//!   only the side chat itself (its name, role or labels) grants nothing.
+//!   Forking one needs `agent.view` and `agent.send` on the source, and
+//!   `agent.spawn` on the side chat's name;
 //! - is kept until the human closes it (`meta/retire_member`): the fork sets
 //!   an explicit keep-until-retired idle override, so no idle sweep retires
 //!   it. The runtime may still unload it while it is idle; that keeps the
@@ -43,9 +46,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use meerkat_core::types::{InstructionKey, InstructionNamespace, Message, SessionId};
 use meerkat_core::{
-    InstructionActivationAdmissionErrorCode, InstructionActivationExpectation,
-    InstructionActivationId, InstructionActivationIdentity, InstructionActivationRequest,
-    InstructionContentDigest,
+    InstructionActivationExpectation, InstructionActivationId, InstructionActivationIdentity,
+    InstructionActivationRequest, InstructionContentDigest,
 };
 use meerkat_mob::{MobSessionService as _, SpawnMemberSpec};
 use serde::Serialize;
@@ -130,7 +132,7 @@ pub(crate) fn any_side_chat_marker<'a>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SideChatLineage {
     /// The source's console identity: its durable identity label while it is
-    /// on the roster, else its public alias.
+    /// on the roster, else the durable identity its roster id names.
     pub(crate) source_identity: String,
     /// The source session the side chat's transcript was forked from.
     pub(crate) source_session_id: String,
@@ -148,14 +150,11 @@ pub(crate) struct SideChatRosterRow<'a> {
 }
 
 /// Every verified side chat among `rows`, one mob's roster, keyed by the side
-/// chat's public alias, with its lineage. Reads nothing when no row carries
-/// the marker.
+/// chat's public alias, with its lineage. A caller builds the rows only when
+/// one carries the marker ([`any_side_chat_marker`]): no other row is one.
 pub(crate) fn side_chat_lineages(
     rows: &[SideChatRosterRow<'_>],
 ) -> BTreeMap<String, SideChatLineage> {
-    if !any_side_chat_marker(rows.iter().map(|row| row.labels)) {
-        return BTreeMap::new();
-    }
     let console_identity_by_alias: BTreeMap<&str, &str> = rows
         .iter()
         .map(|row| {
@@ -170,10 +169,16 @@ pub(crate) fn side_chat_lineages(
         .filter_map(|row| {
             let source_alias =
                 verified_side_chat_source(row.labels, row.spawned_by, row.fork_source)?;
-            let source_session_id = row.fork_source?.source_session_id.to_string();
+            let fork_source = row.fork_source?;
+            let source_session_id = fork_source.source_session_id.to_string();
             let source_identity = match console_identity_by_alias.get(source_alias.as_str()) {
                 Some(identity) => String::from(*identity),
-                None => source_alias,
+                // A source that left the roster: the durable identity its
+                // roster id names (a legacy `rt:{identity}:{generation}` id
+                // names `{identity}`).
+                None => crate::member_comms_id::durable_identity_for_roster_member(
+                    &fork_source.source_member.member,
+                ),
             };
             Some((
                 row.alias.clone(),
@@ -203,6 +208,9 @@ async fn read_verified_side_chats(
     handle: &meerkat_mob::MobHandle,
 ) -> (BTreeMap<String, SideChatLineage>, Vec<ListedSideChatMarker>) {
     let entries = handle.list_all_members().await;
+    if !any_side_chat_marker(entries.iter().map(|entry| &entry.labels)) {
+        return (BTreeMap::new(), Vec::new());
+    }
     let rows = entries
         .iter()
         .map(|entry| SideChatRosterRow {
@@ -407,6 +415,12 @@ pub enum SideChatError {
         source_member_id: String,
         message: String,
     },
+    /// Under the launch's member auth binding, the source's session records
+    /// another binding or none: Meerkat would seat the side chat from the
+    /// source's records, off the launch binding. The member route refusal
+    /// (`member_auth_binding_uncarried`), as the console answers it. Nothing
+    /// was forked.
+    BindingRefused(crate::rpc::JsonRpcError),
     /// The child was seated with peer edges after all. The caller retires it.
     WiredAtSeat {
         member_alias: String,
@@ -430,6 +444,7 @@ impl std::fmt::Display for SideChatError {
                 f,
                 "the fork source {source_member_id} could not be read: {message}"
             ),
+            Self::BindingRefused(error) => f.write_str(&error.message),
             Self::WiredAtSeat {
                 member_alias,
                 peers,
@@ -505,9 +520,11 @@ pub struct SideChatFork {
 /// Refuses, before anything is forked, a source the roster does not hold and
 /// a source whose session was never born (seated and never woken: there is
 /// no conversation to fork, and the fork does not wake it), typed as a
-/// source without a session (`ForkSourceUnavailable`, cause `no_session`).
-/// The durable fork refuses a source that is running (cause `running`),
-/// typed. A dormant source forks from its stored session without waking.
+/// source without a session (`ForkSourceUnavailable`, cause `no_session`),
+/// and, under the launch's member auth binding, a source whose session
+/// records another binding or none (`member_auth_binding_uncarried`). The
+/// durable fork refuses a source that is running (cause `running`), typed. A
+/// dormant source forks from its stored session without waking.
 pub async fn fork_side_chat(
     mob_runtime: &MobRuntime,
     identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
@@ -561,6 +578,17 @@ pub async fn fork_side_chat(
         .is_some_and(|session| handle.session_unborn(session))
     {
         return Err(source_without_session(&source_alias));
+    }
+    // Meerkat seats a fork child from its source's records and asks no spawn
+    // customizer, so under the launch's member auth binding a source whose
+    // session records another binding, or none, would seat a side chat the
+    // member build guard refuses only after the fork committed its session.
+    if let Some(session) = source_session_before_fork.as_ref()
+        && let Some(refusal) = mob_runtime
+            .fork_binding_refusal("meta/fork_member", session)
+            .await
+    {
+        return Err(SideChatError::BindingRefused(refusal.json_rpc_error()));
     }
     let source_console_identity = crate::member_comms_id::durable_identity_label(&source.labels)
         .map_or_else(|| source_alias.clone(), str::to_string);
@@ -800,6 +828,7 @@ pub(crate) fn fork_member_error(error: &SideChatError) -> crate::rpc::JsonRpcErr
             message: error.to_string(),
             data: None,
         },
+        SideChatError::BindingRefused(refusal) => refusal.clone(),
         SideChatError::WiredAtSeat {
             member_alias,
             peers,
@@ -1006,35 +1035,18 @@ fn inherited_activation_request(
     })
 }
 
-/// Append `request` to the side chat's session at its safe boundary,
-/// materializing the member once when the runtime has not (or no longer)
-/// holds its session live.
+/// Append `request` to the side chat's session at its safe boundary. Meerkat
+/// wakes a side chat that is not materialized before it appends.
 async fn activate_in_child(
     handle: &meerkat_mob::MobHandle,
     child: &meerkat_mob::AgentIdentity,
     request: InstructionActivationRequest,
 ) -> Result<(), String> {
-    match handle
-        .activate_member_instruction(child, request.clone())
+    handle
+        .activate_member_instruction(child, request)
         .await
-    {
-        Ok(_) => Ok(()),
-        Err(error)
-            if error.admission_code()
-                == Some(InstructionActivationAdmissionErrorCode::TargetNotMaterialized) =>
-        {
-            handle
-                .ensure_member_live(child)
-                .await
-                .map_err(|error| error.to_string())?;
-            handle
-                .activate_member_instruction(child, request)
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        }
-        Err(error) => Err(error.to_string()),
-    }
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -1146,7 +1158,21 @@ mod tests {
                 .get("alpha-side")
                 .map(|lineage| lineage.source_identity.as_str()),
             Some("alpha"),
-            "a source that left the roster is named by its alias"
+            "a source that left the roster is named by the identity its roster id names"
+        );
+        let legacy_source = fork_source("rt:alpha:0");
+        let legacy_labels = marked("rt:alpha:0");
+        assert_eq!(
+            side_chat_lineages(&[SideChatRosterRow {
+                alias: "alpha-legacy-side".to_string(),
+                labels: &legacy_labels,
+                spawned_by: None,
+                fork_source: Some(&legacy_source),
+            }])
+            .get("alpha-legacy-side")
+            .map(|lineage| lineage.source_identity.as_str()),
+            Some("alpha"),
+            "a legacy runtime-alias roster id names its durable identity, not the alias"
         );
         let unmarked = BTreeMap::new();
         assert!(
@@ -1310,6 +1336,23 @@ mod tests {
                 "message_count": null,
             }))
             .is_ok()
+        );
+    }
+
+    /// A source refused under the launch's member auth binding answers the
+    /// member route refusal as it is.
+    #[test]
+    fn a_binding_refusal_keeps_the_member_route_refusal() {
+        let refusal = crate::rpc::JsonRpcError {
+            code: -32602,
+            message: "meta/fork_member cannot fork".to_string(),
+            data: Some(serde_json::json!({ "kind": "member_auth_binding_uncarried" })),
+        };
+        let error = fork_member_error(&SideChatError::BindingRefused(refusal.clone()));
+        assert_eq!(error, refusal);
+        assert_eq!(
+            SideChatError::BindingRefused(refusal).to_string(),
+            "meta/fork_member cannot fork"
         );
     }
 

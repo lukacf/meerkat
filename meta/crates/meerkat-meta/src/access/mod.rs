@@ -43,6 +43,7 @@ pub use controller::{
 };
 pub(crate) use controller::{
     AccessEditError, AccessEditPrecondition, AccessMutation, CapturedLineageLink, LiveAccessView,
+    MAX_LINEAGE_DEPTH,
 };
 pub use engine::{AccessDecision, AccessPrincipal, AccessResource, evaluate_access};
 pub use model::{

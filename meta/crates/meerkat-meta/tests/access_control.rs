@@ -360,9 +360,10 @@ fn label_selector_rules_filter_experience() {
 
 /// A console side chat follows its source in the access rules, for view,
 /// send and retire: a grant that names the source's identity shows the side
-/// chat and lets the caller send to and close it, and a grant on another
-/// identity does not. The console labels a side chat with its source
-/// (`side_chat_of`) only from Meerkat's durable fork record.
+/// chat and lets the caller send to and close it, and neither a grant on
+/// another identity nor one on the side chat's own name does: every decision
+/// on a side chat is its source's. The console labels a side chat with its
+/// source (`side_chat_of`) only from Meerkat's durable fork record.
 #[test]
 fn a_side_chat_follows_its_source_for_view_send_and_retire() {
     let grant = |id: &str, subject: &str, agent: &str| AccessRule {
@@ -382,6 +383,11 @@ fn a_side_chat_follows_its_source_for_view_send_and_retire() {
         rules: vec![
             grant("alice-on-the-source", "alice@example.test", "ops-lead"),
             grant("carol-on-another-agent", "carol@example.test", "scout-1"),
+            grant(
+                "erin-on-the-side-chat",
+                "erin@example.test",
+                "ops-lead-side-1",
+            ),
         ],
         ..AccessControlConfig::default()
     })
@@ -421,6 +427,19 @@ fn a_side_chat_follows_its_source_for_view_send_and_retire() {
     let carol = controller.view_for_subject(Some("carol@example.test"));
     for action in ["agent.view", "agent.send", "agent.retire"] {
         assert!(!carol.allows_agent(action, "ops-lead-side-1"), "{action}");
+    }
+
+    let erin = experience_for(&controller, "erin@example.test", &snapshot);
+    assert!(
+        sidebar_identities(&erin).is_empty(),
+        "a grant on the side chat's own name does not show it"
+    );
+    let erin = controller.view_for_subject(Some("erin@example.test"));
+    for action in ["agent.view", "agent.send", "agent.retire"] {
+        assert!(
+            !erin.allows_agent(action, "ops-lead-side-1"),
+            "a grant on the side chat's own name grants nothing: {action}"
+        );
     }
 }
 

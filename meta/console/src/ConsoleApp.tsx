@@ -5160,7 +5160,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           [candidate.identity, candidate.member_id, candidate.agent_id].includes(sideChatOf),
         ) ?? null
       : null;
-    const canForkSideChat = !consoleReadOnly && sideChatsOffered && canSpawnMembers && agent !== null;
+    // Forking needs `agent.view` and `agent.send` on the agent (and
+    // `agent.spawn` on the side chat's name): an agent the viewer may not
+    // send to offers no fork.
+    const canForkSideChat = !consoleReadOnly && sideChatsOffered && canSpawnMembers && agent !== null
+      && agent.affordances?.can_send_message !== false;
     const forkSideChatBlocked = forkingPanels.has(panel.id)
       ? "Forking the conversation"
       : sideChatForkBlockedReason({

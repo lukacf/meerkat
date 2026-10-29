@@ -516,8 +516,10 @@ async fn capture_member_provenance(
 }
 
 /// The most links a captured lineage holds: the member and seven ancestors,
-/// the bound the access rules walk.
-const CAPTURED_LINEAGE_DEPTH: usize = 8;
+/// the bound the access rules walk. A capture that reaches it with an
+/// ancestor left is refused when it decides a frame
+/// ([`crate::access::AccessView::can_view_captured_member`]).
+const CAPTURED_LINEAGE_DEPTH: usize = crate::access::MAX_LINEAGE_DEPTH;
 
 /// The member's lineage as the console owner captures it with a frame: the
 /// member first, then each ancestor its runtime-derived lineage label names
@@ -1615,6 +1617,19 @@ impl MetaConsoleAggregator {
             }
         }
         Ok(registered)
+    }
+
+    /// Each registered runtime's identity namespace, by runtime key: the
+    /// prefix its records' identities carry.
+    pub(crate) fn identity_namespaces(&self) -> ConsoleLogResult<BTreeMap<String, String>> {
+        Ok(self
+            .inner
+            .runtimes
+            .read()
+            .map_err(|_| runtime_registry_lock_error())?
+            .values()
+            .map(|entry| (entry.runtime_key.clone(), entry.identity_namespace.clone()))
+            .collect())
     }
 
     /// Each record's side chat lineage, in record order: the source a
@@ -9470,24 +9485,35 @@ pub(crate) fn timeline_frame_visible_to(
 
 /// The access decision's input for a captured provenance. A provenance
 /// captured before lineage was holds only the member's record: the member
-/// is decided by it, and any parent it names counts as unconfirmed.
+/// is decided by it, and the spawner it names (`spawned_by`) counts as
+/// unconfirmed. Side chats came after lineage capture, so such a record's
+/// side chat labels count as neither.
 fn captured_lineage(
     provenance: &ConsoleFrameMemberProvenance,
 ) -> Vec<crate::access::CapturedLineageLink> {
     if provenance.lineage.is_empty() {
         let record = &provenance.identity;
+        // Lineage capture predates side chats, so a provenance captured
+        // without it names a spawner at most: a `side_chat_of` label a
+        // member carried then is an ordinary label, neither a parent nor a
+        // side chat's lineage.
+        let mut labels = record.labels.clone();
+        labels.remove(crate::side_chat::SIDE_CHAT_OF_LABEL);
+        labels.remove(crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL);
+        let parent =
+            crate::console_spawn::lineage_parent(&labels).map(|parent| parent.identity.to_string());
         let mut lineage = vec![crate::access::CapturedLineageLink {
             identity: record.identity.clone(),
             attributes: Some(crate::access::AgentResourceAttributes {
                 identity: record.identity.clone(),
                 agent_id: Some(record.runtime_member_id.clone()),
                 role: Some(provenance.member.role.clone()),
-                labels: record.labels.clone(),
+                labels,
             }),
         }];
-        if let Some(parent) = crate::console_spawn::lineage_parent(&record.labels) {
+        if let Some(parent) = parent {
             lineage.push(crate::access::CapturedLineageLink {
-                identity: parent.identity.to_string(),
+                identity: parent,
                 attributes: None,
             });
         }
@@ -16416,6 +16442,96 @@ comms = true
         );
         assert_eq!(crate::console_spawn::lineage_parent(&record.labels), None);
         runtime.shutdown().await;
+    }
+
+    /// A provenance captured before lineage was holds the member's record
+    /// only. Side chats came after lineage capture, so a `side_chat_of` label
+    /// on such a record is an ordinary label: it names no parent and makes no
+    /// side chat, so a deny on the agent it names does not hide the frame and
+    /// a grant on that agent does not show it. A spawner the record names is
+    /// still an unconfirmed parent.
+    #[test]
+    fn a_lineage_less_provenance_takes_no_side_chat_parent() {
+        let provenance = |labels: Value| -> ConsoleFrameMemberProvenance {
+            serde_json::from_value(json!({
+                "identity": {"identity":"agent-a", "display_name":"Agent",
+                    "runtime_key":"runtime-a", "runtime_member_id":"agent-a",
+                    "session_id":"session-a", "visibility":"retired_readable",
+                    "addressable":false, "health":"retired", "labels": labels},
+                "member": {"agent_identity":"agent-a", "role":"worker", "state":"retired",
+                    "session_id":"session-a", "wired_to":[], "labels":{}},
+                "primary_mob_id":"primary", "source_mob_id":"primary"
+            }))
+            .expect("a provenance captured before lineage")
+        };
+        let side_chat_labels = json!({
+            "side_chat_of": "secret-lead",
+            "side_chat_of_session": "secret-session",
+        });
+        let lineage = captured_lineage(&provenance(side_chat_labels));
+        assert_eq!(lineage.len(), 1, "no parent: {lineage:?}");
+        let own = lineage[0]
+            .attributes
+            .as_ref()
+            .expect("the member's own attributes");
+        assert!(
+            !crate::console_spawn::names_side_chat_source(&own.labels),
+            "the member is no side chat: {own:?}"
+        );
+
+        let with_spawner = captured_lineage(&provenance(json!({
+            "side_chat_of": "secret-lead",
+            "spawned_by": "ops-lead",
+        })));
+        assert_eq!(with_spawner.len(), 2, "{with_spawner:?}");
+        assert_eq!(with_spawner[1].identity, "ops-lead");
+        assert!(
+            with_spawner[1].attributes.is_none(),
+            "an unconfirmed spawner"
+        );
+
+        let controller = crate::access::AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                crate::access::AccessRule {
+                    id: "broad-views-everything".to_string(),
+                    subjects: vec!["broad@example.test".to_string()],
+                    actions: vec!["agent.view".to_string()],
+                    agents: vec!["*".to_string()],
+                    ..crate::access::AccessRule::default()
+                },
+                crate::access::AccessRule {
+                    id: "hide-the-secret-lead".to_string(),
+                    effect: crate::access::AccessEffect::Deny,
+                    subjects: vec!["broad@example.test".to_string()],
+                    actions: vec!["agent.*".to_string()],
+                    agents: vec!["secret-lead".to_string()],
+                    ..crate::access::AccessRule::default()
+                },
+                crate::access::AccessRule {
+                    id: "narrow-views-the-secret-lead".to_string(),
+                    subjects: vec!["narrow@example.test".to_string()],
+                    actions: vec!["agent.view".to_string()],
+                    agents: vec!["secret-lead".to_string()],
+                    ..crate::access::AccessRule::default()
+                },
+            ],
+            ..crate::access::AccessControlConfig::default()
+        })
+        .expect("controller");
+        assert!(
+            controller
+                .view_for_subject(Some("broad@example.test"))
+                .can_view_captured_member(&lineage),
+            "a deny on the agent the label names does not hide the frame"
+        );
+        assert!(
+            !controller
+                .view_for_subject(Some("narrow@example.test"))
+                .can_view_captured_member(&lineage),
+            "a grant on the agent the label names does not show the frame"
+        );
     }
 
     #[tokio::test]

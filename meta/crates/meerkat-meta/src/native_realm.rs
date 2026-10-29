@@ -411,6 +411,36 @@ impl MemberRouteRefusal {
     }
 
     /// The refusal as a JSON-RPC error: its code, message and data.
+    /// The refusal of `method`'s fork of the session `source_session_id`
+    /// under the launch binding: the fork would seat a member off the
+    /// binding (see [`fork_binding_refusal`]).
+    fn fork_uncarried(
+        method: &str,
+        source_session_id: &meerkat_core::types::SessionId,
+        reason: String,
+        retryable: bool,
+    ) -> Self {
+        let mut facts = Map::new();
+        facts.insert(
+            "session_id".to_string(),
+            Value::from(source_session_id.to_string()),
+        );
+        facts.insert("reason".to_string(), Value::from(reason.as_str()));
+        if retryable {
+            facts.insert("retryable".to_string(), Value::Bool(true));
+        }
+        Self::new(
+            MemberRouteRefusalKind::Uncarried,
+            format!(
+                "{method} cannot fork session {source_session_id} under \
+                 runtime_options.{MEMBER_AUTH_BINDING_KEY}: {reason}; Meerkat seats a fork \
+                 from its source's records without the gateway's spawn customizers, so the \
+                 new member would not run on the launch binding"
+            ),
+            facts,
+        )
+    }
+
     pub(crate) fn json_rpc_error(&self) -> crate::rpc::JsonRpcError {
         crate::rpc::JsonRpcError {
             code: self.code(),
@@ -1654,6 +1684,76 @@ pub(crate) async fn attach_binding_refusal(
         ),
         None => refuse(
             format!("its live actor runs with no recorded auth binding, not {launch}"),
+            false,
+        ),
+    }
+}
+
+/// Why `method` may not fork `source_session_id` into a new member under the
+/// launch binding `binding`, if it may not: Meerkat seats a fork from its
+/// source's records (its session's recorded binding included) and asks no
+/// spawn customizer, so the new member builds with the binding the source's
+/// session records, which the member build guard refuses unless it is the
+/// launch binding ([`MemberBuildGuard::escape`]), and only after the fork
+/// committed the new session. A source session that records another binding
+/// or none is refused as [`MemberRouteRefusalKind::Uncarried`] before
+/// anything is forked, and so is one whose binding cannot be read (marked
+/// retryable) or that no session service reads. The launch binding is
+/// accepted as named or as `recorded_form`, the form Core records it in.
+pub(crate) async fn fork_binding_refusal(
+    sessions: Option<&dyn meerkat_mob::MobSessionService>,
+    method: &str,
+    source_session_id: &meerkat_core::types::SessionId,
+    binding: &meerkat_core::AuthBindingRef,
+    recorded_form: Option<&meerkat_core::AuthBindingRef>,
+) -> Option<MemberRouteRefusal> {
+    let refuse = |reason: String, retryable: bool| {
+        Some(MemberRouteRefusal::fork_uncarried(
+            method,
+            source_session_id,
+            reason,
+            retryable,
+        ))
+    };
+    let Some(sessions) = sessions else {
+        return refuse(
+            "no session service reads the binding the source's session records".to_string(),
+            false,
+        );
+    };
+    let recorded = match sessions
+        .load_persisted_session_metadata(source_session_id)
+        .await
+    {
+        Ok(view) => view
+            .and_then(|view| view.session_metadata)
+            .and_then(|metadata| metadata.auth_binding),
+        Err(error) => {
+            return refuse(
+                format!("the binding the source's session records cannot be read: {error}"),
+                true,
+            );
+        }
+    };
+    let launch = match recorded_form {
+        Some(form) if form != binding => format!(
+            "{} (recorded as {})",
+            describe_binding(binding),
+            describe_binding(form)
+        ),
+        _ => describe_binding(binding),
+    };
+    match recorded {
+        Some(recorded) if recorded == *binding || recorded_form == Some(&recorded) => None,
+        Some(recorded) => refuse(
+            format!(
+                "the source's session records auth binding {}, not {launch}",
+                describe_binding(&recorded)
+            ),
+            false,
+        ),
+        None => refuse(
+            format!("the source's session records no auth binding, not {launch}"),
             false,
         ),
     }
@@ -3027,6 +3127,111 @@ auth_profile = "local_none"
             attach(Some(false), Some(binding("a")), &session_id).await,
             None,
             "a session without a live actor is rebuilt under the launch binding"
+        );
+    }
+
+    /// A fork of a session as a new member (`meta/fork_member`) under a
+    /// member auth binding: Meerkat seats a fork from its source's records,
+    /// so a source session that records another binding or none is refused
+    /// typed (`member_auth_binding_uncarried`) before anything is forked,
+    /// whether or not its actor is live, as is one whose binding cannot be
+    /// read (marked retryable) or whose service is missing. A source session
+    /// on the launch binding, in either form, is accepted.
+    #[tokio::test]
+    async fn forking_a_session_off_the_launch_binding_is_refused_typed() {
+        async fn fork(
+            live: Option<bool>,
+            recorded: Option<meerkat_core::AuthBindingRef>,
+            session_id: &meerkat_core::types::SessionId,
+            recorded_form: Option<&meerkat_core::AuthBindingRef>,
+        ) -> Option<MemberRouteRefusal> {
+            let sessions = crate::mob_handle_runtime::recorded_binding_probe(live, recorded);
+            fork_binding_refusal(
+                Some(&*sessions),
+                "meta/fork_member",
+                session_id,
+                &binding("b"),
+                recorded_form,
+            )
+            .await
+        }
+        let session_id = meerkat_core::types::SessionId::new();
+
+        for (live, recorded, what) in [
+            (
+                Some(false),
+                Some(binding("a")),
+                "another binding, no live actor",
+            ),
+            (
+                Some(true),
+                Some(binding("a")),
+                "another binding, a live actor",
+            ),
+            (Some(false), None, "no binding"),
+        ] {
+            let refusal = fork(live, recorded, &session_id, None)
+                .await
+                .unwrap_or_else(|| panic!("{what} is refused"));
+            assert_eq!(refusal.code(), INVALID_PARAMS, "{what}");
+            assert_eq!(
+                refusal.data()["kind"],
+                json!(BINDING_UNCARRIED_KIND),
+                "{what}"
+            );
+            assert_eq!(
+                refusal.data()["session_id"],
+                json!(session_id.to_string()),
+                "{what}"
+            );
+            assert!(
+                refusal.data().get("retryable").is_none(),
+                "{what}: a binding that differs is not retryable"
+            );
+            assert!(
+                refusal
+                    .message()
+                    .starts_with("meta/fork_member cannot fork session"),
+                "{what}: {}",
+                refusal.message()
+            );
+        }
+        assert_eq!(
+            fork(Some(false), Some(binding("b")), &session_id, None).await,
+            None,
+            "a source session on the launch binding"
+        );
+        let mut owner_form = binding("b");
+        owner_form.realm = meerkat_core::RealmId::global();
+        assert_eq!(
+            fork(
+                Some(false),
+                Some(owner_form.clone()),
+                &session_id,
+                Some(&owner_form)
+            )
+            .await,
+            None,
+            "the launch binding in the form Core records it"
+        );
+
+        let unread = fork_binding_refusal(
+            Some(&*crate::mob_handle_runtime::failing_metadata_probe()),
+            "meta/fork_member",
+            &session_id,
+            &binding("b"),
+            None,
+        )
+        .await
+        .expect("an unread binding is refused");
+        assert_eq!(unread.data()["kind"], json!(BINDING_UNCARRIED_KIND));
+        assert_eq!(unread.data()["retryable"], json!(true));
+        assert_eq!(
+            fork_binding_refusal(None, "meta/fork_member", &session_id, &binding("b"), None)
+                .await
+                .map(|refusal| refusal.data()["kind"].clone()),
+            Some(json!(BINDING_UNCARRIED_KIND)),
+            "no session service"
         );
     }
 

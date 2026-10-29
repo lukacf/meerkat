@@ -55,10 +55,6 @@ const GITHUB_RATE_LIMIT_MAX_SECONDS: u64 = 3600;
 /// give the token (a command, a host resolver) is read again at most this
 /// often while the refusal stands.
 const REFUSED_TOKEN_SOURCE_REREAD_SECONDS: u64 = 60;
-/// The floor of a command source's `refresh_interval_ms` on an operator-token
-/// route: the AuthMachine's refresh window, which starts that long before a
-/// declared lifetime ends.
-const OPERATOR_COMMAND_REFRESH_INTERVAL_FLOOR_MS: u64 = AUTH_LEASE_TTL_REFRESH_WINDOW_SECS * 1000;
 /// GitHub's error `message` is quoted in errors with control characters
 /// removed and at most this many characters.
 const GITHUB_ERROR_MESSAGE_MAX_CHARS: usize = 200;
@@ -340,7 +336,7 @@ impl CopilotRuntime {
                 refresh_interval_ms: Some(interval_ms),
                 ..
             } = &binding.auth_profile().source
-            && *interval_ms <= OPERATOR_COMMAND_REFRESH_INTERVAL_FLOOR_MS
+            && command_lifetime_within_refresh_window(*interval_ms)
         {
             return Err(short_command_refresh_interval_refusal());
         }
@@ -2819,6 +2815,16 @@ fn classic_personal_access_token_refusal() -> ProviderAuthError {
 /// its `refresh_interval_ms` ends inside the AuthMachine's refresh window.
 const COMMAND_REFRESH_INTERVAL_WITHIN_REFRESH_WINDOW: &str =
     "command_refresh_interval_within_refresh_window";
+
+/// Whether a command source's `refresh_interval_ms` gives its token a
+/// lifetime that already ends inside the AuthMachine's refresh window when
+/// it is published. The lease counts the lifetime in whole seconds
+/// (`CopilotAuthorizer::operator_lease_expiry`), so 60001 to 60999 ms is the
+/// same one-minute lifetime as 60000: the first interval that outlasts the
+/// window is 61000 ms.
+fn command_lifetime_within_refresh_window(interval_ms: u64) -> bool {
+    interval_ms / 1000 <= AUTH_LEASE_TTL_REFRESH_WINDOW_SECS
+}
 
 /// A command source whose declared lifetime ends inside the AuthMachine's
 /// refresh window is refused before it runs, typed as the classic-token
@@ -5925,6 +5931,50 @@ mod tests {
                             && combination == "command_refresh_interval_within_refresh_window"
                 ),
                 "{auth:?}"
+            );
+        }
+
+        /// The floor counts whole seconds, as the lease's lifetime does: 60001
+        /// to 60999 ms is the same one-minute lifetime as 60000 and is refused
+        /// the same way, and 61000 ms is the first interval past the floor
+        /// (the command then runs; this one does not exist).
+        #[tokio::test]
+        async fn command_refresh_interval_floor_counts_whole_seconds() {
+            let command = |interval_ms| CredentialSourceSpec::Command {
+                program: "/nonexistent/mint-copilot-token".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                timeout_ms: 1_000,
+                refresh_interval_ms: Some(interval_ms),
+            };
+            let floor_refusal = |error: &ProviderAuthError| {
+                matches!(
+                    error,
+                    ProviderAuthError::Auth(AuthError::UnsupportedCombination { auth, .. })
+                        if auth == "command_refresh_interval_within_refresh_window"
+                )
+            };
+            for interval_ms in [60_001, 60_500, 60_999] {
+                let harness = Harness::new(std::iter::empty());
+                let error = harness
+                    .resolve_from(CopilotProviderRoute::OpenAi, command(interval_ms))
+                    .await
+                    .err()
+                    .expect("the interval is refused");
+                assert!(floor_refusal(&error), "{interval_ms}: {error:?}");
+                assert_eq!(harness.transport.request_count(), 0);
+            }
+
+            let harness = Harness::new(std::iter::empty());
+            let error = harness
+                .resolve_from(CopilotProviderRoute::OpenAi, command(61_000))
+                .await
+                .err()
+                .expect("this command does not exist");
+            assert!(
+                !floor_refusal(&error),
+                "61000 ms outlasts the refresh window: {error:?}"
             );
         }
 

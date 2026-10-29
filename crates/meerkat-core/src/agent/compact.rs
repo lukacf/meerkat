@@ -672,6 +672,10 @@ pub(crate) struct CompactionInvocation<'a> {
     /// registry-owned limits; `None` when that model declares no context
     /// window.
     pub(crate) summarization_budget: Option<crate::compact::SummarizationSourceBudget>,
+    /// The summary request's per-call provider params: `None` lets the
+    /// client use its own, and a provider-native tool policy that disables
+    /// native tools passes the session's tag with them stripped.
+    pub(crate) provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
     /// Where the summary request's owner-change waits are reported, for a
     /// host that installed an operation refusal observer.
     pub(crate) wait_report: Option<crate::authorization::WaitReport>,
@@ -1349,6 +1353,7 @@ where
         request_pressure,
         parent_revision,
         summarization_budget,
+        provider_params,
         wait_report,
         scope,
         projection,
@@ -1450,7 +1455,7 @@ where
                     &[],
                     max_summary_tokens,
                     None,
-                    None,
+                    provider_params.as_ref(),
                     authorization.clone(),
                 )
                 .await;
@@ -2159,6 +2164,7 @@ mod tests {
                 request_pressure: None,
                 parent_revision: session.transcript_revision().unwrap(),
                 summarization_budget: None,
+                provider_params: None,
                 wait_report: None,
                 scope: CompactionScope::Whole,
                 projection: &model_messages,
@@ -2671,6 +2677,7 @@ mod tests {
                 request_pressure: None,
                 parent_revision: session.transcript_revision().unwrap(),
                 summarization_budget: None,
+                provider_params: None,
                 wait_report: None,
                 scope: CompactionScope::Whole,
                 projection: &model_messages,

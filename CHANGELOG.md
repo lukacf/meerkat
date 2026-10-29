@@ -206,6 +206,18 @@ them.
   application consequence policy and a scoped tool grant gate alike, instead
   of naming the application policy over a debug rendering of the denial.
 
+### Fixed
+
+- `meerkat-core`: an agent whose provider-native tools are disabled
+  (`ProviderNativeToolPolicy::DisableAll`, which a governed build or a grant
+  gate covering `web_search` sets) no longer sends a provider-native tool,
+  such as native web search, that its provider params or a fallback model's
+  request defaults ask for. Before, only a turn's own request params were
+  stripped: a model fallback attempt (and its retries) carried the fallback
+  model's defaults, and a compaction summary request used the provider params
+  the client was built with. The strip now applies to every model attempt and
+  to the summary request.
+
 ### Upgrade notes
 
 - A session's grant gate is recorded in its tooling metadata, which a binary

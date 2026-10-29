@@ -1118,6 +1118,49 @@ where
             .then(|| Arc::clone(controller.client()))
     }
 
+    /// `provider_params` under the session's provider-native tool policy:
+    /// `DisableAll` strips every provider-native tool from the request's own
+    /// copy, whichever attempt sends it (a turn's first request, a retry or a
+    /// fallback model's attempt), so no native tool rides any request.
+    fn provider_params_under_native_tool_policy(
+        &self,
+        provider_params: Option<ProviderParamsOverride>,
+    ) -> Option<ProviderParamsOverride> {
+        let mut provider_params = provider_params;
+        if matches!(
+            self.config.provider_native_tools,
+            crate::ProviderNativeToolPolicy::DisableAll
+        ) && let Some(params) = provider_params.as_mut()
+        {
+            params.clear_provider_native_tools();
+        }
+        provider_params
+    }
+
+    /// The per-call provider params of a compaction summary request. Under a
+    /// `DisableAll` provider-native tool policy, it is the session's provider
+    /// tag with every provider-native tool stripped, so the client's own
+    /// build-time tag (which may name native search) does not apply.
+    /// Otherwise `None`: the client uses its own.
+    fn compaction_provider_params(&self) -> Option<ProviderParamsOverride> {
+        if !matches!(
+            self.config.provider_native_tools,
+            crate::ProviderNativeToolPolicy::DisableAll
+        ) {
+            return None;
+        }
+        let tag = match self.config.provider_params.effective_params() {
+            Ok(params) => params.provider_tag,
+            Err(_) => self.config.provider_params.params.provider_tag.clone(),
+        }?;
+        let mut params = ProviderParamsOverride {
+            provider_tag: Some(tag),
+            ..ProviderParamsOverride::default()
+        };
+        params.clear_provider_native_tools();
+        Some(params)
+    }
+
     fn prepare_authorized_model_attempt(
         &self,
         messages: Arc<Vec<Message>>,
@@ -1127,6 +1170,7 @@ where
         provider_params: Option<ProviderParamsOverride>,
         authorization: Option<crate::LlmRequestAuthorization>,
     ) -> Result<Arc<dyn crate::AgentLlmRequestAttempt>, AgentError> {
+        let provider_params = self.provider_params_under_native_tool_policy(provider_params);
         if authorization.as_ref().is_some_and(|authorization| {
             authorization.usage()
                 == crate::authorization::ModelAuthorizationUse::ControllerInference
@@ -4666,6 +4710,7 @@ where
                                     request_pressure: provider_request_pressure,
                                     parent_revision,
                                     summarization_budget,
+                                    provider_params: self.compaction_provider_params(),
                                     wait_report: self.refusal_wait_report(
                                         self.tool_dispatch_context.run_id().cloned(),
                                         crate::authorization::OperationRefusalSurface::Compaction,
@@ -13931,6 +13976,111 @@ mod tests {
         );
         assert!(memory_store.staged.lock().unwrap().is_empty());
         assert_eq!(memory_store.aborted.lock().unwrap().len(), 1);
+    }
+
+    /// Records the provider tag each request resolves to, as a provider
+    /// adapter does: the per-call params' tag, else the tag the client was
+    /// built with. Answers the compaction summary request with a summary.
+    #[cfg(feature = "workspace-tests")]
+    struct CompactionTagRecordingClient {
+        built_with: Option<crate::lifecycle::run_primitive::ProviderTag>,
+        seen: Mutex<Vec<(bool, Option<crate::lifecycle::run_primitive::ProviderTag>)>>,
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for CompactionTagRecordingClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let compaction = messages
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::User(user) => Some(user.text_content()),
+                    _ => None,
+                })
+                .is_some_and(|text| text == "COMPACT NOW");
+            let resolved = provider_params
+                .and_then(|params| params.provider_tag.clone())
+                .or_else(|| self.built_with.clone());
+            self.seen.lock().unwrap().push((compaction, resolved));
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: if compaction { "durable summary" } else { "ok" }.to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                normalized_test_usage(self, Usage::default()),
+            ))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::OpenAI
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    /// A compaction summary request under a `DisableAll` provider-native
+    /// tool policy carries no native tool, though the session's provider
+    /// params, and the tag its client was built with, ask for native search:
+    /// the request gets a stripped per-call copy of the session's tag.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_compaction_request_under_disable_all_carries_no_native_search() {
+        use crate::lifecycle::run_primitive::{
+            OpaqueProviderBody, OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+        };
+
+        let native_search = ProviderTag::OpenAi(OpenAiProviderTag {
+            web_search: Some(OpaqueProviderBody::from_value(
+                &serde_json::json!({"type": "web_search"}),
+            )),
+            ..Default::default()
+        });
+        let client = Arc::new(CompactionTagRecordingClient {
+            built_with: Some(native_search.clone()),
+            seen: Mutex::new(Vec::new()),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .budget(BudgetLimits::unlimited().with_max_tokens(2_000))
+            .compactor(Arc::new(DiscardingCompactor::new(1)))
+            .provider_native_tool_policy(crate::ProviderNativeToolPolicy::DisableAll)
+            .provider_params(ProviderParamsOverride {
+                provider_tag: Some(native_search),
+                ..Default::default()
+            })
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        agent.run("second".into()).await.unwrap();
+
+        let seen = client.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.iter().filter(|(compaction, _)| *compaction).count(),
+            1,
+            "one compaction summary request: {seen:?}"
+        );
+        for (compaction, tag) in &seen {
+            let web_search = match tag {
+                Some(ProviderTag::OpenAi(tag)) => tag.web_search.as_ref(),
+                _ => None,
+            };
+            assert!(
+                web_search.is_none(),
+                "no request carries native search (compaction request: {compaction}): {seen:?}"
+            );
+        }
     }
 
     #[cfg(feature = "workspace-tests")]
@@ -33198,6 +33348,9 @@ mod tests {
         call_count: std::sync::atomic::AtomicUsize,
         mismatched_fallback_tag: bool,
         reject_target_compile: bool,
+        /// Fail the first call (retryable) and answer the second: a plain
+        /// turn whose first request falls back to the target model.
+        fail_first_call: bool,
         target_profile: crate::ModelProfileWitness,
         seen_max_tokens: Mutex<Vec<u32>>,
         seen_provider_params:
@@ -33239,6 +33392,7 @@ mod tests {
                 call_count: std::sync::atomic::AtomicUsize::new(0),
                 mismatched_fallback_tag: false,
                 reject_target_compile: false,
+                fail_first_call: false,
                 target_profile,
                 seen_max_tokens: Mutex::new(Vec::new()),
                 seen_provider_params: Mutex::new(Vec::new()),
@@ -33323,6 +33477,28 @@ mod tests {
                 .call_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 + 1;
+
+            if self.fail_first_call {
+                return match call {
+                    1 => Err(AgentError::llm(
+                        "openai",
+                        crate::error::LlmFailureReason::ProviderError(
+                            crate::error::LlmProviderError::retryable(
+                                crate::error::LlmProviderErrorKind::ServerOverloaded,
+                                serde_json::json!({"message": "primary retryable failure"}),
+                            ),
+                        ),
+                        "primary retryable failure",
+                    )),
+                    2 => Ok(normalized_test_result(
+                        self,
+                        text_response("fallback answer"),
+                    )),
+                    _ => Err(AgentError::InternalError(
+                        "ExtractionFallbackOverrideClient: unexpected extra call".to_string(),
+                    )),
+                };
+            }
 
             match call {
                 1 => Ok(normalized_test_result(self, text_response("main answer"))),
@@ -33789,6 +33965,75 @@ mod tests {
                 );
             }
             other => panic!("expected Anthropic fallback extraction params, got {other:?}"),
+        }
+    }
+
+    /// A model fallback attempt under a `DisableAll` provider-native tool
+    /// policy carries no native tool, though the fallback target's request
+    /// policy asks for native search: every attempt is prepared through the
+    /// strip, the fallback's and the retries' included.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_fallback_attempt_under_disable_all_carries_no_native_search() {
+        use crate::lifecycle::run_primitive::ProviderTag;
+        use crate::retry::RetryPolicy;
+
+        let registry = Arc::new(extraction_fallback_registry());
+        let target_profile = registry
+            .profile_witness_for_provider(crate::Provider::Anthropic, "claude-backup")
+            .expect("same-registry fallback profile");
+        let client = Arc::new(ExtractionFallbackOverrideClient {
+            fail_first_call: true,
+            ..ExtractionFallbackOverrideClient::with_target_profile(target_profile)
+        });
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new().max_tokens_per_turn(1024),
+            explicit_hot_swap_session("gpt-primary"),
+        )
+        .provider_native_tool_policy(crate::ProviderNativeToolPolicy::DisableAll)
+        .with_effective_model_registry(Arc::clone(&registry))
+        .with_tool_visibility_owner(generated_visibility_owner)
+        .with_model_routing_handle(model_routing)
+        .retry_policy(RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            multiplier: 1.0,
+            call_timeout: None,
+            stream_inactivity_timeout: None,
+        })
+        .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+
+        let result = agent
+            .run("answer after a fallback".to_string().into())
+            .await
+            .expect("the fallback attempt answers");
+        assert_eq!(result.text, "fallback answer");
+
+        let seen_params = client.seen_provider_params();
+        assert_eq!(
+            seen_params.len(),
+            2,
+            "expected the failed primary call and the fallback attempt"
+        );
+        match seen_params[1]
+            .as_ref()
+            .and_then(|params| params.provider_tag.as_ref())
+        {
+            Some(ProviderTag::Anthropic(tag)) => assert_eq!(
+                tag.web_search, None,
+                "the fallback attempt must not carry the target policy's native search"
+            ),
+            None => {}
+            other => panic!("expected Anthropic fallback params, got {other:?}"),
         }
     }
 

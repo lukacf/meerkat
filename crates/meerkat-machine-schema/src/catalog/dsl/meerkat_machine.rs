@@ -11616,7 +11616,11 @@ macro_rules! meerkat_catalog_machine_dsl {
         // then, under the same authority lock, applies ResumeRun: the run is
         // current again and stops being resumable. Its batch is exactly the
         // inputs bound to it, which stay Staged or Applied; nothing is staged
-        // again.
+        // again. The run then runs under the destination and the authority
+        // batch its inputs were staged for, as a staged run does
+        // (StageForRun): the inputs bound to one run share its authority
+        // batch, whose key includes the exact destination, so the context
+        // target and batch key of any of them are the first one's.
         transition ResumeRun {
             per_phase [Running]
             on input ResumeRun { run_id }
@@ -11628,8 +11632,31 @@ macro_rules! meerkat_catalog_machine_dsl {
                 for_all(held_input_id in self.input_controller_holds,
                     self.input_run_associations.get_cloned(held_input_id) != Some(run_id))
             }
+            // A governed run on a document that requires a destination
+            // resumes only once one is bound again (or was bound, and then
+            // retired), as `scoped_context_attached` stages recovered
+            // governed work; the resumed-run plan waits the same way.
+            guard "resumed_run_destination_attached" {
+                self.scoped_context_required == false
+                || self.scoped_context_binding != None
+                || self.scoped_context_generation != 0
+                || for_all(bound_input_id in self.input_run_associations.keys(),
+                    self.input_run_associations.get_cloned(bound_input_id) != Some(run_id)
+                    || !self.input_authority_bindings.contains_key(bound_input_id))
+            }
             update {
                 self.resumable_run_id = None;
+                self.authority_staged_run = Some(run_id);
+                self.run_context_binding = None;
+                self.authority_staged_batch = None;
+                for bound_input_id in self.input_run_associations.keys() {
+                    if self.input_run_associations.get_cloned(bound_input_id) == Some(run_id) {
+                        self.run_context_binding =
+                            self.input_context_targets.get_cloned(bound_input_id);
+                        self.authority_staged_batch =
+                            self.input_authority_batch_keys.get_cloned(bound_input_id);
+                    }
+                }
             }
             to Running
             emit ResumedRunAuthorized { run_id: run_id }
@@ -40124,9 +40151,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 /// The marked run and exactly the inputs bound to it (staged
                 /// or applied, associated with the run), in admission order.
                 /// `None` unless `run_id` is the marked resumable run, no run
-                /// is current, at least one input is bound to it, and no input
+                /// is current, at least one input is bound to it, no input
                 /// bound to it is held for its controller (mirrors the
-                /// `ResumeRun` guard `run_inputs_not_controller_held`).
+                /// `ResumeRun` guard `run_inputs_not_controller_held`), and
+                /// its destination is attached
+                /// (`resumed_run_destination_attached`).
                 #[must_use]
                 pub fn authorize_resumed_run_from_state(
                     state: &MeerkatMachineState,
@@ -40140,6 +40169,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                         .iter()
                         .any(|held| state.input_run_associations.get(held) == Some(run_id))
                     {
+                        return None;
+                    }
+                    if !resumed_run_destination_attached(state, run_id) {
                         return None;
                     }
                     let mut input_ids: Vec<String> = state
@@ -40279,6 +40311,31 @@ macro_rules! meerkat_catalog_machine_dsl {
             // and later work of its lane goes first.
             fn controller_stageable(state: &MeerkatMachineState, input_id: &String) -> bool {
                 !state.input_controller_holds.contains(input_id)
+            }
+
+            /// Whether the run `run_id` marked resumable may resume under the
+            /// session document's destination: the document requires none,
+            /// one is bound (or was bound, and then retired), or no governed
+            /// input is bound to the run. Mirrors the `ResumeRun` guard
+            /// `resumed_run_destination_attached`, as `scoped_context_stageable`
+            /// mirrors the `StageForRun` guard: a governed run left open waits,
+            /// marked, until the registration owner binds its destination
+            /// again.
+            #[must_use]
+            pub fn resumed_run_destination_attached(
+                state: &MeerkatMachineState,
+                run_id: &RunId,
+            ) -> bool {
+                !state.scoped_context_required
+                    || state.scoped_context_binding.is_some()
+                    || state.scoped_context_generation != 0
+                    || !state
+                        .input_run_associations
+                        .iter()
+                        .any(|(input_id, associated)| {
+                            associated == run_id
+                                && state.input_authority_bindings.contains_key(input_id)
+                        })
             }
 
             fn ordered_queued_lane_inputs(

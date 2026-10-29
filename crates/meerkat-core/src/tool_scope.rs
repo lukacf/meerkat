@@ -3618,6 +3618,112 @@ mod tests {
         );
     }
 
+    /// A visibility owner whose gated `deploy` a live grant keeps opening
+    /// and the next boundary keeps closing: consecutive reads disagree.
+    struct GrantFlippingOwner {
+        reads: std::sync::atomic::AtomicUsize,
+        open_on_next_read: std::sync::atomic::AtomicBool,
+    }
+
+    impl ToolVisibilityOwner for GrantFlippingOwner {
+        fn visibility_state(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let open = self
+                .open_on_next_read
+                .fetch_xor(true, std::sync::atomic::Ordering::SeqCst);
+            let deploy = BTreeSet::from([ToolName::from("deploy")]);
+            Ok(SessionToolVisibilityState {
+                tool_grant_open_names: if open {
+                    deploy.clone()
+                } else {
+                    BTreeSet::new()
+                },
+                tool_grant_gated_names: deploy,
+                ..SessionToolVisibilityState::default()
+            })
+        }
+
+        fn replace_visibility_state(
+            &self,
+            _visibility_state: SessionToolVisibilityState,
+        ) -> Result<(), ToolScopeApplyError> {
+            Ok(())
+        }
+
+        fn stage_persistent_filter(
+            &self,
+            _filter: ToolFilter,
+            _witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
+        ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+            Err(ToolScopeStageError::Owner {
+                message: "grant flipping fixture stages nothing".to_string(),
+            })
+        }
+
+        fn stage_requested_deferred_names(
+            &self,
+            _names: BTreeSet<ToolName>,
+        ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+            Err(ToolScopeStageError::Owner {
+                message: "grant flipping fixture stages nothing".to_string(),
+            })
+        }
+
+        fn request_deferred_tools(
+            &self,
+            _authorities: Vec<DeferredToolLoadAuthority>,
+        ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+            Err(ToolScopeStageError::Owner {
+                message: "grant flipping fixture stages nothing".to_string(),
+            })
+        }
+
+        fn boundary_applied(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
+            self.visibility_state()
+        }
+    }
+
+    /// The closed-gate view a parent's snapshot for an inheriting child uses
+    /// comes from one read of the visibility state, so a grant that opens or
+    /// closes a gated name between two reads can never leak it into the view.
+    #[test]
+    fn the_closed_gate_view_reads_the_visibility_state_once() {
+        let owner = Arc::new(GrantFlippingOwner {
+            reads: std::sync::atomic::AtomicUsize::new(0),
+            open_on_next_read: std::sync::atomic::AtomicBool::new(true),
+        });
+        let scope = ToolScope::new_with_visibility_owner(
+            tools(&["read_file", "deploy"]),
+            HashSet::new(),
+            HashSet::new(),
+            generated_visibility_owner_from(Arc::clone(&owner)),
+        )
+        .expect("the fixture accepts the initial catalogs");
+
+        for open_first in [true, false] {
+            owner.reads.store(0, std::sync::atomic::Ordering::SeqCst);
+            owner
+                .open_on_next_read
+                .store(open_first, std::sync::atomic::Ordering::SeqCst);
+            let names: Vec<String> = scope
+                .visible_tools_with_grant_gate_closed_result()
+                .expect("the view reads")
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect();
+            assert_eq!(
+                names,
+                ["read_file"],
+                "the gated name stays out of the view (open on the first read: {open_first})"
+            );
+            assert_eq!(
+                owner.reads.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "one read of the visibility state (open on the first read: {open_first})"
+            );
+        }
+    }
+
     #[cfg(feature = "workspace-tests")]
     #[test]
     fn stage_rejects_unknown_tools() {

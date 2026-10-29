@@ -912,6 +912,60 @@ async fn an_unreadable_audit_row_is_reported_and_the_rest_of_the_page_served() {
     }
 }
 
+/// Settling arms the deadline driver only for a grant still live at the
+/// reading: a revoked grant whose deadline lies ahead arms nothing, and a
+/// live grant arms its own deadline.
+#[tokio::test]
+async fn settling_arms_no_deadline_for_a_revoked_grant() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let machine = durable.machine(&clock);
+        let session_id = SessionId::new();
+        let subject = ToolGrantSubject::session(session_id.clone());
+        // Granted and revoked while no runtime serves the session, so nothing
+        // is armed yet.
+        let revoked = machine
+            .grant_tool(shell_grant(&session_id, Duration::from_secs(600)))
+            .await
+            .unwrap();
+        machine
+            .revoke_tool_grant(&revoked.record.grant_id, ToolGrantRevocation::default())
+            .await
+            .unwrap();
+        let _served = serve(&machine, &session_id).await;
+        assert_eq!(
+            machine.tool_grant_deadlines().armed_deadline(&session_id),
+            None,
+            "{backend:?}"
+        );
+
+        let listed = machine.list_tool_grants(&subject).await.unwrap();
+        assert_eq!(
+            listed.grants[0].status,
+            ToolGrantStatus::Revoked,
+            "{backend:?}"
+        );
+        assert_eq!(
+            machine.tool_grant_deadlines().armed_deadline(&session_id),
+            None,
+            "{backend:?}: a revoked grant arms no deadline, though its deadline lies ahead"
+        );
+
+        let live = machine
+            .grant_tool(shell_grant(&session_id, Duration::from_secs(300)))
+            .await
+            .unwrap();
+        machine.tool_grant_deadlines().disarm(&session_id);
+        machine.list_tool_grants(&subject).await.unwrap();
+        assert_eq!(
+            machine.tool_grant_deadlines().armed_deadline(&session_id),
+            Some(live.expires_at_ms),
+            "{backend:?}: a live grant arms its own deadline"
+        );
+    }
+}
+
 #[tokio::test]
 async fn grant_store_failure_closes_the_gate() {
     let durable = Durable::new(Backend::Memory);

@@ -297,12 +297,25 @@ pub struct WireToolGrantAuditRow {
     pub event: WireToolGrantAuditEvent,
 }
 
+/// An audit row of the page the server cannot read (written by a newer
+/// version, or damaged): its place in the subject's log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireUnreadableToolGrantAuditRow {
+    pub sequence: u64,
+    pub detail: String,
+}
+
 /// `tool_grants/audit` result. `next_sequence` is the `after_sequence` of
 /// the next page while more rows may follow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ToolGrantAuditResult {
     pub rows: Vec<WireToolGrantAuditRow>,
+    /// Rows of the page the server cannot read; the rest of the page is
+    /// served.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<WireUnreadableToolGrantAuditRow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_sequence: Option<u64>,
 }

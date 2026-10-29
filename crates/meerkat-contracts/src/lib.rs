@@ -663,6 +663,7 @@ pub use wire::{
     WireTrustedPeerSpec,
     WireUnreachablePeer,
     WireUnreadableToolGrant,
+    WireUnreadableToolGrantAuditRow,
     WireUsage,
     WireWorkExecutionLifecyclePhase,
     WireWorkGraphFlowExecutionBinding,

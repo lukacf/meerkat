@@ -45,8 +45,8 @@ pub mod service;
 pub mod wire;
 
 pub use audit::{
-    ToolGrantAuditEvent, ToolGrantAuditRecord, ToolGrantAuditRow, ToolGrantExpiryDriver,
-    ToolGrantRefusalKind,
+    ToolGrantAuditEvent, ToolGrantAuditPage, ToolGrantAuditRecord, ToolGrantAuditRow,
+    ToolGrantExpiryDriver, ToolGrantRefusalKind, UnreadableToolGrantAuditRow,
 };
 pub use deadlines::ToolGrantDeadlines;
 pub use gate::RuntimeSessionToolGrants;

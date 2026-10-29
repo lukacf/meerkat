@@ -1327,7 +1327,7 @@ fn tool_grant_results_pin_their_field_names() {
     use meerkat_contracts::{
         ListToolGrantsResult, RevokeToolGrantResult, ToolGrantAuditResult, WireToolGrant,
         WireToolGrantAuditEvent, WireToolGrantAuditRow, WireToolGrantIssuer, WireToolGrantStatus,
-        WireToolGrantSubject, WireToolGrantTarget,
+        WireToolGrantSubject, WireToolGrantTarget, WireUnreadableToolGrantAuditRow,
     };
     let grant = WireToolGrant {
         grant_id: "0b6f9f5e-8f3d-4a51-9a52-3c1f6d1e2a10".to_string(),
@@ -1385,7 +1385,11 @@ fn tool_grant_results_pin_their_field_names() {
                 reason: Some("done".to_string()),
             },
         }],
-        next_sequence: Some(0),
+        unreadable: vec![WireUnreadableToolGrantAuditRow {
+            sequence: 1,
+            detail: "unknown variant `activated`".to_string(),
+        }],
+        next_sequence: Some(1),
     })
     .expect("serialize");
     assert_eq!(
@@ -1401,8 +1405,20 @@ fn tool_grant_results_pin_their_field_names() {
                     "reason": "done",
                 },
             }],
-            "next_sequence": 0,
+            "unreadable": [{"sequence": 1, "detail": "unknown variant `activated`"}],
+            "next_sequence": 1,
         })
+    );
+    let empty = serde_json::to_value(ToolGrantAuditResult {
+        rows: Vec::new(),
+        unreadable: Vec::new(),
+        next_sequence: None,
+    })
+    .expect("serialize");
+    assert_eq!(
+        empty,
+        serde_json::json!({"rows": []}),
+        "an empty unreadable list and no next page are omitted"
     );
 }
 

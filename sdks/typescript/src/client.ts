@@ -2260,7 +2260,8 @@ export class MeerkatClient {
   /**
    * Read a page of the audit log of a session's scoped tool grants, in
    * sequence order. While the result carries `next_sequence`, pass it as the
-   * next page's `afterSequence`.
+   * next page's `afterSequence`. A row the server cannot read is named in
+   * `unreadable`.
    */
   async toolGrantAudit(
     sessionId: string,

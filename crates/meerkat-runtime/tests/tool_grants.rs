@@ -525,6 +525,7 @@ async fn listing_an_unserved_session_settles_due_grants_without_registering_it()
         assert!(
             matches!(
                 audit
+                    .rows
                     .iter()
                     .map(|record| &record.row.event)
                     .collect::<Vec<_>>()
@@ -787,7 +788,8 @@ async fn lifecycle_audit_rows_commit_with_the_row_and_refusals_append() {
             .await
             .unwrap();
         assert_eq!(
-            page.iter()
+            page.rows
+                .iter()
                 .map(|record| record.sequence)
                 .collect::<Vec<_>>(),
             [1, 2],
@@ -858,6 +860,55 @@ async fn an_unreadable_row_admits_nothing_and_blocks_no_readable_grant() {
             ),
             "{backend:?}: {refused:?}"
         );
+    }
+}
+
+/// An audit row this binary cannot read (an event kind a newer binary
+/// wrote) is reported in its page as unreadable, and the rest of the page
+/// is served: the log stays auditable.
+#[tokio::test]
+async fn an_unreadable_audit_row_is_reported_and_the_rest_of_the_page_served() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let machine = durable.machine(&clock);
+        let session_id = SessionId::new();
+        let subject = ToolGrantSubject::session(session_id.clone());
+        durable
+            .open()
+            .append_tool_grant_audit(
+                subject.key().as_str(),
+                &[br#"{"at_ms":1,"event":{"kind":"activated"}}"#.to_vec()],
+            )
+            .await
+            .unwrap();
+        let grant = machine
+            .grant_tool(shell_grant(&session_id, Duration::from_secs(60)))
+            .await
+            .unwrap();
+
+        let page = machine
+            .read_tool_grant_audit(&subject, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 2, "{backend:?}: {page:?}");
+        assert_eq!(page.unreadable.len(), 1, "{backend:?}: {page:?}");
+        assert_eq!(page.unreadable[0].sequence, 0, "{backend:?}");
+        assert_eq!(
+            page.rows.len(),
+            1,
+            "{backend:?}: the rest of the page is served"
+        );
+        assert_eq!(page.rows[0].sequence, 1, "{backend:?}");
+        assert!(
+            matches!(
+                &page.rows[0].row.event,
+                ToolGrantAuditEvent::Granted { grant_id, .. }
+                    if *grant_id == grant.record.grant_id
+            ),
+            "{backend:?}: {page:?}"
+        );
+        assert_eq!(page.last_sequence(), Some(1), "{backend:?}");
     }
 }
 

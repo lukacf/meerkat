@@ -13,7 +13,7 @@ use meerkat_core::types::SessionId;
 
 use super::MeerkatMachine;
 use crate::tool_grant::{
-    RevokedToolGrant, RuntimeSessionToolGrants, StoredToolGrant, ToolGrantAuditRecord,
+    RevokedToolGrant, RuntimeSessionToolGrants, StoredToolGrant, ToolGrantAuditPage,
     ToolGrantClock, ToolGrantDeadlines, ToolGrantExpiryDriver, ToolGrantListing, ToolGrantPolicy,
     ToolGrantRequest, ToolGrantRevocation, ToolGrantService, ToolGrantServiceError,
 };
@@ -97,7 +97,9 @@ impl MeerkatMachine {
         })
     }
 
-    /// The audit rows of `subject`'s grants ([`ToolGrantService::audit`]).
+    /// A page of the audit rows of `subject`'s grants
+    /// ([`ToolGrantService::audit`]): the rows this binary reads, and the
+    /// rows of the page it cannot read.
     ///
     /// # Errors
     /// The service's refusal.
@@ -106,7 +108,7 @@ impl MeerkatMachine {
         subject: &ToolGrantSubject,
         after: Option<u64>,
         limit: usize,
-    ) -> Result<Vec<ToolGrantAuditRecord>, ToolGrantServiceError> {
+    ) -> Result<ToolGrantAuditPage, ToolGrantServiceError> {
         self.tool_grant_service.audit(subject, after, limit).await
     }
 

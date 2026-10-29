@@ -132,6 +132,48 @@ pub struct ToolGrantAuditRecord {
     pub row: ToolGrantAuditRow,
 }
 
+/// An audit row this binary cannot read (written by a newer binary, or
+/// damaged): its place in its subject's log and why it does not decode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableToolGrantAuditRow {
+    pub sequence: u64,
+    pub detail: String,
+}
+
+/// One page of a subject's audit log: the rows this binary reads, and the
+/// rows of the page it cannot read. An unreadable row never hides the rest
+/// of its page.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolGrantAuditPage {
+    pub rows: Vec<ToolGrantAuditRecord>,
+    pub unreadable: Vec<UnreadableToolGrantAuditRow>,
+}
+
+impl ToolGrantAuditPage {
+    /// How many rows of the log the page holds, readable or not.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len() + self.unreadable.len()
+    }
+
+    /// Whether the page holds no row of the log.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty() && self.unreadable.is_empty()
+    }
+
+    /// The last sequence the page holds, readable or not: the cursor of the
+    /// next page.
+    #[must_use]
+    pub fn last_sequence(&self) -> Option<u64> {
+        self.rows
+            .iter()
+            .map(|record| record.sequence)
+            .chain(self.unreadable.iter().map(|row| row.sequence))
+            .max()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {

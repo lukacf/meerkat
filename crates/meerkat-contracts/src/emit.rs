@@ -644,6 +644,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireToolGrant": schema_for!(crate::wire::WireToolGrant),
         "WireUnreadableToolGrant": schema_for!(crate::wire::WireUnreadableToolGrant),
         "WireToolGrantAuditRow": schema_for!(crate::wire::WireToolGrantAuditRow),
+        "WireUnreadableToolGrantAuditRow": schema_for!(crate::wire::WireUnreadableToolGrantAuditRow),
         "GrantToolResult": schema_for!(crate::wire::GrantToolResult),
         "RevokeToolGrantResult": schema_for!(crate::wire::RevokeToolGrantResult),
         "ListToolGrantsResult": schema_for!(crate::wire::ListToolGrantsResult),

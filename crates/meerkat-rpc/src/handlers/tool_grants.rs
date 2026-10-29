@@ -22,6 +22,7 @@ use meerkat_core::types::ToolName;
 use meerkat_runtime::RuntimeStoreError;
 use meerkat_runtime::tool_grant::wire::{
     wire_tool_grant, wire_tool_grant_audit_row, wire_unreadable_tool_grant,
+    wire_unreadable_tool_grant_audit_row,
 };
 use meerkat_runtime::tool_grant::{
     ToolGrantRequest, ToolGrantRevocation, ToolGrantServiceError, ToolGrantStatus, ToolGrantWindow,
@@ -257,8 +258,9 @@ pub async fn handle_list(
 }
 
 /// Handle `tool_grants/audit`: one page of the subject's audit log, in
-/// sequence order. A full page names its last sequence as the next page's
-/// `after_sequence`.
+/// sequence order. A row the server cannot read is reported in the page's
+/// `unreadable`, and the rest of the page is served. A full page names its
+/// last sequence, readable or not, as the next page's `after_sequence`.
 pub async fn handle_audit(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
@@ -294,16 +296,21 @@ pub async fn handle_audit(
         )
         .await
     {
-        Ok(rows) => {
-            let next_sequence = if rows.len() == limit {
-                rows.last().map(|row| row.sequence)
+        Ok(page) => {
+            let next_sequence = if page.len() == limit {
+                page.last_sequence()
             } else {
                 None
             };
             RpcResponse::success(
                 id,
                 ToolGrantAuditResult {
-                    rows: rows.iter().map(wire_tool_grant_audit_row).collect(),
+                    rows: page.rows.iter().map(wire_tool_grant_audit_row).collect(),
+                    unreadable: page
+                        .unreadable
+                        .iter()
+                        .map(wire_unreadable_tool_grant_audit_row)
+                        .collect(),
                     next_sequence,
                 },
             )

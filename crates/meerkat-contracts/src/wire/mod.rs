@@ -332,6 +332,7 @@ pub use tool_grant::{
     WireGrantGatedTools, WireToolGrant, WireToolGrantAuditEvent, WireToolGrantAuditRow,
     WireToolGrantExpiryDriver, WireToolGrantIssuer, WireToolGrantRefusalKind, WireToolGrantStatus,
     WireToolGrantSubject, WireToolGrantTarget, WireUnreadableToolGrant,
+    WireUnreadableToolGrantAuditRow,
 };
 pub use usage::{WireTurnUsage, WireUsage};
 pub use workgraph::{WorkEventsResult, WorkItemsResult};

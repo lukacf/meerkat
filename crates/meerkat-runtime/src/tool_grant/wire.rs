@@ -5,12 +5,13 @@
 use meerkat_contracts::{
     WireToolGrant, WireToolGrantAuditEvent, WireToolGrantAuditRow, WireToolGrantExpiryDriver,
     WireToolGrantIssuer, WireToolGrantRefusalKind, WireToolGrantStatus, WireToolGrantSubject,
-    WireToolGrantTarget, WireUnreadableToolGrant,
+    WireToolGrantTarget, WireUnreadableToolGrant, WireUnreadableToolGrantAuditRow,
 };
 use meerkat_core::tool_grant::{ToolGrantIssuer, ToolGrantSubject, ToolGrantTarget};
 
 use super::audit::{
     ToolGrantAuditEvent, ToolGrantAuditRecord, ToolGrantExpiryDriver, ToolGrantRefusalKind,
+    UnreadableToolGrantAuditRow,
 };
 use super::service::{StoredToolGrant, ToolGrantStatus, UnreadableToolGrant};
 
@@ -101,6 +102,17 @@ pub fn wire_tool_grant_audit_row(record: &ToolGrantAuditRecord) -> WireToolGrant
         sequence: record.sequence,
         at_ms: record.row.at_ms,
         event: wire_tool_grant_audit_event(&record.row.event),
+    }
+}
+
+/// An audit row this binary cannot read.
+#[must_use]
+pub fn wire_unreadable_tool_grant_audit_row(
+    unreadable: &UnreadableToolGrantAuditRow,
+) -> WireUnreadableToolGrantAuditRow {
+    WireUnreadableToolGrantAuditRow {
+        sequence: unreadable.sequence,
+        detail: unreadable.detail.clone(),
     }
 }
 
@@ -249,6 +261,16 @@ mod tests {
                     "call_id": "call-1",
                 },
             })
+        );
+        assert_eq!(
+            serde_json::to_value(wire_unreadable_tool_grant_audit_row(
+                &UnreadableToolGrantAuditRow {
+                    sequence: 4,
+                    detail: "unknown variant".to_string(),
+                }
+            ))
+            .unwrap(),
+            serde_json::json!({"sequence": 4, "detail": "unknown variant"})
         );
     }
 }

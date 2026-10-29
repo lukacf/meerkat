@@ -2692,7 +2692,8 @@ class MeerkatClient:
 
         Rows come in sequence order, after ``after_sequence`` when given.
         Returns ``{"rows": [...]}``, with ``"next_sequence"`` while more rows
-        may follow: pass it as the next page's ``after_sequence``.
+        may follow: pass it as the next page's ``after_sequence``. A row the
+        server cannot read is named in ``"unreadable"``.
         """
         params: dict[str, Any] = {
             "subject": {"kind": "session", "session_id": session_id},

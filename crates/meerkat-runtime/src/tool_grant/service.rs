@@ -23,8 +23,8 @@ use meerkat_core::types::ToolNameSet;
 use serde::{Deserialize, Serialize};
 
 use super::audit::{
-    ToolGrantAuditEvent, ToolGrantAuditRecord, ToolGrantAuditRow, ToolGrantExpiryDriver,
-    ToolGrantRefusalKind,
+    ToolGrantAuditEvent, ToolGrantAuditPage, ToolGrantAuditRecord, ToolGrantAuditRow,
+    ToolGrantExpiryDriver, ToolGrantRefusalKind, UnreadableToolGrantAuditRow,
 };
 use super::dsl::{
     ToolGrantEndReason, ToolGrantLifecycleEffect, ToolGrantLifecycleInput,
@@ -653,31 +653,44 @@ impl ToolGrantService {
 
     /// At most `limit` of `subject`'s audit rows, after `after` when given,
     /// in sequence order. Each due grant of the subject is settled as
-    /// expired first, so the log records its expiry.
+    /// expired first, so the log records its expiry. A row this binary
+    /// cannot read (written by a newer binary, or damaged) is reported in
+    /// the page's `unreadable` and logged, and the rest of the page is
+    /// served.
     ///
     /// # Errors
-    /// Store and clock failures, and an audit row that does not decode.
+    /// Store and clock failures.
     pub async fn audit(
         &self,
         subject: &ToolGrantSubject,
         after: Option<u64>,
         limit: usize,
-    ) -> Result<Vec<ToolGrantAuditRecord>, ToolGrantServiceError> {
+    ) -> Result<ToolGrantAuditPage, ToolGrantServiceError> {
         let key = subject.key();
         self.settle(&key, ToolGrantExpiryDriver::Read).await?;
-        self.store
+        let mut page = ToolGrantAuditPage::default();
+        for (sequence, bytes) in self
+            .store
             .read_tool_grant_audit(key.as_str(), after, limit)
             .await?
-            .into_iter()
-            .map(|(sequence, bytes)| {
-                ToolGrantAuditRow::decode(&bytes)
-                    .map(|row| ToolGrantAuditRecord { sequence, row })
-                    .map_err(|error| ToolGrantServiceError::CorruptRow {
-                        grant_id: format!("{key} audit row {sequence}"),
+        {
+            match ToolGrantAuditRow::decode(&bytes) {
+                Ok(row) => page.rows.push(ToolGrantAuditRecord { sequence, row }),
+                Err(error) => {
+                    tracing::warn!(
+                        subject = %key,
+                        sequence,
+                        %error,
+                        "an unreadable tool grant audit row is reported, not served"
+                    );
+                    page.unreadable.push(UnreadableToolGrantAuditRow {
+                        sequence,
                         detail: error.to_string(),
-                    })
-            })
-            .collect()
+                    });
+                }
+            }
+        }
+        Ok(page)
     }
 
     /// Settle `subject_key`'s due grants as expired, observed by `driver`,

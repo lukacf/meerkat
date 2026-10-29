@@ -1409,6 +1409,26 @@ pub(crate) async fn respawn_carrying_idle_retire_opt_in<T>(
     outcome
 }
 
+/// The spec a respawn's archive-cleanup fallback seats a member again from,
+/// when the respawn retired it and seated nothing: the role, the labels and
+/// the exemption from the mob definition's wiring rules its roster entry
+/// recorded before the respawn. A member exempt from the rules comes back
+/// exempt, so the definition's wiring still never reaches it.
+pub(crate) fn archive_cleanup_respawn_spec(
+    member_id: meerkat_mob::AgentIdentity,
+    role: &meerkat_mob::ProfileName,
+    labels: &BTreeMap<String, String>,
+    definition_wiring: meerkat_mob::DefinitionWiring,
+) -> SpawnMemberSpec {
+    let spec =
+        SpawnMemberSpec::new(role.clone(), member_id).with_definition_wiring(definition_wiring);
+    if labels.is_empty() {
+        spec
+    } else {
+        spec.with_labels(labels.clone())
+    }
+}
+
 /// One incarnation of a mob member: its roster generation and the bridge
 /// session it runs.
 struct MemberIncarnation {

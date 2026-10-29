@@ -458,20 +458,17 @@ pub(crate) async fn reconcile_edges_over_members(
         }
     }
 
-    // A console side chat is a human's branch of a conversation, never a
-    // member of the society: no discovered edge (definition wiring or an
-    // embedder's policy) reaches it. Verified against Meerkat's roster, so
-    // a label alone excludes nothing.
-    let side_chats = crate::side_chat::verified_side_chat_aliases(
-        mob_handle,
-        active_members.iter().map(|member| &member.labels),
-    )
-    .await;
-
+    // A member exempt from the mob definition's wiring rules, as MobMachine
+    // records it (`meerkat_mob::DefinitionWiring::Exempt`), is reached by no
+    // discovered edge, the definition's or an embedder's policy: a Console
+    // side chat is seated exempt, and a respawn keeps the exemption, so it
+    // is never a member of the society. Its explicit edges are its own.
+    //
     // Project to EdgeMemberView for the policy closure — it only needs
     // identity/role/labels/wired_to, not meerkat's private runtime fields.
     let member_views: Vec<EdgeMemberView> = active_members
         .into_iter()
+        .filter(|m| !m.definition_wiring().is_exempt())
         .map(|m| EdgeMemberView {
             agent_identity: alias_of(m.agent_identity.as_str()),
             role: m.role.to_string(),
@@ -482,7 +479,6 @@ pub(crate) async fn reconcile_edges_over_members(
                 .collect(),
             labels: m.labels,
         })
-        .filter(|view| !side_chats.contains(&view.agent_identity))
         .collect();
 
     // Run edge discovery

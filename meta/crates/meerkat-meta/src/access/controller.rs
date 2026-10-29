@@ -1018,6 +1018,13 @@ impl AccessView {
         }
     }
 
+    /// How many links an access decision on `identity` walks: the agent and
+    /// the ancestors the cached attributes name, at most
+    /// [`MAX_LINEAGE_DEPTH`]; 0 for an identity the cache does not know.
+    pub(crate) fn lineage_links(&self, identity: &str) -> usize {
+        self.lineage_for(identity).len()
+    }
+
     /// Resolve the agent's cached attributes followed by its ancestors (the
     /// `spawned_by` chain, through a side chat's `side_chat_of` source).
     /// Bounded ([`MAX_LINEAGE_DEPTH`] links) and cycle-safe. An ancestor

@@ -723,8 +723,9 @@ async fn a_dormant_source_forks_without_waking() -> TestResult {
 /// console owner captures the side chat's lineage from the live roster
 /// through a read's member cut (the side chat, then the source incarnation it
 /// was forked from, with its attributes), and the captured lineage decides
-/// each frame. A grant on the source alone shows the side chat's frames, and
-/// a deny on the source hides them under a grant on every agent.
+/// each frame. A grant on the source alone shows the side chat's frames, a
+/// deny on the source hides them under a grant on every agent, and a grant on
+/// the side chat's own name shows none.
 #[tokio::test]
 async fn a_side_chat_frame_is_decided_along_its_source() -> TestResult {
     use crate::console_aggregator::{
@@ -827,6 +828,13 @@ async fn a_side_chat_frame_is_decided_along_its_source() -> TestResult {
                 agents: vec!["alpha".to_string()],
                 ..AccessRule::default()
             },
+            AccessRule {
+                id: "the-side-chat-name".to_string(),
+                subjects: vec!["name-reader@example.test".to_string()],
+                actions: vec![ACTION_AGENT_VIEW.to_string()],
+                agents: vec!["alpha-side".to_string()],
+                ..AccessRule::default()
+            },
         ],
         ..crate::access::AccessControlConfig::default()
     })?;
@@ -836,6 +844,13 @@ async fn a_side_chat_frame_is_decided_along_its_source() -> TestResult {
             &frame,
         ),
         "a grant on the source shows the side chat's frame"
+    );
+    assert!(
+        !crate::console_aggregator::timeline_frame_visible_to(
+            &controller.view_for_subject(Some("name-reader@example.test")),
+            &frame,
+        ),
+        "a grant on the side chat's own name shows none of its frames"
     );
     assert!(
         !crate::console_aggregator::timeline_frame_visible_to(
@@ -850,10 +865,12 @@ async fn a_side_chat_frame_is_decided_along_its_source() -> TestResult {
 /// A side chat's fork facts never change for its incarnation, so the console
 /// reads them from Meerkat's roster once and keeps them: one identity read
 /// that records two side chats reads them once, a later read and a side
-/// chat's stream events read them no more.
+/// chat's stream events read them no more. The aggregator runs no session
+/// history backfills, so nothing else reads while the reads are counted (its
+/// registration's identity refresh and the identity read share one lock).
 #[tokio::test]
 async fn one_console_read_reads_the_fork_facts_once() -> TestResult {
-    use crate::console_aggregator::MetaConsoleAggregator;
+    use crate::console_aggregator::{ConsoleAggregatorOptions, MetaConsoleAggregator};
 
     let (_temp_dir, runtime) =
         persistent_console_runtime("console-side-chat-reads", "", "").await?;
@@ -865,7 +882,10 @@ async fn one_console_read_reads_the_fork_facts_once() -> TestResult {
     let reads = || runtime.side_chat_lineages().reads();
     let before = reads();
 
-    let aggregator = MetaConsoleAggregator::in_memory();
+    let aggregator = MetaConsoleAggregator::in_memory_with_options(ConsoleAggregatorOptions {
+        session_history_backfill_enabled: false,
+        ..ConsoleAggregatorOptions::default()
+    });
     aggregator.register_runtime_handles_with_policy(
         "side-chat-reads",
         "",
@@ -1057,8 +1077,10 @@ async fn fork_as(
 
 /// Forking a side chat needs `agent.view` and `agent.send` on its source and
 /// `agent.spawn` on its name, and every decision on the side chat is its
-/// source's: a caller who may only read the source cannot fork it, and grants
-/// on the side chat's own name do not let that caller drive or close it.
+/// source's: a caller who may only read the source, or only send to it,
+/// cannot fork it, nor can one who drives the source without spawn on the
+/// side chat's name, and grants on the side chat's own name do not let a
+/// caller drive or close it.
 #[tokio::test]
 async fn forking_needs_view_and_send_on_the_source_and_the_side_chat_is_decided_as_it() -> TestResult
 {
@@ -1094,7 +1116,46 @@ async fn forking_needs_view_and_send_on_the_source_and_the_side_chat_is_decided_
             &[ACTION_AGENT_SPAWN],
             "alpha-side",
         ),
+        grant(
+            "sender-sends-to-the-source",
+            "sender@example.test",
+            &[ACTION_AGENT_SEND],
+            "alpha",
+        ),
+        grant(
+            "sender-spawns-the-name",
+            "sender@example.test",
+            &[ACTION_AGENT_SPAWN],
+            "alpha-side",
+        ),
+        grant(
+            "nameless-drives-the-source",
+            "nameless@example.test",
+            &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+            "alpha",
+        ),
     ])?;
+
+    for (subject, action, why) in [
+        (
+            "sender@example.test",
+            ACTION_AGENT_VIEW,
+            "send alone on the source does not fork it",
+        ),
+        (
+            "nameless@example.test",
+            ACTION_AGENT_SPAWN,
+            "driving the source does not fork it without spawn on the side chat's name",
+        ),
+    ] {
+        let refused = fork_as(&runtime, &controller, subject, "alpha", "alpha-side").await;
+        assert_eq!(
+            refused["error"]["code"],
+            json!(ACCESS_DENIED_RPC_CODE),
+            "{subject}: {refused:#?}"
+        );
+        assert_eq!(refused["error"]["data"]["action"], json!(action), "{why}");
+    }
 
     let refused = fork_as(
         &runtime,
@@ -1556,6 +1617,618 @@ async fn a_namespaced_console_names_a_side_chat_source_in_its_namespace() -> Tes
         listed("broad-reader@example.test").await,
         ["b/gamma"],
         "a deny on the prefixed source hides its side chat"
+    );
+    Ok(())
+}
+
+/// A side chat is closed and forked again, never respawned or reset: a
+/// successor would be no fork of its agent, so it would be decided as itself
+/// and wired by the definition. `meta/respawn`, `meta/respawn_member` and the
+/// live fallback of `meta/reset` refuse it typed and leave it as it was, and
+/// its sidebar row offers no respawn.
+#[tokio::test]
+async fn a_side_chat_is_never_respawned_or_reset() -> TestResult {
+    let (_temp_dir, runtime) =
+        persistent_console_runtime("console-side-chat-restart", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let forked = fork_when_idle(&runtime, "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+    let session = bridge_session(&runtime, "alpha-side").await;
+    assert!(session.is_some(), "the side chat has a session");
+
+    for (method, params, operation) in [
+        (
+            "meta/respawn",
+            json!({ "identity": "alpha-side" }),
+            "respawn",
+        ),
+        (
+            "meta/respawn_member",
+            json!({ "member_id": "alpha-side" }),
+            "respawn",
+        ),
+        ("meta/reset", json!({ "identity": "alpha-side" }), "reset"),
+    ] {
+        let refused = call(&runtime, method, params).await;
+        assert_eq!(
+            refused["error"]["code"],
+            json!(crate::side_chat::SIDE_CHAT_RESTART_REFUSED_CODE),
+            "{method}: {refused:#?}"
+        );
+        assert_eq!(
+            refused["error"]["data"],
+            json!({
+                "kind": "side_chat_restart_refused",
+                "operation": operation,
+                "agent_identity": "alpha-side",
+                "source_member_id": "alpha",
+            }),
+            "{method}"
+        );
+    }
+    assert_eq!(
+        bridge_session(&runtime, "alpha-side").await,
+        session,
+        "the side chat keeps its session"
+    );
+    assert!(
+        crate::side_chat::verified_side_chats(&runtime.handle())
+            .await
+            .contains_key("alpha-side"),
+        "the side chat is still a fork of its agent"
+    );
+
+    let (snapshot, _) = Box::pin(build_live_snapshot(
+        &runtime,
+        &[],
+        None,
+        &AllowAllConsoleVisibilityPolicy,
+        &ConsoleSnapshotReadModel::default(),
+        None,
+    ))
+    .await;
+    let response = crate::runtime::handle_console_rest_json_route_with_snapshot_and_access(
+        &RuntimeDecisionState::local_console(
+            crate::ConsolePolicy {
+                require_app_auth: false,
+                ..Default::default()
+            },
+            None,
+        ),
+        &ConsoleRestJsonRequest {
+            method: "GET".to_string(),
+            path: "/console/experience".to_string(),
+            auth: None,
+        },
+        Some(&snapshot),
+        None,
+    );
+    assert_eq!(response.status, 200, "experience: {:?}", response.body);
+    let rows = response.body["agent_sidebar"]["live_snapshot"]["agents"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        sidebar_row(&rows, "alpha-side").ok_or("the side chat's row")?["affordances"]["can_respawn"],
+        json!(false),
+        "a side chat's row offers no respawn"
+    );
+    assert_eq!(
+        sidebar_row(&rows, "alpha").ok_or("the agent's row")?["affordances"]["can_respawn"],
+        json!(true),
+        "its agent's row still does"
+    );
+    Ok(())
+}
+
+/// The definition's wiring never reaches a member exempt from it, a side
+/// chat or not: the definition-wiring reconcile and the topology's declared
+/// edges leave every exempt member out, while a bound worker keeps the edge
+/// the definition declares for it.
+#[tokio::test]
+async fn the_definition_reconcile_and_topology_leave_every_exempt_member_out() -> TestResult {
+    let (_temp_dir, runtime) = persistent_console_runtime(
+        "console-side-chat-reconcile",
+        "orchestrator = \"lead\"",
+        "[wiring]\nauto_wire_orchestrator = true\n",
+    )
+    .await?;
+    seeded_member(&runtime, "lead", "lead", &[]).await?;
+    Box::pin(
+        runtime
+            .handle()
+            .spawn_spec(SpawnMemberSpec::new("worker", AgentIdentity::from("bound"))),
+    )
+    .await?;
+    Box::pin(
+        runtime.handle().spawn_spec(
+            SpawnMemberSpec::new("worker", AgentIdentity::from("exempt"))
+                .with_definition_wiring(meerkat_mob::DefinitionWiring::Exempt),
+        ),
+    )
+    .await?;
+    let forked = fork_when_idle(&runtime, "lead", "lead-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+    let declared_edge =
+        std::collections::BTreeSet::from([("bound".to_string(), "lead".to_string())]);
+
+    let report = crate::unified_runtime::edge_reconcile::reconcile_definition_edges_with_topology(
+        &runtime, None,
+    )
+    .await;
+    let desired = report
+        .desired_edges
+        .iter()
+        .map(|edge| {
+            let (a, b) = edge.endpoints();
+            (a.to_string(), b.to_string())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        desired, declared_edge,
+        "the definition declares the bound worker's edge alone: {report:#?}"
+    );
+    assert_eq!(wired_to(&runtime, "bound").await?, peers(&["lead"]));
+    assert!(
+        wired_to(&runtime, "exempt").await?.is_empty(),
+        "the reconcile wires no exempt member"
+    );
+    assert!(
+        wired_to(&runtime, "lead-side").await?.is_empty(),
+        "nor a side chat"
+    );
+
+    let discovery =
+        crate::unified_runtime::edge_reconcile::DefinitionWiringEdgeDiscovery::from_definition(
+            runtime.handle().definition(),
+        )
+        .ok_or("the definition declares wiring")?;
+    let topology = crate::topology_control::TopologyRuntimeHandle::new(
+        runtime.handle(),
+        Some(Arc::new(discovery) as Arc<dyn crate::unified_runtime::edge_types::EdgeDiscovery>),
+        Arc::new(tokio::sync::RwLock::new(std::collections::BTreeSet::new())),
+        crate::topology_control::TopologyController::default(),
+        None,
+        false,
+    );
+    let topology_snapshot = topology.query().await?;
+    let declared = topology_snapshot
+        .edges
+        .iter()
+        .filter(|edge| edge.declared)
+        .map(|edge| (edge.edge.a.identity.clone(), edge.edge.b.identity.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        declared, declared_edge,
+        "the topology declares no edge of an exempt member"
+    );
+    Ok(())
+}
+
+/// A respawn's archive-cleanup fallback seats the member again from its
+/// roster entry before the respawn, exemption from the definition's wiring
+/// rules included: an exempt member comes back exempt.
+#[test]
+fn a_respawn_fallback_seats_an_exempt_member_exempt_again() {
+    let labels = BTreeMap::from([("team".to_string(), "review".to_string())]);
+    let exempt = crate::mob_handle_runtime::archive_cleanup_respawn_spec(
+        AgentIdentity::from("alpha-side"),
+        &meerkat_mob::ProfileName::from("worker"),
+        &labels,
+        meerkat_mob::DefinitionWiring::Exempt,
+    );
+    assert_eq!(
+        exempt.definition_wiring,
+        meerkat_mob::DefinitionWiring::Exempt
+    );
+    assert_eq!(exempt.labels, Some(labels));
+    assert_eq!(exempt.role_name, meerkat_mob::ProfileName::from("worker"));
+    let bound = crate::mob_handle_runtime::archive_cleanup_respawn_spec(
+        AgentIdentity::from("beta"),
+        &meerkat_mob::ProfileName::from("worker"),
+        &BTreeMap::new(),
+        meerkat_mob::DefinitionWiring::Applies,
+    );
+    assert_eq!(
+        bound.definition_wiring,
+        meerkat_mob::DefinitionWiring::Applies
+    );
+    assert_eq!(bound.labels, None);
+}
+
+/// A Console with no local runtime decides a send to a side chat as its
+/// source, also on the cold access cache of a restart: the send gate records
+/// its aggregator's runtimes before it decides, so a grant on the side chat's
+/// own name sends nothing and a deny on its source still applies.
+#[tokio::test]
+async fn a_console_without_a_local_runtime_decides_a_send_to_a_side_chat_as_its_source()
+-> TestResult {
+    use crate::console_aggregator::{ConsoleAggregatorOptions, MetaConsoleAggregator};
+
+    let state = tempfile::tempdir()?;
+    let runtime =
+        persistent_gateway_runtime_in(state.path(), "console-side-chat-send", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let forked = fork_when_idle(&runtime, "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+    runtime.handle().shutdown().await?;
+    let _ = runtime
+        .stand_down_child_mobs(std::time::Instant::now() + std::time::Duration::from_secs(90))
+        .await;
+    drop(runtime);
+
+    let runtime =
+        persistent_gateway_runtime_in(state.path(), "console-side-chat-send", "", "").await?;
+    let aggregator = MetaConsoleAggregator::in_memory_with_options(ConsoleAggregatorOptions {
+        session_history_backfill_enabled: false,
+        ..ConsoleAggregatorOptions::default()
+    });
+    aggregator.register_runtime_handles_with_policy(
+        "runtime-b",
+        "b",
+        runtime.clone(),
+        None,
+        ConsoleEventStore::new(),
+        Arc::new(AllowAllConsoleVisibilityPolicy),
+    );
+    // A fresh controller: its attribute cache is cold, as after a restart.
+    let controller = enforced(vec![
+        grant(
+            "the-side-chat-name",
+            "name-sender@example.test",
+            &[ACTION_AGENT_SEND],
+            "b/alpha-side",
+        ),
+        grant(
+            "every-agent",
+            "broad-sender@example.test",
+            &[ACTION_AGENT_SEND],
+            "*",
+        ),
+        deny("not-the-source", "broad-sender@example.test", "b/alpha"),
+        grant(
+            "the-source",
+            "source-sender@example.test",
+            &[ACTION_AGENT_SEND],
+            "b/alpha",
+        ),
+    ])?;
+    let decisions = RuntimeDecisionState::local_console(
+        crate::ConsolePolicy {
+            require_app_auth: false,
+            ..Default::default()
+        },
+        None,
+    );
+    assert!(
+        matches!(
+            send_gate_without_runtime(
+                &decisions,
+                &aggregator,
+                &controller,
+                "name-sender@example.test",
+                "b/alpha-side",
+            )
+            .await,
+            Err(ConsoleSendGateRefusal::AccessDenied)
+        ),
+        "a grant on the side chat's own name sends nothing"
+    );
+    assert!(
+        matches!(
+            send_gate_without_runtime(
+                &decisions,
+                &aggregator,
+                &controller,
+                "broad-sender@example.test",
+                "b/alpha-side",
+            )
+            .await,
+            Err(ConsoleSendGateRefusal::AccessDenied)
+        ),
+        "a deny on the source refuses a send to its side chat"
+    );
+    assert!(
+        send_gate_without_runtime(
+            &decisions,
+            &aggregator,
+            &controller,
+            "source-sender@example.test",
+            "b/alpha-side",
+        )
+        .await
+        .is_ok(),
+        "a grant on the source sends to its side chat"
+    );
+    Ok(())
+}
+
+/// The `/console/send` gate of a Console with no local runtime, for
+/// `subject` sending to `identity`.
+async fn send_gate_without_runtime(
+    decisions: &RuntimeDecisionState,
+    aggregator: &crate::console_aggregator::MetaConsoleAggregator,
+    controller: &AccessController,
+    subject: &str,
+    identity: &str,
+) -> Result<(), ConsoleSendGateRefusal> {
+    let view = controller.view_for_subject(Some(subject));
+    console_send_gate(
+        decisions,
+        None,
+        Some(aggregator),
+        Some(controller),
+        Some(&view),
+        identity,
+    )
+    .await
+}
+
+/// A source whose lineage already fills the access rules' walk (the agent
+/// and seven ancestors) is refused for a fork: its side chat's lineage would
+/// go one link past the walk, and no one but an admin could open it. A source
+/// one link shorter forks.
+#[test]
+fn a_source_whose_lineage_fills_the_walk_is_refused_for_a_fork() -> TestResult {
+    let controller = enforced(vec![grant(
+        "drives-every-agent",
+        "driver@example.test",
+        &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND, ACTION_AGENT_SPAWN],
+        "*",
+    )])?;
+    // `a0` was spawned by `a1`, and so on up to `a7`, which no agent spawned.
+    for depth in 0..8 {
+        let mut labels = BTreeMap::new();
+        if depth < 7 {
+            labels.insert("spawned_by".to_string(), format!("a{}", depth + 1));
+        }
+        controller.record_agent_attributes(AgentResourceAttributes {
+            identity: format!("a{depth}"),
+            agent_id: Some(format!("a{depth}")),
+            role: Some("worker".to_string()),
+            labels,
+        });
+    }
+    let view = controller.view_for_subject(Some("driver@example.test"));
+    assert!(
+        view.allows_agent(ACTION_AGENT_SEND, "a0"),
+        "the deepest agent is still decided"
+    );
+    let refused = side_chat_source_access_violation(Some(&view), "a0")
+        .ok_or("a source whose lineage fills the walk is refused")?;
+    assert_eq!(refused.code, ACCESS_DENIED_RPC_CODE);
+    assert_eq!(
+        refused.data,
+        Some(json!({
+            "kind": "access_denied",
+            "action": ACTION_AGENT_SPAWN,
+            "resource": "a0",
+            "reason": "lineage_too_deep",
+        }))
+    );
+    assert!(
+        side_chat_source_access_violation(Some(&view), "a1").is_none(),
+        "a side chat of a source with six ancestors fits the walk"
+    );
+    Ok(())
+}
+
+/// A console visibility policy that hides one member, by its member alias.
+struct HideMember(&'static str);
+
+impl crate::console_aggregator::ConsoleVisibilityPolicy for HideMember {
+    fn member_visible(&self, member: &ConsoleMember) -> bool {
+        member.agent_identity != self.0
+    }
+
+    fn identity_visible(&self, record: &ConsoleIdentityRecord) -> bool {
+        record.runtime_member_id != self.0 && record.identity != self.0
+    }
+}
+
+/// A console RPC call under `policy`, with no access rules.
+async fn call_with_policy(
+    runtime: &MobRuntime,
+    policy: &dyn crate::console_aggregator::ConsoleVisibilityPolicy,
+    method: &str,
+    params: Value,
+) -> Value {
+    Box::pin(handle_console_runtime_rpc_with_visibility(
+        runtime,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        policy,
+        request(method, params),
+        true,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &crate::http_console::ConsoleSendGovernance::default(),
+        &crate::topology_control::TopologyApplyScope::Anonymous,
+    ))
+    .await
+}
+
+/// A fork reads its source's conversation, so a source the console's
+/// visibility policy hides is no source the console may fork:
+/// `meta/fork_member` and `meta/fork_helper` answer it as an identity the
+/// console does not show, before anything is read or seated, as `meta/reset`
+/// and `meta/respawn` answer it.
+#[tokio::test]
+async fn a_fork_of_a_source_the_console_hides_is_refused() -> TestResult {
+    let (_temp_dir, runtime) =
+        persistent_console_runtime("console-side-chat-hidden", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let hidden = HideMember("alpha");
+    for (method, params, child) in [
+        (
+            "meta/fork_member",
+            json!({ "source_member_id": "alpha", "agent_identity": "alpha-side" }),
+            "alpha-side",
+        ),
+        (
+            "meta/fork_helper",
+            json!({
+                "source_member_id": "alpha",
+                "agent_identity": "alpha-helper",
+                "task": "Summarize the conversation.",
+                "result_label": "summary",
+                "max_text_bytes": 1024,
+            }),
+            "alpha-helper",
+        ),
+    ] {
+        let refused = call_with_policy(&runtime, &hidden, method, params).await;
+        assert_eq!(
+            refused["error"]["code"],
+            json!(-32001),
+            "{method}: {refused:#?}"
+        );
+        assert_eq!(
+            refused["error"]["data"]["kind"],
+            json!("identity_hidden_by_policy"),
+            "{method}"
+        );
+        assert!(
+            runtime
+                .handle()
+                .get_member(&AgentIdentity::from(child))
+                .await?
+                .is_none(),
+            "{method} seated nothing"
+        );
+    }
+    let forked = fork_when_idle(&runtime, "alpha", "alpha-side").await;
+    assert!(
+        forked["error"].is_null(),
+        "a source the console shows forks: {forked:#?}"
+    );
+    Ok(())
+}
+
+/// A deny that matches a side chat itself refuses it whatever its source
+/// grants: only an allow on the side chat's own link grants nothing.
+#[tokio::test]
+async fn a_deny_on_a_side_chat_itself_refuses_it() -> TestResult {
+    let (_temp_dir, runtime) =
+        persistent_console_runtime("console-side-chat-own-deny", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let forked = fork_when_idle(&runtime, "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+    let controller = enforced(vec![
+        grant(
+            "the-source",
+            "reader@example.test",
+            &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+            "alpha",
+        ),
+        deny("not-the-side-chat", "reader@example.test", "alpha-side"),
+    ])?;
+    prime_access_cache_from_runtime(&runtime, &controller).await;
+    let reader = controller.view_for_subject(Some("reader@example.test"));
+    assert!(reader.allows_agent(ACTION_AGENT_VIEW, "alpha"));
+    for action in [ACTION_AGENT_VIEW, ACTION_AGENT_SEND] {
+        assert!(
+            !reader.allows_agent(action, "alpha-side"),
+            "a deny on the side chat refuses it: {action}"
+        );
+    }
+    let side_events = event_attributes(&runtime, "alpha-side").await?;
+    assert!(
+        !reader
+            .decide_agent_with_attributes(ACTION_AGENT_VIEW, &side_events)
+            .is_allow(),
+        "a deny on the side chat hides its stream events"
+    );
+    Ok(())
+}
+
+/// A member list call reads no side chat fork facts of its own: the route's
+/// access priming lists the roster and keeps each side chat's lineage, and
+/// the call's rows take them from there. A grant on the source lists its side
+/// chats.
+#[tokio::test]
+async fn a_member_list_call_reads_no_fork_facts_of_its_own() -> TestResult {
+    let (_temp_dir, runtime) =
+        persistent_console_runtime("console-side-chat-list-reads", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    for side_chat in ["alpha-side", "alpha-draft"] {
+        let forked = fork_when_idle(&runtime, "alpha", side_chat).await;
+        assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+    }
+    let controller = enforced(vec![grant(
+        "the-source",
+        "reader@example.test",
+        &[ACTION_AGENT_VIEW],
+        "alpha",
+    )])?;
+    let view = controller.view_for_subject(Some("reader@example.test"));
+    let reads = || runtime.side_chat_lineages().reads();
+    let before = reads();
+    let listed = Box::pin(handle_console_runtime_rpc_with_visibility(
+        &runtime,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &AllowAllConsoleVisibilityPolicy,
+        request("meta/list_members", json!({})),
+        true,
+        false,
+        Some("reader@example.test"),
+        Some(&controller),
+        Some(&view),
+        None,
+        None,
+        None,
+        None,
+        None,
+        &crate::http_console::ConsoleSendGovernance::default(),
+        &crate::topology_control::TopologyApplyScope::Anonymous,
+    ))
+    .await;
+    assert!(
+        listed["error"].is_null(),
+        "the list call answers: {listed:#?}"
+    );
+    let mut names = listed["result"]
+        .as_array()
+        .or_else(|| listed["result"]["members"].as_array())
+        .ok_or("the list call's rows")?
+        .iter()
+        .filter_map(|row| {
+            row.get("agent_identity")
+                .or_else(|| row.get("member_id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(
+        names,
+        ["alpha", "alpha-draft", "alpha-side"],
+        "a grant on the source lists its side chats"
+    );
+    assert_eq!(
+        reads() - before,
+        0,
+        "the list call takes the side chats' lineages from its access priming"
     );
     Ok(())
 }

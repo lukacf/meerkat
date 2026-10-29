@@ -2806,6 +2806,12 @@ fn project_members(
             labels: member.labels.clone(),
             affordances: None,
         });
+        // A member exempt from the mob definition's wiring rules (a Console
+        // side chat is) is no input to the declared edges: it holds only its
+        // explicit ones.
+        if member.definition_wiring().is_exempt() {
+            continue;
+        }
         views.push(EdgeMemberView {
             agent_identity: identity,
             role: member.role.to_string(),

@@ -1530,11 +1530,12 @@ pub(super) async fn handle_respawn_member(
                         if member_after_cleanup.is_none()
                             && let Some(entry) = entry_before_respawn
                         {
-                            let mut spec =
-                                SpawnMemberSpec::new(entry.role.clone(), identity.clone());
-                            if !entry.labels.is_empty() {
-                                spec = spec.with_labels(entry.labels.clone());
-                            }
+                            let spec = crate::mob_handle_runtime::archive_cleanup_respawn_spec(
+                                identity.clone(),
+                                &entry.role,
+                                &entry.labels,
+                                entry.definition_wiring,
+                            );
                             if let Err(ensure_err) = handle.ensure_member(spec).await {
                                 return JsonRpcResponse {
                                     jsonrpc: JSONRPC_VERSION.to_string(),

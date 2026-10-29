@@ -7,23 +7,31 @@
 //! - takes its source's role, profile and model overrides and runtime mode,
 //!   and (through the durable fork) its application labels, context and tool
 //!   overlay, so it runs with the source's tools;
-//! - has exactly its source's audience: every access decision on a side
-//!   chat is its source's. A rule that matches the source (by identity, role
-//!   or labels) or the source's own lineage covers its side chats for every
+//! - has exactly its source's audience: every agent check on a side chat is
+//!   its source's. A rule that matches the source (by identity, role or
+//!   labels) or the source's own lineage covers its side chats for every
 //!   action, a deny on any of them hides them too, and a grant that matches
 //!   only the side chat itself (its name, role or labels) grants nothing.
-//!   Forking one needs `agent.view` and `agent.send` on the source, and
-//!   `agent.spawn` on the side chat's name;
-//! - is kept until the human closes it (`meta/retire_member`): the fork sets
-//!   an explicit keep-until-retired idle override, so no idle sweep retires
-//!   it. The runtime may still unload it while it is idle; that keeps the
-//!   member;
+//!   Forking one needs `agent.view` and `agent.send` on the source and
+//!   `agent.spawn` on the side chat's name, and is refused for a source the
+//!   console's visibility policy hides and for a source whose lineage
+//!   already fills the access rules' walk (the side chat's would not fit);
+//! - is kept until the human closes it (`meta/retire_member`), which, as
+//!   every agent check on it, needs `agent.retire` on its source: the fork
+//!   sets an explicit keep-until-retired idle override, so a side chat never
+//!   idle-retires. The runtime may still unload it while it is idle; that
+//!   keeps the member;
+//! - is never respawned or reset ([`side_chat_restart_refusal`]): Meerkat
+//!   records a fork source only for the fork itself, so a successor would
+//!   be no side chat of its source. The human closes it and forks the source
+//!   again;
 //! - is never wired. It has no peer edge, so no other agent can address it
 //!   and none lists it as a peer. The fork seats it exempt from the mob
 //!   definition's wiring rules (`meerkat_mob::DefinitionWiring::Exempt`):
 //!   they wire it to no member when it is seated, and no member seated,
 //!   spawned or rotated later to it, whatever the source's role. Meta's
-//!   definition-wiring reconcile leaves side chats out too;
+//!   definition-wiring reconcile and topology leave every exempt member out
+//!   too;
 //! - names its source in the [`SIDE_CHAT_OF_LABEL`] roster label. The label
 //!   counts only where Meerkat's roster agrees ([`verified_side_chat_source`]):
 //!   the member's typed `fork_source` names that same source and no member's
@@ -42,7 +50,7 @@
 //! inactive, and the child refuses its first turn naming it, typed, until a
 //! host activates it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use meerkat_core::types::{InstructionKey, InstructionNamespace, Message, SessionId};
 use meerkat_core::{
@@ -388,19 +396,6 @@ pub(crate) async fn verified_side_chat_lineage(
     verified_side_chats(handle).await.remove(&alias)
 }
 
-/// The aliases of the verified side chats among `members` (public aliases
-/// of `handle`'s roster rows). Reads the roster's fork facts only when a row
-/// carries the marker.
-pub(crate) async fn verified_side_chat_aliases<'a>(
-    handle: &meerkat_mob::MobHandle,
-    member_labels: impl IntoIterator<Item = &'a BTreeMap<String, String>>,
-) -> BTreeSet<String> {
-    if !any_side_chat_marker(member_labels) {
-        return BTreeSet::new();
-    }
-    verified_side_chats(handle).await.into_keys().collect()
-}
-
 /// Write a verified side chat's lineage into its console labels: its
 /// source's console identity ([`SIDE_CHAT_OF_LABEL`]) and the source session
 /// it was forked from ([`SIDE_CHAT_OF_SESSION_LABEL`]). Applied after the
@@ -453,6 +448,28 @@ pub enum SideChatError {
         member_id: meerkat_mob::AgentIdentity,
         peers: Vec<String>,
     },
+    /// The fork read another session of the source than the one its checks
+    /// read: the source moved to another incarnation in between (a reset or
+    /// a respawn ran), so the child is no fork the checks covered. The caller
+    /// retires it.
+    SourceChanged {
+        member_alias: String,
+        member_id: meerkat_mob::AgentIdentity,
+        source_member_id: String,
+    },
+}
+
+impl SideChatError {
+    /// The seated child the caller retires again: a side chat seated with
+    /// peer edges, or forked from a session its checks did not read.
+    pub(crate) fn seated_child_to_retire(&self) -> Option<&meerkat_mob::AgentIdentity> {
+        match self {
+            Self::WiredAtSeat { member_id, .. } | Self::SourceChanged { member_id, .. } => {
+                Some(member_id)
+            }
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for SideChatError {
@@ -479,6 +496,15 @@ impl std::fmt::Display for SideChatError {
                 f,
                 "the side chat {member_alias} was seated with peer edges ({}) and is retired",
                 peers.join(", ")
+            ),
+            Self::SourceChanged {
+                member_alias,
+                source_member_id,
+                ..
+            } => write!(
+                f,
+                "the fork source {source_member_id} moved to another session while the side \
+                 chat {member_alias} was forked; the side chat is retired, fork again"
             ),
         }
     }
@@ -551,6 +577,11 @@ pub struct SideChatFork {
 /// records another binding or none (`member_auth_binding_uncarried`). The
 /// durable fork refuses a source that is running (cause `running`), typed. A
 /// dormant source forks from its stored session without waking.
+///
+/// The fork is bound to the source session those checks read: when the
+/// seated child records another one as its fork source (the source was
+/// reset or respawned in between), the child is answered
+/// [`SideChatError::SourceChanged`], for the caller to retire.
 pub async fn fork_side_chat(
     mob_runtime: &MobRuntime,
     identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
@@ -689,6 +720,22 @@ pub async fn fork_side_chat(
             None
         }
     };
+    // The checks above read one session of the source; the side chat must
+    // be a fork of that one. A reset or a respawn of the source between the
+    // read and the fork seats it from another session none of them covered.
+    if forked_another_session(
+        source_session_before_fork.as_ref(),
+        child
+            .as_ref()
+            .and_then(|child| child.fork_source.as_ref())
+            .map(|fork_source| &fork_source.source_session_id),
+    ) {
+        return Err(SideChatError::SourceChanged {
+            member_alias: outcome.member_alias,
+            member_id: child_id,
+            source_member_id: source_alias,
+        });
+    }
     if let Some(child) = child.as_ref()
         && !child.wired_to.is_empty()
     {
@@ -722,6 +769,14 @@ pub async fn fork_side_chat(
     })
 }
 
+/// Whether a seated side chat was forked from another session of its source
+/// (`forked_from`, its durable fork source) than `read`, the session the
+/// fork's checks read. A side unknown on either side is no evidence of a
+/// change.
+fn forked_another_session(read: Option<&SessionId>, forked_from: Option<&SessionId>) -> bool {
+    matches!((read, forked_from), (Some(read), Some(forked_from)) if read != forked_from)
+}
+
 /// The typed refusal of a source with no session to fork: Meerkat's own
 /// `ForkSourceUnavailable` with cause `no_session`, so the console answers it
 /// as it answers that refusal.
@@ -736,15 +791,76 @@ fn source_without_session(source_member_id: &str) -> SideChatError {
 
 /// JSON-RPC code of a typed `meta/fork_member` refusal. `data.kind` is
 /// `fork_source_unavailable` (with `source_member_id` and `cause`: `running`,
-/// `no_session`, `remote_read_unavailable` or `authority_unavailable`), and
-/// nothing was forked; or `unwired_seat_unavailable` (`wiring.rule`
-/// `seated_with_peers`), a child seated with peer edges after all, whose
-/// `retired` says whether it was retired again.
+/// `no_session`, `remote_read_unavailable`, or `authority_unavailable` with
+/// the identity authority's refusal in `detail`), and nothing was forked;
+/// `fork_source_changed` (with `agent_identity` and `source_member_id`), a
+/// child forked from another session of the source than the fork's checks
+/// read; or `unwired_seat_unavailable` (`wiring.rule` `seated_with_peers`),
+/// a child seated with peer edges after all. For the last two, `retired`
+/// says whether the child was retired again.
 pub const SIDE_CHAT_FORK_REFUSED_CODE: i64 = -32055;
 
-/// Whether `runtime` can hold a durable fork: its sessions persist, or its
-/// composition did not record whether they do (the fork itself then refuses
-/// typed). A runtime known to persist no sessions never offers side chats.
+/// JSON-RPC code of a refused respawn or reset of a side chat
+/// ([`side_chat_restart_refusal`]): `data.kind` `side_chat_restart_refused`.
+pub const SIDE_CHAT_RESTART_REFUSED_CODE: i64 = -32602;
+
+/// The refusal of `operation` (`respawn` or `reset`) on `member_id`, a
+/// member of `handle`'s mob, when it is a verified side chat
+/// ([`verified_side_chat_source`]). Either would seat a successor no fork
+/// made: Meerkat records a fork source only for the fork itself, so the
+/// successor would no longer be decided as the agent it branched from and
+/// would take the edges the definition declares. A side chat is closed and
+/// forked again instead. A member whose roster entry cannot be read is
+/// refused too, since whether it is a side chat is not known. `None` for
+/// any other member and for one the roster does not hold, which the
+/// operation answers itself.
+pub(crate) async fn side_chat_restart_refusal(
+    handle: &meerkat_mob::MobHandle,
+    member_id: &meerkat_mob::AgentIdentity,
+    operation: &str,
+) -> Option<crate::rpc::JsonRpcError> {
+    let entry = match handle.get_member(member_id).await {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return None,
+        Err(error) => {
+            return Some(crate::rpc::JsonRpcError {
+                code: -32603,
+                message: format!("{operation} failed: the member could not be read: {error}"),
+                data: None,
+            });
+        }
+    };
+    let source = verified_side_chat_source(
+        &entry.labels,
+        entry.spawned_by.as_ref(),
+        entry.fork_source.as_ref(),
+    )?;
+    let alias = crate::member_comms_id::runtime_alias_str(member_id.as_str()).into_owned();
+    let done = if operation == "reset" {
+        "reset"
+    } else {
+        "respawned"
+    };
+    Some(crate::rpc::JsonRpcError {
+        code: SIDE_CHAT_RESTART_REFUSED_CODE,
+        message: format!(
+            "{alias} is a side chat of {source} and cannot be {done}: close it and fork \
+             {source} again"
+        ),
+        data: Some(serde_json::json!({
+            "kind": "side_chat_restart_refused",
+            "operation": operation,
+            "agent_identity": alias,
+            "source_member_id": source,
+        })),
+    })
+}
+
+/// Whether `runtime` can hold a durable fork, and so offers side chats in its
+/// `meta/capabilities`: its sessions persist, or its composition did not
+/// record whether they do (the method is offered then, and the fork itself
+/// refuses typed where the sessions do not persist). A runtime known to
+/// persist no sessions never offers side chats.
 pub(crate) fn runtime_may_fork_durably(runtime: &MobRuntime) -> bool {
     runtime
         .resolved_storage()
@@ -865,6 +981,18 @@ pub(crate) fn fork_member_error(error: &SideChatError) -> crate::rpc::JsonRpcErr
                 "kind": "unwired_seat_unavailable",
                 "agent_identity": member_alias,
                 "wiring": { "rule": "seated_with_peers", "peers": peers },
+            }),
+        ),
+        SideChatError::SourceChanged {
+            member_alias,
+            source_member_id,
+            ..
+        } => fork_refusal(
+            error.to_string(),
+            serde_json::json!({
+                "kind": "fork_source_changed",
+                "agent_identity": member_alias,
+                "source_member_id": source_member_id,
             }),
         ),
         SideChatError::Fork(ForkMemberError::InvalidRequest(message)) => crate::rpc::JsonRpcError {
@@ -1455,6 +1583,48 @@ mod tests {
         assert_eq!(
             data["recovery"],
             serde_json::json!("resume_committed_fork_session")
+        );
+    }
+
+    /// A side chat must be a fork of the source session its checks read: a
+    /// child forked from another session (the source was reset or respawned
+    /// between the read and the fork) is refused typed, and the caller
+    /// retires it; an unknown side is no evidence of a change.
+    #[test]
+    fn a_fork_of_another_source_session_is_refused_for_the_caller_to_retire() {
+        let read = SessionId::new();
+        let other = SessionId::new();
+        assert!(!forked_another_session(Some(&read), Some(&read)));
+        assert!(forked_another_session(Some(&read), Some(&other)));
+        assert!(!forked_another_session(None, Some(&other)));
+        assert!(!forked_another_session(Some(&read), None));
+
+        let changed = SideChatError::SourceChanged {
+            member_alias: "alpha-side".to_string(),
+            member_id: meerkat_mob::AgentIdentity::from("alpha-side"),
+            source_member_id: "alpha".to_string(),
+        };
+        assert_eq!(
+            changed.seated_child_to_retire(),
+            Some(&meerkat_mob::AgentIdentity::from("alpha-side"))
+        );
+        let error = fork_member_error(&changed);
+        assert_eq!(error.code, SIDE_CHAT_FORK_REFUSED_CODE);
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "kind": "fork_source_changed",
+                "agent_identity": "alpha-side",
+                "source_member_id": "alpha",
+            }))
+        );
+        assert_eq!(
+            SideChatError::UnknownSource {
+                source_member_id: "alpha".to_string(),
+            }
+            .seated_child_to_retire(),
+            None,
+            "nothing was seated to retire"
         );
     }
 

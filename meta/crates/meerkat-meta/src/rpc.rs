@@ -7156,13 +7156,13 @@ async fn respawn_rpc_runtime_member_id_with_handle(
                     .is_none()
                     && let Some(entry) = entry_before_respawn
                 {
-                    let mut spec =
-                        meerkat_mob::SpawnMemberSpec::new(entry.role.clone(), member_id.clone());
-                    if !entry.labels.is_empty() {
-                        spec = spec.with_labels(entry.labels.clone());
-                    }
                     handle
-                        .ensure_member(spec)
+                        .ensure_member(crate::mob_handle_runtime::archive_cleanup_respawn_spec(
+                            member_id.clone(),
+                            &entry.role,
+                            &entry.labels,
+                            entry.definition_wiring,
+                        ))
                         .await
                         .map_err(|ensure_err| ensure_err.to_string())?;
                 }

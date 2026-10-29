@@ -1,25 +1,28 @@
 #!/usr/bin/env bash
-# Bounded TLC audit of the machine-owned controller holds: a kept governed
+# Bounded TLC audit of the machine-owned controller holds (a kept governed
 # input that waits, held by the machine, for its host to supply its
-# controller client again.
+# controller client again) and of the destination a resumed run waits for
+# and runs under.
 #
 # usage: input_controller_hold_audit.sh <max-steps> [--mutants] [extra tlc args...]
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then gives the audit two
-# inputs, two runs and one session, adds its three action properties and its
+# inputs, two runs and one session, adds its five action properties and its
 # step bound, and checks them over the whole bounded space. It then reruns the
 # same space once per reachability witness, with that witness's negation as an
 # extra invariant, and requires TLC to report exactly that violation, so the
-# properties are not vacuous. With --mutants it then seeds seven defects into
+# properties are not vacuous. With --mutants it then seeds nine defects into
 # a copy of the generated model (a stage, an apply and a resume that ignore
 # the hold, a settlement and an abandon that keep it, a hold that ignores the
-# input's phase, a release that clears every hold) and requires TLC to refuse
-# each with the property or invariant it breaks. A mutant run uses one worker,
-# so the violation TLC reports is the shallowest one. An anchor this script
-# expects but cannot find fails the run. Each TLC run is held to the canonical
-# lane's per-run cap (`TLC_RUN_CAP_SECS`, default 900 s, see tlc_run_cap.sh);
-# a run that hits it fails closed as TLC INCOMPLETE (exit 3).
+# input's phase, a release that clears every hold, a resume that ignores the
+# destination, a resume that keeps the previous staged run and context) and
+# requires TLC to refuse each with the property or invariant it breaks. A
+# mutant run uses one worker, so the violation TLC reports is the shallowest
+# one. An anchor this script expects but cannot find fails the run. Each TLC
+# run is held to the canonical lane's per-run cap (`TLC_RUN_CAP_SECS`, default
+# 900 s, see tlc_run_cap.sh); a run that hits it fails closed as TLC
+# INCOMPLETE (exit 3).
 set -euo pipefail
 
 usage="usage: input_controller_hold_audit.sh <max-steps> [--mutants] [extra tlc args...]"
@@ -30,8 +33,8 @@ if [[ "${1:-}" == "--mutants" ]]; then
   run_mutants=true
   shift
 fi
-if ! [[ "${max_steps}" =~ ^[0-9]+$ ]] || (( max_steps < 13 )); then
-  echo "error: max-steps must be an integer >= 13 (the longest witness is 13 steps)" >&2
+if ! [[ "${max_steps}" =~ ^[0-9]+$ ]] || (( max_steps < 14 )); then
+  echo "error: max-steps must be an integer >= 14 (the longest witness is 14 steps)" >&2
   exit 2
 fi
 
@@ -69,6 +72,8 @@ write_cfg() {
   AuditHeldWorkNeverAdvances
   AuditHeldRunNeverResumes
   AuditHoldAndReleaseTouchOnlyHolds
+  AuditResumedRunWaitsForDestination
+  AuditResumedRunBindsItsDestination
 INVARIANTS${extra}" "${cfg}"
   replace_exact_line "  CiStateConstraint" "  AuditStateConstraint" "${cfg}"
   printf 'CHECK_DEADLOCK FALSE\n' >> "${cfg}"
@@ -114,7 +119,8 @@ if [[ "${safety_status}" != "0" ]] \
 fi
 
 for witness in HeldWhileRunCurrent ReleasedThenStaged HeldEndsRefused HeldRunWaits \
-  ReleasedRunResumes SettledDropsHold ReleasedRunRequeues; do
+  ReleasedRunResumes SettledDropsHold ReleasedRunRequeues ResumeWaitsForDestination \
+  ResumedUnderItsDestination; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "
   NotAuditWitness${witness}"
@@ -194,18 +200,18 @@ def holds_update(line):
 
   hold_invariant="Invariant input_controller_holds_are_kept_unstaged_governed_inputs is violated"
 
-  # A held queued input stages into the marked run (12 steps): only the
+  # A held queued input stages into the marked run (13 steps): only the
   # property sees it, since the staged input is bound to the marked run.
   mutate stage_ignores_hold "property AuditHeldWorkNeverAdvances is violated" "$@" <<'PY'
 edit_arms(arms("StageForRun", ALL), guard_on_holds, lambda line: "    /\\ TRUE")
 PY
 
-  # The held input bound to the marked run is applied (11 steps).
+  # The held input bound to the marked run is applied (12 steps).
   mutate apply_ignores_hold "property AuditHeldWorkNeverAdvances is violated" "$@" <<'PY'
 edit_arms(arms("MarkApplied", ALL), guard_on_holds, lambda line: "    /\\ TRUE")
 PY
 
-  # The marked run resumes with its input held (12 steps): the held input is
+  # The marked run resumes with its input held (13 steps): the held input is
   # then bound to a run no longer marked, which the generated invariant
   # refuses before the action property is checked.
   mutate resume_ignores_hold "${hold_invariant}" "$@" <<'PY'
@@ -236,13 +242,41 @@ edit_arms(
 )
 PY
 
-  # Two inputs held, one released (12 steps).
+  # Two inputs held, one released (13 steps).
   mutate release_clears_every_hold "property AuditHoldAndReleaseTouchOnlyHolds is violated" "$@" <<'PY'
 edit_arms(
     arms("ReleaseInputController", ALL),
     holds_update,
     lambda line: "    /\\ input_controller_holds' = {}",
 )
+PY
+
+  # The marked run resumes while the document requires a destination that
+  # was never bound (13 steps): no invariant reads the destination, so only
+  # the property sees it.
+  mutate resume_ignores_destination "property AuditResumedRunWaitsForDestination is violated" "$@" <<'PY'
+edit_arms(
+    ["ResumeRunRunning"],
+    lambda line: line.startswith("    /\\ ") and "scoped_context_required" in line and "'" not in line,
+    lambda line: "    /\\ TRUE",
+)
+PY
+
+  # The resume keeps the previous staged run, run context and batch, as
+  # ResumeRun did before it bound them (12 steps): the resumed run is then
+  # not the staged run, so none of its destination-scoped operations could
+  # run.
+  mutate resume_keeps_no_destination "property AuditResumedRunBindsItsDestination is violated" "$@" <<'PY'
+STAGED = ("run_context_binding", "authority_staged_run", "authority_staged_batch")
+
+def staged_update(line):
+    return any(line.startswith("    /\\ " + field + "' = ") for field in STAGED)
+
+def keep_staged(line):
+    field = line[len("    /\\ "):].split("'", 1)[0]
+    return "    /\\ " + field + "' = " + field
+
+edit_arms(["ResumeRunRunning"], staged_update, keep_staged, per_arm=3)
 PY
 fi
 echo "input controller hold audit passed at model_step_count <= ${max_steps}"

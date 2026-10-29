@@ -729,8 +729,8 @@ async fn a_dormant_source_forks_without_waking() -> TestResult {
 #[tokio::test]
 async fn a_side_chat_frame_is_decided_along_its_source() -> TestResult {
     use crate::console_aggregator::{
-        ConsoleFrameSource, ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleLogStore as _,
-        MetaConsoleAggregator, NewConsoleFrame,
+        ConsoleFrameSource, ConsoleFrameSourceKind, ConsoleFrameStatus, MetaConsoleAggregator,
+        NewConsoleFrame,
     };
 
     let (_temp_dir, runtime) =
@@ -1728,8 +1728,6 @@ async fn a_side_chat_is_never_respawned_or_reset() -> TestResult {
 /// meerkat's `mob_respawn` for the side chat's agent.
 #[tokio::test]
 async fn an_agent_mob_respawn_tool_never_respawns_a_side_chat() -> TestResult {
-    use meerkat_core::AgentToolDispatcher as _;
-
     /// Stands in for meerkat's mob tools: records the member each call
     /// names and answers it done.
     #[derive(Default)]

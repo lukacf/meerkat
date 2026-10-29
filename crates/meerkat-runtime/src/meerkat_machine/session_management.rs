@@ -6525,6 +6525,56 @@ impl MeerkatMachine {
             && !entry.is_predecessor_settlement()
     }
 
+    /// Unregister `registration` through the canonical unregister saga,
+    /// awaited to terminal completion, when, and only when, the composition
+    /// that placed it ended without releasing it: the registration is still
+    /// current and durability-ready, no executor is attached to it, and its
+    /// composition endpoint's transport is closed. Nothing can deliver for
+    /// such a registration or release it any more, so the composition that
+    /// replaces the ended one in this process releases it.
+    ///
+    /// `Ok(false)`, with nothing changed, for a registration that is no
+    /// longer current, has no composition endpoint, keeps an endpoint that is
+    /// open or of unknown liveness (that composition keeps it, and a routed
+    /// input from another one stays refused), still has an executor
+    /// attached, needs a durability reload (its reload discards it), or is a
+    /// predecessor settlement's internal registration.
+    ///
+    /// The check and the unregister are two steps: the exact witness keeps a
+    /// same-`SessionId` replacement out of the unregister, and only a
+    /// materialization claim can give the registration an endpoint again.
+    /// Call it where no materialization of the session runs at the same
+    /// time, such as a composition's start before it admits work.
+    pub async fn unregister_registration_of_ended_composition_if_current(
+        &self,
+        registration: &RuntimeSessionRegistrationWitness,
+    ) -> Result<bool, RuntimeDriverError> {
+        if !registration.belongs_to(self) {
+            return Ok(false);
+        }
+        let left_by_an_ended_composition = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(registration.session_id())
+                .is_some_and(|entry| {
+                    entry.epoch_id == registration.epoch_id
+                        && registration.matches_entry(entry)
+                        && entry.require_durability_ready().is_ok()
+                        && !entry.physical_attachment_is_live()
+                        && !entry.is_predecessor_settlement()
+                        && entry
+                            .composition_signal_dispatcher
+                            .as_ref()
+                            .is_some_and(|endpoint| endpoint.transport_is_closed() == Some(true))
+                })
+        };
+        if !left_by_an_ended_composition {
+            return Ok(false);
+        }
+        self.unregister_session_registration_until_terminal_if_current(registration)
+            .await
+    }
+
     /// Fence exact service-actor cleanup after a reload has published an
     /// ownerless cold registration. This never joins runtime teardown; an
     /// attached, draining, or claimed registration returns `CurrentButOwned`;

@@ -34210,8 +34210,19 @@ impl MobActor {
             // is not read and nothing is registered for it here. A member
             // that holds work is planned at the lift, and its wake registers
             // it. A retiring member keeps its cleanup delivery.
+            //
+            // One registration can still be here: the member's last one, left
+            // behind by an actor of this mob that ended abnormally (a crash or
+            // a crash-stop) before the mob was rebuilt in this same process.
+            // It is bound to that ended actor's composition endpoint, whose
+            // transport is closed: nothing can deliver for it or release it
+            // any more, and it refuses every retire routed to it. The start
+            // releases it, so the member is Dormant with nothing registered,
+            // as after a restart. Finding none reads only the runtime's
+            // registration table; no session is read.
             if !retiring && super::boot_plan::domain_member_is_dormant(state, &entry.agent_identity)
             {
+                Self::release_dormant_member_registration_left_behind(&io, &entry).await;
                 continue;
             }
             let Some(session) = entry.bridge_session_id() else {
@@ -34268,6 +34279,56 @@ impl MobActor {
             }
         }
         Ok(())
+    }
+
+    /// Release the runtime registration of Dormant `entry`'s session that an
+    /// ended actor of this mob left behind in this process
+    /// (`MeerkatMachine::unregister_registration_of_ended_composition_if_current`),
+    /// so the start holds nothing for the member, as after a restart. A
+    /// registration whose composition endpoint is open or of unknown
+    /// liveness, or that still has an executor attached, is not the start's
+    /// to release and stays as it is. A release that fails is logged and the
+    /// start goes on, with the registration as it was.
+    #[cfg(feature = "runtime-adapter")]
+    async fn release_dormant_member_registration_left_behind(
+        io: &ResumeOperationBindingIo,
+        entry: &RosterEntry,
+    ) {
+        let Some(session) = entry.bridge_session_id() else {
+            return;
+        };
+        let Some(registration) = io
+            .adapter
+            .current_session_registration_witness(session)
+            .await
+        else {
+            return;
+        };
+        let adapter = Arc::clone(&io.adapter);
+        // The unregister saga is owned by the runtime once admitted, so a
+        // late completion after a cancelled start is harmless.
+        let released = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            adapter
+                .unregister_registration_of_ended_composition_if_current(&registration)
+                .await
+        })
+        .await;
+        match released {
+            Ok(true) => tracing::info!(
+                mob_id = %io.mob_id,
+                member = %entry.agent_identity,
+                session_id = %session,
+                "the start released a dormant member's runtime registration that an ended actor left behind"
+            ),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                mob_id = %io.mob_id,
+                member = %entry.agent_identity,
+                session_id = %session,
+                %error,
+                "the start could not release a dormant member's runtime registration that an ended actor left behind"
+            ),
+        }
     }
 
     /// Restore one member's local cleanup delivery for `session`, the member

@@ -1899,6 +1899,88 @@ fn the_installed_work_owner_forwards_the_policy_mandate_under_the_contributor_ch
     assert_eq!(mandate().expect("current again"), Some(narrowed));
 }
 
+/// A mandate its contributor's narrowing takes past 4 KiB, the former bound
+/// of each review context field, is the work's review material in full: a
+/// contributor whose ceiling names many sessions is stated with every one of
+/// them. A narrowed mandate past the field bound itself is unavailable, never
+/// truncated.
+#[test]
+fn a_contributor_narrowed_mandate_past_four_kib_is_material_and_past_the_bound_unavailable() {
+    use meerkat_core::authorization::{
+        MAX_REVIEW_OPERATION_CONTEXT_BYTES, ReviewOperationContextResolution,
+    };
+    let f = fixture();
+    let source = f.claims.contributing_work[1].clone();
+    let association = InputAuthorityAssociation::new(f.helper_claims()).expect("claims");
+    let configuration = ScopedGrantComposition {
+        grants: Arc::clone(&f.grants),
+        ingress_domain: f.claims.ingress_namespace.ingress.clone(),
+        originals: f.originals.clone(),
+        invocation: ScopedInvocation::from_policy(Arc::new(MandateWork)),
+        operation_owner: Arc::new(ExactOperation(f.helper_operation("setup-report"))),
+        retained_resume: None,
+    }
+    .into_configuration();
+    let policy = GrantBackedWorkPolicy::new(
+        Arc::clone(&f.grants),
+        Arc::clone(&configuration.invocation_owner),
+        Arc::clone(&configuration.operation_owner),
+    );
+    // The contributor is held under a grant whose ceiling names `sessions`
+    // sessions; the work's review mandate is the policy's, narrowed by it.
+    let narrowed_over = |grant: &str, sessions: usize| {
+        let ceiling = ExecutionRestrictions {
+            resource_domains: DomainRestriction::exact(
+                (0..sessions).map(|index| session_of(&format!("helper-{index:05}"))),
+            ),
+            ..ExecutionRestrictions::unrestricted()
+        };
+        f.hold_contributor(&source, vec![f.issue_source_grant(grant, ceiling)]);
+        configuration
+            .invocation_owner
+            .review_mandate(&association, &read_binding(), 100)
+            .expect("the narrowed mandate")
+            .expect("the policy states a mandate")
+    };
+
+    let past_four_kib = narrowed_over("source-leaf", 128);
+    assert!(
+        past_four_kib.starts_with(POLICY_MANDATE) && past_four_kib.len() > 4 * 1024,
+        "the narrowed mandate is past 4 KiB: {} bytes",
+        past_four_kib.len()
+    );
+    let material = policy.review_context(&association, &read_binding(), 100);
+    assert!(
+        matches!(
+            &material,
+            Ok(ReviewOperationContextResolution::Material(context))
+                if context.mandate() == Some(past_four_kib.as_str())
+                    && context.action_account().is_none()
+        ),
+        "a {}-byte narrowed mandate is review material, in full: {material:?}",
+        past_four_kib.len()
+    );
+
+    // Every serialized session is longer than 64 bytes.
+    let past_the_bound = narrowed_over(
+        "source-oversized-leaf",
+        MAX_REVIEW_OPERATION_CONTEXT_BYTES / 64,
+    );
+    assert!(
+        past_the_bound.len() > MAX_REVIEW_OPERATION_CONTEXT_BYTES,
+        "the narrowed mandate is past the field bound: {} bytes",
+        past_the_bound.len()
+    );
+    let unavailable = policy.review_context(&association, &read_binding(), 100);
+    assert!(
+        matches!(
+            &unavailable,
+            Err(meerkat_core::OperationAuthorizationError::Unavailable)
+        ),
+        "a mandate past the field bound is unavailable, never truncated: {unavailable:?}"
+    );
+}
+
 /// The review material states what the contributors' current ceilings
 /// leave of the work: the policy's mandate is followed by the conjunction
 /// of every contributor's ceiling and the earliest of their expiries, so a

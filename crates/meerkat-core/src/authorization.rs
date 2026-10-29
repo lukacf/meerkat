@@ -395,8 +395,13 @@ impl<T> fmt::Debug for ObservedAuthorizationResult<T> {
     }
 }
 
-/// Upper bound, in bytes, for each field of [`ReviewOperationContext`].
-pub const MAX_REVIEW_OPERATION_CONTEXT_BYTES: usize = 4 * 1024;
+/// Upper bound, in bytes, for each field of [`ReviewOperationContext`]. It
+/// leaves room for a composed mandate at realistic sizes: a work's mandate
+/// followed by the bounds its contributing originals narrow it to, or the
+/// listing of every input's own mandate for a multi-input work. A field over
+/// it is refused, never truncated, and its owner answers the material as
+/// unavailable.
+pub const MAX_REVIEW_OPERATION_CONTEXT_BYTES: usize = 64 * 1024;
 
 /// Passive owner material for one reviewed operation: the action account the
 /// operation owner actually selected and the current mandate the admitted-work

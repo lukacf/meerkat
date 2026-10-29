@@ -249,11 +249,12 @@ max_output_tokens = 1024
   its action account and current mandate (the grant that admits it, with its
   bounds and expiry), read once after R1 is ruled out and sent to the R2
   reviewer model or shown in the R3 consent presentation. This material
-  grants nothing, and each field is bounded to 4 KiB. An owner that cannot
-  supply it settles the call as `review_unavailable` (`context_unavailable`)
-  before any review; material that changes makes a retained allow stale
-  (`review_unsatisfied`, `context_changed`) and a fresh attempt is reviewed
-  again. In a stock governed realm the mandate text depends on who requested
+  grants nothing, and each field is bounded to 64 KiB (4 KiB before 0.9.7),
+  never truncated. An owner that cannot supply it settles the call as
+  `review_unavailable` (`context_unavailable`) before any review; material
+  that changes makes a retained allow stale (`review_unsatisfied`,
+  `context_changed`) and a fresh attempt is reviewed again. In a stock
+  governed realm the mandate text depends on who requested
   the work (0.9.4): for an outcome bound with `bind_host_outcome` it says the
   stock ingress itself requested it, that no person did and that it is not
   the operator's consent, and it attributes the event's content to the ingress

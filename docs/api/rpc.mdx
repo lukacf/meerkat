@@ -1172,10 +1172,11 @@ present.
 `workgraph/snapshot`, and `workgraph/events`.
 
 WorkGraph ready-set and snapshot projections are atomic only within explicit
-process bounds. A projection that would need to scan more than 1,000 items,
-1,000 edges, or 1,000 attention bindings fails closed with
-`INVALID_PARAMS`; narrow the realm/namespace/filter and retry. The store does
-not materialize an oversized graph and truncate it after the fact.
+process bounds. A projection over more than 1,000 live (non-terminal) items,
+1,000 edges that touch a live item, or 1,000 attention bindings fails closed
+with `INVALID_PARAMS`; narrow the realm/namespace/filter and retry. Terminal
+items and edges between two terminal items do not count against these bounds,
+and an oversized graph is never truncated after the fact.
 
 ### session/read
 
@@ -2257,8 +2258,8 @@ are a `ReadyWorkFilter`.
 
 There is no `include_terminal` here because a terminal item is never ready.
 Readiness is evaluated atomically over the namespace; a namespace with more
-than 1,000 items fails with `INVALID_PARAMS` and must be narrowed rather than
-truncated. The result is `{"items": [...]}`.
+than 1,000 live (non-terminal) items fails with `INVALID_PARAMS` and must be
+narrowed rather than truncated. Terminal items do not count. The result is `{"items": [...]}`.
 
 ### workgraph/snapshot
 

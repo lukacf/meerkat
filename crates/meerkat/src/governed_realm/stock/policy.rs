@@ -2464,7 +2464,24 @@ mod tests {
             Ok(meerkat_core::authorization::ReviewOperationContextResolution::NotApplicable),
             "no input has material"
         );
-        let many: Vec<_> = (0..8_u64)
+        // Inputs under grants that differ only in their windows: each input
+        // states its own expiry, a millisecond before the previous one's.
+        let windowed_text = |n: u64| {
+            let until = match n {
+                0 => "2100-01-01T00:00:00.000Z".to_owned(),
+                n => format!("2099-12-31T23:59:59.{:03}Z", 1000 - n),
+            };
+            stock_mandate(&format!(
+                "actions any; resources any; processors any; audiences any; effective until \
+                 {until}."
+            ))
+        };
+        // Every input's own mandate is as long as the first one's, so this
+        // many inputs list more than the field bound.
+        let past_the_bound = (meerkat_core::authorization::MAX_REVIEW_OPERATION_CONTEXT_BYTES
+            / windowed_text(0).len()
+            + 1) as u64;
+        let windowed: Vec<_> = (0..past_the_bound)
             .map(|n| {
                 let lineage = issue(
                     &grants,
@@ -2477,8 +2494,27 @@ mod tests {
                 input(&format!("work-{n}"), &lineage)
             })
             .collect();
+        // Eight of them list more than 4 KiB, the former field bound, and
+        // are material: every input's own bounds, in full.
+        let mut eight = "The 8 inputs of this work hold their own mandates, and the operation \
+                         must be within every one of them:"
+            .to_owned();
+        for n in 0..8_u64 {
+            eight.push_str(&format!(
+                "\nInput {} (original work {}): {}",
+                n + 1,
+                original(&format!("work-{n}")),
+                windowed_text(n)
+            ));
+        }
+        assert!(eight.len() > 4 * 1024, "{} bytes", eight.len());
         assert_eq!(
-            batch(many),
+            batch(windowed[..8].to_vec()),
+            material(eight),
+            "eight inputs past the former 4 KiB bound are material, with every input's bounds"
+        );
+        assert_eq!(
+            batch(windowed),
             Err(OperationAuthorizationError::Unavailable),
             "material over the field bound is unavailable"
         );

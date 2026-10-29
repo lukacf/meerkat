@@ -840,6 +840,17 @@ them.
 
 ### Changed
 
+- `meerkat-workgraph`: the atomic `ready`/`snapshot` ceilings count the live
+  working set only. A namespace fails `ready` and `snapshot` when it holds more
+  than 1,000 non-terminal items (it used to be 1,000 stored items, terminal ones
+  included), and `snapshot`'s 1,000-edge ceiling counts only edges that touch a
+  non-terminal item. Terminal items are never ready, so `ready` evaluates only
+  live items; closed items and edges between them are still read, still
+  resolve blockers and child joins, and are still returned with
+  `include_terminal`. Before this, a long-lived namespace became permanently
+  unreadable through `ready` and `snapshot` once its history passed 1,000
+  items, because nothing can delete an item.
+
 - `meerkat-mob`: `MobBuilder::resume` restores a running mob's members
   concurrently, up to the builder's restore concurrency, instead of one at a
   time. A member counts against the bound from the start of its restore until
@@ -932,6 +943,18 @@ them.
   snapshot: until then a restart presents it again (one more wake and one
   repeated notice, never a lost completion).
 
+- `meerkat-core`: each field of a `ReviewOperationContext` (the action account
+  and the mandate an operation's owners state for its R2 review and its R3
+  consent presentation) is bounded at 64 KiB instead of 4 KiB
+  (`authorization::MAX_REVIEW_OPERATION_CONTEXT_BYTES`). A mandate composed
+  with the bounds its contributing originals narrow it to, or the listing of
+  every input's own mandate for a multi-input work, no longer exceeds the
+  bound at realistic sizes; past the old bound the call settled as
+  `review_unavailable` (`context_unavailable`) and was neither reviewed nor
+  presented for consent. A field over the new bound is still unavailable,
+  never truncated, and the model reviewer still refuses, as unavailable, an
+  input over its own 128 KiB bound.
+
 ### Fixed
 
 - `meerkat-mob`: a member rebuilt on its durable session (an explicit resume
@@ -972,6 +995,18 @@ them.
   input the runtime still holds and runs it only when the runtime holds none,
   so the kickoff runs once and its status resolves. Before, the restart did
   not resume it, and the kickoff's status stayed `starting`.
+
+- `meerkat-mob`: retiring a member of a stopped or completed mob that was
+  rebuilt in the same process after its previous actor ended abnormally (a
+  crash, or a crash-stop) no longer stays stuck. The member's last runtime
+  registration could outlive that actor, still bound to the actor's closed
+  composition endpoint, and then refused every retire the rebuilt mob
+  routed to it ("session registration belongs to another composition
+  endpoint"). The rebuilt mob's start now releases such a registration of a
+  dormant member, under every member restore policy, so the retire
+  completes and nothing of the ended actor stays registered. Inputs still
+  queued on that registration end as stopped, as when an explicit resume
+  takes over a member's registration.
 
 - `meerkat-runtime`: a mob member's runtime registration keeps serving after
   an empty resume (a background operation's completion waking an idle
@@ -1268,6 +1303,15 @@ them.
   after the next start it reads active again until its next delivery, which
   fails the same way. `OnDemandVerified` and `Eager` find it before the mob
   reports ready, at every start.
+
+- `meerkat-mob`: a member retirement that a restart recovered, in a mob that
+  came back running, is not retried in the running process when one of its
+  steps fails on a transient error, such as an archive of the member's
+  session that fails once. The retirement settles stuck and the member stays
+  retiring until the retirement is driven again: re-driving it
+  (`MobHandle::redrive_retirement`) completes it, and so does the mob's next
+  start, which drives the recovered retirement again. A plain retire of the
+  member answers that its retirement is stuck.
 
 - With TCP or UDS member comms (`MobBuilder::with_network_member_comms`),
   members are not lazy: every start of the mob, and every lift of a stopped

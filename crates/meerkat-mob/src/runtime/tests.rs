@@ -20813,210 +20813,319 @@ async fn test_resume_after_destroying_marker_replays_retire_before_storage_clean
     .expect("same-process bounded-backoff destroy retry clears storage");
 }
 
-#[tokio::test]
-async fn test_resume_retries_retirement_started_anchor_without_operator_command() {
-    let definition = with_unique_mob_id(sample_definition(), "retirement-started-auto-retry");
-    let mob_id = definition.id.clone();
-    let events = Arc::new(FaultInjectedMobEventStore::new());
-    let runtime_metadata = Arc::new(InMemoryMobRuntimeMetadataStore::new());
-    let service = Arc::new(MockSessionService::new());
-    let adapter = service.enable_runtime_adapter();
-    let handle = MobBuilder::new(
-        definition,
-        MobStorage::with_events_and_runtime_metadata(events.clone(), runtime_metadata.clone()),
-    )
-    .with_session_service(service.clone())
-    .create()
-    .await
-    .expect("create mob");
-    let worker = AgentIdentity::from("retirement-started-worker");
-    handle
-        .spawn(ProfileName::from("worker"), worker.clone(), None)
-        .await
-        .expect("spawn worker");
-    let survivor = AgentIdentity::from("retirement-started-survivor");
-    let survivor_bridge_session_id = handle
-        .spawn(ProfileName::from("worker"), survivor.clone(), None)
-        .await
-        .expect("spawn survivor")
-        .bridge_session_id()
-        .cloned()
-        .expect("survivor bridge session id");
-    handle
-        .wire(worker.clone(), survivor.clone())
-        .await
-        .expect("wire retiring worker to survivor");
-    let entry = handle
-        .list_members_including_retiring()
-        .await
-        .into_iter()
-        .find(|entry| entry.agent_identity == worker)
-        .expect("spawned roster entry");
-    let agent_runtime_id = entry.agent_runtime_id.clone().expect("spawned runtime id");
-    let generation = agent_runtime_id.generation;
-    let bridge_session_id = entry
-        .current_bridge_session_id
-        .clone()
-        .expect("spawned bridge session id");
-    assert!(
-        matches!(
-            adapter.peer_ingress_owner(&bridge_session_id).await,
-            meerkat_runtime::PeerIngressOwner::MobOwned { .. }
-        ),
-        "fixture must begin with mob-owned peer ingress"
-    );
-    let retiring_peer_endpoint = events
-        .replay_all()
-        .await
-        .expect("replay spawned endpoint")
-        .into_iter()
-        .find_map(|event| match event.kind {
-            MobEventKind::MemberSpawned(spawned) if spawned.agent_identity == worker => {
-                spawned.member_peer_endpoint().cloned()
-            }
-            _ => None,
-        })
-        .expect("retiring worker has a durable peer endpoint");
-    events
-        .append(NewMobEvent {
-            mob_id: mob_id.clone(),
-            timestamp: None,
-            kind: MobEventKind::MemberRetirementStarted {
-                agent_identity: entry.agent_identity.clone(),
-                agent_runtime_id,
-                generation,
-                role: entry.role.clone(),
-                releasing: None,
-                session_id: Some(bridge_session_id.clone()),
-                retiring_peer_endpoint: Some(retiring_peer_endpoint),
-                preserve_machine_topology: true,
-            },
-        })
-        .await
-        .expect("persist retirement-started crash anchor");
-    service.set_archive_failure(&bridge_session_id).await;
-    handle
-        .crash_stop_preserving_durable_work_for_test()
-        .await
-        .expect("quiesce old actor with crash semantics");
-    let closed_error = tokio::time::timeout(Duration::from_secs(1), handle.stop())
-        .await
-        .expect("old actor command channel closes after crash stop")
-        .expect_err("crash-stopped actor must reject later commands");
-    assert!(matches!(closed_error, MobError::ActorCommandChannelClosed));
-    // Generated owner tokens are process-local volatile state. A real crash
-    // destroys them with the runtimes; this retained-runtime mock must clear
-    // them explicitly before the recovered MobMachine installs its new owner.
-    service
-        .clear_mob_machine_trust_owner(&bridge_session_id)
-        .await;
-    service
-        .clear_mob_machine_trust_owner(&survivor_bridge_session_id)
-        .await;
-    crash_stop_and_release_routes(handle).await;
+/// A Running mob whose worker has a durably started retirement (the
+/// `MemberRetirementStarted` anchor a crash left), whose archive of the
+/// worker's session fails, and whose actor then crash-stopped. The survivor
+/// was wired to the worker. The same process then resumes the mob from its
+/// durable journal, so the start recovers the retirement and drives it.
+struct RetirementStartedAnchorCrash {
+    mob_id: MobId,
+    events: Arc<FaultInjectedMobEventStore>,
+    runtime_metadata: Arc<InMemoryMobRuntimeMetadataStore>,
+    service: Arc<MockSessionService>,
+    adapter: Arc<meerkat_runtime::MeerkatMachine>,
+    worker: AgentIdentity,
+    survivor: AgentIdentity,
+    bridge_session_id: SessionId,
+}
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
-        events.clone(),
-        runtime_metadata,
-    ))
-    .with_session_service(service.clone())
-    .resume()
-    .await
-    .expect("resume retirement-started anchor");
+impl RetirementStartedAnchorCrash {
+    async fn new(label: &str) -> Self {
+        let definition = with_unique_mob_id(sample_definition(), label);
+        let mob_id = definition.id.clone();
+        let events = Arc::new(FaultInjectedMobEventStore::new());
+        let runtime_metadata = Arc::new(InMemoryMobRuntimeMetadataStore::new());
+        let service = Arc::new(MockSessionService::new());
+        let adapter = service.enable_runtime_adapter();
+        let handle = MobBuilder::new(
+            definition,
+            MobStorage::with_events_and_runtime_metadata(events.clone(), runtime_metadata.clone()),
+        )
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+        let worker = AgentIdentity::from(format!("{label}-worker"));
+        handle
+            .spawn(ProfileName::from("worker"), worker.clone(), None)
+            .await
+            .expect("spawn worker");
+        let survivor = AgentIdentity::from(format!("{label}-survivor"));
+        let survivor_bridge_session_id = handle
+            .spawn(ProfileName::from("worker"), survivor.clone(), None)
+            .await
+            .expect("spawn survivor")
+            .bridge_session_id()
+            .cloned()
+            .expect("survivor bridge session id");
+        handle
+            .wire(worker.clone(), survivor.clone())
+            .await
+            .expect("wire retiring worker to survivor");
+        let entry = handle
+            .list_members_including_retiring()
+            .await
+            .into_iter()
+            .find(|entry| entry.agent_identity == worker)
+            .expect("spawned roster entry");
+        let agent_runtime_id = entry.agent_runtime_id.clone().expect("spawned runtime id");
+        let generation = agent_runtime_id.generation;
+        let bridge_session_id = entry
+            .current_bridge_session_id
+            .clone()
+            .expect("spawned bridge session id");
+        assert!(
+            matches!(
+                adapter.peer_ingress_owner(&bridge_session_id).await,
+                meerkat_runtime::PeerIngressOwner::MobOwned { .. }
+            ),
+            "fixture must begin with mob-owned peer ingress"
+        );
+        let retiring_peer_endpoint = events
+            .replay_all()
+            .await
+            .expect("replay spawned endpoint")
+            .into_iter()
+            .find_map(|event| match event.kind {
+                MobEventKind::MemberSpawned(spawned) if spawned.agent_identity == worker => {
+                    spawned.member_peer_endpoint().cloned()
+                }
+                _ => None,
+            })
+            .expect("retiring worker has a durable peer endpoint");
+        events
+            .append(NewMobEvent {
+                mob_id: mob_id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MemberRetirementStarted {
+                    agent_identity: entry.agent_identity.clone(),
+                    agent_runtime_id,
+                    generation,
+                    role: entry.role.clone(),
+                    releasing: None,
+                    session_id: Some(bridge_session_id.clone()),
+                    retiring_peer_endpoint: Some(retiring_peer_endpoint),
+                    preserve_machine_topology: true,
+                },
+            })
+            .await
+            .expect("persist retirement-started crash anchor");
+        service.set_archive_failure(&bridge_session_id).await;
+        handle
+            .crash_stop_preserving_durable_work_for_test()
+            .await
+            .expect("quiesce old actor with crash semantics");
+        let closed_error = tokio::time::timeout(Duration::from_secs(1), handle.stop())
+            .await
+            .expect("old actor command channel closes after crash stop")
+            .expect_err("crash-stopped actor must reject later commands");
+        assert!(matches!(closed_error, MobError::ActorCommandChannelClosed));
+        // Generated owner tokens are process-local volatile state. A real crash
+        // destroys them with the runtimes; this retained-runtime mock must clear
+        // them explicitly before the recovered MobMachine installs its new owner.
+        service
+            .clear_mob_machine_trust_owner(&bridge_session_id)
+            .await;
+        service
+            .clear_mob_machine_trust_owner(&survivor_bridge_session_id)
+            .await;
+        crash_stop_and_release_routes(handle).await;
 
-    // The first recovered attempts fail archive, but Retire consequences must
-    // still be re-realized: ingress detaches and the non-routable roster
-    // anchor remains for automatic same-process retry.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let retained = resumed
-                .list_members_including_retiring()
-                .await
-                .into_iter()
-                .find(|entry| entry.agent_identity == worker);
-            if retained.is_some()
-                && matches!(
-                    adapter.peer_ingress_owner(&bridge_session_id).await,
-                    meerkat_runtime::PeerIngressOwner::Unattached
-                )
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
+        Self {
+            mob_id,
+            events,
+            runtime_metadata,
+            service,
+            adapter,
+            worker,
+            survivor,
+            bridge_session_id,
         }
-    })
-    .await
-    .expect("recovered Retire re-realizes ingress detach before failed archive");
+    }
 
-    service.clear_archive_failure(&bridge_session_id).await;
-    let convergence = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if !resumed
-                .list_members_including_retiring()
-                .await
+    async fn resume(&self) -> MobHandle {
+        MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+            self.events.clone(),
+            self.runtime_metadata.clone(),
+        ))
+        .with_session_service(self.service.clone())
+        .resume()
+        .await
+        .expect("resume retirement-started anchor")
+    }
+
+    /// The recovered Retire re-realizes its consequences before the archive:
+    /// the worker's peer ingress detaches while its roster anchor stays.
+    async fn wait_for_ingress_detach(&self, resumed: &MobHandle) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let retained = resumed
+                    .list_members_including_retiring()
+                    .await
+                    .into_iter()
+                    .find(|entry| entry.agent_identity == self.worker);
+                if retained.is_some()
+                    && matches!(
+                        self.adapter
+                            .peer_ingress_owner(&self.bridge_session_id)
+                            .await,
+                        meerkat_runtime::PeerIngressOwner::Unattached
+                    )
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recovered Retire re-realizes ingress detach before the archive");
+    }
+
+    /// Whether the worker leaves the roster within `bound`, printing the
+    /// mob's state when it does not.
+    async fn converges_within(&self, resumed: &MobHandle, bound: Duration) -> bool {
+        let converged = tokio::time::timeout(bound, async {
+            loop {
+                if !resumed
+                    .list_members_including_retiring()
+                    .await
+                    .iter()
+                    .any(|entry| entry.agent_identity == self.worker)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+        if !converged {
+            eprintln!(
+                "retirement convergence diagnostic: members={:?} dsl={:?} events={:?} live_session={:?}",
+                resumed.list_members_including_retiring().await,
+                resumed.debug_dsl_t2_snapshot().await,
+                self.events.replay_all().await,
+                self.service.has_live_session(&self.bridge_session_id).await,
+            );
+        }
+        converged
+    }
+
+    /// The completed retirement abandoned the survivor's respawn topology,
+    /// reused the one durable retirement start and appended exactly one final
+    /// `MemberRetired`.
+    async fn assert_converged(&self, resumed: &MobHandle) {
+        let surviving_entry = resumed
+            .list_members()
+            .await
+            .into_iter()
+            .find(|entry| entry.agent_identity == self.survivor)
+            .expect("survivor remains after recovered respawn retirement");
+        assert!(
+            !surviving_entry.wired_to.contains(&self.worker),
+            "a recovered retirement start without a durable successor must abandon respawn topology"
+        );
+        let convergence_events = self
+            .events
+            .replay_all()
+            .await
+            .expect("replay retirement convergence");
+        assert_eq!(
+            convergence_events
                 .iter()
-                .any(|entry| entry.agent_identity == worker)
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
-    if convergence.is_err() {
-        eprintln!(
-            "retirement retry diagnostic: members={:?} dsl={:?} events={:?} live_session={:?}",
-            resumed.list_members_including_retiring().await,
-            resumed.debug_dsl_t2_snapshot().await,
-            events.replay_all().await,
-            service.has_live_session(&bridge_session_id).await,
+                .filter(|event| {
+                    event.mob_id == self.mob_id
+                        && matches!(
+                            &event.kind,
+                            MobEventKind::MemberRetirementStarted { agent_identity, .. }
+                                if agent_identity == &self.worker
+                        )
+                })
+                .count(),
+            1,
+            "cold replay must reuse the one durable retirement-start carrier"
+        );
+        assert_eq!(
+            convergence_events
+                .iter()
+                .filter(|event| {
+                    event.mob_id == self.mob_id
+                        && matches!(
+                            &event.kind,
+                            MobEventKind::MemberRetired { agent_identity, .. }
+                                if agent_identity == &self.worker
+                        )
+                })
+                .count(),
+            1,
+            "background convergence must append exactly one final MemberRetired carrier"
         );
     }
-    convergence.expect("background retire convergence completes");
-    let surviving_entry = resumed
-        .list_members()
+}
+
+/// A retirement a crash left started is recovered at the start of a mob that
+/// comes back Running. The recovered Retire re-realizes its consequences
+/// first (the worker's peer ingress detaches while its roster anchor stays),
+/// and once the archive of the worker's session can succeed the retirement
+/// completes on its own: the worker leaves the roster, and the survivor's
+/// respawn topology is abandoned. The archive is held until its injected
+/// failure is cleared, so its first attempt is the one that succeeds.
+#[tokio::test]
+async fn test_resume_completes_a_retirement_started_anchor_once_its_archive_can_succeed() {
+    let crash = RetirementStartedAnchorCrash::new("retirement-started-completes").await;
+    let archive_hold =
+        super::actor::retirement_stage_hold::install(&crash.worker, "retire-session-archive");
+    let resumed = crash.resume().await;
+    tokio::time::timeout(Duration::from_secs(10), archive_hold.entered())
         .await
-        .into_iter()
-        .find(|entry| entry.agent_identity == survivor)
-        .expect("survivor remains after recovered respawn retirement");
+        .expect("the recovered retirement reaches its archive");
+    crash.wait_for_ingress_detach(&resumed).await;
+    crash
+        .service
+        .clear_archive_failure(&crash.bridge_session_id)
+        .await;
+    archive_hold.release();
     assert!(
-        !surviving_entry.wired_to.contains(&worker),
-        "a recovered retirement start without a durable successor must abandon respawn topology"
+        crash
+            .converges_within(&resumed, Duration::from_secs(5))
+            .await,
+        "the recovered retirement completes once its archive can succeed"
     );
-    let convergence_events = events
-        .replay_all()
-        .await
-        .expect("replay retirement convergence");
-    assert_eq!(
-        convergence_events
-            .iter()
-            .filter(|event| {
-                event.mob_id == mob_id
-                    && matches!(
-                        &event.kind,
-                        MobEventKind::MemberRetirementStarted { agent_identity, .. }
-                            if agent_identity == &worker
-                    )
-            })
-            .count(),
-        1,
-        "cold replay must reuse the one durable retirement-start carrier"
+    crash.assert_converged(&resumed).await;
+}
+
+/// A recovered retirement whose archive fails settles stuck. In a mob that
+/// came back Running, it should be re-driven once the archive can succeed,
+/// with no operator command, and complete.
+#[tokio::test]
+#[ignore = "a stuck recovered retirement is not re-driven in a running mob until a machine-owned re-drive exists"]
+async fn test_resume_re_drives_a_stuck_recovered_retirement_without_operator_command() {
+    let crash = RetirementStartedAnchorCrash::new("retirement-started-stuck-redrive").await;
+    let resumed = crash.resume().await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(watch) = resumed.retirement_settlement(&crash.worker)
+                && matches!(watch.current(), super::RetirementSettlement::Stuck { .. })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the recovered retirement settles stuck at its failed archive");
+    crash.wait_for_ingress_detach(&resumed).await;
+    crash
+        .service
+        .clear_archive_failure(&crash.bridge_session_id)
+        .await;
+    assert!(
+        crash
+            .converges_within(&resumed, Duration::from_secs(30))
+            .await,
+        "the stuck recovered retirement is re-driven and completes without an operator command"
     );
-    assert_eq!(
-        convergence_events
-            .iter()
-            .filter(|event| {
-                event.mob_id == mob_id
-                    && matches!(
-                        &event.kind,
-                        MobEventKind::MemberRetired { agent_identity, .. }
-                            if agent_identity == &worker
-                    )
-            })
-            .count(),
-        1,
-        "background convergence must append exactly one final MemberRetired carrier"
-    );
+    crash.assert_converged(&resumed).await;
 }
 
 #[tokio::test]
@@ -42407,6 +42516,201 @@ async fn test_retire_broken_member_succeeds_and_removes_it() {
             .unwrap()
             .is_none(),
         "retire should remove the broken member from the roster"
+    );
+}
+
+/// The state a mob rebuilt in the same process can find after its
+/// predecessor's actor ended abnormally: the predecessor stopped, its member's
+/// session was archived and deleted, and the member's executor stopped on its
+/// own while the actor crash-stopped. The member's runtime registration is
+/// then still current in the shared runtime, Stopped, and bound to the dead
+/// actor's composition endpoint, whose transport is closed.
+///
+/// The rebuilt mob's start releases that registration: right after the
+/// start, before the explicit resume and before anything acts on the member,
+/// the runtime holds no registration of the member's session. Returns the
+/// rebuilt mob after its explicit resume under `policy`, the member's session
+/// and the shared runtime.
+async fn rebuilt_mob_over_a_dead_predecessors_registration(
+    policy: MemberRestorePolicy,
+) -> (MobHandle, SessionId, Arc<meerkat_runtime::MeerkatMachine>) {
+    let service = Arc::new(MockSessionService::new());
+    let machine = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
+        .await
+        .expect("spawn");
+    handle.stop().await.expect("stop");
+    let session = handle
+        .get_member(&AgentIdentity::from("w-1"))
+        .await
+        .unwrap()
+        .expect("roster entry")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    service
+        .archive(&session)
+        .await
+        .expect("archive live session");
+    service.delete_persisted_session(&session).await;
+    crash_stop_and_release_routes(handle).await;
+    let registration = machine
+        .current_session_registration_witness(&session)
+        .await
+        .expect("the predecessor's registration outlives its actor");
+    assert!(
+        machine
+            .stop_runtime_executor_until_terminal_if_current(
+                &registration,
+                "the predecessor's executor stops on its own",
+            )
+            .await
+            .expect("stop the predecessor's executor"),
+        "the predecessor's executor stops while its registration stays"
+    );
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .with_member_restore_policy(policy)
+    .resume()
+    .await
+    .expect("stopped mob reconstruction should succeed");
+    // The actor answers a command only once its start ran.
+    assert_eq!(
+        resumed.status().await.expect("the rebuilt mob's status"),
+        MobState::Stopped,
+        "the rebuilt mob is stopped"
+    );
+    assert!(
+        machine
+            .current_session_registration_witness(&session)
+            .await
+            .is_none(),
+        "the rebuilt mob's start released the registration the dead predecessor held"
+    );
+    resumed.resume().await.expect("explicit resume");
+    (resumed, session, machine)
+}
+
+/// Waits, within a bound, until the runtime holds no registration of
+/// `session`.
+async fn wait_for_registration_released(
+    machine: &meerkat_runtime::MeerkatMachine,
+    session: &SessionId,
+) -> bool {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while machine
+            .current_session_registration_witness(session)
+            .await
+            .is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// Eager restore: the explicit resume restores the member, which ends Broken
+/// (its session is gone), and its retire reaches the runtime registration the
+/// dead predecessor still held. The retire completes and removes the member,
+/// and the registration is released.
+#[tokio::test]
+async fn a_member_retires_over_a_registration_its_dead_predecessor_held_under_eager_restore() {
+    let (resumed, session, machine) =
+        rebuilt_mob_over_a_dead_predecessors_registration(MemberRestorePolicy::Eager).await;
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        resumed.retire(AgentIdentity::from("w-1")),
+    )
+    .await
+    .expect("the retire answers")
+    .expect("the retire completes");
+    assert!(
+        resumed
+            .get_member(&AgentIdentity::from("w-1"))
+            .await
+            .unwrap()
+            .is_none(),
+        "the retired member left the roster"
+    );
+    assert!(
+        wait_for_registration_released(&machine, &session).await,
+        "the registration the dead predecessor held is released"
+    );
+}
+
+/// On-demand restore: the member stays Dormant through the explicit resume,
+/// and its retire completes. The registration the dead predecessor held was
+/// already released by the start (asserted in the helper), so nothing of the
+/// predecessor stays registered while the member is Dormant.
+#[tokio::test]
+async fn a_member_retires_over_a_registration_its_dead_predecessor_held_under_on_demand_restore() {
+    let (resumed, session, machine) =
+        rebuilt_mob_over_a_dead_predecessors_registration(MemberRestorePolicy::OnDemand).await;
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        resumed.retire(AgentIdentity::from("w-1")),
+    )
+    .await
+    .expect("the retire answers")
+    .expect("the retire completes");
+    assert!(
+        resumed
+            .get_member(&AgentIdentity::from("w-1"))
+            .await
+            .unwrap()
+            .is_none(),
+        "the retired member left the roster"
+    );
+    assert!(
+        wait_for_registration_released(&machine, &session).await,
+        "the registration the dead predecessor held is released"
+    );
+}
+
+/// On-demand restore with the ready verdict: the member reads Broken at
+/// ready (its session is gone) without being materialized. Its retire
+/// completes and removes it, and the registration the dead predecessor held
+/// is released.
+#[tokio::test]
+async fn a_broken_at_ready_member_retires_over_a_dead_predecessors_registration() {
+    let (resumed, session, machine) =
+        rebuilt_mob_over_a_dead_predecessors_registration(MemberRestorePolicy::OnDemandVerified)
+            .await;
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        resumed.retire(AgentIdentity::from("w-1")),
+    )
+    .await
+    .expect("the retire answers")
+    .expect("the retire completes");
+    assert!(
+        resumed
+            .get_member(&AgentIdentity::from("w-1"))
+            .await
+            .unwrap()
+            .is_none(),
+        "the retired member left the roster"
+    );
+    assert!(
+        wait_for_registration_released(&machine, &session).await,
+        "the registration the dead predecessor held is released"
     );
 }
 

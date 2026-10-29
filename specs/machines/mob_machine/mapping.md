@@ -4746,6 +4746,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeSpawnProfileSeatedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ExemptMemberFromDefinitionWiringSeatedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExemptMemberFromDefinitionWiringSeatedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `HoldMemberRunStarts`
@@ -5477,6 +5483,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `spawn_profile_authority_is_a_pending_grant`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `definition_wiring_exempt_member_is_seated`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `owed_edge_repairs_join_seated_members`

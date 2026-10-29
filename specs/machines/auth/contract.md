@@ -13,6 +13,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `credential_present`: `Bool`
 - `credential_generation`: `u64`
 - `credential_published_at_millis`: `Option<u64>`
+- `credential_material_fingerprint`: `Option<String>`
 - `oauth_browser_flow_ids`: `Set<String>`
 - `oauth_browser_flow_providers`: `Map<String, String>`
 - `oauth_browser_flow_redirect_uris`: `Map<String, String>`
@@ -25,7 +26,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `release_draining`: `Bool`
 
 ## Inputs
-- `Acquire`(expires_at_ts: Option<u64>, credential_published_at_millis: u64)
+- `Acquire`(expires_at_ts: Option<u64>, credential_published_at_millis: u64, credential_material_fingerprint: Option<String>)
 - `MarkExpiring`
 - `ObserveCredentialFreshness`(now_ts: u64, refresh_window_secs: u64)
 - `BeginRefresh`
@@ -57,6 +58,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveRefreshFailureDisposition`(http_status: Option<u64>, oauth_error_code: Option<String>, local_credential_unusable: Bool)
 - `ResolveCredentialUseAdmission`(intent: CredentialUseIntent)
 - `ResolveOAuthLoginCredentialDisposition`(credential_present: Bool, force_refresh: Bool, refresh_allowed: Bool)
+- `ResolveSourceCredentialPublication`(credential_material_fingerprint: String)
 
 ## Signals
 
@@ -66,6 +68,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RefreshFailureDispositionResolved`(disposition: RefreshFailureDisposition)
 - `CredentialUseAdmissionResolved`(disposition: CredentialUseDisposition)
 - `CancelOAuthFlowsForRelease`(browser_flow_ids: Set<String>, device_flow_ids: Set<String>)
+- `SourceCredentialPublicationResolved`(disposition: SourceCredentialPublicationDisposition)
 
 ## Invariants
 - `oauth_flow_membership_consistent`
@@ -75,7 +78,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Transitions
 ### `Acquire`
 - From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
-- On: `Acquire`(expires_at_ts, credential_published_at_millis)
+- On: `Acquire`(expires_at_ts, credential_published_at_millis, credential_material_fingerprint)
+- Guards:
+  - `credential_material_publishable`
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
@@ -1518,9 +1523,105 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `CredentialUseAdmissionResolved`
 - To: `Released`
 
+### `ResolveSourceCredentialPublicationNewMaterialValid`
+- From: `Valid`
+- On: `ResolveSourceCredentialPublication`(credential_material_fingerprint)
+- Guards:
+  - `source_credential_material_differs`
+- Emits: `SourceCredentialPublicationResolved`
+- To: `Valid`
+
+### `ResolveSourceCredentialPublicationNewMaterialExpiring`
+- From: `Expiring`
+- On: `ResolveSourceCredentialPublication`(credential_material_fingerprint)
+- Guards:
+  - `source_credential_material_differs`
+- Emits: `SourceCredentialPublicationResolved`
+- To: `Expiring`
+
+### `ResolveSourceCredentialPublicationNewMaterialExpired`
+- From: `Expired`
+- On: `ResolveSourceCredentialPublication`(credential_material_fingerprint)
+- Guards:
+  - `source_credential_material_differs`
+- Emits: `SourceCredentialPublicationResolved`
+- To: `Expired`
+
+### `ResolveSourceCredentialPublicationNewMaterialRefreshing`
+- From: `Refreshing`
+- On: `ResolveSourceCredentialPublication`(credential_material_fingerprint)
+- Guards:
+  - `source_credential_material_differs`
+- Emits: `SourceCredentialPublicationResolved`
+- To: `Refreshing`
+
+### `ResolveSourceCredentialPublicationNewMaterialReauthRequired`
+- From: `ReauthRequired`
+- On: `ResolveSourceCredentialPublication`(credential_material_fingerprint)
+- Guards:
+  - `source_credential_material_differs`
+- Emits: `SourceCredentialPublicationResolved`
+- To: `ReauthRequired`
+
+### `ResolveSourceCredentialPublicationNewMaterialReleased`
+- From: `Released`
+- On: `ResolveSourceCredentialPublication`(credential_material_fingerprint)
+- Guards:
+  - `source_credential_material_differs`
+- Emits: `SourceCredentialPublicationResolved`
+- To: `Released`
+
+### `ResolveSourceCredentialPublicationRenewalExpiring`
+- From: `Expiring`
+- On: `ResolveSourceCredentialPublication`(credential_material_fingerprint)
+- Guards:
+  - `source_credential_material_recorded`
+- Emits: `SourceCredentialPublicationResolved`
+- To: `Expiring`
+
+### `ResolveSourceCredentialPublicationRenewalExpired`
+- From: `Expired`
+- On: `ResolveSourceCredentialPublication`(credential_material_fingerprint)
+- Guards:
+  - `source_credential_material_recorded`
+- Emits: `SourceCredentialPublicationResolved`
+- To: `Expired`
+
+### `ResolveSourceCredentialPublicationAlreadyPublishedValid`
+- From: `Valid`
+- On: `ResolveSourceCredentialPublication`(credential_material_fingerprint)
+- Guards:
+  - `source_credential_material_recorded`
+- Emits: `SourceCredentialPublicationResolved`
+- To: `Valid`
+
+### `ResolveSourceCredentialPublicationAlreadyPublishedRefreshing`
+- From: `Refreshing`
+- On: `ResolveSourceCredentialPublication`(credential_material_fingerprint)
+- Guards:
+  - `source_credential_material_recorded`
+- Emits: `SourceCredentialPublicationResolved`
+- To: `Refreshing`
+
+### `ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired`
+- From: `ReauthRequired`
+- On: `ResolveSourceCredentialPublication`(credential_material_fingerprint)
+- Guards:
+  - `source_credential_material_recorded`
+- Emits: `SourceCredentialPublicationResolved`
+- To: `ReauthRequired`
+
+### `ResolveSourceCredentialPublicationAlreadyPublishedReleased`
+- From: `Released`
+- On: `ResolveSourceCredentialPublication`(credential_material_fingerprint)
+- Guards:
+  - `source_credential_material_recorded`
+- Emits: `SourceCredentialPublicationResolved`
+- To: `Released`
+
 ## Coverage
 ### Code Anchors
-- `auth_lease_handle` (machine `AuthMachine`): `crates/meerkat-runtime/src/handles/auth_lease.rs` — per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, observe credential freshness, expiring, expired, refresh, reauth, release, lifecycle event, and wake loop DSL transitions through it
+- `auth_lease_handle` (machine `AuthMachine`): `crates/meerkat-runtime/src/handles/auth_lease.rs` — per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, observe credential freshness, expiring, expired, refresh, reauth, release, source-credential publication, lifecycle event, and wake loop DSL transitions through it
 - `oauth_flow_handle` (machine `AuthMachine`): `crates/meerkat-runtime/src/handles/oauth_flow.rs` — per-binding AuthMachine-owned OAuth browser and device flow lifecycle authority for admit, verify, begin poll, finish poll, consume, expire, valid, expiring, expired, refreshing, and reauth required phases
 
 ### Scenarios
@@ -1528,3 +1629,4 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `reauth_release_and_publication` — reauth required from valid/expiring/expired/refreshing, observe credential freshness for released state, release lease, emit lifecycle event, and wake refresh loop publication
 - `oauth_browser_flow_lifecycle` — OAuth browser flow admit, verify, consume, and expire operations stay under the per-binding AuthMachine lifecycle authority
 - `oauth_device_flow_lifecycle` — OAuth device flow admit, verify, begin poll, finish poll, consume, and expire operations stay under the per-binding AuthMachine lifecycle authority
+- `source_credential_publication` — a publisher that re-reads its credential value from a source asks for the publication verdict with the value's fingerprint and acquires only on publish: a new value publishes, the recorded value publishes again only when its declared freshness window ran out, and a refused or logged-out value is never published again

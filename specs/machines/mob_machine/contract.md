@@ -307,12 +307,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `owed_external_edge_repairs`: `Set<ExternalPeerEdge>`
 - `member_seat_session_unborn`: `Set<AgentIdentity>`
 - `unborn_seat_sessions`: `Set<SessionId>`
+- `member_definition_wiring_exempt`: `Set<AgentIdentity>`
 
 ## Inputs
 - `RunFlow`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
 - `CancelFlow`(run_id: RunId)
 - `FlowStatus`
-- `CommitSpawnMembership`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: Bool, runtime_mode: SpawnPolicyRuntimeMode, bridge_session_id: Option<SessionId>, replacing: Option<SessionId>, member_peer_endpoint: Option<MemberPeerEndpoint>, spec_digest_echo: Option<String>, ack_engine_version: Option<String>, placed_spawn_id: Option<PlacedSpawnId>, provision_operation_id: Option<String>)
+- `CommitSpawnMembership`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: Bool, runtime_mode: SpawnPolicyRuntimeMode, bridge_session_id: Option<SessionId>, replacing: Option<SessionId>, member_peer_endpoint: Option<MemberPeerEndpoint>, spec_digest_echo: Option<String>, ack_engine_version: Option<String>, placed_spawn_id: Option<PlacedSpawnId>, provision_operation_id: Option<String>, definition_wiring_exempt: Bool)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
 - `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId>)
@@ -546,10 +547,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PlanBootMaterialization`(agent_identity: AgentIdentity, obligation: MemberRecoveryObligationKind, host_required: Bool, orchestrator_notified: Bool)
 - `SealBootMaterializationPlan`
 - `ClassifyPeerNotice`(recipient: AgentIdentity, sender: AgentIdentity, notice_class: PeerInputClass)
-- `CommitDormantSeat`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, runtime_mode: SpawnPolicyRuntimeMode, bridge_session_id: SessionId, member_peer_endpoint: Option<MemberPeerEndpoint>, session_archived: Bool, kickoff_owed: Bool, session_unborn: Bool, fresh_launch: Bool)
+- `CommitDormantSeat`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, runtime_mode: SpawnPolicyRuntimeMode, bridge_session_id: SessionId, member_peer_endpoint: Option<MemberPeerEndpoint>, session_archived: Bool, kickoff_owed: Bool, session_unborn: Bool, fresh_launch: Bool, definition_wiring_exempt: Bool)
 - `ResolveMemberHostPreparation`(agent_identity: AgentIdentity)
 - `BeginMemberRotation`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, session_archived: Bool)
-- `CommitMemberRotation`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>, disposal: MemberSessionDisposal, next_agent_runtime_id: AgentRuntimeId, next_fence_token: FenceToken, next_generation: Generation, runtime_mode: SpawnPolicyRuntimeMode, external_addressable: Bool, kickoff_owed: Bool, kickoff_objective_id: String)
+- `CommitMemberRotation`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>, disposal: MemberSessionDisposal, next_agent_runtime_id: AgentRuntimeId, next_fence_token: FenceToken, next_generation: Generation, runtime_mode: SpawnPolicyRuntimeMode, external_addressable: Bool, kickoff_owed: Bool, kickoff_objective_id: String, definition_wiring_exempt: Bool)
 - `ClassifyMemberRelease`(agent_identity: AgentIdentity)
 
 ## Signals
@@ -639,6 +640,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveExternalEdgeRealization`(edge: ExternalPeerEdge, realized: Bool)
 - `ResolveMemberRevivalSessionCreated`(agent_identity: AgentIdentity, attempt: u64)
 - `RecoverMemberSeatSession`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, unborn: Bool)
+- `ExemptMemberFromDefinitionWiring`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
 
 ## Effects
 - `HoldMemberRunStarts`
@@ -984,6 +986,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `seat_session_unborn_is_never_bound`
 - `unborn_seat_session_is_recorded`
 - `spawn_profile_authority_is_a_pending_grant`
+- `definition_wiring_exempt_member_is_seated`
 - `owed_edge_repairs_join_seated_members`
 - `destroyed_mob_holds_no_member_lifecycle`
 
@@ -3785,7 +3788,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommitSpawnMembershipFresh`
 - From: `Running`
-- On: `CommitSpawnMembership`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, member_peer_endpoint, spec_digest_echo, ack_engine_version, placed_spawn_id, provision_operation_id)
+- On: `CommitSpawnMembership`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, member_peer_endpoint, spec_digest_echo, ack_engine_version, placed_spawn_id, provision_operation_id, definition_wiring_exempt)
 - Guards:
   - `spawn_exec_opened`
   - `ack_fields_absent`
@@ -3799,7 +3802,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommitSpawnMembershipFreshPeerOnly`
 - From: `Running`
-- On: `CommitSpawnMembership`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, member_peer_endpoint, spec_digest_echo, ack_engine_version, placed_spawn_id, provision_operation_id)
+- On: `CommitSpawnMembership`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, member_peer_endpoint, spec_digest_echo, ack_engine_version, placed_spawn_id, provision_operation_id, definition_wiring_exempt)
 - Guards:
   - `spawn_exec_opened`
   - `ack_fields_absent`
@@ -3813,10 +3816,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommitSpawnMembershipRemote`
 - From: `Running`
-- On: `CommitSpawnMembership`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, member_peer_endpoint, spec_digest_echo, ack_engine_version, placed_spawn_id, provision_operation_id)
+- On: `CommitSpawnMembership`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, member_peer_endpoint, spec_digest_echo, ack_engine_version, placed_spawn_id, provision_operation_id, definition_wiring_exempt)
 - Guards:
   - `spawn_exec_materialize_pending`
   - `placement_present`
+  - `placed_not_exempt`
   - `no_prior_session_binding`
   - `current_binding_absent`
   - `generation_is_next`
@@ -15862,7 +15866,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommitDormantSeatRunning`
 - From: `Running`
-- On: `CommitDormantSeat`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, runtime_mode, bridge_session_id, member_peer_endpoint, session_archived, kickoff_owed, session_unborn, fresh_launch)
+- On: `CommitDormantSeat`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, runtime_mode, bridge_session_id, member_peer_endpoint, session_archived, kickoff_owed, session_unborn, fresh_launch, definition_wiring_exempt)
 - Guards:
   - `lifecycle_origin_open`
   - `composition_authoritative`
@@ -15920,7 +15924,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommitMemberRotationLiveRunning`
 - From: `Running`
-- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id)
+- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
   - `composition_authoritative`
@@ -15949,7 +15953,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommitMemberRotationLiveStopped`
 - From: `Stopped`
-- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id)
+- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
   - `composition_authoritative`
@@ -15978,7 +15982,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommitMemberRotationRetiredRunning`
 - From: `Running`
-- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id)
+- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
   - `composition_authoritative`
@@ -16007,7 +16011,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommitMemberRotationRetiredStopped`
 - From: `Stopped`
-- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id)
+- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
   - `composition_authoritative`
@@ -16428,7 +16432,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommitMemberRotationLiveKickoffRunning`
 - From: `Running`
-- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id)
+- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
   - `composition_authoritative`
@@ -16457,7 +16461,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommitMemberRotationLiveKickoffStopped`
 - From: `Stopped`
-- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id)
+- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
   - `composition_authoritative`
@@ -16486,7 +16490,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommitMemberRotationRetiredKickoffRunning`
 - From: `Running`
-- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id)
+- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
   - `composition_authoritative`
@@ -16515,7 +16519,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommitMemberRotationRetiredKickoffStopped`
 - From: `Stopped`
-- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id)
+- On: `CommitMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt)
 - Guards:
   - `rotation_pending`
   - `composition_authoritative`
@@ -16926,6 +16930,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `no_rotation_intent`
 - Emits: `SpawnProfileAuthorized`
 - To: `Running`
+
+### `ExemptMemberFromDefinitionWiringSeatedRunning`
+- From: `Running`
+- On: `ExemptMemberFromDefinitionWiring`(agent_identity, agent_runtime_id)
+- Guards:
+  - `replay_not_sealed`
+  - `identity_runtime_matches`
+  - `member_local`
+- To: `Running`
+
+### `ExemptMemberFromDefinitionWiringSeatedStopped`
+- From: `Stopped`
+- On: `ExemptMemberFromDefinitionWiring`(agent_identity, agent_runtime_id)
+- Guards:
+  - `replay_not_sealed`
+  - `identity_runtime_matches`
+  - `member_local`
+- To: `Stopped`
 
 ## Coverage
 ### Code Anchors

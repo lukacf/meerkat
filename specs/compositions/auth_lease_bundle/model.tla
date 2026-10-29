@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated composition model for auth_lease_bundle.
 
-CONSTANTS AuthLifecyclePhaseValues, BooleanValues, CredentialUseDispositionValues, CredentialUseIntentValues, NatValues, RefreshFailureDispositionValues, SetOfStringValues, StringValues
+CONSTANTS AuthLifecyclePhaseValues, BooleanValues, CredentialUseDispositionValues, CredentialUseIntentValues, NatValues, RefreshFailureDispositionValues, SetOfStringValues, SourceCredentialPublicationDispositionValues, StringValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -67,28 +67,28 @@ RouteDeliveryKind(route_name) ==
 
 RouteTargetActor(route_name) == ActorOfMachine(RouteTargetMachine(route_name))
 
-VARIABLES auth_machine_phase, auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, obligation_auth_machine_auth_release_oauth_flow_drain, obligation_auth_machine_auth_lease_lifecycle_publication, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs
-vars == << auth_machine_phase, auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, obligation_auth_machine_auth_release_oauth_flow_drain, obligation_auth_machine_auth_lease_lifecycle_publication, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+VARIABLES auth_machine_phase, auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_credential_material_fingerprint, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, obligation_auth_machine_auth_release_oauth_flow_drain, obligation_auth_machine_auth_lease_lifecycle_publication, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs
+vars == << auth_machine_phase, auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_credential_material_fingerprint, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, obligation_auth_machine_auth_release_oauth_flow_drain, obligation_auth_machine_auth_lease_lifecycle_publication, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 \* Named UNCHANGED frames. One definition per distinct frame; every action
 \* that leaves those variables unchanged references the definition by name.
-UnchangedFrame_0ec772f63e2ab753 == UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_142968104a9da3b5 == UNCHANGED << auth_machine_credential_generation, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, witness_current_script_input, witness_remaining_script_inputs >>
 UnchangedFrame_2f784fb0b4b0fa86 == UNCHANGED << auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_33a078928811255f == UNCHANGED << auth_machine_phase, auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, obligation_auth_machine_auth_lease_lifecycle_publication, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_386d7041634a8604 == UNCHANGED << auth_machine_phase, auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, obligation_auth_machine_auth_release_oauth_flow_drain, obligation_auth_machine_auth_lease_lifecycle_publication, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_55ac2e7c2bf5dba1 == UNCHANGED << auth_machine_phase, auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, obligation_auth_machine_auth_release_oauth_flow_drain, obligation_auth_machine_auth_lease_lifecycle_publication, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
+UnchangedFrame_314eb35e3bf6edcc == UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_credential_material_fingerprint, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_release_draining, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_3979f8dd7a3b921a == UNCHANGED << auth_machine_credential_generation, auth_machine_credential_material_fingerprint, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_57d45c89d18260a3 == UNCHANGED << auth_machine_phase, auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_credential_material_fingerprint, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, obligation_auth_machine_auth_release_oauth_flow_drain, obligation_auth_machine_auth_lease_lifecycle_publication, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 UnchangedFrame_6d338e6154d09149 == UNCHANGED << obligation_auth_machine_auth_release_oauth_flow_drain, obligation_auth_machine_auth_lease_lifecycle_publication >>
+UnchangedFrame_74afb28b45d42c5a == UNCHANGED << auth_machine_credential_generation, auth_machine_credential_material_fingerprint, witness_current_script_input, witness_remaining_script_inputs >>
 UnchangedFrame_758184af7afe5f8d == UNCHANGED << auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_7d08f82f20f4c9b9 == UNCHANGED << auth_machine_credential_generation, witness_current_script_input, witness_remaining_script_inputs >>
 UnchangedFrame_87048e7ba4c974a0 == UNCHANGED << obligation_auth_machine_auth_release_oauth_flow_drain >>
-UnchangedFrame_91362fe975d968ca == UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_release_draining, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_9505f18efa8439f4 == UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_b8305a9f03dbd4c5 == UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_a38652f51a54207c == UNCHANGED << auth_machine_phase, auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_credential_material_fingerprint, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, obligation_auth_machine_auth_release_oauth_flow_drain, obligation_auth_machine_auth_lease_lifecycle_publication, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
+UnchangedFrame_afe2b1dfb354130a == UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_credential_material_fingerprint, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_b36328745f4ddb6a == UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_credential_material_fingerprint, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_bdd94ea638539100 == UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_credential_material_fingerprint, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_be20e4c2185ca581 == UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_credential_material_fingerprint, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_bec47b4d3e24e7c2 == UNCHANGED << auth_machine_phase, auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_credential_material_fingerprint, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, obligation_auth_machine_auth_lease_lifecycle_publication, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 UnchangedFrame_c72cb1d65d4e320f == UNCHANGED << auth_machine_last_refresh, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, witness_current_script_input, witness_remaining_script_inputs >>
 UnchangedFrame_c794524b689d9327 == UNCHANGED << obligation_auth_machine_auth_lease_lifecycle_publication >>
-UnchangedFrame_e66abac924d246d9 == UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_release_draining, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_fc530d92825d2bc1 == UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_outstanding_flow_count, auth_machine_release_draining, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_eebc0bfb7d9edfdb == UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_credential_material_fingerprint, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_release_draining, witness_current_script_input, witness_remaining_script_inputs >>
 UnchangedFrame_ff767348ef3f1efe == UNCHANGED << witness_current_script_input, witness_remaining_script_inputs >>
 
 RoutePackets == SeqElements(pending_routes) \cup delivered_routes
@@ -103,6 +103,7 @@ BaseInit ==
     /\ auth_machine_credential_present = FALSE
     /\ auth_machine_credential_generation = 0
     /\ auth_machine_credential_published_at_millis = None
+    /\ auth_machine_credential_material_fingerprint = None
     /\ auth_machine_oauth_browser_flow_ids = {}
     /\ auth_machine_oauth_browser_flow_providers = [x \in {} |-> None]
     /\ auth_machine_oauth_browser_flow_redirect_uris = [x \in {} |-> None]
@@ -130,46 +131,49 @@ Init ==
 
 WitnessInit_freshness_expiry ==
     /\ BaseInit
-    /\ pending_inputs = <<[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(1)], source_kind |-> "entry", source_route |-> "witness:freshness_expiry:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]>>
-    /\ observed_inputs = {[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(1)], source_kind |-> "entry", source_route |-> "witness:freshness_expiry:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]}
-    /\ witness_current_script_input = [machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(1)], source_kind |-> "entry", source_route |-> "witness:freshness_expiry:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]
+    /\ pending_inputs = <<[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_material_fingerprint |-> None, credential_published_at_millis |-> 1, expires_at_ts |-> Some(1)], source_kind |-> "entry", source_route |-> "witness:freshness_expiry:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]>>
+    /\ observed_inputs = {[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_material_fingerprint |-> None, credential_published_at_millis |-> 1, expires_at_ts |-> Some(1)], source_kind |-> "entry", source_route |-> "witness:freshness_expiry:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]}
+    /\ witness_current_script_input = [machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_material_fingerprint |-> None, credential_published_at_millis |-> 1, expires_at_ts |-> Some(1)], source_kind |-> "entry", source_route |-> "witness:freshness_expiry:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]
     /\ witness_remaining_script_inputs = <<[machine |-> "auth_machine", variant |-> "ObserveCredentialFreshness", payload |-> [now_ts |-> 0, refresh_window_secs |-> 0], source_kind |-> "entry", source_route |-> "witness:freshness_expiry:2", source_machine |-> "external_entry", source_effect |-> "ObserveCredentialFreshness", effect_id |-> 0], [machine |-> "auth_machine", variant |-> "ObserveCredentialFreshness", payload |-> [now_ts |-> 2, refresh_window_secs |-> 0], source_kind |-> "entry", source_route |-> "witness:freshness_expiry:3", source_machine |-> "external_entry", source_effect |-> "ObserveCredentialFreshness", effect_id |-> 0]>>
 
 WitnessInit_expiring_refresh ==
     /\ BaseInit
-    /\ pending_inputs = <<[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:expiring_refresh:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]>>
-    /\ observed_inputs = {[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:expiring_refresh:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]}
-    /\ witness_current_script_input = [machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:expiring_refresh:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]
+    /\ pending_inputs = <<[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_material_fingerprint |-> None, credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:expiring_refresh:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]>>
+    /\ observed_inputs = {[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_material_fingerprint |-> None, credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:expiring_refresh:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]}
+    /\ witness_current_script_input = [machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_material_fingerprint |-> None, credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:expiring_refresh:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]
     /\ witness_remaining_script_inputs = <<[machine |-> "auth_machine", variant |-> "ObserveCredentialFreshness", payload |-> [now_ts |-> 1, refresh_window_secs |-> 2], source_kind |-> "entry", source_route |-> "witness:expiring_refresh:2", source_machine |-> "external_entry", source_effect |-> "ObserveCredentialFreshness", effect_id |-> 0], [machine |-> "auth_machine", variant |-> "BeginRefresh", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "witness:expiring_refresh:3", source_machine |-> "external_entry", source_effect |-> "BeginRefresh", effect_id |-> 0], [machine |-> "auth_machine", variant |-> "CompleteRefresh", payload |-> [credential_published_at_millis |-> 2, new_expires_at |-> Some(2), now_ts |-> 1], source_kind |-> "entry", source_route |-> "witness:expiring_refresh:4", source_machine |-> "external_entry", source_effect |-> "CompleteRefresh", effect_id |-> 0]>>
 
 WitnessInit_release_drains_oauth_flow ==
     /\ BaseInit
-    /\ pending_inputs = <<[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]>>
-    /\ observed_inputs = {[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]}
-    /\ witness_current_script_input = [machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]
+    /\ pending_inputs = <<[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_material_fingerprint |-> None, credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]>>
+    /\ observed_inputs = {[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_material_fingerprint |-> None, credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]}
+    /\ witness_current_script_input = [machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_material_fingerprint |-> None, credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]
     /\ witness_remaining_script_inputs = <<[machine |-> "auth_machine", variant |-> "AdmitOAuthBrowserFlow", payload |-> [expires_at_millis |-> 2, flow_id |-> "flow_1", max_outstanding_flows |-> 1, observed_global_outstanding_flows |-> 0, provider |-> "provider_1", redirect_uri |-> "uri_1"], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_flow:2", source_machine |-> "external_entry", source_effect |-> "AdmitOAuthBrowserFlow", effect_id |-> 0], [machine |-> "auth_machine", variant |-> "BeginRelease", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_flow:3", source_machine |-> "external_entry", source_effect |-> "BeginRelease", effect_id |-> 0], [machine |-> "auth_machine", variant |-> "Release", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_flow:4", source_machine |-> "external_entry", source_effect |-> "Release", effect_id |-> 0]>>
 
 WitnessInit_release_drains_oauth_device_flow ==
     /\ BaseInit
-    /\ pending_inputs = <<[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_device_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]>>
-    /\ observed_inputs = {[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_device_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]}
-    /\ witness_current_script_input = [machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_device_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]
+    /\ pending_inputs = <<[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_material_fingerprint |-> None, credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_device_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]>>
+    /\ observed_inputs = {[machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_material_fingerprint |-> None, credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_device_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]}
+    /\ witness_current_script_input = [machine |-> "auth_machine", variant |-> "Acquire", payload |-> [credential_material_fingerprint |-> None, credential_published_at_millis |-> 1, expires_at_ts |-> Some(2)], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_device_flow:1", source_machine |-> "external_entry", source_effect |-> "Acquire", effect_id |-> 0]
     /\ witness_remaining_script_inputs = <<[machine |-> "auth_machine", variant |-> "AdmitOAuthDeviceFlow", payload |-> [expires_at_millis |-> 2, flow_id |-> "flow_1", max_outstanding_flows |-> 1, observed_global_outstanding_flows |-> 0, provider |-> "provider_1"], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_device_flow:2", source_machine |-> "external_entry", source_effect |-> "AdmitOAuthDeviceFlow", effect_id |-> 0], [machine |-> "auth_machine", variant |-> "BeginRelease", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_device_flow:3", source_machine |-> "external_entry", source_effect |-> "BeginRelease", effect_id |-> 0], [machine |-> "auth_machine", variant |-> "Release", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "witness:release_drains_oauth_device_flow:4", source_machine |-> "external_entry", source_effect |-> "Release", effect_id |-> 0]>>
 
-auth_machine_Acquire(arg_expires_at_ts, arg_credential_published_at_millis) ==
+auth_machine_Acquire(arg_expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "auth_machine"
        /\ packet.variant = "Acquire"
        /\ packet.payload.expires_at_ts = arg_expires_at_ts
        /\ packet.payload.credential_published_at_millis = arg_credential_published_at_millis
+       /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
+       /\ (IF (packet.payload.credential_material_fingerprint = None) THEN TRUE ELSE (auth_machine_credential_material_fingerprint # packet.payload.credential_material_fingerprint))
        /\ auth_machine_phase' = "Valid"
        /\ auth_machine_expires_at' = packet.payload.expires_at_ts
        /\ auth_machine_refresh_attempt' = 0
        /\ auth_machine_credential_present' = TRUE
        /\ auth_machine_credential_generation' = (auth_machine_credential_generation + 1)
        /\ auth_machine_credential_published_at_millis' = Some(packet.payload.credential_published_at_millis)
+       /\ auth_machine_credential_material_fingerprint' = packet.payload.credential_material_fingerprint
        /\ UnchangedFrame_c72cb1d65d4e320f
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -189,7 +193,7 @@ auth_machine_MarkExpiring ==
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Valid"
        /\ auth_machine_phase' = "Expiring"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -211,7 +215,7 @@ auth_machine_ObserveCredentialFreshnessValid(arg_now_ts, arg_refresh_window_secs
        /\ auth_machine_phase = "Valid"
        /\ (IF (auth_machine_expires_at = None) THEN TRUE ELSE ((packet.payload.now_ts < (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)) /\ ((packet.payload.now_ts + packet.payload.refresh_window_secs) <= (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None))))
        /\ auth_machine_phase' = "Valid"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -233,7 +237,7 @@ auth_machine_ObserveCredentialFreshnessExpiringFromValid(arg_now_ts, arg_refresh
        /\ auth_machine_phase = "Valid"
        /\ (IF (auth_machine_expires_at = None) THEN FALSE ELSE ((packet.payload.now_ts < (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)) /\ ((IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None) < (packet.payload.now_ts + packet.payload.refresh_window_secs))))
        /\ auth_machine_phase' = "Expiring"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -255,7 +259,7 @@ auth_machine_ObserveCredentialFreshnessExpiredFromValid(arg_now_ts, arg_refresh_
        /\ auth_machine_phase = "Valid"
        /\ (IF (auth_machine_expires_at = None) THEN FALSE ELSE ((IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None) <= packet.payload.now_ts))
        /\ auth_machine_phase' = "Expired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -277,7 +281,7 @@ auth_machine_ObserveCredentialFreshnessExpiring(arg_now_ts, arg_refresh_window_s
        /\ auth_machine_phase = "Expiring"
        /\ (IF (auth_machine_expires_at = None) THEN TRUE ELSE (packet.payload.now_ts < (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)))
        /\ auth_machine_phase' = "Expiring"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -299,7 +303,7 @@ auth_machine_ObserveCredentialFreshnessExpiredFromExpiring(arg_now_ts, arg_refre
        /\ auth_machine_phase = "Expiring"
        /\ (IF (auth_machine_expires_at = None) THEN FALSE ELSE ((IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None) <= packet.payload.now_ts))
        /\ auth_machine_phase' = "Expired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -320,7 +324,7 @@ auth_machine_ObserveCredentialFreshnessExpired(arg_now_ts, arg_refresh_window_se
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Expired"
        /\ auth_machine_phase' = "Expired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -341,7 +345,7 @@ auth_machine_ObserveCredentialFreshnessRefreshing(arg_now_ts, arg_refresh_window
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Refreshing"
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -362,7 +366,7 @@ auth_machine_ObserveCredentialFreshnessReauthRequired(arg_now_ts, arg_refresh_wi
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "ReauthRequired"
        /\ auth_machine_phase' = "ReauthRequired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -383,7 +387,7 @@ auth_machine_ObserveCredentialFreshnessReleased(arg_now_ts, arg_refresh_window_s
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Released"
        /\ auth_machine_phase' = "Released"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -402,7 +406,7 @@ auth_machine_BeginRefreshFromValid ==
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Valid"
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -421,7 +425,7 @@ auth_machine_BeginRefreshFromExpiring ==
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Expiring"
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -440,7 +444,7 @@ auth_machine_BeginRefreshFromExpired ==
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Expired"
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -469,6 +473,7 @@ auth_machine_CompleteRefresh(arg_new_expires_at, arg_now_ts, arg_credential_publ
        /\ auth_machine_credential_present' = TRUE
        /\ auth_machine_credential_generation' = (auth_machine_credential_generation + 1)
        /\ auth_machine_credential_published_at_millis' = Some(packet.payload.credential_published_at_millis)
+       /\ auth_machine_credential_material_fingerprint' = None
        /\ UnchangedFrame_2f784fb0b4b0fa86
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -492,7 +497,7 @@ auth_machine_ResolveRefreshFailureDispositionTransientRefreshing(arg_http_status
        /\ auth_machine_phase = "Refreshing"
        /\ ((packet.payload.local_credential_unusable = FALSE) /\ (packet.payload.http_status # Some(401)) /\ (packet.payload.http_status # Some(403)) /\ (packet.payload.oauth_error_code # Some("invalid_grant")) /\ (packet.payload.oauth_error_code # Some("invalid_client")) /\ (packet.payload.oauth_error_code # Some("unauthorized_client")) /\ (packet.payload.oauth_error_code # Some("invalid_scope")) /\ (packet.payload.oauth_error_code # Some("access_denied")) /\ (packet.payload.oauth_error_code # Some("permission_denied")) /\ (packet.payload.oauth_error_code # Some("expired_token")))
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -514,7 +519,7 @@ auth_machine_ResolveRefreshFailureDispositionPermanentRefreshing(arg_http_status
        /\ auth_machine_phase = "Refreshing"
        /\ (IF (packet.payload.local_credential_unusable = TRUE) THEN TRUE ELSE (IF (packet.payload.http_status = Some(401)) THEN TRUE ELSE (IF (packet.payload.http_status = Some(403)) THEN TRUE ELSE (IF (packet.payload.oauth_error_code = Some("invalid_grant")) THEN TRUE ELSE (IF (packet.payload.oauth_error_code = Some("invalid_client")) THEN TRUE ELSE (IF (packet.payload.oauth_error_code = Some("unauthorized_client")) THEN TRUE ELSE (IF (packet.payload.oauth_error_code = Some("invalid_scope")) THEN TRUE ELSE (IF (packet.payload.oauth_error_code = Some("access_denied")) THEN TRUE ELSE (IF (packet.payload.oauth_error_code = Some("permission_denied")) THEN TRUE ELSE (packet.payload.oauth_error_code = Some("expired_token")))))))))))
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -535,7 +540,7 @@ auth_machine_RefreshFailedTransient(arg_disposition) ==
        /\ (packet.payload.disposition = "Transient")
        /\ auth_machine_phase' = "Expiring"
        /\ auth_machine_refresh_attempt' = (auth_machine_refresh_attempt + 1)
-       /\ UnchangedFrame_0ec772f63e2ab753
+       /\ UnchangedFrame_bdd94ea638539100
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -557,7 +562,7 @@ auth_machine_RefreshFailedPermanent(arg_disposition) ==
        /\ (packet.payload.disposition = "ReauthRequired")
        /\ auth_machine_phase' = "ReauthRequired"
        /\ auth_machine_refresh_attempt' = (auth_machine_refresh_attempt + 1)
-       /\ UnchangedFrame_0ec772f63e2ab753
+       /\ UnchangedFrame_bdd94ea638539100
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -576,7 +581,7 @@ auth_machine_MarkReauthRequiredFromValid ==
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Valid"
        /\ auth_machine_phase' = "ReauthRequired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -595,7 +600,7 @@ auth_machine_MarkReauthRequiredFromExpiring ==
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Expiring"
        /\ auth_machine_phase' = "ReauthRequired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -614,7 +619,7 @@ auth_machine_MarkReauthRequiredFromExpired ==
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Expired"
        /\ auth_machine_phase' = "ReauthRequired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -633,7 +638,7 @@ auth_machine_MarkReauthRequiredFromRefreshing ==
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Refreshing"
        /\ auth_machine_phase' = "ReauthRequired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -657,7 +662,7 @@ auth_machine_ClearCredentialLifecycle ==
        /\ auth_machine_refresh_attempt' = 0
        /\ auth_machine_credential_present' = FALSE
        /\ auth_machine_credential_published_at_millis' = None
-       /\ UnchangedFrame_142968104a9da3b5
+       /\ UnchangedFrame_3979f8dd7a3b921a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -682,7 +687,7 @@ auth_machine_ReleaseCredentialLifecycleWithOAuth ==
        /\ auth_machine_refresh_attempt' = 0
        /\ auth_machine_credential_present' = FALSE
        /\ auth_machine_credential_published_at_millis' = None
-       /\ UnchangedFrame_142968104a9da3b5
+       /\ UnchangedFrame_3979f8dd7a3b921a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -717,7 +722,7 @@ auth_machine_ReleaseCredentialLifecycleWithoutOAuth ==
        /\ auth_machine_oauth_device_poll_ids' = {}
        /\ auth_machine_oauth_outstanding_flow_count' = 0
        /\ auth_machine_release_draining' = FALSE
-       /\ UnchangedFrame_7d08f82f20f4c9b9
+       /\ UnchangedFrame_74afb28b45d42c5a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -738,7 +743,7 @@ auth_machine_BeginReleaseDrainingOAuthFlowsValid ==
        /\ (auth_machine_oauth_outstanding_flow_count > 0)
        /\ auth_machine_phase' = "Valid"
        /\ auth_machine_release_draining' = TRUE
-       /\ UnchangedFrame_9505f18efa8439f4
+       /\ UnchangedFrame_be20e4c2185ca581
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -759,7 +764,7 @@ auth_machine_BeginReleaseDrainingOAuthFlowsExpiring ==
        /\ (auth_machine_oauth_outstanding_flow_count > 0)
        /\ auth_machine_phase' = "Expiring"
        /\ auth_machine_release_draining' = TRUE
-       /\ UnchangedFrame_9505f18efa8439f4
+       /\ UnchangedFrame_be20e4c2185ca581
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -780,7 +785,7 @@ auth_machine_BeginReleaseDrainingOAuthFlowsExpired ==
        /\ (auth_machine_oauth_outstanding_flow_count > 0)
        /\ auth_machine_phase' = "Expired"
        /\ auth_machine_release_draining' = TRUE
-       /\ UnchangedFrame_9505f18efa8439f4
+       /\ UnchangedFrame_be20e4c2185ca581
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -801,7 +806,7 @@ auth_machine_BeginReleaseDrainingOAuthFlowsRefreshing ==
        /\ (auth_machine_oauth_outstanding_flow_count > 0)
        /\ auth_machine_phase' = "Refreshing"
        /\ auth_machine_release_draining' = TRUE
-       /\ UnchangedFrame_9505f18efa8439f4
+       /\ UnchangedFrame_be20e4c2185ca581
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -822,7 +827,7 @@ auth_machine_BeginReleaseDrainingOAuthFlowsReauthRequired ==
        /\ (auth_machine_oauth_outstanding_flow_count > 0)
        /\ auth_machine_phase' = "ReauthRequired"
        /\ auth_machine_release_draining' = TRUE
-       /\ UnchangedFrame_9505f18efa8439f4
+       /\ UnchangedFrame_be20e4c2185ca581
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -843,7 +848,7 @@ auth_machine_BeginReleaseWithoutOAuthFlowsValid ==
        /\ (auth_machine_oauth_outstanding_flow_count = 0)
        /\ auth_machine_phase' = "Valid"
        /\ auth_machine_release_draining' = TRUE
-       /\ UnchangedFrame_9505f18efa8439f4
+       /\ UnchangedFrame_be20e4c2185ca581
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -863,7 +868,7 @@ auth_machine_BeginReleaseWithoutOAuthFlowsExpiring ==
        /\ (auth_machine_oauth_outstanding_flow_count = 0)
        /\ auth_machine_phase' = "Expiring"
        /\ auth_machine_release_draining' = TRUE
-       /\ UnchangedFrame_9505f18efa8439f4
+       /\ UnchangedFrame_be20e4c2185ca581
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -883,7 +888,7 @@ auth_machine_BeginReleaseWithoutOAuthFlowsExpired ==
        /\ (auth_machine_oauth_outstanding_flow_count = 0)
        /\ auth_machine_phase' = "Expired"
        /\ auth_machine_release_draining' = TRUE
-       /\ UnchangedFrame_9505f18efa8439f4
+       /\ UnchangedFrame_be20e4c2185ca581
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -903,7 +908,7 @@ auth_machine_BeginReleaseWithoutOAuthFlowsRefreshing ==
        /\ (auth_machine_oauth_outstanding_flow_count = 0)
        /\ auth_machine_phase' = "Refreshing"
        /\ auth_machine_release_draining' = TRUE
-       /\ UnchangedFrame_9505f18efa8439f4
+       /\ UnchangedFrame_be20e4c2185ca581
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -923,7 +928,7 @@ auth_machine_BeginReleaseWithoutOAuthFlowsReauthRequired ==
        /\ (auth_machine_oauth_outstanding_flow_count = 0)
        /\ auth_machine_phase' = "ReauthRequired"
        /\ auth_machine_release_draining' = TRUE
-       /\ UnchangedFrame_9505f18efa8439f4
+       /\ UnchangedFrame_be20e4c2185ca581
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -941,7 +946,7 @@ auth_machine_BeginReleaseReleased ==
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Released"
        /\ auth_machine_phase' = "Released"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -975,7 +980,7 @@ auth_machine_Release ==
        /\ auth_machine_oauth_device_poll_ids' = {}
        /\ auth_machine_oauth_outstanding_flow_count' = 0
        /\ auth_machine_release_draining' = FALSE
-       /\ UnchangedFrame_7d08f82f20f4c9b9
+       /\ UnchangedFrame_74afb28b45d42c5a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1009,6 +1014,7 @@ auth_machine_RestoreCredentialLifecycleSnapshotValid(arg_lifecycle_phase, arg_ex
        /\ auth_machine_credential_present' = packet.payload.credential_present
        /\ auth_machine_credential_generation' = IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation
        /\ auth_machine_credential_published_at_millis' = packet.payload.credential_published_at_millis
+       /\ auth_machine_credential_material_fingerprint' = None
        /\ UnchangedFrame_2f784fb0b4b0fa86
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -1043,6 +1049,7 @@ auth_machine_RestoreCredentialLifecycleSnapshotExpiring(arg_lifecycle_phase, arg
        /\ auth_machine_credential_present' = packet.payload.credential_present
        /\ auth_machine_credential_generation' = IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation
        /\ auth_machine_credential_published_at_millis' = packet.payload.credential_published_at_millis
+       /\ auth_machine_credential_material_fingerprint' = None
        /\ UnchangedFrame_2f784fb0b4b0fa86
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -1077,6 +1084,7 @@ auth_machine_RestoreCredentialLifecycleSnapshotRefreshing(arg_lifecycle_phase, a
        /\ auth_machine_credential_present' = packet.payload.credential_present
        /\ auth_machine_credential_generation' = IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation
        /\ auth_machine_credential_published_at_millis' = packet.payload.credential_published_at_millis
+       /\ auth_machine_credential_material_fingerprint' = None
        /\ UnchangedFrame_2f784fb0b4b0fa86
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -1111,6 +1119,7 @@ auth_machine_RestoreCredentialLifecycleSnapshotExpired(arg_lifecycle_phase, arg_
        /\ auth_machine_credential_present' = packet.payload.credential_present
        /\ auth_machine_credential_generation' = IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation
        /\ auth_machine_credential_published_at_millis' = packet.payload.credential_published_at_millis
+       /\ auth_machine_credential_material_fingerprint' = None
        /\ UnchangedFrame_2f784fb0b4b0fa86
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -1145,6 +1154,7 @@ auth_machine_RestoreCredentialLifecycleSnapshotReauthRequired(arg_lifecycle_phas
        /\ auth_machine_credential_present' = packet.payload.credential_present
        /\ auth_machine_credential_generation' = IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation
        /\ auth_machine_credential_published_at_millis' = packet.payload.credential_published_at_millis
+       /\ auth_machine_credential_material_fingerprint' = None
        /\ UnchangedFrame_2f784fb0b4b0fa86
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -1180,6 +1190,7 @@ auth_machine_RestoreCredentialLifecycleSnapshotNoCredentialWithOAuth(arg_lifecyc
        /\ auth_machine_credential_present' = FALSE
        /\ auth_machine_credential_generation' = IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation
        /\ auth_machine_credential_published_at_millis' = None
+       /\ auth_machine_credential_material_fingerprint' = None
        /\ UnchangedFrame_2f784fb0b4b0fa86
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -1215,6 +1226,7 @@ auth_machine_RestoreCredentialLifecycleSnapshotNoCredentialWithoutOAuth(arg_life
        /\ auth_machine_credential_present' = FALSE
        /\ auth_machine_credential_generation' = IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation
        /\ auth_machine_credential_published_at_millis' = None
+       /\ auth_machine_credential_material_fingerprint' = None
        /\ auth_machine_oauth_browser_flow_ids' = {}
        /\ auth_machine_oauth_browser_flow_providers' = [x \in {} |-> None]
        /\ auth_machine_oauth_browser_flow_redirect_uris' = [x \in {} |-> None]
@@ -1258,6 +1270,7 @@ auth_machine_RestoreAuthoritySnapshotValid(arg_lifecycle_phase, arg_expires_at, 
        /\ auth_machine_credential_present' = packet.payload.credential_present
        /\ auth_machine_credential_generation' = IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation
        /\ auth_machine_credential_published_at_millis' = packet.payload.credential_published_at_millis
+       /\ auth_machine_credential_material_fingerprint' = None
        /\ UnchangedFrame_2f784fb0b4b0fa86
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -1291,6 +1304,7 @@ auth_machine_RestoreAuthoritySnapshotExpiring(arg_lifecycle_phase, arg_expires_a
        /\ auth_machine_credential_present' = packet.payload.credential_present
        /\ auth_machine_credential_generation' = IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation
        /\ auth_machine_credential_published_at_millis' = packet.payload.credential_published_at_millis
+       /\ auth_machine_credential_material_fingerprint' = None
        /\ UnchangedFrame_2f784fb0b4b0fa86
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -1324,6 +1338,7 @@ auth_machine_RestoreAuthoritySnapshotRefreshing(arg_lifecycle_phase, arg_expires
        /\ auth_machine_credential_present' = packet.payload.credential_present
        /\ auth_machine_credential_generation' = IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation
        /\ auth_machine_credential_published_at_millis' = packet.payload.credential_published_at_millis
+       /\ auth_machine_credential_material_fingerprint' = None
        /\ UnchangedFrame_2f784fb0b4b0fa86
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -1357,6 +1372,7 @@ auth_machine_RestoreAuthoritySnapshotExpired(arg_lifecycle_phase, arg_expires_at
        /\ auth_machine_credential_present' = packet.payload.credential_present
        /\ auth_machine_credential_generation' = IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation
        /\ auth_machine_credential_published_at_millis' = packet.payload.credential_published_at_millis
+       /\ auth_machine_credential_material_fingerprint' = None
        /\ UnchangedFrame_2f784fb0b4b0fa86
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -1390,6 +1406,7 @@ auth_machine_RestoreAuthoritySnapshotReauthRequired(arg_lifecycle_phase, arg_exp
        /\ auth_machine_credential_present' = packet.payload.credential_present
        /\ auth_machine_credential_generation' = IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation
        /\ auth_machine_credential_published_at_millis' = packet.payload.credential_published_at_millis
+       /\ auth_machine_credential_material_fingerprint' = None
        /\ UnchangedFrame_2f784fb0b4b0fa86
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -1423,6 +1440,7 @@ auth_machine_RestoreAuthoritySnapshotReleased(arg_lifecycle_phase, arg_expires_a
        /\ auth_machine_credential_present' = packet.payload.credential_present
        /\ auth_machine_credential_generation' = IF (packet.payload.credential_generation > auth_machine_credential_generation) THEN packet.payload.credential_generation ELSE auth_machine_credential_generation
        /\ auth_machine_credential_published_at_millis' = packet.payload.credential_published_at_millis
+       /\ auth_machine_credential_material_fingerprint' = None
        /\ auth_machine_release_draining' = FALSE
        /\ UnchangedFrame_758184af7afe5f8d
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -1456,7 +1474,7 @@ auth_machine_RestoreOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirec
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapSet(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id, (IF "value" \in DOMAIN packet.payload.redirect_uri THEN packet.payload.redirect_uri["value"] ELSE None))
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapSet(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id, (IF "value" \in DOMAIN packet.payload.expires_at_millis THEN packet.payload.expires_at_millis["value"] ELSE None))
        /\ auth_machine_oauth_outstanding_flow_count' = IF ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE) THEN (auth_machine_oauth_outstanding_flow_count + 1) ELSE auth_machine_oauth_outstanding_flow_count
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1488,7 +1506,7 @@ auth_machine_RestoreOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redi
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapSet(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id, (IF "value" \in DOMAIN packet.payload.redirect_uri THEN packet.payload.redirect_uri["value"] ELSE None))
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapSet(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id, (IF "value" \in DOMAIN packet.payload.expires_at_millis THEN packet.payload.expires_at_millis["value"] ELSE None))
        /\ auth_machine_oauth_outstanding_flow_count' = IF ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE) THEN (auth_machine_oauth_outstanding_flow_count + 1) ELSE auth_machine_oauth_outstanding_flow_count
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1520,7 +1538,7 @@ auth_machine_RestoreOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redir
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapSet(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id, (IF "value" \in DOMAIN packet.payload.redirect_uri THEN packet.payload.redirect_uri["value"] ELSE None))
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapSet(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id, (IF "value" \in DOMAIN packet.payload.expires_at_millis THEN packet.payload.expires_at_millis["value"] ELSE None))
        /\ auth_machine_oauth_outstanding_flow_count' = IF ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE) THEN (auth_machine_oauth_outstanding_flow_count + 1) ELSE auth_machine_oauth_outstanding_flow_count
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1552,7 +1570,7 @@ auth_machine_RestoreOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_re
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapSet(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id, (IF "value" \in DOMAIN packet.payload.redirect_uri THEN packet.payload.redirect_uri["value"] ELSE None))
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapSet(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id, (IF "value" \in DOMAIN packet.payload.expires_at_millis THEN packet.payload.expires_at_millis["value"] ELSE None))
        /\ auth_machine_oauth_outstanding_flow_count' = IF ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE) THEN (auth_machine_oauth_outstanding_flow_count + 1) ELSE auth_machine_oauth_outstanding_flow_count
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1584,7 +1602,7 @@ auth_machine_RestoreOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, ar
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapSet(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id, (IF "value" \in DOMAIN packet.payload.redirect_uri THEN packet.payload.redirect_uri["value"] ELSE None))
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapSet(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id, (IF "value" \in DOMAIN packet.payload.expires_at_millis THEN packet.payload.expires_at_millis["value"] ELSE None))
        /\ auth_machine_oauth_outstanding_flow_count' = IF ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE) THEN (auth_machine_oauth_outstanding_flow_count + 1) ELSE auth_machine_oauth_outstanding_flow_count
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1614,7 +1632,7 @@ auth_machine_RestoreOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_expires_
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapSet(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id, (IF "value" \in DOMAIN packet.payload.expires_at_millis THEN packet.payload.expires_at_millis["value"] ELSE None))
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = IF ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE) THEN (auth_machine_oauth_outstanding_flow_count + 1) ELSE auth_machine_oauth_outstanding_flow_count
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1644,7 +1662,7 @@ auth_machine_RestoreOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expir
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapSet(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id, (IF "value" \in DOMAIN packet.payload.expires_at_millis THEN packet.payload.expires_at_millis["value"] ELSE None))
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = IF ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE) THEN (auth_machine_oauth_outstanding_flow_count + 1) ELSE auth_machine_oauth_outstanding_flow_count
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1674,7 +1692,7 @@ auth_machine_RestoreOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_expire
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapSet(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id, (IF "value" \in DOMAIN packet.payload.expires_at_millis THEN packet.payload.expires_at_millis["value"] ELSE None))
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = IF ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE) THEN (auth_machine_oauth_outstanding_flow_count + 1) ELSE auth_machine_oauth_outstanding_flow_count
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1704,7 +1722,7 @@ auth_machine_RestoreOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_exp
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapSet(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id, (IF "value" \in DOMAIN packet.payload.expires_at_millis THEN packet.payload.expires_at_millis["value"] ELSE None))
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = IF ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE) THEN (auth_machine_oauth_outstanding_flow_count + 1) ELSE auth_machine_oauth_outstanding_flow_count
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1734,7 +1752,7 @@ auth_machine_RestoreOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapSet(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id, (IF "value" \in DOMAIN packet.payload.expires_at_millis THEN packet.payload.expires_at_millis["value"] ELSE None))
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = IF ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE) THEN (auth_machine_oauth_outstanding_flow_count + 1) ELSE auth_machine_oauth_outstanding_flow_count
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1757,7 +1775,7 @@ auth_machine_RestoreOAuthDevicePollValid(arg_flow_id) ==
        /\ (packet.payload.flow_id \in auth_machine_oauth_device_flow_ids)
        /\ auth_machine_phase' = "Valid"
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \cup {packet.payload.flow_id})
-       /\ UnchangedFrame_fc530d92825d2bc1
+       /\ UnchangedFrame_afe2b1dfb354130a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1780,7 +1798,7 @@ auth_machine_RestoreOAuthDevicePollExpiring(arg_flow_id) ==
        /\ (packet.payload.flow_id \in auth_machine_oauth_device_flow_ids)
        /\ auth_machine_phase' = "Expiring"
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \cup {packet.payload.flow_id})
-       /\ UnchangedFrame_fc530d92825d2bc1
+       /\ UnchangedFrame_afe2b1dfb354130a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1803,7 +1821,7 @@ auth_machine_RestoreOAuthDevicePollExpired(arg_flow_id) ==
        /\ (packet.payload.flow_id \in auth_machine_oauth_device_flow_ids)
        /\ auth_machine_phase' = "Expired"
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \cup {packet.payload.flow_id})
-       /\ UnchangedFrame_fc530d92825d2bc1
+       /\ UnchangedFrame_afe2b1dfb354130a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1826,7 +1844,7 @@ auth_machine_RestoreOAuthDevicePollRefreshing(arg_flow_id) ==
        /\ (packet.payload.flow_id \in auth_machine_oauth_device_flow_ids)
        /\ auth_machine_phase' = "Refreshing"
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \cup {packet.payload.flow_id})
-       /\ UnchangedFrame_fc530d92825d2bc1
+       /\ UnchangedFrame_afe2b1dfb354130a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1849,7 +1867,7 @@ auth_machine_RestoreOAuthDevicePollReauthRequired(arg_flow_id) ==
        /\ (packet.payload.flow_id \in auth_machine_oauth_device_flow_ids)
        /\ auth_machine_phase' = "ReauthRequired"
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \cup {packet.payload.flow_id})
-       /\ UnchangedFrame_fc530d92825d2bc1
+       /\ UnchangedFrame_afe2b1dfb354130a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1883,7 +1901,7 @@ auth_machine_AdmitOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect_
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapSet(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id, packet.payload.redirect_uri)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapSet(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count + 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1917,7 +1935,7 @@ auth_machine_AdmitOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redire
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapSet(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id, packet.payload.redirect_uri)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapSet(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count + 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1951,7 +1969,7 @@ auth_machine_AdmitOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redirec
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapSet(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id, packet.payload.redirect_uri)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapSet(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count + 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1985,7 +2003,7 @@ auth_machine_AdmitOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_redi
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapSet(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id, packet.payload.redirect_uri)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapSet(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count + 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2019,7 +2037,7 @@ auth_machine_AdmitOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg_
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapSet(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id, packet.payload.redirect_uri)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapSet(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count + 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2053,7 +2071,7 @@ auth_machine_ReopenReleasedForOAuthBrowserFlowAdmission(arg_flow_id, arg_provide
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapSet(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id, packet.payload.redirect_uri)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapSet(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count + 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2080,7 +2098,7 @@ auth_machine_VerifyOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirect
        /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_redirect_uris) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_redirect_uris THEN auth_machine_oauth_browser_flow_redirect_uris[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.redirect_uri))
        /\ ((packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_expires_at_millis) /\ (packet.payload.now_millis <= (auth_machine_oauth_browser_flow_expires_at_millis)[packet.payload.flow_id]))
        /\ auth_machine_phase' = "Valid"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2107,7 +2125,7 @@ auth_machine_VerifyOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redir
        /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_redirect_uris) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_redirect_uris THEN auth_machine_oauth_browser_flow_redirect_uris[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.redirect_uri))
        /\ ((packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_expires_at_millis) /\ (packet.payload.now_millis <= (auth_machine_oauth_browser_flow_expires_at_millis)[packet.payload.flow_id]))
        /\ auth_machine_phase' = "Expiring"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2134,7 +2152,7 @@ auth_machine_VerifyOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redire
        /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_redirect_uris) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_redirect_uris THEN auth_machine_oauth_browser_flow_redirect_uris[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.redirect_uri))
        /\ ((packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_expires_at_millis) /\ (packet.payload.now_millis <= (auth_machine_oauth_browser_flow_expires_at_millis)[packet.payload.flow_id]))
        /\ auth_machine_phase' = "Expired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2161,7 +2179,7 @@ auth_machine_VerifyOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_red
        /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_redirect_uris) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_redirect_uris THEN auth_machine_oauth_browser_flow_redirect_uris[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.redirect_uri))
        /\ ((packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_expires_at_millis) /\ (packet.payload.now_millis <= (auth_machine_oauth_browser_flow_expires_at_millis)[packet.payload.flow_id]))
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2188,7 +2206,7 @@ auth_machine_VerifyOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, arg
        /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_redirect_uris) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_redirect_uris THEN auth_machine_oauth_browser_flow_redirect_uris[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.redirect_uri))
        /\ ((packet.payload.flow_id \in DOMAIN auth_machine_oauth_browser_flow_expires_at_millis) /\ (packet.payload.now_millis <= (auth_machine_oauth_browser_flow_expires_at_millis)[packet.payload.flow_id]))
        /\ auth_machine_phase' = "ReauthRequired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2220,7 +2238,7 @@ auth_machine_ConsumeOAuthBrowserFlowValid(arg_flow_id, arg_provider, arg_redirec
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapRemove(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapRemove(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2252,7 +2270,7 @@ auth_machine_ConsumeOAuthBrowserFlowExpiring(arg_flow_id, arg_provider, arg_redi
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapRemove(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapRemove(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2284,7 +2302,7 @@ auth_machine_ConsumeOAuthBrowserFlowExpired(arg_flow_id, arg_provider, arg_redir
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapRemove(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapRemove(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2316,7 +2334,7 @@ auth_machine_ConsumeOAuthBrowserFlowRefreshing(arg_flow_id, arg_provider, arg_re
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapRemove(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapRemove(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2348,7 +2366,7 @@ auth_machine_ConsumeOAuthBrowserFlowReauthRequired(arg_flow_id, arg_provider, ar
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapRemove(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapRemove(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2374,7 +2392,7 @@ auth_machine_ExpireOAuthBrowserFlowValid(arg_flow_id) ==
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapRemove(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapRemove(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2400,7 +2418,7 @@ auth_machine_ExpireOAuthBrowserFlowExpiring(arg_flow_id) ==
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapRemove(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapRemove(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2426,7 +2444,7 @@ auth_machine_ExpireOAuthBrowserFlowExpired(arg_flow_id) ==
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapRemove(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapRemove(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2452,7 +2470,7 @@ auth_machine_ExpireOAuthBrowserFlowRefreshing(arg_flow_id) ==
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapRemove(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapRemove(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2478,7 +2496,7 @@ auth_machine_ExpireOAuthBrowserFlowReauthRequired(arg_flow_id) ==
        /\ auth_machine_oauth_browser_flow_redirect_uris' = MapRemove(auth_machine_oauth_browser_flow_redirect_uris, packet.payload.flow_id)
        /\ auth_machine_oauth_browser_flow_expires_at_millis' = MapRemove(auth_machine_oauth_browser_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_91362fe975d968ca
+       /\ UnchangedFrame_eebc0bfb7d9edfdb
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2499,7 +2517,7 @@ auth_machine_ExpireOAuthBrowserFlowAbsentValid(arg_flow_id) ==
        /\ auth_machine_phase = "Valid"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE)
        /\ auth_machine_phase' = "Valid"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2519,7 +2537,7 @@ auth_machine_ExpireOAuthBrowserFlowAbsentExpiring(arg_flow_id) ==
        /\ auth_machine_phase = "Expiring"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE)
        /\ auth_machine_phase' = "Expiring"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2539,7 +2557,7 @@ auth_machine_ExpireOAuthBrowserFlowAbsentExpired(arg_flow_id) ==
        /\ auth_machine_phase = "Expired"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE)
        /\ auth_machine_phase' = "Expired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2559,7 +2577,7 @@ auth_machine_ExpireOAuthBrowserFlowAbsentRefreshing(arg_flow_id) ==
        /\ auth_machine_phase = "Refreshing"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE)
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2579,7 +2597,7 @@ auth_machine_ExpireOAuthBrowserFlowAbsentReauthRequired(arg_flow_id) ==
        /\ auth_machine_phase = "ReauthRequired"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_browser_flow_ids) = FALSE)
        /\ auth_machine_phase' = "ReauthRequired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2598,7 +2616,7 @@ auth_machine_ExpireOAuthBrowserFlowReleased(arg_flow_id) ==
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Released"
        /\ auth_machine_phase' = "Released"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2630,7 +2648,7 @@ auth_machine_AdmitOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_expires_at
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapSet(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count + 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2663,7 +2681,7 @@ auth_machine_AdmitOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_expires
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapSet(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count + 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2696,7 +2714,7 @@ auth_machine_AdmitOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_expires_
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapSet(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count + 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2729,7 +2747,7 @@ auth_machine_AdmitOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_expir
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapSet(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count + 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2762,7 +2780,7 @@ auth_machine_AdmitOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_e
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapSet(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count + 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2795,7 +2813,7 @@ auth_machine_ReopenReleasedForOAuthDeviceFlowAdmission(arg_flow_id, arg_provider
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapSet(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id, packet.payload.expires_at_millis)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count + 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2817,7 +2835,7 @@ auth_machine_ConfirmOAuthDurableAdmissionValid(arg_observed_global_outstanding_f
        /\ auth_machine_phase = "Valid"
        /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
        /\ auth_machine_phase' = "Valid"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2838,7 +2856,7 @@ auth_machine_ConfirmOAuthDurableAdmissionExpiring(arg_observed_global_outstandin
        /\ auth_machine_phase = "Expiring"
        /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
        /\ auth_machine_phase' = "Expiring"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2859,7 +2877,7 @@ auth_machine_ConfirmOAuthDurableAdmissionExpired(arg_observed_global_outstanding
        /\ auth_machine_phase = "Expired"
        /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
        /\ auth_machine_phase' = "Expired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2880,7 +2898,7 @@ auth_machine_ConfirmOAuthDurableAdmissionRefreshing(arg_observed_global_outstand
        /\ auth_machine_phase = "Refreshing"
        /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2901,7 +2919,7 @@ auth_machine_ConfirmOAuthDurableAdmissionReauthRequired(arg_observed_global_outs
        /\ auth_machine_phase = "ReauthRequired"
        /\ (packet.payload.observed_global_outstanding_flows < packet.payload.max_outstanding_flows)
        /\ auth_machine_phase' = "ReauthRequired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2921,7 +2939,7 @@ auth_machine_ConfirmOAuthDurableAdmissionReleased(arg_observed_global_outstandin
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Released"
        /\ auth_machine_phase' = "Released"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2945,7 +2963,7 @@ auth_machine_VerifyOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_now_milli
        /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers THEN auth_machine_oauth_device_flow_providers[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.provider))
        /\ ((packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis) /\ (packet.payload.now_millis <= (auth_machine_oauth_device_flow_expires_at_millis)[packet.payload.flow_id]))
        /\ auth_machine_phase' = "Valid"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2970,7 +2988,7 @@ auth_machine_VerifyOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_now_mi
        /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers THEN auth_machine_oauth_device_flow_providers[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.provider))
        /\ ((packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis) /\ (packet.payload.now_millis <= (auth_machine_oauth_device_flow_expires_at_millis)[packet.payload.flow_id]))
        /\ auth_machine_phase' = "Expiring"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2995,7 +3013,7 @@ auth_machine_VerifyOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_now_mil
        /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers THEN auth_machine_oauth_device_flow_providers[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.provider))
        /\ ((packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis) /\ (packet.payload.now_millis <= (auth_machine_oauth_device_flow_expires_at_millis)[packet.payload.flow_id]))
        /\ auth_machine_phase' = "Expired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3020,7 +3038,7 @@ auth_machine_VerifyOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_now_
        /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers THEN auth_machine_oauth_device_flow_providers[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.provider))
        /\ ((packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis) /\ (packet.payload.now_millis <= (auth_machine_oauth_device_flow_expires_at_millis)[packet.payload.flow_id]))
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3045,7 +3063,7 @@ auth_machine_VerifyOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg_
        /\ ((IF (packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers) THEN Some((IF packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_providers THEN auth_machine_oauth_device_flow_providers[packet.payload.flow_id] ELSE "None")) ELSE None) = Some(packet.payload.provider))
        /\ ((packet.payload.flow_id \in DOMAIN auth_machine_oauth_device_flow_expires_at_millis) /\ (packet.payload.now_millis <= (auth_machine_oauth_device_flow_expires_at_millis)[packet.payload.flow_id]))
        /\ auth_machine_phase' = "ReauthRequired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3072,7 +3090,7 @@ auth_machine_BeginOAuthDevicePollValid(arg_flow_id, arg_provider, arg_now_millis
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_poll_ids) = FALSE)
        /\ auth_machine_phase' = "Valid"
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \cup {packet.payload.flow_id})
-       /\ UnchangedFrame_fc530d92825d2bc1
+       /\ UnchangedFrame_afe2b1dfb354130a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3099,7 +3117,7 @@ auth_machine_BeginOAuthDevicePollExpiring(arg_flow_id, arg_provider, arg_now_mil
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_poll_ids) = FALSE)
        /\ auth_machine_phase' = "Expiring"
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \cup {packet.payload.flow_id})
-       /\ UnchangedFrame_fc530d92825d2bc1
+       /\ UnchangedFrame_afe2b1dfb354130a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3126,7 +3144,7 @@ auth_machine_BeginOAuthDevicePollExpired(arg_flow_id, arg_provider, arg_now_mill
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_poll_ids) = FALSE)
        /\ auth_machine_phase' = "Expired"
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \cup {packet.payload.flow_id})
-       /\ UnchangedFrame_fc530d92825d2bc1
+       /\ UnchangedFrame_afe2b1dfb354130a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3153,7 +3171,7 @@ auth_machine_BeginOAuthDevicePollRefreshing(arg_flow_id, arg_provider, arg_now_m
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_poll_ids) = FALSE)
        /\ auth_machine_phase' = "Refreshing"
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \cup {packet.payload.flow_id})
-       /\ UnchangedFrame_fc530d92825d2bc1
+       /\ UnchangedFrame_afe2b1dfb354130a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3180,7 +3198,7 @@ auth_machine_BeginOAuthDevicePollReauthRequired(arg_flow_id, arg_provider, arg_n
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_poll_ids) = FALSE)
        /\ auth_machine_phase' = "ReauthRequired"
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \cup {packet.payload.flow_id})
-       /\ UnchangedFrame_fc530d92825d2bc1
+       /\ UnchangedFrame_afe2b1dfb354130a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3202,7 +3220,7 @@ auth_machine_FinishOAuthDevicePollValid(arg_flow_id) ==
        /\ (packet.payload.flow_id \in auth_machine_oauth_device_poll_ids)
        /\ auth_machine_phase' = "Valid"
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
-       /\ UnchangedFrame_fc530d92825d2bc1
+       /\ UnchangedFrame_afe2b1dfb354130a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3224,7 +3242,7 @@ auth_machine_FinishOAuthDevicePollExpiring(arg_flow_id) ==
        /\ (packet.payload.flow_id \in auth_machine_oauth_device_poll_ids)
        /\ auth_machine_phase' = "Expiring"
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
-       /\ UnchangedFrame_fc530d92825d2bc1
+       /\ UnchangedFrame_afe2b1dfb354130a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3246,7 +3264,7 @@ auth_machine_FinishOAuthDevicePollExpired(arg_flow_id) ==
        /\ (packet.payload.flow_id \in auth_machine_oauth_device_poll_ids)
        /\ auth_machine_phase' = "Expired"
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
-       /\ UnchangedFrame_fc530d92825d2bc1
+       /\ UnchangedFrame_afe2b1dfb354130a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3268,7 +3286,7 @@ auth_machine_FinishOAuthDevicePollRefreshing(arg_flow_id) ==
        /\ (packet.payload.flow_id \in auth_machine_oauth_device_poll_ids)
        /\ auth_machine_phase' = "Refreshing"
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
-       /\ UnchangedFrame_fc530d92825d2bc1
+       /\ UnchangedFrame_afe2b1dfb354130a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3290,7 +3308,7 @@ auth_machine_FinishOAuthDevicePollReauthRequired(arg_flow_id) ==
        /\ (packet.payload.flow_id \in auth_machine_oauth_device_poll_ids)
        /\ auth_machine_phase' = "ReauthRequired"
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
-       /\ UnchangedFrame_fc530d92825d2bc1
+       /\ UnchangedFrame_afe2b1dfb354130a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3311,7 +3329,7 @@ auth_machine_FinishOAuthDevicePollAbsentValid(arg_flow_id) ==
        /\ auth_machine_phase = "Valid"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_poll_ids) = FALSE)
        /\ auth_machine_phase' = "Valid"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3331,7 +3349,7 @@ auth_machine_FinishOAuthDevicePollAbsentExpiring(arg_flow_id) ==
        /\ auth_machine_phase = "Expiring"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_poll_ids) = FALSE)
        /\ auth_machine_phase' = "Expiring"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3351,7 +3369,7 @@ auth_machine_FinishOAuthDevicePollAbsentExpired(arg_flow_id) ==
        /\ auth_machine_phase = "Expired"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_poll_ids) = FALSE)
        /\ auth_machine_phase' = "Expired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3371,7 +3389,7 @@ auth_machine_FinishOAuthDevicePollAbsentRefreshing(arg_flow_id) ==
        /\ auth_machine_phase = "Refreshing"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_poll_ids) = FALSE)
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3391,7 +3409,7 @@ auth_machine_FinishOAuthDevicePollAbsentReauthRequired(arg_flow_id) ==
        /\ auth_machine_phase = "ReauthRequired"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_poll_ids) = FALSE)
        /\ auth_machine_phase' = "ReauthRequired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3410,7 +3428,7 @@ auth_machine_FinishOAuthDevicePollReleased(arg_flow_id) ==
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Released"
        /\ auth_machine_phase' = "Released"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3439,7 +3457,7 @@ auth_machine_ConsumeOAuthDeviceFlowValid(arg_flow_id, arg_provider, arg_now_mill
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapRemove(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3469,7 +3487,7 @@ auth_machine_ConsumeOAuthDeviceFlowExpiring(arg_flow_id, arg_provider, arg_now_m
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapRemove(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3499,7 +3517,7 @@ auth_machine_ConsumeOAuthDeviceFlowExpired(arg_flow_id, arg_provider, arg_now_mi
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapRemove(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3529,7 +3547,7 @@ auth_machine_ConsumeOAuthDeviceFlowRefreshing(arg_flow_id, arg_provider, arg_now
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapRemove(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3559,7 +3577,7 @@ auth_machine_ConsumeOAuthDeviceFlowReauthRequired(arg_flow_id, arg_provider, arg
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapRemove(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3585,7 +3603,7 @@ auth_machine_ExpireOAuthDeviceFlowValid(arg_flow_id) ==
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapRemove(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3611,7 +3629,7 @@ auth_machine_ExpireOAuthDeviceFlowExpiring(arg_flow_id) ==
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapRemove(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3637,7 +3655,7 @@ auth_machine_ExpireOAuthDeviceFlowExpired(arg_flow_id) ==
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapRemove(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3663,7 +3681,7 @@ auth_machine_ExpireOAuthDeviceFlowRefreshing(arg_flow_id) ==
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapRemove(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3689,7 +3707,7 @@ auth_machine_ExpireOAuthDeviceFlowReauthRequired(arg_flow_id) ==
        /\ auth_machine_oauth_device_flow_expires_at_millis' = MapRemove(auth_machine_oauth_device_flow_expires_at_millis, packet.payload.flow_id)
        /\ auth_machine_oauth_device_poll_ids' = (auth_machine_oauth_device_poll_ids \ {packet.payload.flow_id})
        /\ auth_machine_oauth_outstanding_flow_count' = (auth_machine_oauth_outstanding_flow_count - 1)
-       /\ UnchangedFrame_e66abac924d246d9
+       /\ UnchangedFrame_314eb35e3bf6edcc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3710,7 +3728,7 @@ auth_machine_ExpireOAuthDeviceFlowAbsentValid(arg_flow_id) ==
        /\ auth_machine_phase = "Valid"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE)
        /\ auth_machine_phase' = "Valid"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3730,7 +3748,7 @@ auth_machine_ExpireOAuthDeviceFlowAbsentExpiring(arg_flow_id) ==
        /\ auth_machine_phase = "Expiring"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE)
        /\ auth_machine_phase' = "Expiring"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3750,7 +3768,7 @@ auth_machine_ExpireOAuthDeviceFlowAbsentExpired(arg_flow_id) ==
        /\ auth_machine_phase = "Expired"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE)
        /\ auth_machine_phase' = "Expired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3770,7 +3788,7 @@ auth_machine_ExpireOAuthDeviceFlowAbsentRefreshing(arg_flow_id) ==
        /\ auth_machine_phase = "Refreshing"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE)
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3790,7 +3808,7 @@ auth_machine_ExpireOAuthDeviceFlowAbsentReauthRequired(arg_flow_id) ==
        /\ auth_machine_phase = "ReauthRequired"
        /\ ((packet.payload.flow_id \in auth_machine_oauth_device_flow_ids) = FALSE)
        /\ auth_machine_phase' = "ReauthRequired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3809,7 +3827,7 @@ auth_machine_ExpireOAuthDeviceFlowReleased(arg_flow_id) ==
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Released"
        /\ auth_machine_phase' = "Released"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3829,7 +3847,7 @@ auth_machine_ResolveCredentialUseAdmissionValidUseAuthorizedValid(arg_intent) ==
        /\ auth_machine_phase = "Valid"
        /\ ((packet.payload.intent = "UseCredential") /\ auth_machine_credential_present)
        /\ auth_machine_phase' = "Valid"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3849,7 +3867,7 @@ auth_machine_ResolveCredentialUseAdmissionValidHoldAuthorizedValid(arg_intent) =
        /\ auth_machine_phase = "Valid"
        /\ ((packet.payload.intent = "HoldAuthority") /\ auth_machine_credential_present)
        /\ auth_machine_phase' = "Valid"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3869,7 +3887,7 @@ auth_machine_ResolveCredentialUseAdmissionValidBeginRefreshValid(arg_intent) ==
        /\ auth_machine_phase = "Valid"
        /\ ((packet.payload.intent = "BeginRefresh") /\ auth_machine_credential_present)
        /\ auth_machine_phase' = "Valid"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3889,7 +3907,7 @@ auth_machine_ResolveCredentialUseAdmissionValidNoCredentialValid(arg_intent) ==
        /\ auth_machine_phase = "Valid"
        /\ (auth_machine_credential_present = FALSE)
        /\ auth_machine_phase' = "Valid"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3909,7 +3927,7 @@ auth_machine_ResolveCredentialUseAdmissionExpiringUseRefreshExpiring(arg_intent)
        /\ auth_machine_phase = "Expiring"
        /\ ((packet.payload.intent = "UseCredential") /\ auth_machine_credential_present)
        /\ auth_machine_phase' = "Expiring"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3929,7 +3947,7 @@ auth_machine_ResolveCredentialUseAdmissionExpiringHoldAuthorizedExpiring(arg_int
        /\ auth_machine_phase = "Expiring"
        /\ ((packet.payload.intent = "HoldAuthority") /\ auth_machine_credential_present)
        /\ auth_machine_phase' = "Expiring"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3949,7 +3967,7 @@ auth_machine_ResolveCredentialUseAdmissionExpiringBeginRefreshExpiring(arg_inten
        /\ auth_machine_phase = "Expiring"
        /\ ((packet.payload.intent = "BeginRefresh") /\ auth_machine_credential_present)
        /\ auth_machine_phase' = "Expiring"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3969,7 +3987,7 @@ auth_machine_ResolveCredentialUseAdmissionExpiringNoCredentialExpiring(arg_inten
        /\ auth_machine_phase = "Expiring"
        /\ (auth_machine_credential_present = FALSE)
        /\ auth_machine_phase' = "Expiring"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3989,7 +4007,7 @@ auth_machine_ResolveCredentialUseAdmissionExpiredUseRefreshExpired(arg_intent) =
        /\ auth_machine_phase = "Expired"
        /\ ((packet.payload.intent = "UseCredential") /\ auth_machine_credential_present)
        /\ auth_machine_phase' = "Expired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4009,7 +4027,7 @@ auth_machine_ResolveCredentialUseAdmissionExpiredHoldRefreshExpired(arg_intent) 
        /\ auth_machine_phase = "Expired"
        /\ ((packet.payload.intent = "HoldAuthority") /\ auth_machine_credential_present)
        /\ auth_machine_phase' = "Expired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4029,7 +4047,7 @@ auth_machine_ResolveCredentialUseAdmissionExpiredBeginRefreshExpired(arg_intent)
        /\ auth_machine_phase = "Expired"
        /\ ((packet.payload.intent = "BeginRefresh") /\ auth_machine_credential_present)
        /\ auth_machine_phase' = "Expired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4049,7 +4067,7 @@ auth_machine_ResolveCredentialUseAdmissionExpiredNoCredentialExpired(arg_intent)
        /\ auth_machine_phase = "Expired"
        /\ (auth_machine_credential_present = FALSE)
        /\ auth_machine_phase' = "Expired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4069,7 +4087,7 @@ auth_machine_ResolveCredentialUseAdmissionRefreshingUseRefreshRefreshing(arg_int
        /\ auth_machine_phase = "Refreshing"
        /\ ((packet.payload.intent = "UseCredential") /\ auth_machine_credential_present)
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4089,7 +4107,7 @@ auth_machine_ResolveCredentialUseAdmissionRefreshingHoldAuthorizedRefreshing(arg
        /\ auth_machine_phase = "Refreshing"
        /\ ((packet.payload.intent = "HoldAuthority") /\ auth_machine_credential_present)
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4109,7 +4127,7 @@ auth_machine_ResolveCredentialUseAdmissionRefreshingBeginAlreadyRefreshingRefres
        /\ auth_machine_phase = "Refreshing"
        /\ (packet.payload.intent = "BeginRefresh")
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4129,7 +4147,7 @@ auth_machine_ResolveCredentialUseAdmissionRefreshingNoCredentialUseOrHoldRefresh
        /\ auth_machine_phase = "Refreshing"
        /\ ((auth_machine_credential_present = FALSE) /\ (IF (packet.payload.intent = "UseCredential") THEN TRUE ELSE (packet.payload.intent = "HoldAuthority")))
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4148,7 +4166,7 @@ auth_machine_ResolveCredentialUseAdmissionReauthRequiredReauthRequired(arg_inten
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "ReauthRequired"
        /\ auth_machine_phase' = "ReauthRequired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4167,7 +4185,7 @@ auth_machine_ResolveCredentialUseAdmissionReleasedReleased(arg_intent) ==
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Released"
        /\ auth_machine_phase' = "Released"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4189,7 +4207,7 @@ auth_machine_ResolveOAuthLoginCredentialDispositionUseCachedValid(arg_credential
        /\ auth_machine_phase = "Valid"
        /\ (auth_machine_credential_present /\ packet.payload.credential_present /\ (packet.payload.force_refresh = FALSE))
        /\ auth_machine_phase' = "Valid"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4211,7 +4229,7 @@ auth_machine_ResolveOAuthLoginCredentialDispositionRefreshValidValid(arg_credent
        /\ auth_machine_phase = "Valid"
        /\ (~((auth_machine_credential_present /\ packet.payload.credential_present /\ (packet.payload.force_refresh = FALSE))) /\ packet.payload.refresh_allowed)
        /\ auth_machine_phase' = "Valid"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4233,7 +4251,7 @@ auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedValidValid(a
        /\ auth_machine_phase = "Valid"
        /\ (~((auth_machine_credential_present /\ packet.payload.credential_present /\ (packet.payload.force_refresh = FALSE))) /\ (packet.payload.refresh_allowed = FALSE))
        /\ auth_machine_phase' = "Valid"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4255,7 +4273,7 @@ auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidExpiring(arg_c
        /\ auth_machine_phase = "Expiring"
        /\ packet.payload.refresh_allowed
        /\ auth_machine_phase' = "Expiring"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4277,7 +4295,7 @@ auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidExpired(arg_cr
        /\ auth_machine_phase = "Expired"
        /\ packet.payload.refresh_allowed
        /\ auth_machine_phase' = "Expired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4299,7 +4317,7 @@ auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidRefreshing(arg
        /\ auth_machine_phase = "Refreshing"
        /\ packet.payload.refresh_allowed
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4321,7 +4339,7 @@ auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidReauthRequired
        /\ auth_machine_phase = "ReauthRequired"
        /\ packet.payload.refresh_allowed
        /\ auth_machine_phase' = "ReauthRequired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4343,7 +4361,7 @@ auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidReleased(arg_c
        /\ auth_machine_phase = "Released"
        /\ packet.payload.refresh_allowed
        /\ auth_machine_phase' = "Released"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4365,7 +4383,7 @@ auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpi
        /\ auth_machine_phase = "Expiring"
        /\ (packet.payload.refresh_allowed = FALSE)
        /\ auth_machine_phase' = "Expiring"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4387,7 +4405,7 @@ auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpi
        /\ auth_machine_phase = "Expired"
        /\ (packet.payload.refresh_allowed = FALSE)
        /\ auth_machine_phase' = "Expired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4409,7 +4427,7 @@ auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRefr
        /\ auth_machine_phase = "Refreshing"
        /\ (packet.payload.refresh_allowed = FALSE)
        /\ auth_machine_phase' = "Refreshing"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4431,7 +4449,7 @@ auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReau
        /\ auth_machine_phase = "ReauthRequired"
        /\ (packet.payload.refresh_allowed = FALSE)
        /\ auth_machine_phase' = "ReauthRequired"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4453,7 +4471,7 @@ auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRele
        /\ auth_machine_phase = "Released"
        /\ (packet.payload.refresh_allowed = FALSE)
        /\ auth_machine_phase' = "Released"
-       /\ UnchangedFrame_b8305a9f03dbd4c5
+       /\ UnchangedFrame_b36328745f4ddb6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4464,12 +4482,252 @@ auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRele
        /\ model_step_count' = model_step_count + 1
 
 
+auth_machine_ResolveSourceCredentialPublicationNewMaterialValid(arg_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveSourceCredentialPublication"
+       /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Valid"
+       /\ (auth_machine_credential_material_fingerprint # Some(packet.payload.credential_material_fingerprint))
+       /\ auth_machine_phase' = "Valid"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "SourceCredentialPublicationResolved", payload |-> [disposition |-> "Publish"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSourceCredentialPublicationNewMaterialValid"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveSourceCredentialPublicationNewMaterialValid", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Valid"]}
+       /\ UnchangedFrame_6d338e6154d09149
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveSourceCredentialPublicationNewMaterialExpiring(arg_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveSourceCredentialPublication"
+       /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expiring"
+       /\ (auth_machine_credential_material_fingerprint # Some(packet.payload.credential_material_fingerprint))
+       /\ auth_machine_phase' = "Expiring"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "SourceCredentialPublicationResolved", payload |-> [disposition |-> "Publish"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSourceCredentialPublicationNewMaterialExpiring"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveSourceCredentialPublicationNewMaterialExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
+       /\ UnchangedFrame_6d338e6154d09149
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveSourceCredentialPublicationNewMaterialExpired(arg_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveSourceCredentialPublication"
+       /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ (auth_machine_credential_material_fingerprint # Some(packet.payload.credential_material_fingerprint))
+       /\ auth_machine_phase' = "Expired"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "SourceCredentialPublicationResolved", payload |-> [disposition |-> "Publish"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSourceCredentialPublicationNewMaterialExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveSourceCredentialPublicationNewMaterialExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ UnchangedFrame_6d338e6154d09149
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveSourceCredentialPublicationNewMaterialRefreshing(arg_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveSourceCredentialPublication"
+       /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Refreshing"
+       /\ (auth_machine_credential_material_fingerprint # Some(packet.payload.credential_material_fingerprint))
+       /\ auth_machine_phase' = "Refreshing"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "SourceCredentialPublicationResolved", payload |-> [disposition |-> "Publish"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSourceCredentialPublicationNewMaterialRefreshing"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveSourceCredentialPublicationNewMaterialRefreshing", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Refreshing"]}
+       /\ UnchangedFrame_6d338e6154d09149
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveSourceCredentialPublicationNewMaterialReauthRequired(arg_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveSourceCredentialPublication"
+       /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "ReauthRequired"
+       /\ (auth_machine_credential_material_fingerprint # Some(packet.payload.credential_material_fingerprint))
+       /\ auth_machine_phase' = "ReauthRequired"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "SourceCredentialPublicationResolved", payload |-> [disposition |-> "Publish"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSourceCredentialPublicationNewMaterialReauthRequired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveSourceCredentialPublicationNewMaterialReauthRequired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "ReauthRequired"]}
+       /\ UnchangedFrame_6d338e6154d09149
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveSourceCredentialPublicationNewMaterialReleased(arg_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveSourceCredentialPublication"
+       /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Released"
+       /\ (auth_machine_credential_material_fingerprint # Some(packet.payload.credential_material_fingerprint))
+       /\ auth_machine_phase' = "Released"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "SourceCredentialPublicationResolved", payload |-> [disposition |-> "Publish"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSourceCredentialPublicationNewMaterialReleased"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveSourceCredentialPublicationNewMaterialReleased", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Released"]}
+       /\ UnchangedFrame_6d338e6154d09149
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveSourceCredentialPublicationRenewalExpiring(arg_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveSourceCredentialPublication"
+       /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expiring"
+       /\ (auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint))
+       /\ auth_machine_phase' = "Expiring"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "SourceCredentialPublicationResolved", payload |-> [disposition |-> "Publish"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSourceCredentialPublicationRenewalExpiring"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveSourceCredentialPublicationRenewalExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
+       /\ UnchangedFrame_6d338e6154d09149
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveSourceCredentialPublicationRenewalExpired(arg_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveSourceCredentialPublication"
+       /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ (auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint))
+       /\ auth_machine_phase' = "Expired"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "SourceCredentialPublicationResolved", payload |-> [disposition |-> "Publish"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSourceCredentialPublicationRenewalExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveSourceCredentialPublicationRenewalExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ UnchangedFrame_6d338e6154d09149
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveSourceCredentialPublicationAlreadyPublishedValid(arg_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveSourceCredentialPublication"
+       /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Valid"
+       /\ (auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint))
+       /\ auth_machine_phase' = "Valid"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "SourceCredentialPublicationResolved", payload |-> [disposition |-> "AlreadyPublished"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSourceCredentialPublicationAlreadyPublishedValid"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveSourceCredentialPublicationAlreadyPublishedValid", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Valid"]}
+       /\ UnchangedFrame_6d338e6154d09149
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveSourceCredentialPublicationAlreadyPublishedRefreshing(arg_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveSourceCredentialPublication"
+       /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Refreshing"
+       /\ (auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint))
+       /\ auth_machine_phase' = "Refreshing"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "SourceCredentialPublicationResolved", payload |-> [disposition |-> "AlreadyPublished"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSourceCredentialPublicationAlreadyPublishedRefreshing"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveSourceCredentialPublicationAlreadyPublishedRefreshing", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Refreshing"]}
+       /\ UnchangedFrame_6d338e6154d09149
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired(arg_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveSourceCredentialPublication"
+       /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "ReauthRequired"
+       /\ (auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint))
+       /\ auth_machine_phase' = "ReauthRequired"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "SourceCredentialPublicationResolved", payload |-> [disposition |-> "AlreadyPublished"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "ReauthRequired"]}
+       /\ UnchangedFrame_6d338e6154d09149
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveSourceCredentialPublicationAlreadyPublishedReleased(arg_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveSourceCredentialPublication"
+       /\ packet.payload.credential_material_fingerprint = arg_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Released"
+       /\ (auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint))
+       /\ auth_machine_phase' = "Released"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "SourceCredentialPublicationResolved", payload |-> [disposition |-> "AlreadyPublished"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveSourceCredentialPublicationAlreadyPublishedReleased"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveSourceCredentialPublicationAlreadyPublishedReleased", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Released"]}
+       /\ UnchangedFrame_6d338e6154d09149
+       /\ model_step_count' = model_step_count + 1
+
+
 auth_machine_oauth_flow_membership_consistent == ((DOMAIN auth_machine_oauth_browser_flow_providers = auth_machine_oauth_browser_flow_ids) /\ (DOMAIN auth_machine_oauth_browser_flow_redirect_uris = auth_machine_oauth_browser_flow_ids) /\ (DOMAIN auth_machine_oauth_browser_flow_expires_at_millis = auth_machine_oauth_browser_flow_ids) /\ (DOMAIN auth_machine_oauth_device_flow_providers = auth_machine_oauth_device_flow_ids) /\ (DOMAIN auth_machine_oauth_device_flow_expires_at_millis = auth_machine_oauth_device_flow_ids) /\ (\A flow_id \in auth_machine_oauth_device_poll_ids : (flow_id \in auth_machine_oauth_device_flow_ids)) /\ (auth_machine_oauth_outstanding_flow_count = (Cardinality(auth_machine_oauth_browser_flow_ids) + Cardinality(auth_machine_oauth_device_flow_ids))))
 auth_machine_released_oauth_membership_drained == (IF (auth_machine_phase # "Released") THEN TRUE ELSE (auth_machine_oauth_outstanding_flow_count = 0))
 auth_machine_released_not_release_draining == (IF (auth_machine_phase # "Released") THEN TRUE ELSE (auth_machine_release_draining = FALSE))
 
 EntryPacketAdmissible_auth_machine(packet) ==
-    \/ /\ (packet.variant = "Acquire") /\ (auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released")
+    \/ /\ (packet.variant = "Acquire") /\ (auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released") /\ ((IF (packet.payload.credential_material_fingerprint = None) THEN TRUE ELSE (auth_machine_credential_material_fingerprint # packet.payload.credential_material_fingerprint)))
     \/ /\ (packet.variant = "MarkExpiring") /\ (auth_machine_phase = "Valid")
     \/ /\ (packet.variant = "ObserveCredentialFreshness") /\ (auth_machine_phase = "Valid") /\ ((IF (auth_machine_expires_at = None) THEN TRUE ELSE ((packet.payload.now_ts < (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)) /\ ((packet.payload.now_ts + packet.payload.refresh_window_secs) <= (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)))))
     \/ /\ (packet.variant = "ObserveCredentialFreshness") /\ (auth_machine_phase = "Valid") /\ ((IF (auth_machine_expires_at = None) THEN FALSE ELSE ((packet.payload.now_ts < (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)) /\ ((IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None) < (packet.payload.now_ts + packet.payload.refresh_window_secs)))))
@@ -4642,6 +4900,18 @@ EntryPacketAdmissible_auth_machine(packet) ==
     \/ /\ (packet.variant = "ResolveOAuthLoginCredentialDisposition") /\ (auth_machine_phase = "Refreshing") /\ ((packet.payload.refresh_allowed = FALSE))
     \/ /\ (packet.variant = "ResolveOAuthLoginCredentialDisposition") /\ (auth_machine_phase = "ReauthRequired") /\ ((packet.payload.refresh_allowed = FALSE))
     \/ /\ (packet.variant = "ResolveOAuthLoginCredentialDisposition") /\ (auth_machine_phase = "Released") /\ ((packet.payload.refresh_allowed = FALSE))
+    \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "Valid") /\ ((auth_machine_credential_material_fingerprint # Some(packet.payload.credential_material_fingerprint)))
+    \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "Expiring") /\ ((auth_machine_credential_material_fingerprint # Some(packet.payload.credential_material_fingerprint)))
+    \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "Expired") /\ ((auth_machine_credential_material_fingerprint # Some(packet.payload.credential_material_fingerprint)))
+    \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "Refreshing") /\ ((auth_machine_credential_material_fingerprint # Some(packet.payload.credential_material_fingerprint)))
+    \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "ReauthRequired") /\ ((auth_machine_credential_material_fingerprint # Some(packet.payload.credential_material_fingerprint)))
+    \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "Released") /\ ((auth_machine_credential_material_fingerprint # Some(packet.payload.credential_material_fingerprint)))
+    \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "Expiring") /\ ((auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint)))
+    \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "Expired") /\ ((auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint)))
+    \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "Valid") /\ ((auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint)))
+    \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "Refreshing") /\ ((auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint)))
+    \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "ReauthRequired") /\ ((auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint)))
+    \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "Released") /\ ((auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint)))
 
 EntryPacketAdmissible(packet) ==
     CASE
@@ -4656,7 +4926,7 @@ DeliverQueuedRoute ==
        /\ model_step_count' = model_step_count + 1
        /\ pending_inputs' = AppendIfMissing(pending_inputs, [machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id]}
-       /\ UnchangedFrame_386d7041634a8604
+       /\ UnchangedFrame_57d45c89d18260a3
 
 QuiescentStutter ==
     /\ Len(pending_routes) = 0
@@ -4678,7 +4948,7 @@ WitnessInjectNext_freshness_expiry ==
     /\ witness_current_script_input' = next_script_input
     /\ witness_remaining_script_inputs' = next_remaining_script_inputs
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_55ac2e7c2bf5dba1
+    /\ UnchangedFrame_a38652f51a54207c
 
 WitnessInjectNext_expiring_refresh ==
     LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input
@@ -4695,7 +4965,7 @@ WitnessInjectNext_expiring_refresh ==
     /\ witness_current_script_input' = next_script_input
     /\ witness_remaining_script_inputs' = next_remaining_script_inputs
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_55ac2e7c2bf5dba1
+    /\ UnchangedFrame_a38652f51a54207c
 
 WitnessInjectNext_release_drains_oauth_flow ==
     LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input
@@ -4712,7 +4982,7 @@ WitnessInjectNext_release_drains_oauth_flow ==
     /\ witness_current_script_input' = next_script_input
     /\ witness_remaining_script_inputs' = next_remaining_script_inputs
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_55ac2e7c2bf5dba1
+    /\ UnchangedFrame_a38652f51a54207c
 
 WitnessInjectNext_release_drains_oauth_device_flow ==
     LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input
@@ -4729,7 +4999,7 @@ WitnessInjectNext_release_drains_oauth_device_flow ==
     /\ witness_current_script_input' = next_script_input
     /\ witness_remaining_script_inputs' = next_remaining_script_inputs
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_55ac2e7c2bf5dba1
+    /\ UnchangedFrame_a38652f51a54207c
 
 WitnessScriptComplete_freshness_expiry ==
     /\ Len(witness_remaining_script_inputs) = 0
@@ -4844,16 +5114,16 @@ OwnerFeedback_auth_machine_auth_release_oauth_flow_drain_ExpireOAuthBrowserFlow 
     /\ obligation_auth_machine_auth_release_oauth_flow_drain /= {}
     /\ \E token \in obligation_auth_machine_auth_release_oauth_flow_drain :
         /\ \E member_browser_flow_ids \in token.browser_flow_ids : (/\ pending_inputs' = Append(pending_inputs, [machine |-> "auth_machine", variant |-> "ExpireOAuthBrowserFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token.effect_id, payload |-> [flow_id |-> member_browser_flow_ids]]) /\ observed_inputs' = observed_inputs \cup {[machine |-> "auth_machine", variant |-> "ExpireOAuthBrowserFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token.effect_id, payload |-> [flow_id |-> member_browser_flow_ids]]} /\ obligation_auth_machine_auth_release_oauth_flow_drain' = (IF [token EXCEPT !.browser_flow_ids = @ \ {member_browser_flow_ids}].browser_flow_ids = {} /\ [token EXCEPT !.browser_flow_ids = @ \ {member_browser_flow_ids}].device_flow_ids = {} THEN obligation_auth_machine_auth_release_oauth_flow_drain \ {token} ELSE (obligation_auth_machine_auth_release_oauth_flow_drain \ {token}) \cup {[token EXCEPT !.browser_flow_ids = @ \ {member_browser_flow_ids}]}) /\ model_step_count' = model_step_count + 1)
-    /\ UnchangedFrame_33a078928811255f
+    /\ UnchangedFrame_bec47b4d3e24e7c2
 
 OwnerFeedback_auth_machine_auth_release_oauth_flow_drain_ExpireOAuthDeviceFlow ==
     /\ obligation_auth_machine_auth_release_oauth_flow_drain /= {}
     /\ \E token \in obligation_auth_machine_auth_release_oauth_flow_drain :
         /\ \E member_device_flow_ids \in token.device_flow_ids : (/\ pending_inputs' = Append(pending_inputs, [machine |-> "auth_machine", variant |-> "ExpireOAuthDeviceFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token.effect_id, payload |-> [flow_id |-> member_device_flow_ids]]) /\ observed_inputs' = observed_inputs \cup {[machine |-> "auth_machine", variant |-> "ExpireOAuthDeviceFlow", source_kind |-> "owner", source_machine |-> "auth_machine", source_effect |-> "CancelOAuthFlowsForRelease", source_route |-> "none", effect_id |-> token.effect_id, payload |-> [flow_id |-> member_device_flow_ids]]} /\ obligation_auth_machine_auth_release_oauth_flow_drain' = (IF [token EXCEPT !.device_flow_ids = @ \ {member_device_flow_ids}].browser_flow_ids = {} /\ [token EXCEPT !.device_flow_ids = @ \ {member_device_flow_ids}].device_flow_ids = {} THEN obligation_auth_machine_auth_release_oauth_flow_drain \ {token} ELSE (obligation_auth_machine_auth_release_oauth_flow_drain \ {token}) \cup {[token EXCEPT !.device_flow_ids = @ \ {member_device_flow_ids}]}) /\ model_step_count' = model_step_count + 1)
-    /\ UnchangedFrame_33a078928811255f
+    /\ UnchangedFrame_bec47b4d3e24e7c2
 
 CoreNext ==
-    \/ \E arg_expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : auth_machine_Acquire(arg_expires_at_ts, arg_credential_published_at_millis)
+    \/ \E arg_expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : \E arg_credential_material_fingerprint \in OptionStringValues : auth_machine_Acquire(arg_expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint)
     \/ auth_machine_MarkExpiring
     \/ \E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessValid(arg_now_ts, arg_refresh_window_secs)
     \/ \E arg_now_ts \in 0..2 : \E arg_refresh_window_secs \in 0..2 : auth_machine_ObserveCredentialFreshnessExpiringFromValid(arg_now_ts, arg_refresh_window_secs)
@@ -5026,6 +5296,18 @@ CoreNext ==
     \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRefreshing(arg_credential_present, arg_force_refresh, FALSE)
     \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReauthRequired(arg_credential_present, arg_force_refresh, FALSE)
     \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReleased(arg_credential_present, arg_force_refresh, FALSE)
+    \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationNewMaterialValid(arg_credential_material_fingerprint)
+    \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationNewMaterialExpiring(arg_credential_material_fingerprint)
+    \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationNewMaterialExpired(arg_credential_material_fingerprint)
+    \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationNewMaterialRefreshing(arg_credential_material_fingerprint)
+    \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationNewMaterialReauthRequired(arg_credential_material_fingerprint)
+    \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationNewMaterialReleased(arg_credential_material_fingerprint)
+    \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationRenewalExpiring(arg_credential_material_fingerprint)
+    \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationRenewalExpired(arg_credential_material_fingerprint)
+    \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationAlreadyPublishedValid(arg_credential_material_fingerprint)
+    \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationAlreadyPublishedRefreshing(arg_credential_material_fingerprint)
+    \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired(arg_credential_material_fingerprint)
+    \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationAlreadyPublishedReleased(arg_credential_material_fingerprint)
     \/ OwnerFeedback_auth_machine_auth_release_oauth_flow_drain_ExpireOAuthBrowserFlow
     \/ OwnerFeedback_auth_machine_auth_release_oauth_flow_drain_ExpireOAuthDeviceFlow
     \/ QuiescentStutter
@@ -5037,14 +5319,14 @@ Next ==
     \/ CoreNext
 
 WitnessNext_freshness_expiry ==
-    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "Acquire" /\ auth_machine_Acquire(witness_packet.payload.expires_at_ts, witness_packet.payload.credential_published_at_millis)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "Acquire" /\ auth_machine_Acquire(witness_packet.payload.expires_at_ts, witness_packet.payload.credential_published_at_millis, witness_packet.payload.credential_material_fingerprint)
     \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "ObserveCredentialFreshness" /\ auth_machine_ObserveCredentialFreshnessValid(witness_packet.payload.now_ts, witness_packet.payload.refresh_window_secs)
     \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "ObserveCredentialFreshness" /\ auth_machine_ObserveCredentialFreshnessExpiredFromValid(witness_packet.payload.now_ts, witness_packet.payload.refresh_window_secs)
     \/ WitnessSatisfiedStutter_freshness_expiry
     \/ WitnessInjectNext_freshness_expiry
 
 WitnessNext_expiring_refresh ==
-    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "Acquire" /\ auth_machine_Acquire(witness_packet.payload.expires_at_ts, witness_packet.payload.credential_published_at_millis)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "Acquire" /\ auth_machine_Acquire(witness_packet.payload.expires_at_ts, witness_packet.payload.credential_published_at_millis, witness_packet.payload.credential_material_fingerprint)
     \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "ObserveCredentialFreshness" /\ auth_machine_ObserveCredentialFreshnessExpiringFromValid(witness_packet.payload.now_ts, witness_packet.payload.refresh_window_secs)
     \/ auth_machine_BeginRefreshFromExpiring
     \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "CompleteRefresh" /\ auth_machine_CompleteRefresh(witness_packet.payload.new_expires_at, witness_packet.payload.now_ts, witness_packet.payload.credential_published_at_millis)
@@ -5052,7 +5334,7 @@ WitnessNext_expiring_refresh ==
     \/ WitnessInjectNext_expiring_refresh
 
 WitnessNext_release_drains_oauth_flow ==
-    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "Acquire" /\ auth_machine_Acquire(witness_packet.payload.expires_at_ts, witness_packet.payload.credential_published_at_millis)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "Acquire" /\ auth_machine_Acquire(witness_packet.payload.expires_at_ts, witness_packet.payload.credential_published_at_millis, witness_packet.payload.credential_material_fingerprint)
     \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "AdmitOAuthBrowserFlow" /\ auth_machine_AdmitOAuthBrowserFlowValid(witness_packet.payload.flow_id, witness_packet.payload.provider, witness_packet.payload.redirect_uri, witness_packet.payload.expires_at_millis, witness_packet.payload.max_outstanding_flows, witness_packet.payload.observed_global_outstanding_flows)
     \/ auth_machine_BeginReleaseDrainingOAuthFlowsValid
     \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "ExpireOAuthBrowserFlow" /\ auth_machine_ExpireOAuthBrowserFlowValid(witness_packet.payload.flow_id)
@@ -5062,7 +5344,7 @@ WitnessNext_release_drains_oauth_flow ==
     \/ WitnessInjectNext_release_drains_oauth_flow
 
 WitnessNext_release_drains_oauth_device_flow ==
-    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "Acquire" /\ auth_machine_Acquire(witness_packet.payload.expires_at_ts, witness_packet.payload.credential_published_at_millis)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "Acquire" /\ auth_machine_Acquire(witness_packet.payload.expires_at_ts, witness_packet.payload.credential_published_at_millis, witness_packet.payload.credential_material_fingerprint)
     \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "AdmitOAuthDeviceFlow" /\ auth_machine_AdmitOAuthDeviceFlowValid(witness_packet.payload.flow_id, witness_packet.payload.provider, witness_packet.payload.expires_at_millis, witness_packet.payload.max_outstanding_flows, witness_packet.payload.observed_global_outstanding_flows)
     \/ auth_machine_BeginReleaseDrainingOAuthFlowsValid
     \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "auth_machine" /\ witness_packet.variant = "ExpireOAuthDeviceFlow" /\ auth_machine_ExpireOAuthDeviceFlowValid(witness_packet.payload.flow_id)

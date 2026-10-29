@@ -8054,6 +8054,7 @@ pub struct State {
     pub owed_external_edge_repairs: std::collections::BTreeSet<ExternalPeerEdge>,
     pub member_seat_session_unborn: std::collections::BTreeSet<AgentIdentity>,
     pub unborn_seat_sessions: std::collections::BTreeSet<SessionId>,
+    pub member_definition_wiring_exempt: std::collections::BTreeSet<AgentIdentity>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -8261,6 +8262,7 @@ pub mod inputs {
         pub ack_engine_version: Option<String>,
         pub placed_spawn_id: Option<PlacedSpawnId>,
         pub provision_operation_id: Option<String>,
+        pub definition_wiring_exempt: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitSpawnActivation {
@@ -9476,6 +9478,7 @@ pub mod inputs {
         pub kickoff_owed: bool,
         pub session_unborn: bool,
         pub fresh_launch: bool,
+        pub definition_wiring_exempt: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveMemberHostPreparation {
@@ -9506,6 +9509,7 @@ pub mod inputs {
         pub external_addressable: bool,
         pub kickoff_owed: bool,
         pub kickoff_objective_id: String,
+        pub definition_wiring_exempt: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyMemberRelease {
@@ -10779,6 +10783,11 @@ pub mod signals {
         pub agent_runtime_id: AgentRuntimeId,
         pub unborn: bool,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExemptMemberFromDefinitionWiring {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -10871,6 +10880,7 @@ pub enum Signal {
     ResolveExternalEdgeRealization(signals::ResolveExternalEdgeRealization),
     ResolveMemberRevivalSessionCreated(signals::ResolveMemberRevivalSessionCreated),
     RecoverMemberSeatSession(signals::RecoverMemberSeatSession),
+    ExemptMemberFromDefinitionWiring(signals::ExemptMemberFromDefinitionWiring),
 }
 impl Signal {
     pub fn kind(&self) -> SignalKind {
@@ -10995,6 +11005,9 @@ impl Signal {
                 SignalKind::ResolveMemberRevivalSessionCreated
             }
             Self::RecoverMemberSeatSession(_) => SignalKind::RecoverMemberSeatSession,
+            Self::ExemptMemberFromDefinitionWiring(_) => {
+                SignalKind::ExemptMemberFromDefinitionWiring
+            }
         }
     }
 }
@@ -11086,6 +11099,7 @@ pub enum SignalKind {
     ResolveExternalEdgeRealization,
     ResolveMemberRevivalSessionCreated,
     RecoverMemberSeatSession,
+    ExemptMemberFromDefinitionWiring,
 }
 
 pub mod effects {
@@ -14096,6 +14110,8 @@ pub enum TransitionId {
     RecoverMemberSeatSessionUnbornRunning,
     RecoverMemberSeatSessionBornRunning,
     AuthorizeSpawnProfileSeatedRunning,
+    ExemptMemberFromDefinitionWiringSeatedRunning,
+    ExemptMemberFromDefinitionWiringSeatedStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14469,5 +14485,6 @@ pub fn initial_state() -> State {
         owed_external_edge_repairs: Default::default(),
         member_seat_session_unborn: Default::default(),
         unborn_seat_sessions: Default::default(),
+        member_definition_wiring_exempt: Default::default(),
     }
 }

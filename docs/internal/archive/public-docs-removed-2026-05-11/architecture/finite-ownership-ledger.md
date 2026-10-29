@@ -21,14 +21,14 @@ Verification contract: paths, symbols, boundary kinds, owner shells, write-sets,
 | runtime | 5 | 20 | 3 | 0 | 0 | 0 |
 | mcp | 11 | 21 | 2 | 0 | 0 | 0 |
 | mob | 8 | 38 | 8 | 0 | 0 | 0 |
-| auth | 1 | 8 | 0 | 0 | 0 | 0 |
+| auth | 1 | 9 | 0 | 0 | 0 | 0 |
 
 ## Boundary Manifest
 
 | Family | Kind | Path | Type / Trait | Methods |
 | --- | --- | --- | --- | --- |
 | runtime-control-plane | trait-impl | `crates/meerkat-runtime/src/meerkat_machine/traits.rs` | `MeerkatMachine` / `RuntimeControlPlane` | `ingest`, `publish_event`, `retire`, `recycle`, `reset`, `recover`, `destroy` |
-| auth-lease-registry | trait-impl | `crates/meerkat-runtime/src/handles/auth_lease.rs` | `RuntimeAuthLeaseHandle` / `AuthLeaseHandle` | `acquire_lease`, `mark_expiring`, `begin_refresh`, `complete_refresh`, `refresh_failed`, `mark_reauth_required`, `release_lease`, `snapshot` |
+| auth-lease-registry | trait-impl | `crates/meerkat-runtime/src/handles/auth_lease.rs` | `RuntimeAuthLeaseHandle` / `AuthLeaseHandle` | `acquire_lease`, `publish_source_credential`, `mark_expiring`, `begin_refresh`, `complete_refresh`, `refresh_failed`, `mark_reauth_required`, `release_lease`, `snapshot` |
 | runtime-session-adapter | public-inherent | `crates/meerkat-runtime/src/meerkat_machine/mod.rs` | `MeerkatMachine` | `register_session` |
 | runtime-session-adapter | public-inherent | `crates/meerkat-runtime/src/meerkat_machine/session_management.rs` | `MeerkatMachine` | `set_session_silent_intents`, `register_session_with_executor`, `ensure_session_with_executor`, `unregister_session` |
 | runtime-session-adapter | public-inherent | `crates/meerkat-runtime/src/user_interrupt.rs` | `MeerkatMachine` | `hard_cancel_current_run` |
@@ -220,6 +220,7 @@ Verification contract: paths, symbols, boundary kinds, owner shells, write-sets,
 | Path | Symbol | Boundary | Status | Writes | Anchor |
 | --- | --- | --- | --- | --- | --- |
 | `crates/meerkat-runtime/src/handles/auth_lease.rs` | `acquire_lease` | `trait-impl` | `closed` | `machines` | `AuthMachine Acquire transition — per-binding lease lifecycle` |
+| `crates/meerkat-runtime/src/handles/auth_lease.rs` | `publish_source_credential` | `trait-impl` | `closed` | `machines` | `AuthMachine ResolveSourceCredentialPublication verdict, then the Acquire transition it asks for` |
 | `crates/meerkat-runtime/src/handles/auth_lease.rs` | `mark_expiring` | `trait-impl` | `closed` | `machines` | `AuthMachine MarkExpiring transition` |
 | `crates/meerkat-runtime/src/handles/auth_lease.rs` | `begin_refresh` | `trait-impl` | `closed` | `machines` | `AuthMachine BeginRefresh transition — refresh dedup` |
 | `crates/meerkat-runtime/src/handles/auth_lease.rs` | `complete_refresh` | `trait-impl` | `closed` | `machines` | `AuthMachine CompleteRefresh transition` |

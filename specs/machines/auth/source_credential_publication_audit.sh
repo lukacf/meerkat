@@ -9,10 +9,12 @@
 # checks them over the whole bounded space. It then reruns the same space
 # once per reachability witness, with that witness's negation as an extra
 # invariant, and requires TLC to report exactly that violation, so the
-# properties are not vacuous. With --mutants it then removes the Acquire
-# guard credential_material_publishable from a copy of the generated model
-# and requires TLC to refuse that with the action property. An anchor this
-# script expects but cannot find fails the run.
+# properties are not vacuous. With --mutants it then seeds two defects, each
+# into its own copy of the generated model, and requires TLC to refuse each:
+# Acquire without its guard credential_material_publishable (refused by the
+# action property), and the renewal arms AcquireFromExpiring and
+# AcquireFromExpired disabled (refused by the verdict invariant). An anchor
+# this script expects but cannot find fails the run.
 set -euo pipefail
 
 usage="usage: source_credential_publication_audit.sh <max-steps> [--mutants] [extra tlc args...]"
@@ -154,5 +156,35 @@ PY
     exit 1
   fi
   echo "mutant unguarded-acquire refused by AuditWithdrawnMaterialNeverRepublished"
+
+  # The renewal arms disabled: in Expiring and Expired the classifier still
+  # answers Publish for the value the lease records, while no Acquire arm
+  # accepts it there. The verdict invariant must refuse it.
+  dir="${work_dir}/mutant-no-renewal"
+  mkdir -p "${dir}"
+  cp "${spec_dir}"/*.tla "${dir}/"
+  MODEL="${dir}/model.tla" python3 - <<'PY'
+import os
+import re
+path = os.environ["MODEL"]
+text = open(path).read()
+for arm in ("AcquireFromExpiring", "AcquireFromExpired"):
+    header = re.search(r"^" + arm + r"\([^\n]*\) ==\n", text, re.M)
+    assert header, f"{arm} not found"
+    text = text[: header.end()] + "    /\\ FALSE\n" + text[header.end():]
+open(path, "w").write(text)
+PY
+  cfg="${work_dir}/mutant-no-renewal.cfg"
+  write_cfg "${cfg}" "
+  AuditVerdictMatchesAcquire"
+  status=0
+  (cd "${dir}" && run_tlc mutant-no-renewal "${cfg}" "$@") || status=$?
+  log="${work_dir}/mutant-no-renewal.log"
+  if ! grep -q "Error: Invariant AuditVerdictMatchesAcquire is violated" "${log}"; then
+    cat "${log}"
+    echo "error: mutant no-renewal was not refused by AuditVerdictMatchesAcquire (tlc exit ${status})" >&2
+    exit 1
+  fi
+  echo "mutant no-renewal refused by AuditVerdictMatchesAcquire"
 fi
 echo "source-credential publication audit passed at model_step_count <= ${max_steps}"

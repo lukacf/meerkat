@@ -378,15 +378,23 @@ macro_rules! auth_catalog_machine_dsl {
             // that was refused (ReauthRequired) or logged out (Released)
             // stays so until a different value is published. A publication
             // that names no value (logins, stores) is accepted from every
-            // phase, as before. ResolveSourceCredentialPublication answers
-            // Publish exactly when this guard holds.
+            // phase, as before. The rule is split by phase, so each arm's
+            // guard lowers to the TLA+ model exactly as production evaluates
+            // it (a phase predicate inside a disjunction would be dropped
+            // there): Acquire takes the phases outside a run-out window and
+            // refuses the recorded value in them, and AcquireFromExpiring and
+            // AcquireFromExpired (at the end of this list) take any value,
+            // the recorded one included. ResolveSourceCredentialPublication
+            // answers Publish exactly when one of these arms accepts.
             transition Acquire {
                 on input Acquire { expires_at_ts, credential_published_at_millis, credential_material_fingerprint }
+                guard {
+                    self.lifecycle_phase != Phase::Expiring
+                    && self.lifecycle_phase != Phase::Expired
+                }
                 guard "credential_material_publishable" {
                     credential_material_fingerprint == None
                     || self.credential_material_fingerprint != credential_material_fingerprint
-                    || self.lifecycle_phase == Phase::Expiring
-                    || self.lifecycle_phase == Phase::Expired
                 }
                 update {
                     self.expires_at = expires_at_ts;
@@ -2020,13 +2028,15 @@ macro_rules! auth_catalog_machine_dsl {
             // A publisher that re-reads its credential value from a source
             // feeds the fingerprint of the value it read; this machine answers
             // whether that value is a new publication. Publish exactly when
-            // the Acquire guard `credential_material_publishable` admits the
-            // value: nothing was published or the lease records another value
-            // (every phase), or the lease records this value and its declared
-            // freshness window ran out (Expiring, Expired). AlreadyPublished
-            // otherwise: the lease carries this value as it is, a refused
-            // (ReauthRequired) or logged-out (Released) value included. Each
-            // transition self-loops; the guards partition every phase.
+            // an Acquire arm naming the value is accepted (Acquire with its
+            // guard `credential_material_publishable`, or AcquireFromExpiring,
+            // AcquireFromExpired): nothing was published or the lease records
+            // another value (every phase), or the lease records this value and
+            // its declared freshness window ran out (Expiring, Expired).
+            // AlreadyPublished otherwise: the lease carries this value as it
+            // is, a refused (ReauthRequired) or logged-out (Released) value
+            // included. Each transition self-loops; the guards partition every
+            // phase.
             transition ResolveSourceCredentialPublicationNewMaterial {
                 per_phase [Valid, Expiring, Expired, Refreshing, ReauthRequired, Released]
                 on input ResolveSourceCredentialPublication { credential_material_fingerprint }
@@ -2058,6 +2068,54 @@ macro_rules! auth_catalog_machine_dsl {
                 update {}
                 to Valid
                 emit SourceCredentialPublicationResolved { disposition: SourceCredentialPublicationDisposition::AlreadyPublished }
+            }
+
+            // --- Acquire from a lease whose declared freshness window ran out ---
+            //
+            // The renewal arms of Acquire (see Acquire): from Expiring or
+            // Expired every publication is accepted, the value the lease
+            // records included, so a source that re-asserts its value renews
+            // the lease with a new expiry. One arm per phase, each guarded by
+            // its phase alone, so the TLA+ model keeps the renewal production
+            // performs. Same update and lifecycle event as Acquire.
+            transition AcquireFromExpiring {
+                on input Acquire { expires_at_ts, credential_published_at_millis, credential_material_fingerprint }
+                guard { self.lifecycle_phase == Phase::Expiring }
+                update {
+                    self.expires_at = expires_at_ts;
+                    self.refresh_attempt = 0;
+                    self.credential_present = true;
+                    self.credential_generation = self.credential_generation + 1;
+                    self.credential_published_at_millis = Some(credential_published_at_millis);
+                    self.credential_material_fingerprint = credential_material_fingerprint;
+                }
+                to Valid
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition AcquireFromExpired {
+                on input Acquire { expires_at_ts, credential_published_at_millis, credential_material_fingerprint }
+                guard { self.lifecycle_phase == Phase::Expired }
+                update {
+                    self.expires_at = expires_at_ts;
+                    self.refresh_attempt = 0;
+                    self.credential_present = true;
+                    self.credential_generation = self.credential_generation + 1;
+                    self.credential_published_at_millis = Some(credential_published_at_millis);
+                    self.credential_material_fingerprint = credential_material_fingerprint;
+                }
+                to Valid
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
             }
         }
             }

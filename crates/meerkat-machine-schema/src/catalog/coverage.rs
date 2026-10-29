@@ -1188,6 +1188,8 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     CoverageClaims::none()
                         .transitions(&[
                             "Acquire",
+                            "AcquireFromExpiring",
+                            "AcquireFromExpired",
                             "ObserveCredentialFreshnessExpiring",
                             "ObserveCredentialFreshnessExpired",
                             "Release",
@@ -1305,6 +1307,8 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     CoverageClaims::none()
                         .transitions(&[
                             "Acquire",
+                            "AcquireFromExpiring",
+                            "AcquireFromExpired",
                             "ResolveSourceCredentialPublicationNewMaterialValid",
                             "ResolveSourceCredentialPublicationNewMaterialExpiring",
                             "ResolveSourceCredentialPublicationNewMaterialExpired",

@@ -2009,9 +2009,9 @@ impl CopilotAuthorizer {
     /// to the account lease when this account state is the lease's
     /// publisher, and take the AuthMachine's admission. While GitHub's
     /// refusal of the token stands, a source that runs something is read
-    /// again only at its paced instant ([`Self::refused_source_reread_pending`]).
+    /// again only at its paced instant ([`Self::refused_source_reread_waits`]).
     async fn load_operator_token(&self) -> Result<OperatorTokenMaterial, ProviderAuthError> {
-        if self.refused_source_reread_pending()? {
+        if self.refused_source_reread_waits()? {
             return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired));
         }
         let source = &self.binding.auth_profile().source;
@@ -2290,32 +2290,46 @@ impl CopilotAuthorizer {
         }
     }
 
-    /// Whether the route's source must not be read yet: it runs something,
-    /// GitHub refused the token the lease's publication carries, the paced
-    /// instant has not come, and nothing was published since (the lease is
-    /// at the refused generation and the AuthMachine still answers
-    /// `reauth_required`). A new publication on the lease ends the pause at
-    /// once, so a value another session, machine or login published heals
-    /// this account state on its next request.
-    fn refused_source_reread_pending(&self) -> Result<bool, ProviderAuthError> {
+    /// Claim a read of the route's source while GitHub's refusal of the
+    /// token it gave stands, and say whether the read must wait: the source
+    /// runs something, the lease is still at the refused generation, the
+    /// AuthMachine still answers `reauth_required`, and the paced instant has
+    /// not come. A read that takes the paced instant pushes it a pause
+    /// further before the source runs, so a read that fails (a command that
+    /// exits non-zero, a resolver error, an empty or a classic token) is
+    /// paced as a read that gives the refused token again is. A new
+    /// publication on the lease ends the pause at once, so a value another
+    /// session, machine or login published heals this account state on its
+    /// next request. The pause is checked and moved under its own lock, so
+    /// of concurrent account states only one reads at each paced instant.
+    fn refused_source_reread_waits(&self) -> Result<bool, ProviderAuthError> {
         if !source_reread_is_paced(&self.binding.auth_profile().source) {
             return Ok(false);
         }
-        let Some(paced) = *self.state.pacing.refused_source_reread.lock() else {
+        let mut pause = self.state.pacing.refused_source_reread.lock();
+        let Some(paced) = *pause else {
             return Ok(false);
         };
-        if (self.env.now)() >= paced.at {
-            return Ok(false);
-        }
         let auth_lease = self.auth_lease()?;
         let lease_key = self.lease_key();
-        if auth_lease.snapshot(&lease_key).generation != paced.generation {
-            return Ok(false);
-        }
+        let generation = auth_lease.snapshot(&lease_key).generation;
         let disposition = auth_lease
             .resolve_credential_use_admission(&lease_key, CredentialUseIntent::UseCredential)
             .map_err(credential_use_admission_error)?;
-        Ok(disposition == CredentialUseDisposition::ReauthRequired)
+        if generation != paced.generation || disposition != CredentialUseDisposition::ReauthRequired
+        {
+            *pause = None;
+            return Ok(false);
+        }
+        let now = (self.env.now)();
+        if now < paced.at {
+            return Ok(true);
+        }
+        *pause = Some(RefusedSourceReread {
+            generation,
+            at: refused_source_reread_at(now),
+        });
+        Ok(false)
     }
 
     /// Apply a refusal: a token GitHub refused is published to the account
@@ -5804,6 +5818,54 @@ mod tests {
                 Some(format!("Bearer {rotated}"))
             );
             assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+        }
+
+        /// A read at the paced instant that fails (here a command that exits
+        /// non-zero) is paced as a read that gives the refused token again
+        /// is: the instant moves a pause further before the command runs, so
+        /// across several requests the failing command runs at most once per
+        /// pause.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_failing_reread_of_a_refused_source_is_paced() {
+            let directory = tempfile::tempdir().expect("command directory");
+            std::fs::write(
+                directory.path().join("token"),
+                user_token("refused-then-failing"),
+            )
+            .expect("write the token");
+            let harness = Harness::new([Ok(json_response(
+                401,
+                serde_json::json!({"message": "Bad credentials"}),
+            ))]);
+            let source = token_file_command(directory.path());
+            let resolve = || harness.resolve_from(CopilotProviderRoute::OpenAi, source.clone());
+            let reauth = Some(ProviderAuthError::Auth(AuthError::UserReauthRequired));
+            assert_eq!(resolve().await.err(), reauth);
+            assert_eq!(command_runs(directory.path()), 1);
+
+            // From now on the command fails: it has no token to print.
+            std::fs::remove_file(directory.path().join("token")).expect("remove the token");
+            harness.operator.advance(61);
+            let failed = resolve().await.err().expect("the command fails");
+            assert_ne!(Some(failed), reauth, "the read at the paced instant ran");
+            assert_eq!(command_runs(directory.path()), 2);
+            for _ in 0..3 {
+                assert_eq!(resolve().await.err(), reauth);
+            }
+            harness.operator.advance(59);
+            assert_eq!(resolve().await.err(), reauth);
+            assert_eq!(
+                command_runs(directory.path()),
+                2,
+                "a failed read waits a pause like any other"
+            );
+
+            harness.operator.advance(2);
+            resolve().await.err().expect("the command fails again");
+            assert_eq!(resolve().await.err(), reauth);
+            assert_eq!(command_runs(directory.path()), 3);
+            assert_eq!(harness.transport.request_count(), 1);
         }
 
         /// A refusal of another account state's publication (another runtime

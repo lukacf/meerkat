@@ -11533,6 +11533,10 @@ mod tests {
 
             #[async_trait::async_trait]
             impl crate::runtime::session_service::MobSessionService for StubService {
+                fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+                    meerkat_core::SessionCommsIdentityRoot::NotKept
+                }
+
                 async fn subscribe_session_activity(
                     &self,
                     _session_id: &CoreSessionId,

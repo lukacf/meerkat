@@ -13599,6 +13599,11 @@ impl meerkat_core::service::SessionServiceHistoryExt for RunMobSessionService {
 #[async_trait::async_trait]
 #[cfg(feature = "mob")]
 impl meerkat_mob::MobSessionService for RunMobSessionService {
+    // Forwarded: the wrapped service's builds keep the members' comms identities.
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_mob::MobSessionService::session_comms_identity_root(self.inner.as_ref())
+    }
+
     async fn recorded_auth_binding(
         &self,
         auth_binding: &meerkat_core::AuthBindingRef,
@@ -17552,6 +17557,11 @@ impl meerkat_core::service::SessionServiceHistoryExt for MobCliSessionService {
 #[async_trait::async_trait]
 #[cfg(all(feature = "mob", feature = "session-store"))]
 impl meerkat_mob::MobSessionService for MobCliSessionService {
+    // Forwarded: the wrapped service's builds keep the members' comms identities.
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_mob::MobSessionService::session_comms_identity_root(self.inner.as_ref())
+    }
+
     async fn recorded_auth_binding(
         &self,
         auth_binding: &meerkat_core::AuthBindingRef,
@@ -28621,6 +28631,10 @@ default_model = "gemma"
     #[cfg(feature = "mob")]
     #[async_trait]
     impl meerkat_mob::MobSessionService for TestMobSessionService {
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn subscribe_session_activity(
             &self,
             _session_id: &meerkat_core::SessionId,

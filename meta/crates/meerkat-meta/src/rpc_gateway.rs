@@ -15232,6 +15232,13 @@ impl StdioCallbackAgentBuilder {
 impl SessionAgentBuilder for StdioCallbackAgentBuilder {
     type Agent = FactoryAgent;
 
+    // Forwarded: the inner factory builds every agent, so its root is where
+    // the members' comms identities live, and the mob seats dormant members
+    // under the root this reports.
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.inner.session_comms_identity_root()
+    }
+
     async fn abort_absent_session_compaction_stages(
         &self,
         session_id: &meerkat_core::SessionId,

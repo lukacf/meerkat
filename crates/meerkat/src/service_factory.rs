@@ -1728,6 +1728,11 @@ impl meerkat_session::McpAttemptGuardSource for FactoryAgentBuilder {
 impl SessionAgentBuilder for FactoryAgentBuilder {
     type Agent = FactoryAgent;
 
+    /// The factory's root ([`AgentFactory::session_comms_identity_root`]).
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.factory.session_comms_identity_root()
+    }
+
     /// A build resolves an explicit binding on its realm's chain and records
     /// it stamped with the realm that declares it; this is that resolution,
     /// on the config a build would read.

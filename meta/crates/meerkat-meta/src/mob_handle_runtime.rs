@@ -4039,6 +4039,13 @@ macro_rules! delegate_mob_session_service {
 
         #[async_trait]
         impl MobSessionService for $wrapper {
+            // Forwarded exactly: the inner service's agent builds keep the
+            // members' comms identities, and the mob seats dormant members
+            // under the root it reports. Required since meerkat 0.9.8.
+            fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+                self.inner.session_comms_identity_root()
+            }
+
             async fn commit_live_delegation_final_transcript(
                 &self,
                 machine: &meerkat_runtime::MeerkatMachine,
@@ -5503,6 +5510,12 @@ impl meerkat_core::service::SessionServiceHistoryExt for AfterCreateMobSessionSe
 
 #[async_trait]
 impl MobSessionService for AfterCreateMobSessionService {
+    // Forwarded exactly, as in `delegate_mob_session_service!`: the mob seats
+    // dormant members under the root the inner service reports.
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.inner.session_comms_identity_root()
+    }
+
     // Forwarded exactly, as in `delegate_mob_session_service!`: a mob Stop
     // awaits the inner service's activity watch for an interrupted turn.
     async fn subscribe_session_activity(
@@ -17380,6 +17393,10 @@ realm_profile = "worker-v2"
 
     #[async_trait]
     impl MobSessionService for AbsorberInnerProbe {
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         // In-memory double: its sessions never report an active turn.
         async fn subscribe_session_activity(
             &self,
@@ -18042,8 +18059,20 @@ comms = true
         }
     }
 
+    /// The comms identity root the forwarding probe reports for its builds.
+    fn probe_comms_identity_root() -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::Durable(PathBuf::from(
+            "/probe/.rkat/session_comms_identity",
+        ))
+    }
+
     #[async_trait]
     impl MobSessionService for ForwardingProbe {
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            self.record("session_comms_identity_root");
+            probe_comms_identity_root()
+        }
+
         async fn fork_source_tools(
             &self,
             _session_id: &meerkat_core::SessionId,
@@ -18861,6 +18890,31 @@ comms = true
                 probe.calls(),
                 vec!["settle_cold_predecessor_with_mob_lifecycle_authority_before"],
                 "{shape}: the inner service settles once"
+            );
+        }
+    }
+
+    /// Both production decorators, alone and stacked as the builder stacks
+    /// them, forward the session comms identity root the inner service
+    /// reports for its agent builds. The mob seats dormant members under
+    /// the root the outermost wrapper reports when the host declares none,
+    /// so a wrapper that answered anything else would record endpoints from
+    /// keys the members' first builds never load. The method has no trait
+    /// default: a wrapper that does not answer it does not compile.
+    #[test]
+    fn mob_session_wrappers_forward_the_session_comms_identity_root() {
+        let probe = Arc::new(ForwardingProbe::default());
+        for (shape, wrapper) in decorated_shapes(&probe) {
+            probe.calls.lock().expect("probe calls").clear();
+            assert_eq!(
+                wrapper.session_comms_identity_root(),
+                probe_comms_identity_root(),
+                "{shape}: the inner service's root comes back"
+            );
+            assert_eq!(
+                probe.calls(),
+                vec!["session_comms_identity_root"],
+                "{shape}: the inner service answers, exactly once"
             );
         }
     }

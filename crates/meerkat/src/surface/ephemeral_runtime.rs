@@ -873,6 +873,10 @@ mod tests {
         impl SessionAgentBuilder for BuildProbe {
             type Agent = <FactoryAgentBuilder as SessionAgentBuilder>::Agent;
 
+            fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+                self.inner.session_comms_identity_root()
+            }
+
             async fn build_agent(
                 &self,
                 request: &CreateSessionRequest,

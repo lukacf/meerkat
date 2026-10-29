@@ -104,6 +104,18 @@ them.
   that names a value has the new guard `credential_material_publishable`: it
   refuses the value the lease records unless the lease's declared freshness
   window ran out. Code that builds `Acquire` sets the new field.
+- `meerkat-session`, `meerkat-mob`: a session service reports where its agent
+  builds keep the members' comms identities, and every wrapper forwards it.
+  `SessionAgentBuilder` and `MobSessionService` each gain the required method
+  `session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot`,
+  without a default: an implementation answers it (`NotKept` for one that
+  builds no comms of its own), and a wrapper forwards the one it wraps, or it
+  does not compile. A default would let a wrapper drop the root, and a dormant
+  seat would then record an endpoint from a key the member's first build never
+  loads. `FactoryAgentBuilder`, `EphemeralSessionService`,
+  `PersistentSessionService`, the mob session wrappers of `rkat` and
+  `meerkat-rpc`, and the session service of `MobMcpState::new_in_memory`
+  answer it.
 
 ### Added
 
@@ -175,6 +187,16 @@ them.
   `rkat auth test` and `rkat auth status`. Default selection never picks
   these routes, and any configured Copilot route turns them off.
   `RealmConnectionSet::copilot_token_default` returns them.
+- `meerkat-core`: `SessionCommsIdentityRoot` says where a session service's
+  agent builds keep each session's durable comms identity (its key pair) on
+  in-process comms: `Durable(root)` (the key pair in `<root>/<session id>`),
+  `NotKept` (the builds keep none, or keep it in memory, as a browser runtime
+  does) or `Unresolved(reason)`. `AgentFactory::session_comms_identity_root`
+  reports a factory's: the root `canonical_session_comms_identity_root`
+  resolves from its `user_config_root`.
+  `EphemeralSessionService::session_comms_identity_root` and
+  `PersistentSessionService::session_comms_identity_root` report their
+  builder's.
 
 ## [0.9.7] - 2026-10-28
 

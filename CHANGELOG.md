@@ -198,6 +198,24 @@ them.
   `PersistentSessionService::session_comms_identity_root` report their
   builder's.
 
+### Changed
+
+- `meerkat-mob`: a dormant seat (`MobHandle::seat_dormant_members`,
+  `MobHandle::rotate_member`) on in-process comms takes the members' comms
+  identity root from the mob's session service when the host declares none:
+  it reads or mints each member's key pair under the root the service
+  reports, where its agent factory keeps them, so the member's first wake
+  builds it with the key the seat recorded. A host that composes its own
+  session service over a factory with its own `user_config_root` no longer
+  passes that root to `MobBuilder::with_member_comms_identity_root`. Before,
+  a mob that declared no root refused every seat, and one that declared
+  another root than its factory's had each member's first wake refused (its
+  endpoint disagreed with the seat's). A declared root, and
+  `MobBuilder::with_network_member_comms`, still win over the report. A
+  service that reports `NotKept`, or a root it cannot resolve, has every
+  seat refused typed (`MobError::WiringError`, naming the report) unless the
+  host declares a root: no other root stands in for the one its builds use.
+
 ## [0.9.7] - 2026-10-28
 
 ### Breaking

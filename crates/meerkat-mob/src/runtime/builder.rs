@@ -8004,15 +8004,22 @@ impl MobBuilder {
     }
 
     /// The root of the members' session-scoped comms identities, for
-    /// members on inproc comms (the default transport): pass the root the
-    /// session service's agent factory uses,
-    /// `meerkat::canonical_session_comms_identity_root(user_config_root)`. A
-    /// dormant seat ([`MobHandle::seat_dormant_members`],
+    /// members on inproc comms (the default transport), in place of the root
+    /// the session service reports for its agent builds
+    /// ([`super::MobSessionService::session_comms_identity_root`]). A dormant
+    /// seat ([`MobHandle::seat_dormant_members`],
     /// [`MobHandle::rotate_member`]) reads a member's key there, one local
     /// read with no session load, and records the inproc endpoint the
     /// member's woken runtime reports. Without this or
-    /// [`Self::with_network_member_comms`], every seat is refused typed and
-    /// nothing is written.
+    /// [`Self::with_network_member_comms`], a seat reads it under the root
+    /// the session service reports, which for a service over
+    /// `meerkat::FactoryAgentBuilder` is its agent factory's,
+    /// `meerkat::canonical_session_comms_identity_root(user_config_root)`; a
+    /// service that reports no durable root has every seat refused typed,
+    /// and nothing is written. A declared root wins over the reported one:
+    /// declare one only where the service's report is not where its builds
+    /// keep the key pairs, since a member seated under a root its first build
+    /// does not load from is refused at its first wake.
     pub fn with_member_comms_identity_root(
         mut self,
         identity_root: impl Into<std::path::PathBuf>,
@@ -8029,7 +8036,8 @@ impl MobBuilder {
     /// the realm rather than to a member's session. A dormant seat then
     /// records no endpoint: the member is seated with its endpoint owed, and
     /// its boot wake registers the endpoint (a network member is in the boot
-    /// set anyway).
+    /// set anyway). The session service's reported comms identity root is
+    /// then not consulted.
     pub fn with_network_member_comms(mut self) -> Self {
         self.member_residency.seat_endpoints =
             Some(super::dormant_seat::MemberSeatEndpointSource::Network);

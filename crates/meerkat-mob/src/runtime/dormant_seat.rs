@@ -330,6 +330,67 @@ pub(crate) enum MemberSeatEndpointSource {
     Network,
 }
 
+/// Why a seat has no endpoint source: the host declared none, and the
+/// mob's session service reports no durable session comms identity root.
+/// Every seat is then refused typed, and nothing of it is written: a seat
+/// never takes another root than the one the service's builds use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MemberSeatEndpointsUnavailable {
+    /// The service's builds keep no durable session comms identity
+    /// ([`meerkat_core::SessionCommsIdentityRoot::NotKept`]).
+    NotKept,
+    /// The service's root could not be resolved: the reason
+    /// ([`meerkat_core::SessionCommsIdentityRoot::Unresolved`]).
+    Unresolved(String),
+}
+
+impl MemberSeatEndpointsUnavailable {
+    /// The typed refusal of the seat of `agent_identity`.
+    fn refusal(&self, agent_identity: &AgentIdentity) -> MobError {
+        let reported = match self {
+            Self::NotKept => {
+                "the mob's session service keeps no durable session comms identity".to_string()
+            }
+            Self::Unresolved(reason) => format!(
+                "the mob's session service cannot resolve its session comms identity root \
+                 ({reason})"
+            ),
+        };
+        MobError::WiringError(format!(
+            "seating '{agent_identity}' dormant needs the members' comms identity source: \
+             {reported}, and none was declared (MobBuilder::with_member_comms_identity_root or \
+             with_network_member_comms)"
+        ))
+    }
+}
+
+/// The endpoint source of the seats a mob plans: the one the host declared
+/// ([`super::MobBuilder::with_member_comms_identity_root`],
+/// [`super::MobBuilder::with_network_member_comms`]), which wins, else the
+/// session comms identity root the mob's session service reports
+/// (`reported`, read only when the host declared none): the root its agent
+/// factory keeps the members' key pairs under, so a seat reads the key the
+/// member's first build loads.
+pub(crate) fn member_seat_endpoint_source(
+    declared: Option<&MemberSeatEndpointSource>,
+    reported: impl FnOnce() -> meerkat_core::SessionCommsIdentityRoot,
+) -> Result<MemberSeatEndpointSource, MemberSeatEndpointsUnavailable> {
+    if let Some(declared) = declared {
+        return Ok(declared.clone());
+    }
+    match reported() {
+        meerkat_core::SessionCommsIdentityRoot::Durable(identity_root) => {
+            Ok(MemberSeatEndpointSource::SessionScopedInproc { identity_root })
+        }
+        meerkat_core::SessionCommsIdentityRoot::NotKept => {
+            Err(MemberSeatEndpointsUnavailable::NotKept)
+        }
+        meerkat_core::SessionCommsIdentityRoot::Unresolved(reason) => {
+            Err(MemberSeatEndpointsUnavailable::Unresolved(reason))
+        }
+    }
+}
+
 /// The name-based id of a fresh seat's session: the same mob, mob
 /// incarnation, identity and generation always name the same session, so a
 /// seat re-driven after a crash finds the session its earlier attempt
@@ -388,7 +449,10 @@ pub(in crate::runtime) enum DormantSeatPlanEntry {
 /// The plan of one seat chunk.
 pub(in crate::runtime) struct DormantSeatPlan {
     pub(in crate::runtime) entries: Vec<DormantSeatPlanEntry>,
-    pub(in crate::runtime) endpoint_source: Option<MemberSeatEndpointSource>,
+    /// Where the chunk's seats take their endpoints from
+    /// ([`member_seat_endpoint_source`]).
+    pub(in crate::runtime) endpoint_source:
+        Result<MemberSeatEndpointSource, MemberSeatEndpointsUnavailable>,
 }
 
 /// What one seat's commit needs, as the actor planned it.
@@ -471,7 +535,7 @@ pub(in crate::runtime) enum MemberRotationPlan {
         /// step. Otherwise (its last retirement already completed) the
         /// rotation is one fresh seat.
         seated: bool,
-        endpoint_source: Option<MemberSeatEndpointSource>,
+        endpoint_source: Result<MemberSeatEndpointSource, MemberSeatEndpointsUnavailable>,
     },
     /// An identity that is not seated, whose spec owes a kickoff: spawned
     /// through the ordinary spawn path on its name-based session, as a seat
@@ -504,10 +568,11 @@ pub(in crate::runtime) enum DormantSeatCommitEntry {
 /// Prepare one seat off the actor: its session's archived state, whether a
 /// fresh seat's session is unborn, and its endpoint. Nothing is built or
 /// created. A spec this refuses is answered with its typed outcome, and
-/// nothing of it is written.
+/// nothing of it is written: so is every spec while the plan found no
+/// endpoint source (`endpoint_source` is `Err`).
 pub(in crate::runtime) async fn prepare_dormant_seat(
     session_service: &dyn super::session_service::MobSessionService,
-    endpoint_source: Option<&MemberSeatEndpointSource>,
+    endpoint_source: Result<&MemberSeatEndpointSource, &MemberSeatEndpointsUnavailable>,
     mob_id: &MobId,
     mut candidate: Box<DormantSeatCandidate>,
 ) -> Result<DormantSeatCommitEntry, Box<DormantSeatOutcome>> {
@@ -519,12 +584,8 @@ pub(in crate::runtime) async fn prepare_dormant_seat(
             error,
         })
     };
-    let Some(endpoint_source) = endpoint_source else {
-        return Err(refused(MobError::WiringError(format!(
-            "seating '{agent_identity}' dormant needs the members' comms identity source \
-             (MobBuilder::with_member_comms_identity_root or with_network_member_comms)"
-        ))));
-    };
+    let endpoint_source =
+        endpoint_source.map_err(|unavailable| refused(unavailable.refusal(&agent_identity)))?;
     // The session owner's resume observation: authority, catalog lifecycle
     // and runtime lifecycle in one snapshot. No session is built. On a host
     // store the runtime store answers it by loading the stored session's
@@ -711,6 +772,57 @@ pub(in crate::runtime) fn inproc_member_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The precedence of a seat's endpoint source: the host's declaration
+    /// wins (the service's report is not even read), else the report's
+    /// durable root, else no source, named by the report. Nothing falls back
+    /// to another root.
+    #[test]
+    fn a_declared_source_wins_and_the_reported_root_stands_in_for_none() {
+        let declared = MemberSeatEndpointSource::SessionScopedInproc {
+            identity_root: PathBuf::from("/declared"),
+        };
+        for declared in [declared, MemberSeatEndpointSource::Network] {
+            assert_eq!(
+                member_seat_endpoint_source(Some(&declared), || {
+                    panic!("a declared source does not read the service's report")
+                }),
+                Ok(declared)
+            );
+        }
+        assert_eq!(
+            member_seat_endpoint_source(None, || {
+                meerkat_core::SessionCommsIdentityRoot::Durable(PathBuf::from("/reported"))
+            }),
+            Ok(MemberSeatEndpointSource::SessionScopedInproc {
+                identity_root: PathBuf::from("/reported"),
+            })
+        );
+        assert_eq!(
+            member_seat_endpoint_source(None, || meerkat_core::SessionCommsIdentityRoot::NotKept),
+            Err(MemberSeatEndpointsUnavailable::NotKept)
+        );
+        assert_eq!(
+            member_seat_endpoint_source(None, || {
+                meerkat_core::SessionCommsIdentityRoot::Unresolved("no home".to_string())
+            }),
+            Err(MemberSeatEndpointsUnavailable::Unresolved(
+                "no home".to_string()
+            ))
+        );
+        let refusal = MemberSeatEndpointsUnavailable::Unresolved("no home".to_string())
+            .refusal(&AgentIdentity::from("w1"));
+        assert!(
+            matches!(
+                &refusal,
+                MobError::WiringError(reason)
+                    if reason.contains("'w1'")
+                        && reason.contains("no home")
+                        && reason.contains("with_member_comms_identity_root")
+            ),
+            "{refusal:?}"
+        );
+    }
 
     #[test]
     fn fresh_seat_session_ids_are_name_based() {

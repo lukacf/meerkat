@@ -9487,9 +9487,14 @@ impl MobHandle {
     /// through the ordinary spawn path and answered
     /// [`super::DormantSeatOutcome::Embodied`]. A fork, a placed member and a
     /// member that inherits its creator's tool visibility are refused.
-    /// Seating needs the members' comms transport
-    /// ([`super::MobBuilder::with_member_comms_identity_root`] or
-    /// [`super::MobBuilder::with_network_member_comms`]) and a running mob.
+    /// Seating needs the members' comms transport and a running mob. A seat
+    /// on inproc comms (the default) reads its member's key under the root
+    /// the session service reports for its agent builds
+    /// ([`super::MobSessionService::session_comms_identity_root`]), the root
+    /// the member's first build loads it from, unless the host declared the
+    /// transport itself ([`super::MobBuilder::with_member_comms_identity_root`]
+    /// or [`super::MobBuilder::with_network_member_comms`]); with neither, every
+    /// seat is refused typed.
     /// A seat reads its session's resume observation once, to refuse an
     /// archived or lost session; on a host store (`meerkat_core::host_store`)
     /// that read loads the session's stored rows, so seating members on

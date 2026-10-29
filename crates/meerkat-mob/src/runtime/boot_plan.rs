@@ -180,9 +180,10 @@ pub(crate) struct MemberResidencyConfig {
     /// of its plan's wakes a clean-stop lift runs at once, and how many
     /// members it observes at once when it rebuilds them.
     pub(crate) verify_concurrency: usize,
-    /// Where a dormant seat takes its member's endpoint from; `None` until
-    /// the host names its members' comms transport, and every seat is
-    /// refused typed meanwhile.
+    /// Where a dormant seat takes its member's endpoint from, when the host
+    /// names its members' comms transport. `None` leaves it to the root the
+    /// session service reports
+    /// (`super::dormant_seat::member_seat_endpoint_source`).
     pub(crate) seat_endpoints: Option<super::dormant_seat::MemberSeatEndpointSource>,
     /// The host's per-member build preparation (its tools published before
     /// the member's first run).

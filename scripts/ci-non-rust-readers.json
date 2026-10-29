@@ -150,6 +150,14 @@
         "sources": [
           "meta/crates/meerkat-meta/src/bin/meta_gateway.rs"
         ]
+      },
+      {
+        "package": "meerkat-meta",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "meta/crates/meerkat-meta/src/sqlite_lock_profile_tests.rs"
+        ]
       }
     ],
     ".cargo/config.toml": [

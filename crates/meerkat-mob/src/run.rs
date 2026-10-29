@@ -680,6 +680,8 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::BeginMemberRotation { .. }
             | mob_dsl::MobMachineInput::CommitMemberRotation { .. }
             | mob_dsl::MobMachineInput::ClassifyMemberRelease { .. }
+            | mob_dsl::MobMachineInput::AdoptLegacyIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::ResolveAgentLaneMemberAdmission { .. }
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
             | mob_dsl::MobMachineInput::Complete
             | mob_dsl::MobMachineInput::Reset
@@ -1968,6 +1970,8 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::BeginMemberRotation { .. }
             | mob_dsl::MobMachineInput::CommitMemberRotation { .. }
             | mob_dsl::MobMachineInput::ClassifyMemberRelease { .. }
+            | mob_dsl::MobMachineInput::AdoptLegacyIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::ResolveAgentLaneMemberAdmission { .. }
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
             | mob_dsl::MobMachineInput::Complete
             | mob_dsl::MobMachineInput::Reset

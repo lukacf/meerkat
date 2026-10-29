@@ -611,6 +611,31 @@ macro_rules! mob_catalog_machine_dsl {
             // keeps the incarnation's facts as the roster's fold keeps its
             // definition_wiring. Only local members are exempt.
             member_definition_wiring_exempt: Set<AgentIdentity>,
+            // Identity entries: the identities the host declared as its own
+            // durable identities, as opposed to worker members. An entry's
+            // member is a member like any other; the entry adds custody of
+            // the name. No worker reconcile spawns or retires an entry
+            // (mob_machine_members_to_spawn, mob_machine_members_to_retire),
+            // no spawn without entry custody takes its name (the
+            // IdentityMemberRejected admission probe and BeginSpawnExec's
+            // entry_name_free guard), and the agent lane's member commands
+            // are refused for it (ResolveAgentLaneMemberAdmission). An entry
+            // is recorded by the membership commit of a spawn or the dormant
+            // seat that carried entry custody, by the adoption of a legacy
+            // member (AdoptLegacyIdentityEntry) and by the replay of either
+            // row (RecoverIdentityEntry); a rotation keeps it. An entry is
+            // always seated here: every unseat removes it, as do the destroy
+            // and the replay of a retirement
+            // (entry_is_seated_or_has_an_unseated_cause). Only local members
+            // are entries (identity_entry_is_local).
+            identity_entry_origins: Map<AgentIdentity, Enum<IdentityEntryOrigin>>,
+            // The open spawn ladders that act for their identity's entry: a
+            // BeginSpawnExec that carried entry custody records its identity
+            // here, and the membership commit or the dormant seat that closes
+            // the ladder consumes it, recording the member an entry. An abort
+            // and the destroy drop it. Only an Opened local ladder holds it
+            // (entry_custody_ladder_is_open).
+            spawn_exec_entry_custody: Set<AgentIdentity>,
         }
 
         init(Running) {
@@ -915,6 +940,8 @@ macro_rules! mob_catalog_machine_dsl {
             member_seat_session_unborn = EmptySet,
             unborn_seat_sessions = EmptySet,
             member_definition_wiring_exempt = EmptySet,
+            identity_entry_origins = EmptyMap,
+            spawn_exec_entry_custody = EmptySet,
         }
 
         terminal [Destroyed]
@@ -1096,6 +1123,11 @@ macro_rules! mob_catalog_machine_dsl {
                 placed_operation_owner_session_id: Option<SessionId>,
                 effective_profile_override_present: bool,
                 effective_model_override_present: bool,
+                // The spawn acts for the identity entry of its name: it may
+                // take a name that is an entry, and the member it seats is
+                // recorded an entry (spawn_exec_entry_custody). A placed
+                // spawn never carries it.
+                entry_custody: bool,
             },
             // Multi-host (§6.1/§15.4): the remote arm carries the
             // materialization-ack facts (member endpoint, digest echo, engine
@@ -1589,7 +1621,10 @@ macro_rules! mob_catalog_machine_dsl {
             // ---------------------------------------------------------------
             // Row #14: duplicate-member admission probe. The actor reads the
             // emitted verdict instead of probing the PendingSpawnLineage map.
-            ProbeMemberAdmission { agent_identity: AgentIdentity },
+            // entry_custody: the spawn acts for the identity entry of its
+            // name; a spawn without it is refused an entry's name
+            // (IdentityMemberRejected) before anything is created.
+            ProbeMemberAdmission { agent_identity: AgentIdentity, entry_custody: bool },
             // Row #181: compute the next monotone respawn generation. The
             // actor reads the emitted generation instead of `generation.next()`.
             ComputeRespawnGeneration { agent_identity: AgentIdentity },
@@ -1859,6 +1894,17 @@ macro_rules! mob_catalog_machine_dsl {
             // answers through it, never from a shell phase read. A pure
             // verdict in every lifecycle phase.
             ClassifyMemberRelease { agent_identity: AgentIdentity },
+            // The adoption of one legacy member as an identity entry, once,
+            // in the first declaration after an upgrade. legacy_roster_member
+            // is the shell's raw observation that the spawn row of the
+            // member's incarnation at `generation` carries the
+            // DurableIdentity continuity marker or the legacy identity label
+            // naming its own id; the machine decides the verdict.
+            AdoptLegacyIdentityEntry { agent_identity: AgentIdentity, generation: Generation, legacy_roster_member: bool },
+            // The agent lane's admission of a member command addressed to
+            // one member: refused for an identity entry. A pure verdict in
+            // every lifecycle phase; the command's own arms decide the rest.
+            ResolveAgentLaneMemberAdmission { agent_identity: AgentIdentity },
         }
 
         surface_only [
@@ -1998,6 +2044,11 @@ macro_rules! mob_catalog_machine_dsl {
             // row records DefinitionWiring::Exempt). The live seats carry the
             // fact on their own input (definition_wiring_exempt).
             ExemptMemberFromDefinitionWiring { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
+            // Replay: the incarnation the replay of its row recovered is an
+            // identity entry. Its MemberSpawned row, or the row of its
+            // adoption, records the entry's origin; the live steps record
+            // the entry in their own transition.
+            RecoverIdentityEntry { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, origin: Enum<IdentityEntryOrigin> },
         }
 
         effect MobMachineEffect {
@@ -2393,6 +2444,11 @@ macro_rules! mob_catalog_machine_dsl {
             // An unborn seat's session was created: the owner journals it, so
             // a replay never creates that session afresh.
             PersistMemberSeatSessionBorn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId },
+            // The verdict of one legacy adoption. The shell journals an
+            // Adopted verdict before the adoption commits.
+            LegacyIdentityEntryAdoptionResolved { agent_identity: AgentIdentity, verdict: Enum<LegacyIdentityEntryAdoptionKind> },
+            // The agent lane's admission of a member command.
+            AgentLaneMemberAdmissionResolved { agent_identity: AgentIdentity, admission: Enum<AgentLaneMemberAdmissionKind> },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -3332,6 +3388,8 @@ macro_rules! mob_catalog_machine_dsl {
         disposition OwedMemberWakesRecorded => local seam OwnerRealizationOnly,
         disposition OwedEdgeRepairsRecorded => local seam OwnerRealizationOnly,
         disposition PersistMemberSeatSessionBorn => local seam OwnerRealizationOnly,
+        disposition LegacyIdentityEntryAdoptionResolved => local seam SurfaceResultAlignment,
+        disposition AgentLaneMemberAdmissionResolved => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -4302,6 +4360,41 @@ macro_rules! mob_catalog_machine_dsl {
             for_all(id in self.member_definition_wiring_exempt,
                 self.identity_to_runtime.contains_key(id)
                 && self.member_placement.contains_key(id) == false)
+        }
+
+        // Every identity entry is seated: an entry is recorded only for a
+        // seated member (a commit that carried entry custody, an adoption,
+        // the replay of its row) and every unseat removes it. A later
+        // release adds the unseated causes this invariant is named for.
+        invariant entry_is_seated_or_has_an_unseated_cause {
+            for_all(id in self.identity_entry_origins.keys(),
+                self.identity_to_runtime.contains_key(id))
+        }
+
+        // An identity entry is a local member: a placed spawn never carries
+        // entry custody, and the adoption and the replay of an entry refuse
+        // a placed member.
+        invariant identity_entry_is_local {
+            for_all(id in self.identity_entry_origins.keys(),
+                self.member_placement.contains_key(id) == false)
+        }
+
+        // A worker reconcile never spawns or retires an identity entry: the
+        // reconcile helpers range over workers only, and every step that
+        // records an entry drops it from the reconcile sets.
+        invariant worker_reconcile_spares_entries {
+            for_all(id in self.members_to_spawn,
+                self.identity_entry_origins.contains_key(id) == false)
+            && for_all(id in self.members_to_retire,
+                self.identity_entry_origins.contains_key(id) == false)
+        }
+
+        // Entry custody belongs to an open local spawn ladder: the opener
+        // records it, the membership commit or the dormant seat consumes it,
+        // and an abort and the destroy drop it.
+        invariant entry_custody_ladder_is_open {
+            for_all(id in self.spawn_exec_entry_custody,
+                self.spawn_exec_phase.get_cloned(id) == Some(SpawnExecPhase::Opened))
         }
 
         // An owed edge repair is a wired edge between seated members, and an
@@ -6935,6 +7028,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.topology_epoch += 1;
                 // Phase ladder: Opened -> MembershipCommitted.
                 self.spawn_exec_phase.insert(agent_identity, SpawnExecPhase::MembershipCommitted);
+                // A ladder opened with entry custody seats the identity's
+                // entry: the member is recorded an entry in this same step,
+                // and leaves the worker reconcile sets.
+                if self.spawn_exec_entry_custody.contains(agent_identity) == true {
+                    self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                    self.members_to_spawn.remove(agent_identity);
+                    self.members_to_retire.remove(agent_identity);
+                }
+                self.spawn_exec_entry_custody.remove(agent_identity);
                 // A new incarnation starts without an execution-health
                 // history: the previous incarnation's raw snapshot, progress
                 // clock, last event and health class do not carry over.
@@ -7038,6 +7140,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.topology_epoch += 1;
                 // Phase ladder: Opened -> MembershipCommitted.
                 self.spawn_exec_phase.insert(agent_identity, SpawnExecPhase::MembershipCommitted);
+                // A ladder opened with entry custody seats the identity's
+                // entry: the member is recorded an entry in this same step,
+                // and leaves the worker reconcile sets.
+                if self.spawn_exec_entry_custody.contains(agent_identity) == true {
+                    self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                    self.members_to_spawn.remove(agent_identity);
+                    self.members_to_retire.remove(agent_identity);
+                }
+                self.spawn_exec_entry_custody.remove(agent_identity);
                 // A new incarnation starts without an execution-health
                 // history: the previous incarnation's raw snapshot, progress
                 // clock, last event and health class do not carry over.
@@ -7259,7 +7370,7 @@ macro_rules! mob_catalog_machine_dsl {
         // membership and does NOT consume the single-shot spawn_profile_authority_*
         // material (that happens at CommitSpawnMembership). Self-loops to Running.
         transition BeginSpawnExecFresh {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "placement_absent" { placement == None }
@@ -7277,6 +7388,8 @@ macro_rules! mob_catalog_machine_dsl {
             guard "spawn_exec_settled" { self.spawn_exec_phase.contains_key(agent_identity) == false }
             guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
             guard "current_binding_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            // No spawn without entry custody takes an identity entry's name.
+            guard "entry_name_free" { self.identity_entry_origins.contains_key(agent_identity) == false || entry_custody == true }
             guard "generation_is_next" { Some(generation) == mob_machine_next_minted_generation(self.identity_runtime_generations, self.identity_generation_highwater, agent_identity) }
             guard "replacing_absent" { replacing == None }
             guard "identity_not_external_peer" { mob_machine_external_peer_identity_absent(self.external_peer_edges, agent_identity) }
@@ -7286,12 +7399,17 @@ macro_rules! mob_catalog_machine_dsl {
             guard "bridge_session_present" { bridge_session_id != None }
             update {
                 self.spawn_exec_phase.insert(agent_identity, SpawnExecPhase::Opened);
+                // The ladder acts for the identity's entry: the commit that
+                // closes it records the member an entry.
+                if entry_custody {
+                    self.spawn_exec_entry_custody.insert(agent_identity);
+                }
             }
             to Running
         }
 
         transition BeginSpawnExecFreshPeerOnly {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "placement_absent" { placement == None }
@@ -7309,6 +7427,8 @@ macro_rules! mob_catalog_machine_dsl {
             guard "spawn_exec_settled" { self.spawn_exec_phase.contains_key(agent_identity) == false }
             guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
             guard "current_binding_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            // No spawn without entry custody takes an identity entry's name.
+            guard "entry_name_free" { self.identity_entry_origins.contains_key(agent_identity) == false || entry_custody == true }
             guard "generation_is_next" { Some(generation) == mob_machine_next_minted_generation(self.identity_runtime_generations, self.identity_generation_highwater, agent_identity) }
             guard "replacing_absent" { replacing == None }
             guard "identity_not_external_peer" { mob_machine_external_peer_identity_absent(self.external_peer_edges, agent_identity) }
@@ -7318,6 +7438,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "bridge_session_absent" { bridge_session_id == None }
             update {
                 self.spawn_exec_phase.insert(agent_identity, SpawnExecPhase::Opened);
+                // The ladder acts for the identity's entry: the commit that
+                // closes it records the member an entry.
+                if entry_custody {
+                    self.spawn_exec_entry_custody.insert(agent_identity);
+                }
             }
             to Running
         }
@@ -7335,7 +7460,7 @@ macro_rules! mob_catalog_machine_dsl {
         // =====================================================================
 
         transition BeginSpawnExecDeniedNonPortableRustBundles {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "rust_bundles_present" { rust_bundles_present == true }
@@ -7345,7 +7470,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedNonPortablePerSpawnExternalTools {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "per_spawn_external_tools_present" {
@@ -7358,7 +7483,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedNonPortableMobDefaultExternalTools {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "mob_default_external_tools_present" {
@@ -7372,7 +7497,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedNonPortableDefaultLlmClientOverride {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "default_llm_client_override_present" {
@@ -7387,7 +7512,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedNonPortableHostSurfaceMcpAllowlist {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "host_surface_mcp_allowlist_present" {
@@ -7403,7 +7528,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedNonPortableInheritedToolFilter {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "inherited_tool_filter_present" {
@@ -7420,7 +7545,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedNonPortableWorkgraphTools {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "workgraph_required" {
@@ -7438,7 +7563,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedSecretBearingShellEnv {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "shell_env_present" {
@@ -7457,7 +7582,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedSecretBearingMcpStdioEnv {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "mcp_stdio_env_present" {
@@ -7477,7 +7602,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedSecretBearingMcpHttpHeaders {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "mcp_http_headers_present" {
@@ -7498,7 +7623,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedHostNotBound {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "portability_clean" {
@@ -7520,7 +7645,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedMissingCapabilityAutonomousMembers {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "portability_clean" {
@@ -7547,7 +7672,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedMissingCapabilityDurableSessions {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "portability_clean" {
@@ -7577,7 +7702,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedMissingCapabilityTrackedInputCancel {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "portability_clean" {
@@ -7608,7 +7733,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedMissingCapabilityProtocolV4 {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "portability_clean" {
@@ -7641,7 +7766,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedMissingCapabilityMemoryStore {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "portability_clean" {
@@ -7675,7 +7800,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedMissingCapabilityMcp {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "portability_clean" {
@@ -7713,7 +7838,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedOwnerBridgeAbsent {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "portability_clean" {
@@ -7752,7 +7877,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedResumePlacementMismatch {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "portability_clean" {
@@ -7800,7 +7925,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition BeginSpawnExecDeniedDigestAbsent {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placement_present" { placement != None }
             guard "portability_clean" {
@@ -7852,10 +7977,13 @@ macro_rules! mob_catalog_machine_dsl {
         // enters the MaterializePending rung, records placement, and hands
         // the materialization request to the shell.
         transition BeginSpawnExecRemote {
-            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present }
+            on input BeginSpawnExec { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "placement_present" { placement != None }
+            // An identity entry is a local member: a placed spawn never
+            // carries entry custody.
+            guard "placed_spawn_without_entry_custody" { entry_custody == false }
             guard "placed_spawn_id_present" { placed_spawn_id != None }
             guard "placed_operation_owner_present" {
                 placed_provision_operation_id != None
@@ -8040,6 +8168,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "not_materialize_pending" { self.spawn_exec_phase.get_cloned(agent_identity) != Some(SpawnExecPhase::MaterializePending) }
             update {
                 self.spawn_exec_phase.remove(agent_identity);
+                self.spawn_exec_entry_custody.remove(agent_identity);
             }
             to Running
         }
@@ -8052,6 +8181,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "spawn_exec_materialize_pending" { self.spawn_exec_phase.get_cloned(agent_identity) == Some(SpawnExecPhase::MaterializePending) }
             update {
                 self.spawn_exec_phase.remove(agent_identity);
+                self.spawn_exec_entry_custody.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.pending_placed_carrier_cleanup.insert(mob_machine_placed_cleanup_obligation(
                     agent_identity,
@@ -8222,6 +8352,8 @@ macro_rules! mob_catalog_machine_dsl {
             guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "coordinator_bound" { self.coordinator_bound == true }
             guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            // A worker ensure never spawns an identity entry's name.
+            guard "not_an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
             update {
                 self.desired_members.insert(agent_identity);
                 self.members_to_spawn.insert(agent_identity);
@@ -9359,6 +9491,7 @@ macro_rules! mob_catalog_machine_dsl {
                 // side effect again after terminal completion.
                 self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
@@ -9468,6 +9601,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
@@ -9790,13 +9924,15 @@ macro_rules! mob_catalog_machine_dsl {
         // sets from the returned snapshot and executes spawn/retire mechanically
         // rather than computing the difference itself. Each ReconcileRunning
         // fully recomputes the sets so successive reconciles stay self-fresh.
+        // The diff ranges over workers only: an identity entry is never in
+        // either set (worker_reconcile_spares_entries).
         transition ReconcileRunning {
             on input Reconcile { desired, retire_stale }
             guard { self.lifecycle_phase == Phase::Running }
             guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             update {
-                self.members_to_spawn = mob_machine_members_to_spawn(self.identity_to_runtime, desired);
-                self.members_to_retire = mob_machine_members_to_retire(self.identity_to_runtime, desired, retire_stale);
+                self.members_to_spawn = mob_machine_members_to_spawn(self.identity_to_runtime, self.identity_entry_origins, desired);
+                self.members_to_retire = mob_machine_members_to_retire(self.identity_to_runtime, self.identity_entry_origins, desired, retire_stale);
                 self.desired_members = desired;
             }
             to Running
@@ -10751,11 +10887,15 @@ macro_rules! mob_catalog_machine_dsl {
         // duplicate. Admitted is the exact negation of all three presence facts.
         transition ProbeMemberAdmissionDuplicate {
             per_phase [Running, Stopped, Completed, Destroyed]
-            on input ProbeMemberAdmission { agent_identity }
+            on input ProbeMemberAdmission { agent_identity, entry_custody }
             guard "identity_already_bound_or_pending" {
                 self.identity_to_runtime.contains_key(agent_identity) == true
                 || self.member_session_bindings.contains_key(agent_identity) == true
                 || self.pending_spawn_sessions.contains_key(agent_identity) == true
+            }
+            guard "not_an_entry_without_custody" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                || entry_custody == true
             }
             update {}
             to Running
@@ -10764,15 +10904,34 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ProbeMemberAdmissionAdmitted {
             per_phase [Running, Stopped, Completed, Destroyed]
-            on input ProbeMemberAdmission { agent_identity }
+            on input ProbeMemberAdmission { agent_identity, entry_custody }
             guard "identity_not_bound_and_not_pending" {
                 self.identity_to_runtime.contains_key(agent_identity) == false
                 && self.member_session_bindings.contains_key(agent_identity) == false
                 && self.pending_spawn_sessions.contains_key(agent_identity) == false
             }
+            guard "not_an_entry_without_custody" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                || entry_custody == true
+            }
             update {}
             to Running
             emit MemberAdmissionProbed { agent_identity: agent_identity, verdict: MemberAdmissionVerdictKind::Admitted }
+        }
+
+        // An identity entry's name, probed by a spawn without entry custody:
+        // refused typed before anything is created, whether or not the
+        // entry's member is seated now.
+        transition ProbeMemberAdmissionIdentityMember {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ProbeMemberAdmission { agent_identity, entry_custody }
+            guard "entry_without_custody" {
+                self.identity_entry_origins.contains_key(agent_identity) == true
+                && entry_custody == false
+            }
+            update {}
+            to Running
+            emit MemberAdmissionProbed { agent_identity: agent_identity, verdict: MemberAdmissionVerdictKind::IdentityMemberRejected }
         }
 
         // Row #181: compute the generation for the next incarnation. A fresh
@@ -12460,6 +12619,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.member_materialization.remove(agent_identity);
@@ -12564,6 +12724,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
@@ -12655,6 +12816,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -12746,6 +12908,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
@@ -12830,6 +12993,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
@@ -12914,6 +13078,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -12998,6 +13163,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
@@ -13080,6 +13246,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
@@ -13180,6 +13347,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
@@ -13381,6 +13549,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -13459,6 +13628,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -13531,6 +13701,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -13602,6 +13773,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -13689,6 +13861,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -13780,6 +13953,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -14287,6 +14461,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.unborn_seat_sessions = EmptySet;
                 self.external_peer_edges_by_key = EmptyMap;
                 self.identity_to_runtime = EmptyMap;
+                self.identity_entry_origins = EmptyMap;
                 self.member_definition_wiring_exempt = EmptySet;
                 self.identity_runtime_generations = EmptyMap;
                 self.identity_generation_highwater = EmptyMap;
@@ -14322,6 +14497,7 @@ macro_rules! mob_catalog_machine_dsl {
                 // map so no in-flight spawn-exec survives into Destroyed (every
                 // late CommitSpawnActivation/AbortSpawnExec becomes a Settled no-op).
                 self.spawn_exec_phase = EmptyMap;
+                self.spawn_exec_entry_custody = EmptySet;
                 self.pending_session_ingress_detach_runtime_ids = EmptySet;
                 self.active_run_count = 0;
                 self.coordinator_bound = false;
@@ -21666,6 +21842,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.unborn_seat_sessions = EmptySet;
                 self.external_peer_edges_by_key = EmptyMap;
                 self.identity_to_runtime = EmptyMap;
+                self.identity_entry_origins = EmptyMap;
                 self.member_definition_wiring_exempt = EmptySet;
                 self.identity_runtime_generations = EmptyMap;
                 self.identity_generation_highwater = EmptyMap;
@@ -25395,6 +25572,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.topology_epoch += 1;
                 // The seat closes the spawn ladder it walked.
                 self.spawn_exec_phase.remove(agent_identity);
+                // A ladder opened with entry custody seats the identity's
+                // entry: the member is recorded an entry in this same step,
+                // and leaves the worker reconcile sets.
+                if self.spawn_exec_entry_custody.contains(agent_identity) == true {
+                    self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                    self.members_to_spawn.remove(agent_identity);
+                    self.members_to_retire.remove(agent_identity);
+                }
+                self.spawn_exec_entry_custody.remove(agent_identity);
                 self.member_run_open.remove(agent_identity);
                 self.member_in_flight_work.remove(agent_identity);
                 self.member_progress_tokens.remove(agent_identity);
@@ -27185,6 +27371,172 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
         }
+
+        // The replay of an identity entry's row: the MemberSpawned row of a
+        // member that a spawn, a dormant seat or a rotation recorded an
+        // entry, or the row of a legacy member's adoption. Replay only (the
+        // boot plan is not sealed yet), after the row's seat, in a running
+        // mob or a stopped one, as the replay of a wiring exemption. Only the
+        // current incarnation of a seated local identity is recorded.
+        transition RecoverIdentityEntrySeated {
+            per_phase [Running, Stopped]
+            on signal RecoverIdentityEntry { agent_identity, agent_runtime_id, origin }
+            guard "replay_not_sealed" { self.boot_plan_sealed == false }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "member_local" { self.member_placement.contains_key(agent_identity) == false }
+            update {
+                self.identity_entry_origins.insert(agent_identity, origin);
+                self.members_to_spawn.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
+            }
+            to Running
+        }
+
+        // The adoption of a legacy member as an identity entry, once, in the
+        // first declaration after an upgrade. Adopted: the member at
+        // `generation` is the identity's current incarnation, seated, local,
+        // bound to a session, not retiring and not an entry yet, and the
+        // shell observed the legacy marker on its spawn row. Every other case
+        // answers its own verdict and changes nothing. One arm per verdict
+        // and per lifecycle phase; Running only, and an authoritative
+        // composition only.
+        transition AdoptLegacyIdentityEntryAdopted {
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
+            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "observed_incarnation_current" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_adoptable" {
+                self.member_placement.contains_key(agent_identity) == false
+                && self.member_session_bindings.contains_key(agent_identity) == true
+                && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring)
+            }
+            guard "legacy_roster_member_observed" { legacy_roster_member == true }
+            update {
+                self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                self.members_to_spawn.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
+            }
+            to Running
+            emit LegacyIdentityEntryAdoptionResolved { agent_identity: agent_identity, verdict: LegacyIdentityEntryAdoptionKind::Adopted }
+        }
+
+        // The member holds the name as a worker: its spawn row carries no
+        // legacy marker.
+        transition AdoptLegacyIdentityEntryNameHeldByWorker {
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
+            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "observed_incarnation_current" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_adoptable" {
+                self.member_placement.contains_key(agent_identity) == false
+                && self.member_session_bindings.contains_key(agent_identity) == true
+                && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring)
+            }
+            guard "legacy_roster_member_not_observed" { legacy_roster_member == false }
+            update {}
+            to Running
+            emit LegacyIdentityEntryAdoptionResolved { agent_identity: agent_identity, verdict: LegacyIdentityEntryAdoptionKind::NameHeldByWorker }
+        }
+
+        // A placed member, a member bound to no session, or a retiring one is
+        // never adopted.
+        transition AdoptLegacyIdentityEntryNotAdoptable {
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
+            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "observed_incarnation_current" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_not_adoptable" {
+                self.member_placement.contains_key(agent_identity) == true
+                || self.member_session_bindings.contains_key(agent_identity) == false
+                || self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)
+            }
+            update {}
+            to Running
+            emit LegacyIdentityEntryAdoptionResolved { agent_identity: agent_identity, verdict: LegacyIdentityEntryAdoptionKind::NotAdoptable }
+        }
+
+        // The observation names another incarnation than the current one:
+        // the shell observes again.
+        transition AdoptLegacyIdentityEntryStaleObservation {
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
+            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "observed_incarnation_stale" { self.identity_runtime_generations.get_copied(agent_identity) != Some(generation) }
+            update {}
+            to Running
+            emit LegacyIdentityEntryAdoptionResolved { agent_identity: agent_identity, verdict: LegacyIdentityEntryAdoptionKind::StaleObservation }
+        }
+
+        transition AdoptLegacyIdentityEntryNotSeated {
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
+            guard "member_not_seated" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Running
+            emit LegacyIdentityEntryAdoptionResolved { agent_identity: agent_identity, verdict: LegacyIdentityEntryAdoptionKind::NotSeated }
+        }
+
+        // The adoption ran once: the identity is an entry already, and its
+        // spawn row is not read again.
+        transition AdoptLegacyIdentityEntryAlreadyAnEntry {
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == true }
+            update {}
+            to Running
+            emit LegacyIdentityEntryAdoptionResolved { agent_identity: agent_identity, verdict: LegacyIdentityEntryAdoptionKind::AlreadyAnEntry }
+        }
+
+        // A candidate composition adopts nothing.
+        transition AdoptLegacyIdentityEntryNonAuthoritative {
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_non_authoritative" { self.composition_authority == CompositionAuthorityKind::NonAuthoritative }
+            update {}
+            to Running
+            emit LegacyIdentityEntryAdoptionResolved { agent_identity: agent_identity, verdict: LegacyIdentityEntryAdoptionKind::NonAuthoritative }
+        }
+
+        transition AdoptLegacyIdentityEntryMobNotRunning {
+            per_phase [Stopped, Completed, Destroyed]
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            update {}
+            to Running
+            emit LegacyIdentityEntryAdoptionResolved { agent_identity: agent_identity, verdict: LegacyIdentityEntryAdoptionKind::MobNotRunning }
+        }
+
+        // The agent lane's admission of a member command addressed to one
+        // member: an identity entry is refused, anything else is admitted;
+        // the command's own arms decide the rest. A pure verdict in every
+        // lifecycle phase.
+        transition ResolveAgentLaneMemberAdmissionAdmitted {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveAgentLaneMemberAdmission { agent_identity }
+            guard "not_an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
+            update {}
+            to Running
+            emit AgentLaneMemberAdmissionResolved { agent_identity: agent_identity, admission: AgentLaneMemberAdmissionKind::Admitted }
+        }
+
+        transition ResolveAgentLaneMemberAdmissionIdentityMember {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveAgentLaneMemberAdmission { agent_identity }
+            guard "identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == true }
+            update {}
+            to Running
+            emit AgentLaneMemberAdmissionResolved { agent_identity: agent_identity, admission: AgentLaneMemberAdmissionKind::IdentityMember }
+        }
     }
         }
 
@@ -28255,23 +28607,30 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         // Row #351: members that must be spawned — desired identities that are
-        // not currently bound to a runtime.
+        // not currently bound to a runtime. A worker reconcile never spawns
+        // an identity entry's name.
         fn mob_machine_members_to_spawn(
             identity_to_runtime: &std::collections::BTreeMap<AgentIdentity, AgentRuntimeId>,
+            identity_entry_origins: &std::collections::BTreeMap<AgentIdentity, IdentityEntryOrigin>,
             desired: &std::collections::BTreeSet<AgentIdentity>,
         ) -> std::collections::BTreeSet<AgentIdentity> {
             desired
                 .iter()
-                .filter(|identity| !identity_to_runtime.contains_key(*identity))
+                .filter(|identity| {
+                    !identity_to_runtime.contains_key(*identity)
+                        && !identity_entry_origins.contains_key(*identity)
+                })
                 .cloned()
                 .collect()
         }
 
         // Row #351: members that must be retired — currently bound identities
         // that are no longer desired. Only computed when `retire_stale` is set;
-        // otherwise no member is retired (the set is empty).
+        // otherwise no member is retired (the set is empty). A worker
+        // reconcile never retires an identity entry.
         fn mob_machine_members_to_retire(
             identity_to_runtime: &std::collections::BTreeMap<AgentIdentity, AgentRuntimeId>,
+            identity_entry_origins: &std::collections::BTreeMap<AgentIdentity, IdentityEntryOrigin>,
             desired: &std::collections::BTreeSet<AgentIdentity>,
             retire_stale: &bool,
         ) -> std::collections::BTreeSet<AgentIdentity> {
@@ -28280,7 +28639,9 @@ macro_rules! mob_catalog_machine_dsl {
             }
             identity_to_runtime
                 .keys()
-                .filter(|identity| !desired.contains(*identity))
+                .filter(|identity| {
+                    !desired.contains(*identity) && !identity_entry_origins.contains_key(*identity)
+                })
                 .cloned()
                 .collect()
         }
@@ -30227,13 +30588,59 @@ pub enum IdentityReplacementCondition {
 
 /// Row #14: machine-owned duplicate-member admission verdict for
 /// [`MobMachineInput::ProbeMemberAdmission`]. The actor mirrors `Admitted ->
-/// Ok` / `DuplicateRejected -> MemberAlreadyExists` instead of probing the
+/// Ok` / `DuplicateRejected -> MemberAlreadyExists` /
+/// `IdentityMemberRejected -> IdentityMember` instead of probing the
 /// PendingSpawnLineage side-map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum MemberAdmissionVerdictKind {
     #[default]
     Admitted,
     DuplicateRejected,
+    /// The name is an identity entry's and the spawn carries no entry
+    /// custody.
+    IdentityMemberRejected,
+}
+
+/// How an identity became an identity entry (`identity_entry_origins`).
+/// The stored form of an entry's journal row names the origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum IdentityEntryOrigin {
+    /// The host declared it: a spawn or a dormant seat that carried entry
+    /// custody, or the adoption of a legacy member.
+    #[default]
+    Declared,
+}
+
+/// The verdict of [`MobMachineInput::AdoptLegacyIdentityEntry`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LegacyIdentityEntryAdoptionKind {
+    /// The member is now an identity entry.
+    #[default]
+    Adopted,
+    /// The identity is an entry already: nothing changes.
+    AlreadyAnEntry,
+    /// A worker holds the name: its spawn row carries no legacy marker.
+    NameHeldByWorker,
+    /// The member is placed, bound to no session, or retiring.
+    NotAdoptable,
+    /// The observation names another incarnation than the current one.
+    StaleObservation,
+    /// No member holds the identity.
+    NotSeated,
+    /// A candidate composition adopts nothing.
+    NonAuthoritative,
+    /// The mob is not running.
+    MobNotRunning,
+}
+
+/// The agent lane's admission of a member command
+/// ([`MobMachineInput::ResolveAgentLaneMemberAdmission`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AgentLaneMemberAdmissionKind {
+    #[default]
+    Admitted,
+    /// The member is an identity entry: the agent lane does not act on it.
+    IdentityMember,
 }
 
 /// Row #260: typed step-output fault carried by

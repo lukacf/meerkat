@@ -245,6 +245,7 @@ fn begin_spawn_multi_host_fields() -> Vec<(FieldId, KernelValue)> {
             field("effective_model_override_present"),
             KernelValue::Bool(false),
         ),
+        (field("entry_custody"), KernelValue::Bool(false)),
     ])
     .collect()
 }

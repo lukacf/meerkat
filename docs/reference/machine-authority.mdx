@@ -106,6 +106,25 @@ only under `GrantRecorded`/`GrantRevoked` transition witnesses and replayed
 on resume through the machine's own `GrantOperatorScopes` input — never a
 second enforcement source.
 
+Identity entries (a host's own durable identities, as opposed to worker
+members; see [Mob Architecture](/reference/mob-architecture#identity-entries))
+are `MobMachine` facts too. The machine owns which members are entries
+(`identity_entry_origins`) and which open spawn ladders act for one
+(`spawn_exec_entry_custody`): a `BeginSpawnExec` that carries entry custody
+records the entry in the membership commit or the dormant seat that closes its
+ladder, in the same step that seats the member. The legacy adoption
+(`AdoptLegacyIdentityEntry`) decides from the shell's raw observation of the
+member's spawn row, and the shell journals an adoption before it commits. The
+replay of either row records the entry again (`RecoverIdentityEntry`, before
+the boot plan is sealed). The admission probe answers an entry's name without
+custody `IdentityMemberRejected`, the worker reconcile helpers range over
+workers only, and the agent lane's member admission
+(`ResolveAgentLaneMemberAdmission`) is a pure verdict the actor's command
+admission realizes. No shell code records, removes or derives an entry: the
+handle's entry reads project the published machine state. The ci profile has
+no identities, so the hand-written audit
+`specs/machines/mob_machine/identity_entry_audit.sh` drives the entry arms.
+
 ## Consumed Checkpoint Completion Recovery
 
 A live steer checkpoint can durably consume an input before its completion

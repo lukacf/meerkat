@@ -140,6 +140,65 @@ acts on it, and the read is never a write path: only the machine's own
 transitions move a member's residency, and a host that needs a member live
 wakes it with a delivery or `ensure_member_live`.
 
+### Identity entries
+
+Since 0.9.8 a Rust host can tell its own durable identities from worker
+members. An identity entry is a MobMachine fact (`identity_entry_origins`): the
+entry's member is a member like any other, and the entry adds custody of its
+name.
+
+- A spawn or a dormant seat whose `SpawnMemberSpec::entry_custody` is set
+  (`with_entry_custody(true)`) seats an entry: MobMachine records the member
+  an entry in the step that seats it, and the member's `MemberSpawned` row
+  records the entry, so a restart restores it from the journal alone.
+- No spawn or seat without entry custody takes an entry's name: it is refused
+  `MobError::IdentityMember` (structured kind `identity_member`) before
+  anything is created. A spawn with entry custody of a seated member's name is
+  a duplicate (`MemberAlreadyExists`), and so is a seat with entry custody of
+  a worker's name.
+- A worker reconcile (`reconcile`, `ensure_member`) never spawns or retires an
+  entry: an entry is neither desired nor stale for it.
+- The agent lane (the handle the member tools act through) does not act on an
+  entry as a member: its retire, respawn, rotation, release, reload,
+  cancellation, run-start release and wiring commands addressed to an entry
+  are refused `MobError::IdentityMember`, and its requests carry no entry
+  custody. The host acts on its own entries.
+- A respawn of an entry's member seats the entry's member again, and a
+  rotation (`rotate_member`) keeps the identity's standing. Every retirement
+  ends the entry: in this release an entry is always seated.
+- Only a local member is an entry: a placed spawn refuses entry custody.
+
+`MobHandle::adopt_legacy_identity_entry(identity)` adopts, once, a member a
+host seated before identity entries existed: one whose spawn row carries the
+durable-identity continuity marker or the legacy `agent_identity` label naming
+its own id. MobMachine decides the adoption from that observation of the
+member's current incarnation, read from the member binding history. The
+adoption is journaled on a session-binding row that carries the member's
+binding unchanged, a restart restores the entry from it, and the label is
+never read for the member again. The answer is a
+`LegacyIdentityEntryAdoption`: `Adopted`, `AlreadyAnEntry`, `NameHeldByWorker`
+(no marker), `NotAdoptable` (a placed member, one bound to no session, or a
+retiring one), `NotSeated` or `NonAuthoritative`. A mob that is not running
+refuses it, and it needs `ControlScope::Retire`.
+
+The reads need no actor command and never wake a member:
+
+| Read | Answers |
+|------|---------|
+| `identity_entry(identity)` | `IdentityEntryRead::Entry` with the entry's origin, its member's standing (seated or retiring, with its generation, session, profile and runtime mode), whether it is Broken, whether its host preparation is pending and whether a rotation of it is in flight; or `NotAnEntry` with the worker that holds the identity, if any. |
+| `identity_entries(after, limit)` | One page of the entries in identity order, at most `IDENTITY_ENTRY_PAGE_MAX`, and the identity to read the next page after. |
+| `identity_census()` | The entries declared, seated, retiring, Broken, with host preparation pending and with a rotation in flight. |
+| `member_lifecycle_events(after, limit)` | One page of the journal's member lifecycle facts after a `MobJournalCursor`: spawns and seats (with the entry a row records), legacy adoptions, retirement starts, retirements, member resets and mob resets. |
+| `members_holding_run_starts(reason)` | The members whose run starts the host holds for `reason`, as `release_member_run_starts` releases them. |
+
+All but the journal read answer from the machine state the actor last
+published, as `member_unmaterialized` does: the answer can be stale by the time
+the host acts on it, and it never says whether a member is materialized. The
+journal read is a store read. They need `ControlScope::List`, and the journal
+read `ControlScope::SubscribeEvents`. An entry's fields are internal to the
+stored event codec, so an older release reads an entry's rows as an ordinary
+member's.
+
 ### One-shot durable role migration
 
 Role is durable context, but it is not member identity. `MemberLaunchMode::Resume`

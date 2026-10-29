@@ -2029,15 +2029,25 @@ impl CopilotAuthorizer {
     /// Read the operator's GitHub token from the route's source, refuse a
     /// classic personal access token before any request, publish the token
     /// to the account lease when this account state is the lease's
-    /// publisher, and take the AuthMachine's admission. While the lease
-    /// withdraws the token (GitHub refused it, or a logout released it), a
-    /// source that runs something is read again only at its paced instant
+    /// publisher, and take the AuthMachine's admission. A source that runs
+    /// something is not read while GitHub rate limits the account's identity
+    /// lookup, and while the lease withdraws the token (GitHub refused it,
+    /// or a logout released it) it is read again only at its paced instant
     /// ([`Self::claim_withdrawn_source_reread`]).
     async fn load_operator_token(&self) -> Result<OperatorTokenMaterial, ProviderAuthError> {
+        let source = &self.binding.auth_profile().source;
+        // The identity lookup the token is read for could not run before
+        // GitHub's stated time, so a command or a resolver is not run for it.
+        let identity_retry_at = *self.state.pacing.identity_retry_at.lock();
+        if source_reread_is_paced(source)
+            && let Some(until) = identity_retry_at
+            && (self.env.now)() < until
+        {
+            return Err(OperatorRefusal::RateLimited { until }.into_provider_error());
+        }
         if let Some(withdrawn) = self.claim_withdrawn_source_reread()? {
             return Err(withdrawn);
         }
-        let source = &self.binding.auth_profile().source;
         let resolved = resolve_simple_secret(source, &self.env, &self.binding).await?;
         let token = resolved.trim_matches(|character: char| character.is_ascii_whitespace());
         if token.is_empty() {
@@ -6102,6 +6112,59 @@ mod tests {
             resolve().await.err().expect("the command fails again");
             assert_eq!(command_runs(directory.path()), 3);
             assert_eq!(harness.transport.request_count(), 2);
+        }
+
+        /// While GitHub rate limits the account's identity lookup, a command
+        /// source is not run for a token that lookup could not take: with no
+        /// cached account, requests fail as the rate limit did, without
+        /// running the command, until GitHub's stated time.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_rate_limited_identity_lookup_pauses_command_reads() {
+            let directory = tempfile::tempdir().expect("command directory");
+            std::fs::write(
+                directory.path().join("token"),
+                user_token("rate-limited-command"),
+            )
+            .expect("write the token");
+            let harness = Harness::new([
+                Ok(rate_limited(403, 120)),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            let source = token_file_command(directory.path());
+            let resolve = || harness.resolve_from(CopilotProviderRoute::OpenAi, source.clone());
+            let detail = refresh_failure(
+                resolve()
+                    .await
+                    .err()
+                    .expect("the identity lookup is rate limited"),
+            );
+            assert!(detail.contains("rate limited"), "{detail}");
+            assert_eq!(command_runs(directory.path()), 1);
+
+            harness.operator.advance(60);
+            for _ in 0..3 {
+                let detail = refresh_failure(
+                    resolve()
+                        .await
+                        .err()
+                        .expect("the account still waits for GitHub's time"),
+                );
+                assert!(detail.contains("rate limited"), "{detail}");
+            }
+            assert_eq!(
+                command_runs(directory.path()),
+                1,
+                "no command run while GitHub's limit stands"
+            );
+
+            harness.operator.advance(61);
+            resolve()
+                .await
+                .expect("the lookup runs again after the wait");
+            assert_eq!(command_runs(directory.path()), 2);
+            assert_eq!(harness.transport.request_count(), 3);
         }
 
         /// One account over two AuthMachine registries (here two credential

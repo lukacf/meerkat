@@ -385,7 +385,8 @@ as they were.
   the mob definition's wiring rules (`auto_wire_orchestrator`,
   `role_wiring`), so no agent seated after it is wired to it either, and the
   definition-wiring reconcile and the topology's declared edges leave it
-  out, as they leave out every member exempt from those rules.
+  out, as they leave out every member exempt from those rules. A host's own
+  edge discovery policy is never handed one either.
 - It is listed under its agent in the sidebar, marked **Side chat**, and is
   kept until you close it: across a console reload and a gateway restart. It
   never idle-retires. **Close side chat** in its pane retires it, which, as
@@ -398,7 +399,13 @@ as they were.
 - A side chat is never respawned or reset: its pane offers neither, and
   `meta/respawn`, `meta/respawn_member` and `meta/reset` refuse it
   (`side_chat_restart_refused`), since its successor would be no fork of the
-  agent. Close it and fork the agent again.
+  agent. An agent's `mob_respawn` tool refuses it too, and `meta/reset_all`
+  reports it as a member it could not reset where a host declares a
+  baseline member under its name. Close it and fork the agent again.
+- A side chat is never adopted as an identity:
+  `mob/adopt_member_identity_declaration` refuses it
+  (`side_chat_adoption_refused`), since an adopted identity is rebuilt from
+  its declaration, which no fork made.
 - The action is offered only to a viewer who may spawn members
   (`agent.spawn`) and send to the agent (`agent.send`), and only where the
   gateway's sessions persist or its composition did not record whether they
@@ -406,7 +413,8 @@ as they were.
   agent seated and never woken has no conversation to fork: the fork is
   refused, and the agent is not woken for it. An agent the console's
   visibility policy hides cannot be forked, nor can an agent whose lineage
-  already fills the access rules' walk (the agent and seven ancestors).
+  already fills the access rules' walk (the agent and seven ancestors), by
+  any viewer, an admin included.
 - Under `runtime_options.member_auth_binding`, an agent whose session
   records another binding or none (one created before the launch named the
   binding) cannot be forked: the runtime would seat the side chat off the

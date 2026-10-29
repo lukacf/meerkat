@@ -89,6 +89,11 @@ pub struct EdgeMemberView {
 ///
 /// The app owns the policy (which agents should be wired). Meta owns
 /// the lifecycle-safe reconciliation that makes reality match the policy.
+///
+/// `active_members` never holds a member exempt from the mob definition's
+/// wiring rules (`meerkat_mob::DefinitionWiring::Exempt`, as a Console side
+/// chat is seated): no discovered edge reaches one, an embedder's own policy
+/// included. An exempt member's explicit edges are its own.
 pub trait EdgeDiscovery: Send + Sync {
     fn discover_edges(
         &self,

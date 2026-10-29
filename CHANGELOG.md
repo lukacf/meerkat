@@ -83,9 +83,10 @@ them.
   `MobMemberListEntry::definition_wiring()` reports MobMachine's record of it
   for a listed member (a host reconciling the definition's edges leaves an
   exempt member out), a restore replays it, a respawn keeps it, and a
-  rotation decides it anew from the spec it seats. A member placed on a member host cannot be exempt: its
-  spawn is refused typed (`MobError::WiringError`). The option is Rust-only;
-  the wire spawn contracts do not carry it.
+  rotation decides it anew from the spec it seats. A member placed on a
+  member host cannot be exempt: its spawn is refused typed
+  (`MobError::WiringError`). The option is Rust-only; the wire spawn
+  contracts do not carry it.
 
 ## [0.9.7] - 2026-10-28
 

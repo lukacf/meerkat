@@ -578,7 +578,7 @@ not establish that no identities are registered.
 | `meta/respawn_member` | `{member_id}` | acceptance acknowledgement; identity-first: resets the identity like `meta/reset` (a fresh session at a new generation); a side chat is refused (`-32602`, `side_chat_restart_refused`; see `meta/fork_member` below) |
 | `meta/reload_member` | `{member_id}` | `{reloaded, disposition, session_id?, generation?, identity, identity_first}`; non-destructive cold reload, same bound session and generation (identity-first only) |
 | `meta/member_health` | `{member_id}` | `MemberHealthReport`: lifecycle state, materialization in flight, last delivery error class, actor-loop verdict and open `stall_id`; in-process reads only, so it answers during an actor stall |
-| `meta/reconcile_edges` | none | `UnifiedRuntimeReconcileEdgesReport`; the definition's wiring leaves out every member exempt from it, a Console side chat among them |
+| `meta/reconcile_edges` | none | `UnifiedRuntimeReconcileEdgesReport`; the definition's wiring leaves out every member exempt from it, a Console side chat among them, and a host's own edge discovery policy is never handed one |
 | `meta/rediscover` (SDK/stdin only) | none | `RediscoverReport`, or `{status: "no_discovery_configured"}` |
 | `meta/reconcile_identity` (SDK/stdin only) | none | `{outcomes: {identity: {outcome, ...}}, managed_edges}` (identity-first runtimes only). `outcome` is `created` (with `agent_runtime_id` and `session_id`: the identity was seated, or created by a held pass, on a fresh session; `replaced_session_id` is always `null`), `resumed` (with `agent_runtime_id` and `session_id`: the identity is bound to its own committed session), `dormant`, or `refused` with an `error` object: the `code`, `message` and `data` the same refusal answers as a JSON-RPC error |
 | `meta/reconcile` (SDK/stdin only) | `{modules: string[]}` | module reconcile report; this reconciles modules, not the roster |
@@ -588,7 +588,10 @@ has finished and its retirement has been attempted, and the gateway applies no
 deadline to that, so a client should give these requests a reply timeout that
 covers the whole helper run. A fork helper is retired when its one turn ends,
 so it cannot be continued; a conversation a human continues is a side chat
-(`meta/fork_member`, below).
+(`meta/fork_member`, below). On the Console, `meta/fork_helper` answers a
+source the console's visibility policy hides as unknown (`-32001`,
+`data.kind` `identity_hidden_by_policy`) before its conversation is read, as
+`meta/fork_member` does.
 
 ### `meta/fork_member` (Console)
 
@@ -615,7 +618,7 @@ agent's tools, so a caller who may only read the agent cannot fork it. A
 refused check answers `-32030` naming the action, as does an agent whose
 lineage already fills the access rules' walk (the agent and seven
 ancestors; `reason: "lineage_too_deep"`), since no one but an admin could
-open its side chat. An agent the console's visibility policy hides is
+open its side chat. That bound is one for every caller, an admin included. An agent the console's visibility policy hides is
 answered as unknown (`-32001`, `identity_hidden_by_policy`), as
 `meta/fork_helper` answers it. The fork is refused on a read-only console
 (`-32010`) and on a candidate launch (`-32047`). An agent seated and never
@@ -644,7 +647,8 @@ The side chat:
   `role_wiring`), so it gets no edge they declare and no member seated,
   spawned or rotated after it is wired to it; the definition-wiring
   reconcile and the topology's declared edges leave out every member exempt
-  from those rules, side chats among them;
+  from those rules, side chats among them, and a host's own edge discovery
+  policy (`EdgeDiscovery`) is never handed one;
 - is kept until it is retired (`meta/retire` or `meta/retire_member`, which
   need `agent.retire` on the agent): the fork sets an explicit
   keep-until-retired idle-retire override, so a side chat never
@@ -655,7 +659,16 @@ The side chat:
   `meta/reset` refuse it, on the Console and on the stdio gateway, with
   `-32602`, `data.kind` `side_chat_restart_refused` (`operation`,
   `agent_identity`, `source_member_id`), since its successor would be no
-  fork of the agent. Close it and fork the agent again;
+  fork of the agent. An agent's `mob_respawn` tool answers a policy denial
+  with that kind, and `meta/reset_all`, where a host declares a baseline
+  member under the side chat's name (without identity-first authority),
+  lists it under `failed` with `kind` `side_chat_restart_refused` and leaves
+  it as it is. Close it and fork the agent again;
+- is never adopted as an identity: `mob/adopt_member_identity_declaration`
+  refuses it, on the Console and on the stdio gateway, with `-32602`,
+  `data.kind` `side_chat_adoption_refused` (`agent_identity`,
+  `source_member_id`), before anything is written: an adopted identity is
+  rebuilt from its declaration, which no fork made;
 - names the agent in its console labels, `side_chat_of` (the agent's
   identity) and `side_chat_of_session` (the session it was forked from), and
   in its experience sidebar row's `side_chat_of`. They are read from
@@ -955,8 +968,8 @@ manifest cannot be read.
 | `meta/status_identity` | `{identity}` | `IdentityStatus`: `identity`, `state`, `agent_runtime_id` (`null` when not live), `session_id` and `generation` (Core's last binding; `null` when it holds none), `member_id` (Core's mob member id of that binding, live or retired: the identity's roster member id, which is the identity itself when it is already a valid comms name and its `mk--...` encoding otherwise, as for an identity with a `:`; absent when Core holds no binding), `profile`, `runtime_mode` (the roster's `runtime_mode_override` for the identity; `null` when its profile's mode applies), `addressability`, `display_name`, `labels`, `intent_managed`, `customizer_tools_pending` (`null` once the identity's customizer tools are published) and `delivery_scope` (see [Scope-bound dispatch](#scope-bound-dispatch)); `convergence` (host-adopted identities), `wake_refusal` and `replaced_session` only when set |
 | `meta/inspect_identity` | `{identity}` | The execution view: `identity`, `state`, `profile`, `addressability`, `display_name`, `labels`, `generation`, `agent_runtime_id`, `session_id`, `intent_managed`, `output_preview`, `preview_unavailable`, `is_final`, `peer_reachable_count`, `completion_cursor`, and the optional keys of the status |
 | `meta/retire` | `{identity}` | `{identity, cleanup_warning}`. Releases the member's live materialization: the identity stays a member of Core's mob, on the same session at the same generation, and still reads `active`; its next delivery materializes it again, and a delivery scope captured before stays valid. A member that is not materialized is left as it is. No `spawned_by` descendant of the member is retired (earlier releases retired them), and a completion wait on the identity goes on to its next completion. A member that is being woken or has work in flight is refused with `-32052`: nothing is interrupted (earlier releases interrupted its run), and the retire succeeds once it is quiescent. An identity Core holds no member for is refused as invalid state. A retire ends no incarnation: a reset or a delete ends it, with Core's rotation onto a fresh session, and so does a respawn, which wakes the member on its session at a new generation |
-| `meta/respawn` | `{identity}` | `{identity, agent_runtime_id, session_id, generation, live_respawn_warning, cleanup_warning}`. Retires the live member and wakes it on the same session at a new generation, so a delivery scope captured before is refused as stale. The atoms are `null` for a peer-only member |
-| `meta/reset` | `{identity}` | `{identity, agent_runtime_id, session_id, generation, cleanup_warning}`. Starts the identity on a fresh session at a new generation, in one Core rotation: Core retires the current incarnation and seats the identity on the fresh empty session in the same step, so it is never without a member. Meta materializes nothing: the fresh life starts on the identity's next delivery or, when its spec owes a kickoff (an autonomous identity's kickoff turn, or an initial message), on that kickoff, which Core runs exactly once on the new session. Core's rotation ends the identity's wiring with its incarnation, so Meta wires its managed edges (the roster's and the topology controller's) again at once, bounded; a re-wire that fails is logged and the next reconcile retries it. A cross-mob edge (`wire_cross_mob_by_identity`) ends with the incarnation it named: wire it again for the new one. A reset Core refuses before any of it starts (the mob is not running, or another lifecycle operation of the member is in progress) answers `-32052` and is not carried out later. If Core committed the fresh session but its binding cannot be read back, the reset answers an internal error (`-32603`) that says so: read the identity's status, and do not repeat the reset |
+| `meta/respawn` | `{identity}` | `{identity, agent_runtime_id, session_id, generation, live_respawn_warning, cleanup_warning}`. Retires the live member and wakes it on the same session at a new generation, so a delivery scope captured before is refused as stale. The atoms are `null` for a peer-only member. A side chat is refused (`-32602`, `side_chat_restart_refused`; see `meta/fork_member` above) |
+| `meta/reset` | `{identity}` | `{identity, agent_runtime_id, session_id, generation, cleanup_warning}`. Starts the identity on a fresh session at a new generation, in one Core rotation: Core retires the current incarnation and seats the identity on the fresh empty session in the same step, so it is never without a member. Meta materializes nothing: the fresh life starts on the identity's next delivery or, when its spec owes a kickoff (an autonomous identity's kickoff turn, or an initial message), on that kickoff, which Core runs exactly once on the new session. Core's rotation ends the identity's wiring with its incarnation, so Meta wires its managed edges (the roster's and the topology controller's) again at once, bounded; a re-wire that fails is logged and the next reconcile retries it. A cross-mob edge (`wire_cross_mob_by_identity`) ends with the incarnation it named: wire it again for the new one. A reset Core refuses before any of it starts (the mob is not running, or another lifecycle operation of the member is in progress) answers `-32052` and is not carried out later. If Core committed the fresh session but its binding cannot be read back, the reset answers an internal error (`-32603`) that says so: read the identity's status, and do not repeat the reset. A side chat is refused (`-32602`, `side_chat_restart_refused`; see `meta/fork_member` above) |
 | `meta/delete_identity` | `{identity}` | `{identity, cleanup_warning}`; see below |
 
 `wake_refusal` is `{code, session_id, remedy}`: `code` is `-32051` for a

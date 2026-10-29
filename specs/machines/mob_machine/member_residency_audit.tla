@@ -54,7 +54,8 @@
 \*   seat (AuditSeatSpec): two identities from the spawn ladder's Opened
 \*     phase: the dormant seat with an endpoint, with another member's peer id
 \*     or with none (EndpointPending), member 1's over an existing session
-\*     and member 2's over an unborn one, the embodied spawn commit, the
+\*     and member 2's over an unborn one, member 1's exempt from the
+\*     definition's wiring rules or not, the embodied spawn commit, the
 \*     runtime-ready observation and the release that clears the startup
 \*     ladder, the boot plan and seal, the endpoint registration, and the
 \*     rotation (retirement start, intent, terminal over a live or a retired
@@ -113,7 +114,9 @@
 \*     retiring incarnation's exemption never carries over);
 \*   seat: AuditSeatLeavesDormant (a dormant seat leaves its identity
 \*     Dormant, with its endpoint or owed EndpointPending, and requests no
-\*     runtime binding).
+\*     runtime binding) and AuditSeatDecidesExemptionFromInput (a dormant
+\*     seat or a spawn commit records its member exempt from the
+\*     definition's wiring rules exactly when its own input says so).
 \* An ASSUME over the generated wake refusal helper's whole input domain:
 \* a present, session-bound member with a phase is never refused as not a
 \* member. A second ASSUME pins the release verdict helper: Release,
@@ -735,20 +738,29 @@ SIncarnation(id) ==
 
 SOpenArm == \E id \in {Id1, Id2} : SOpen(id, SIncarnation(id).rid, SIncarnation(id).fence, SIncarnation(id).session)
 
+\* The exemption from the definition's wiring rules a seat's input may name:
+\* either for member 1, none for member 2, which keeps the space near its
+\* size.
+SExemptInputs(id) == IF id = Id1 THEN BOOLEAN ELSE {FALSE}
+
 \* A seat with member 1's endpoint (member 2 then offers a duplicate peer id,
 \* which the peer-id guards refuse), member 2's own endpoint, or none
 \* (EndpointPending). Member 1 is seated over an existing session, member 2
 \* over an unborn one (a fresh launch's seat), which keeps the space near its
-\* size without the fact. A seat owes no kickoff.
+\* size without the fact. A seat owes no kickoff. Its input names the
+\* member's exemption (ex).
+SSeatAs(id, ep, ex) ==
+    CommitDormantSeatRunning(id, SIncarnation(id).rid, SIncarnation(id).fence, 0, FALSE, AuditMode,
+                             SIncarnation(id).session, ep, FALSE, FALSE, id = Id2, TRUE, ex)
 SSeat ==
-    \E id \in {Id1, Id2}, ep \in {Some(E1Inproc), Some(E2Inproc), None} :
-        CommitDormantSeatRunning(id, SIncarnation(id).rid, SIncarnation(id).fence, 0, FALSE, AuditMode,
-                                 SIncarnation(id).session, ep, FALSE, FALSE, id = Id2, TRUE, FALSE)
+    \E id \in {Id1, Id2}, ep \in {Some(E1Inproc), Some(E2Inproc), None}, ex \in SExemptInputs(id) :
+        SSeatAs(id, ep, ex)
 
-SCommit ==
-    \E id \in {Id1, Id2} :
-        CommitSpawnMembershipFresh(id, SIncarnation(id).rid, SIncarnation(id).fence, 0, AuditDigest, FALSE, AuditMode,
-                                   Some(SIncarnation(id).session), None, None, None, None, None, None, FALSE)
+\* The embodied spawn commit, its input naming the member's exemption (ex).
+SCommitAs(id, ex) ==
+    CommitSpawnMembershipFresh(id, SIncarnation(id).rid, SIncarnation(id).fence, 0, AuditDigest, FALSE, AuditMode,
+                               Some(SIncarnation(id).session), None, None, None, None, None, None, ex)
+SCommit == \E id \in {Id1, Id2}, ex \in SExemptInputs(id) : SCommitAs(id, ex)
 
 SReady == \E id \in {Id1, Id2} : ObserveRuntimeReady(SIncarnation(id).rid, SIncarnation(id).fence, Epoch1)
 
@@ -1136,6 +1148,16 @@ AuditDestroyFencesRotation == [][destroy_admitted => ~RotationArms]_vars
 AuditRotationDecidesExemptionAnew ==
     [][\A ex \in BOOLEAN :
          RCommitRotationAs(ex) => (Id1 \in member_definition_wiring_exempt' <=> ex)
+      ]_vars
+
+\* A seat decides member 1's exemption from the definition's wiring rules
+\* from its own input, in its own step: a dormant seat or an embodied spawn
+\* commit records it exempt exactly when the seat's input says so.
+AuditSeatDecidesExemptionFromInput ==
+    [][\A ex \in BOOLEAN :
+         (\/ \E ep \in {Some(E1Inproc), Some(E2Inproc), None} : SSeatAs(Id1, ep, ex)
+          \/ SCommitAs(Id1, ex))
+           => (Id1 \in member_definition_wiring_exempt' <=> ex)
       ]_vars
 
 \* After the boot plan is sealed, member 1 becomes exempt from the

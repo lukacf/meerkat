@@ -599,6 +599,7 @@ printf '%s\n' \
   'echo "Error: Invariant definition_wiring_exempt_member_is_seated is violated."' \
   'echo "Error: Action property AuditRotationDecidesExemptionAnew is violated."' \
   'echo "Error: Action property AuditSealedExemptsOnlyASeat is violated."' \
+  'echo "Error: Action property AuditSeatDecidesExemptionFromInput is violated."' \
   'echo "Error: Action property NotAuditWitnessSessionOwnedRetires is violated."' \
   'echo "Error: Action property NotAuditWitnessCompositionKeepsServing is violated."' \
   'echo "Error: Action property NotAuditWitnessQueuedKeepsServing is violated."' \

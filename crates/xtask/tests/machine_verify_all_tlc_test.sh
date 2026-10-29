@@ -565,6 +565,7 @@ fi
 # rotation under an admitted destroy, a resume seat unborn exactly when no
 # build created its session, a rotation's terminal that records its next
 # incarnation exempt from the definition's wiring rules exactly when its own
+# input says so, a seat that records its member exempt exactly when its own
 # input says so, no exemption after the seal but a seat's, an explicit
 # resume that can always join a wake
 # in flight before its topology whatever readiness it settled, holds no member
@@ -573,7 +574,7 @@ fi
 # helper. It runs with TLC coverage and requires every listed arm to fire and
 # a floor of distinct states per run, and requires its thirty-four witnesses
 # reached. Its --mutants mode (run by hand, outside the shard's budget)
-# refuses fifty-six seeded defects, one per residency invariant and property.
+# refuses fifty-seven seeded defects, one per residency invariant and property.
 member_residency_audit="${workspace_root}/specs/machines/mob_machine/member_residency_audit.sh"
 if [[ ! -x "${member_residency_audit}" ]]; then
   echo "error: member residency audit runner is missing from workspace runfiles: ${member_residency_audit}" >&2

@@ -38,7 +38,8 @@
 #   trust realization outcomes (an owed edge repair);
 # - seat (AuditSeatSpec): two identities from the spawn ladder's Opened phase
 #   through the dormant seat (one over an existing session, one over an
-#   unborn one), the embodied spawn commit, the release and the rotation;
+#   unborn one, the first exempt from the definition's wiring rules or not),
+#   the embodied spawn commit, the release and the rotation;
 # - wake2 (AuditWake2Spec): two identities woken beside each other.
 # Every run checks every generated invariant (the residency invariants among
 # them), AuditAttemptEndsClosed and AuditWakingClosable (an open attempt is
@@ -62,7 +63,10 @@
 # holds it, that no rotation begins or commits under an admitted destroy, that
 # a resume seat is unborn exactly when no build created its session, and that
 # a rotation's terminal records its next incarnation exempt exactly when its
-# own input says so. The
+# own input says so. The seat run checks that a dormant seat leaves its
+# identity Dormant (AuditSeatLeavesDormant) and that a dormant seat or a spawn
+# commit records its member exempt exactly when its own input says so
+# (AuditSeatDecidesExemptionFromInput). The
 # resume run checks that the explicit resume can always join a wake in flight
 # while its readiness is not in flight and its topology has not started,
 # whatever readiness it already settled (AuditResumeJoinable), that it
@@ -457,7 +461,8 @@ write_cfg() {
       run_properties="
   AuditSeatRecoverKeepsPhase
   AuditAttemptEndsClosed
-  AuditSeatLeavesDormant"
+  AuditSeatLeavesDormant
+  AuditSeatDecidesExemptionFromInput"
       run_invariants="
   AuditWakingClosable"
       ;;
@@ -887,6 +892,11 @@ rewrite_frame("RecoverMemberSessionBindingAlreadyCurrentRunning", {
   mutate retire rotation_keeps_exemption \
     "Error: Action property AuditRotationDecidesExemptionAnew is violated" \
     'keep_var("CommitMemberRotationLiveRunning", "member_definition_wiring_exempt")' "$@"
+  # A dormant seat that keeps the exemption its member had whatever its own
+  # input says: a seat named exempt is seated bound by the rules.
+  mutate seat seat_keeps_exemption \
+    "Error: Action property AuditSeatDecidesExemptionFromInput is violated" \
+    'keep_var("CommitDormantSeatRunning", "member_definition_wiring_exempt")' "$@"
   # The replay of an exempt row applied after the seal: a seated member
   # becomes exempt in a step that seats nothing.
   mutate wake exempt_after_seal \

@@ -16352,7 +16352,7 @@ impl SessionAgentBuilder for GatedOverlayProbeSessionAgentBuilder {
     type Agent = OverlayProbeSessionAgent;
 
     fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
-        meerkat_core::SessionCommsIdentityRoot::NotKept
+        self.inner.session_comms_identity_root()
     }
 
     async fn build_agent(
@@ -97716,7 +97716,7 @@ impl SessionAgentBuilder for StopBoundaryProbeBuilder {
     type Agent = StopBoundaryProbeAgent;
 
     fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
-        meerkat_core::SessionCommsIdentityRoot::NotKept
+        self.inner.session_comms_identity_root()
     }
 
     async fn build_agent(

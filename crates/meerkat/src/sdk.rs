@@ -22,6 +22,18 @@ use meerkat_tools::{
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+/// The durable session-scoped comms identity root under an explicit
+/// user-global config root: `<user_config_root>/.rkat/session_comms_identity`,
+/// where an agent factory whose `user_config_root` is that root keeps each
+/// session's key pair. Infallible: it consults no ambient location, unlike
+/// [`canonical_session_comms_identity_root`] without a root.
+#[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+pub fn session_comms_identity_root_in(user_config_root: &Path) -> std::path::PathBuf {
+    user_config_root
+        .join(".rkat")
+        .join("session_comms_identity")
+}
+
 /// Canonical root for durable session-scoped comms identities.
 ///
 /// Public: the `rkat mob host` daemon passes this root into the member-host
@@ -34,7 +46,7 @@ pub fn canonical_session_comms_identity_root(
     user_config_root: Option<&Path>,
 ) -> Result<std::path::PathBuf, String> {
     if let Some(root) = user_config_root {
-        return Ok(root.join(".rkat").join("session_comms_identity"));
+        return Ok(session_comms_identity_root_in(root));
     }
 
     #[cfg(target_os = "macos")]

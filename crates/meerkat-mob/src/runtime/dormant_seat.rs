@@ -358,8 +358,11 @@ impl MemberSeatEndpointsUnavailable {
         };
         MobError::WiringError(format!(
             "seating '{agent_identity}' dormant needs the members' comms identity source: \
-             {reported}, and none was declared (MobBuilder::with_member_comms_identity_root or \
-             with_network_member_comms)"
+             {reported}, and none was declared. A session service or agent builder that wraps \
+             another must forward session_comms_identity_root to it; otherwise declare the \
+             source (MobBuilder::with_member_comms_identity_root or \
+             with_network_member_comms; a Meta host sets \
+             MobBootstrapSpec::with_session_identity_config_root)"
         ))
     }
 }
@@ -818,7 +821,9 @@ mod tests {
                 MobError::WiringError(reason)
                     if reason.contains("'w1'")
                         && reason.contains("no home")
+                        && reason.contains("forward session_comms_identity_root")
                         && reason.contains("with_member_comms_identity_root")
+                        && reason.contains("MobBootstrapSpec::with_session_identity_config_root")
             ),
             "{refusal:?}"
         );

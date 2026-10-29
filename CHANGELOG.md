@@ -196,7 +196,8 @@ them.
   resolves from its `user_config_root`.
   `EphemeralSessionService::session_comms_identity_root` and
   `PersistentSessionService::session_comms_identity_root` report their
-  builder's.
+  builder's. `meerkat::session_comms_identity_root_in` gives the root under
+  an explicit user-global root, infallibly.
 
 ### Changed
 
@@ -215,6 +216,11 @@ them.
   service that reports `NotKept`, or a root it cannot resolve, has every
   seat refused typed (`MobError::WiringError`, naming the report) unless the
   host declares a root: no other root stands in for the one its builds use.
+  The reported root covers in-process (session-scoped) comms keys only: a
+  host whose members run on Tcp or Uds must still declare
+  `MobBuilder::with_network_member_comms`. Without it, the seat records an
+  in-process endpoint, the member's first wake refuses it with the endpoint
+  mismatch, and the member needs a rotation (`MobHandle::rotate_member`).
 
 ## [0.9.7] - 2026-10-28
 

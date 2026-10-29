@@ -8038,6 +8038,12 @@ impl MobBuilder {
     /// its boot wake registers the endpoint (a network member is in the boot
     /// set anyway). The session service's reported comms identity root is
     /// then not consulted.
+    ///
+    /// The reported root covers in-process (session-scoped) comms keys only,
+    /// so a host whose members run on Tcp or Uds must still declare this:
+    /// without it, a seat records an in-process endpoint under the reported
+    /// root, the member's first wake refuses it with the endpoint mismatch,
+    /// and the member needs a rotation ([`MobHandle::rotate_member`]).
     pub fn with_network_member_comms(mut self) -> Self {
         self.member_residency.seat_endpoints =
             Some(super::dormant_seat::MemberSeatEndpointSource::Network);

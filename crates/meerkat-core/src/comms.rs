@@ -2580,6 +2580,13 @@ pub enum SendAndStreamError {
 /// A session service reports it so a host that records a session's comms
 /// endpoint before the session's first build (a mob's dormant seat) reads
 /// the key that build loads, wherever the service's agent factory keeps it.
+///
+/// The reported root covers in-process (session-scoped) comms keys only,
+/// whatever transport the builds' comms configuration selects. A mob host
+/// whose members run on Tcp or Uds must still declare network member comms
+/// (`MobBuilder::with_network_member_comms` in `meerkat-mob`): without it, a
+/// dormant seat records an in-process endpoint, the member's first wake
+/// refuses it with the endpoint mismatch, and the member needs a rotation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionCommsIdentityRoot {
     /// Each session's key pair lives in a directory of its own,

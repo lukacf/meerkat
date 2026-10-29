@@ -5060,3 +5060,210 @@ async fn a_kept_run_whose_host_has_no_client_settles_refused_and_runs_nothing() 
     );
     hold.notify_waiters();
 }
+
+/// The governed end to end of a consent notice that a graceful requeue stop
+/// keeps. Consent of the original run's retained work, approved and parked
+/// at that run's close, owes its approved notice; the notice is admitted to
+/// the session as a resume of that work through the governed host, as the
+/// delivery owner admits it, and its receipt names the admitted input, as
+/// the notice's committed job source records it. The session's graceful
+/// requeue stop keeps the notice queued, and its controller client does not
+/// survive the stop. The session's next registration asks the host for the
+/// client again; once the registration owner binds the destination again,
+/// the kept notice runs on that client as the input that resumes the
+/// retained work, and a run staged with that input takes the parked consent
+/// over and spends it once. The consent half runs through the approval
+/// owner's own run open and consent attempt, as the other parked-consent
+/// rows do: no agent serves the session here. RED at base: the kept notice
+/// had no client after the stop and nothing asked its host again, so every
+/// staging failed before the executor and it ended
+/// `Abandoned { MaxAttemptsExhausted }`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_requeue_stop_keeps_a_governed_consent_notice_that_runs_and_spends_its_consent() {
+    use meerkat_core::approval::consent::ConsentDeliveryReceipt;
+    use meerkat_core::approval::consent_test_support::ParkedRoutedConsent;
+    use meerkat_core::session_hosting::HostingPaths;
+    use meerkat_core::{
+        ApprovalConsentCustody, ApprovalConsentDeliveryState, ApprovalConsentScope,
+        ApprovalConsentTransition, ApprovalService,
+    };
+
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let runtime = LogicalRuntimeId::for_session(&session);
+    let destination = {
+        let machine = open(&store, &blobs, &owners).await;
+        let (destination, _effects, _applied) = settle_original_with_continuation(
+            &machine,
+            &store,
+            &session,
+            &template,
+            &owners,
+            "the original's result",
+        )
+        .await;
+        destination
+    };
+
+    // The host process that delivers the notice: no executor serves the
+    // session yet, so the admitted notice stays queued.
+    let machine = open(&store, &blobs, &owners).await;
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("a registration no executor serves");
+    machine
+        .prepare_bindings(session.clone())
+        .await
+        .expect("actual runtime binding");
+    machine.support_governed_work_for_test(&session).await;
+    install_credential(
+        &machine,
+        &EphemeralTokenStore::new(),
+        &controller_selection(&template),
+    )
+    .await;
+    bind_when_settled(&machine, &session, &destination).await;
+    let request = head_request(&store, &runtime, DELIVERY, 1).await;
+    let identity = request.identity().clone();
+
+    // Consent of that retained work, approved and parked at its run's close.
+    let approvals = ApprovalService::new();
+    let scope = ApprovalConsentScope {
+        domain: HostingPaths {
+            hosting_lock_dir: "realm/hosting".into(),
+            cold_delivery_lock: "realm/hosting/cold-delivery.lock".into(),
+            database: None,
+        }
+        .domain_ref(),
+        session_id: session.clone(),
+    };
+    let consent = ParkedRoutedConsent::park(&approvals, scope, identity.clone())
+        .await
+        .expect("the consent is parked through the owner's paths");
+    let approval_id = consent.approval_id().clone();
+    let custody = || {
+        approvals
+            .get(&approval_id)
+            .expect("row")
+            .consent
+            .and_then(|consent| consent.custody)
+    };
+
+    // The approved notice, admitted as a resume of that work through the
+    // governed host, and its receipt naming the admitted input.
+    let notice = continuation();
+    let notice_id = notice.id().clone();
+    let (outcome, _) = machine
+        .accept_retained_resume(&session, notice, request)
+        .await
+        .expect("the notice is admitted through the governed host");
+    assert!(
+        matches!(outcome, AcceptOutcome::Accepted { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        approvals.settle_consent_delivery(
+            &approval_id,
+            ApprovalConsentTransition::Approved,
+            ConsentDeliveryReceipt::Admitted {
+                session_id: session.clone(),
+                input_id: notice_id.clone(),
+            },
+        ),
+        Ok(ApprovalConsentDeliveryState::Admitted {
+            session_id: session.clone(),
+            input_id: notice_id.to_string(),
+        }),
+        "the receipt names the admitted notice input"
+    );
+    assert_eq!(custody(), Some(ApprovalConsentCustody::Parked));
+
+    // The session's graceful requeue stop keeps the notice queued.
+    let registration = machine
+        .current_session_registration_witness(&session)
+        .await
+        .expect("the session is registered");
+    assert!(
+        machine
+            .unregister_session_registration_until_terminal_with_queued_inputs_if_current(
+                &registration,
+                crate::UnregisterQueuedInputs::Requeue {
+                    max_age: Duration::from_secs(600),
+                },
+            )
+            .await
+            .expect("the requeue stop completes"),
+        "the exact registration is torn down"
+    );
+
+    // The next registration asks the host for the kept notice's client
+    // again; once the destination is bound again it runs on that client.
+    let asked = owners.controllers.asks();
+    let reacquired = owners.controllers.0.lock().expect("reacquisitions").len();
+    let (effects, mut applied) = attach(&machine, &session, "the consented work").await;
+    assert_eq!(
+        owners.controllers.asks() - asked,
+        1,
+        "the next registration asks the host for the kept notice's client once"
+    );
+    assert_waits_for_its_destination(&machine, &session, &notice_id).await;
+    bind_when_settled(&machine, &session, &destination).await;
+    machine
+        .wake_runtime_if_active_inputs(&session)
+        .await
+        .expect("the attached loop takes a wake");
+    let entered = next_apply(&mut applied, "the kept notice").await;
+    assert_eq!(entered.ids, vec![notice_id.clone()]);
+    let running = entered
+        .context
+        .controller_client()
+        .expect("the kept notice runs on a controller client");
+    assert!(
+        owners.controllers.0.lock().expect("reacquisitions")[reacquired..]
+            .iter()
+            .any(|client| Arc::ptr_eq(running.client(), client.client())),
+        "the kept notice runs on the client its host supplied after the stop"
+    );
+    assert!(
+        entered
+            .context
+            .resumed_inputs()
+            .iter()
+            .any(|resumed| resumed.input_id == notice_id && resumed.resumes == identity),
+        "the run names the kept notice as the input that resumes the retained work"
+    );
+    assert_eq!(
+        completed_text(&machine, &session, &notice_id).await,
+        "the consented work"
+    );
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        1,
+        "the kept notice ran once"
+    );
+
+    // A run staged with the notice's input takes the parked consent over
+    // and spends it once.
+    let run = consent.open_resumed_run(std::slice::from_ref(&notice_id));
+    assert_eq!(
+        custody(),
+        Some(ApprovalConsentCustody::Transferred {
+            input_id: notice_id.to_string(),
+        }),
+        "the consent moved into the run staged with its notice's input"
+    );
+    assert_eq!(consent.spend_in(&run), Ok(()), "spent in the resumed run");
+    assert_eq!(
+        consent.spend_in(&run),
+        Err(meerkat_core::ToolError::ReviewUnsatisfied {
+            kind: meerkat_core::ReviewUnsatisfiedKind::AlreadyConsumed,
+            approval_id: None,
+        }),
+        "a second spend is refused"
+    );
+}

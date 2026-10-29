@@ -375,28 +375,38 @@ as they were.
 
 - The side chat runs with the agent's role, profile and model overrides and
   tools, and inherits the agent's labels.
-- Its audience is exactly the agent's: every access decision on a side chat
-  is the agent's, so whoever may see the agent, send to it or retire it may
-  do the same with its side chats, a deny on the agent hides them, and a
-  grant on the side chat's own name grants nothing (see
+- Its audience is exactly the agent's: every agent check on a side chat is
+  the agent's, so whoever may see the agent, send to it or retire it may do
+  the same with its side chats, a deny on the agent hides them, and a grant
+  on the side chat's own name grants nothing (see
   [Side chats](/concepts/access-control#side-chats)).
 - It is never wired to a peer, whatever the agent's role: no other agent can
   address it, and none lists it as a peer. The runtime seats it exempt from
   the mob definition's wiring rules (`auto_wire_orchestrator`,
-  `role_wiring`), so no agent seated after it is wired to it either.
+  `role_wiring`), so no agent seated after it is wired to it either, and the
+  definition-wiring reconcile and the topology's declared edges leave it
+  out, as they leave out every member exempt from those rules.
 - It is listed under its agent in the sidebar, marked **Side chat**, and is
-  kept until you close it: across a console reload and a gateway restart.
-  **Close side chat** in its pane retires it; the agent is not touched.
-  `meta/reset_all` retires side chats with the other members that have no
-  registered identity. A host that reconciles the whole mob against a
-  declared roster (`UnifiedRuntime::reconcile`, without identity-first
-  authority) retires them too, since no declared roster names them; the
-  stock gateway does not.
+  kept until you close it: across a console reload and a gateway restart. It
+  never idle-retires. **Close side chat** in its pane retires it, which, as
+  every check on a side chat, needs `agent.retire` on its agent; the agent
+  is not touched. `meta/reset_all` retires side chats with the other members
+  that have no registered identity. A host that reconciles the whole mob
+  against a declared roster (`UnifiedRuntime::reconcile`, without
+  identity-first authority) retires them too, since no declared roster names
+  them; the stock gateway does not.
+- A side chat is never respawned or reset: its pane offers neither, and
+  `meta/respawn`, `meta/respawn_member` and `meta/reset` refuse it
+  (`side_chat_restart_refused`), since its successor would be no fork of the
+  agent. Close it and fork the agent again.
 - The action is offered only to a viewer who may spawn members
   (`agent.spawn`) and send to the agent (`agent.send`), and only where the
-  gateway's sessions persist. It is disabled while the agent works and
-  enabled when it is idle. An agent that has never run has no conversation
-  to fork: the fork is refused, and the agent is not woken for it.
+  gateway's sessions persist or its composition did not record whether they
+  do. It is disabled while the agent works and enabled when it is idle. An
+  agent seated and never woken has no conversation to fork: the fork is
+  refused, and the agent is not woken for it. An agent the console's
+  visibility policy hides cannot be forked, nor can an agent whose lineage
+  already fills the access rules' walk (the agent and seven ancestors).
 - Under `runtime_options.member_auth_binding`, an agent whose session
   records another binding or none (one created before the launch named the
   binding) cannot be forked: the runtime would seat the side chat off the
@@ -975,8 +985,8 @@ Primary RPC methods on `/console/rpc`:
 - `meta/send_message` - legacy member-addressed send path
 - `meta/fork_member` - forks an agent's conversation into a side chat (see
   [Side chats](#side-chats)); gated by `agent.spawn` for the side chat and
-  `agent.view` and `agent.send` for the agent, and offered only where
-  sessions persist
+  `agent.view` and `agent.send` for the agent, and offered where sessions
+  persist or the composition did not record whether they do
 - `meta/topology/query`, `meta/topology/plan`, `meta/topology/apply`,
   `meta/topology/operation/get`, and `meta/topology/audit/query` - optional,
   revisioned connection management and separately permissioned durable audit

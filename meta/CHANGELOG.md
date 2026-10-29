@@ -16,27 +16,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the agent's role, profile and model overrides and tools and inherits its
   labels; it is never wired to a peer, whatever the agent's role: Meerkat
   seats it exempt from the mob definition's wiring rules, so no member seated
-  after it is wired to it either; it is kept until **Close side chat** retires
-  it, across a console reload and a gateway restart; and the sidebar lists it
-  under the agent. Its console labels name the agent (`side_chat_of`, and the
-  forked session in `side_chat_of_session`), as does `side_chat_of` on its
-  experience sidebar row, read from Meerkat's durable roster fork source and
-  never from a supplied label; the member and identity list calls, event
-  streams and frame lineage read it the same way. Every access decision on a
-  side chat is the agent's: a rule that matches the agent (or the agent's own
-  lineage) covers its side chats for every action, a deny on the agent hides
-  them, and a rule that matches only the side chat (its name, its role or a
-  label only it carries) grants nothing. The fork needs `agent.view` and
-  `agent.send` for the agent and `agent.spawn` for the side chat's name, is
-  offered where sessions persist and the viewer may send to the agent, and is
-  refused typed (`-32055`, `fork_source_unavailable`) while the agent works
-  (the Console disables the action until it is idle) and for an agent that
-  has never run (cause `no_session`; the agent is not woken for it). Under
+  after it is wired to it either, and the definition-wiring reconcile and the
+  topology's declared edges leave it out, as they leave out every member
+  exempt from those rules; it is kept until **Close side chat** retires it
+  (which needs `agent.retire` on the agent), across a console reload and a
+  gateway restart, and never idle-retires; it is never respawned or reset (its
+  pane offers neither, and `meta/respawn`, `meta/respawn_member` and
+  `meta/reset` refuse it, `-32602` `side_chat_restart_refused`: close it and
+  fork the agent again); and the sidebar lists it under the agent. Its console
+  labels name the agent (`side_chat_of`, and the forked session in
+  `side_chat_of_session`), as does `side_chat_of` on its experience sidebar
+  row, read from Meerkat's durable roster fork source and never from a
+  supplied label; the member and identity list calls, event streams and frame
+  lineage read it the same way. Every agent check on a side chat is the
+  agent's: a rule that matches the agent (or the agent's own lineage) covers
+  its side chats for every action, a deny on the agent hides them, and a rule
+  that matches only the side chat (its name, its role or a label only it
+  carries) grants nothing. The fork needs `agent.view` and `agent.send` for
+  the agent and `agent.spawn` for the side chat's name, is offered where
+  sessions persist (or the composition did not record whether they do) and the
+  viewer may send to the agent, and is refused typed (`-32055`,
+  `fork_source_unavailable`) while the agent works (the Console disables the
+  action until it is idle) and for a seat that was never woken (cause
+  `no_session`; the agent is not woken for it). It is refused for an agent the
+  console's visibility policy hides (`-32001`, as `meta/fork_helper` now
+  refuses one too) and for an agent whose lineage already fills the access
+  rules' walk (`-32030`, `lineage_too_deep`). Under
   `runtime_options.member_auth_binding`, an agent whose session records
   another binding or none is refused before anything is forked
-  (`member_auth_binding_uncarried`). Instructions the agent activated and had
-  in effect at the fork are activated in the side chat; any other stays
-  inactive and the side chat names it.
+  (`member_auth_binding_uncarried`). A side chat forked from another session
+  of the agent than the fork's checks read (the agent was reset or respawned
+  in between) is retired again (`fork_source_changed`). Instructions the agent
+  activated and had in effect at the fork are activated in the side chat; any
+  other stays inactive and the side chat names it.
 
 ### Changed
 
@@ -49,6 +61,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `POST /console/send` on a Console with no local runtime records the
+  members of its aggregator's runtimes before it decides the send, as every
+  route with a runtime does: a send to a spawned member or a side chat is
+  decided along its lineage, also on the cold access cache of a restart, and
+  a member whose record names a lineage the cache still does not know is
+  refused rather than decided by its bare name.
+- A respawn whose archive cleanup leaves the member to be seated again keeps
+  the member's exemption from the mob definition's wiring rules.
 - The record of an identity with no live member (for example a dormant one)
   no longer takes lineage from labels in the identity's roster declaration:
   a declared `spawned_by` (or `side_chat_of`) no longer counts as a parent in

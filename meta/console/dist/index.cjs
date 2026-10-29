@@ -20546,16 +20546,16 @@ function memberKickoffNotice(block) {
 
 // ../packages/console-core/src/control-plane.ts
 function normalizeMemberProgress(value) {
-  const record8 = value && typeof value === "object" ? value : null;
-  if (!record8) {
+  const record9 = value && typeof value === "object" ? value : null;
+  if (!record9) {
     return null;
   }
   return {
-    run_state: typeof record8.run_state === "string" && record8.run_state ? record8.run_state : "unknown",
-    in_flight_work: typeof record8.in_flight_work === "number" && Number.isFinite(record8.in_flight_work) ? record8.in_flight_work : 0,
-    last_progress_at_ms: typeof record8.last_progress_at_ms === "number" && Number.isFinite(record8.last_progress_at_ms) ? record8.last_progress_at_ms : 0,
-    last_progress_event: typeof record8.last_progress_event === "string" && record8.last_progress_event ? record8.last_progress_event : "unchanged",
-    health: typeof record8.health === "string" && record8.health ? record8.health : "unknown"
+    run_state: typeof record9.run_state === "string" && record9.run_state ? record9.run_state : "unknown",
+    in_flight_work: typeof record9.in_flight_work === "number" && Number.isFinite(record9.in_flight_work) ? record9.in_flight_work : 0,
+    last_progress_at_ms: typeof record9.last_progress_at_ms === "number" && Number.isFinite(record9.last_progress_at_ms) ? record9.last_progress_at_ms : 0,
+    last_progress_event: typeof record9.last_progress_event === "string" && record9.last_progress_event ? record9.last_progress_event : "unchanged",
+    health: typeof record9.health === "string" && record9.health ? record9.health : "unknown"
   };
 }
 var IDENTITY_STATE_NEEDS_REPAIR_LABEL = "needs repair";
@@ -20605,32 +20605,32 @@ function normalizeStringArray(value) {
   return normalized.length > 0 ? normalized : void 0;
 }
 function normalizeSidebarWatchFields(value) {
-  const record8 = value && typeof value === "object" ? value : {};
+  const record9 = value && typeof value === "object" ? value : {};
   const normalized = {};
-  if (typeof record8.watched === "boolean") {
-    normalized.watched = record8.watched;
+  if (typeof record9.watched === "boolean") {
+    normalized.watched = record9.watched;
   }
-  if (record8.alertLevel === "elevated" || record8.alertLevel === "critical" || record8.alertLevel === null) {
-    normalized.alertLevel = record8.alertLevel;
+  if (record9.alertLevel === "elevated" || record9.alertLevel === "critical" || record9.alertLevel === null) {
+    normalized.alertLevel = record9.alertLevel;
   }
-  if (typeof record8.degraded === "boolean") {
-    normalized.degraded = record8.degraded;
+  if (typeof record9.degraded === "boolean") {
+    normalized.degraded = record9.degraded;
   }
-  const degradedReason = trimString(record8.degradedReason);
+  const degradedReason = trimString(record9.degradedReason);
   if (degradedReason) {
     normalized.degradedReason = degradedReason;
   }
   return normalized;
 }
 function normalizeIdentitySessionRepair(value) {
-  const record8 = value && typeof value === "object" ? value : null;
-  if (!record8) {
+  const record9 = value && typeof value === "object" ? value : null;
+  if (!record9) {
     return null;
   }
-  const session_id = trimString(record8.session_id);
-  const hold = trimString(record8.hold);
-  const diagnose_command = trimString(record8.diagnose_command);
-  const apply_command = trimString(record8.apply_command);
+  const session_id = trimString(record9.session_id);
+  const hold = trimString(record9.hold);
+  const diagnose_command = trimString(record9.diagnose_command);
+  const apply_command = trimString(record9.apply_command);
   if (!session_id || !hold || !diagnose_command || !apply_command) {
     return null;
   }
@@ -20639,20 +20639,20 @@ function normalizeIdentitySessionRepair(value) {
     hold,
     diagnose_command,
     apply_command,
-    detail: trimString(record8.detail) ?? ""
+    detail: trimString(record9.detail) ?? ""
   };
 }
 function normalizeIdentityStatusRow(value) {
-  const record8 = value && typeof value === "object" ? value : null;
-  if (!record8) {
+  const record9 = value && typeof value === "object" ? value : null;
+  if (!record9) {
     return null;
   }
-  const identity = trimString(record8.identity);
-  const state = trimString(record8.state);
+  const identity = trimString(record9.identity);
+  const state = trimString(record9.state);
   if (!identity || !state) {
     return null;
   }
-  const addressability = record8.addressability === "internal_only" ? "internal_only" : record8.addressability === "addressable" ? "addressable" : null;
+  const addressability = record9.addressability === "internal_only" ? "internal_only" : record9.addressability === "addressable" ? "addressable" : null;
   if (!addressability) {
     return null;
   }
@@ -20660,59 +20660,59 @@ function normalizeIdentityStatusRow(value) {
     identity,
     state,
     addressability,
-    labels: stringRecord(record8.labels),
-    ...trimString(record8.display_name) ? { display_name: trimString(record8.display_name) } : {},
-    ...trimString(record8.role) ? { role: trimString(record8.role) } : {},
-    ...typeof record8.generation === "number" && Number.isFinite(record8.generation) ? { generation: record8.generation } : {},
+    labels: stringRecord(record9.labels),
+    ...trimString(record9.display_name) ? { display_name: trimString(record9.display_name) } : {},
+    ...trimString(record9.role) ? { role: trimString(record9.role) } : {},
+    ...typeof record9.generation === "number" && Number.isFinite(record9.generation) ? { generation: record9.generation } : {},
     ...(() => {
-      const progress = normalizeMemberProgress(record8.progress);
+      const progress = normalizeMemberProgress(record9.progress);
       return progress ? { progress } : {};
     })(),
     ...(() => {
-      const session_repair = normalizeIdentitySessionRepair(record8.session_repair);
+      const session_repair = normalizeIdentitySessionRepair(record9.session_repair);
       return session_repair ? { session_repair } : {};
     })(),
     ...(() => {
-      const unobserved = normalizeUnobservedFacts(record8.unobserved);
+      const unobserved = normalizeUnobservedFacts(record9.unobserved);
       return unobserved ? { unobserved } : {};
     })()
   };
 }
 function normalizeUnobservedFacts(value) {
-  const record8 = value && typeof value === "object" ? value : null;
-  if (!record8) {
+  const record9 = value && typeof value === "object" ? value : null;
+  if (!record9) {
     return null;
   }
-  const reason = trimString(record8.reason);
+  const reason = trimString(record9.reason);
   if (!reason) {
     return null;
   }
-  const fields = Array.isArray(record8.fields) ? record8.fields.map((field) => trimString(field)).filter((field) => Boolean(field)) : [];
+  const fields = Array.isArray(record9.fields) ? record9.fields.map((field) => trimString(field)).filter((field) => Boolean(field)) : [];
   return { reason, fields };
 }
 function consoleMobStatus(snapshot) {
-  const record8 = snapshot && typeof snapshot === "object" ? snapshot : null;
-  if (!record8) {
+  const record9 = snapshot && typeof snapshot === "object" ? snapshot : null;
+  if (!record9) {
     return "unknown";
   }
-  if (normalizeUnobservedFacts(record8.unobserved)?.fields.includes("running")) {
+  if (normalizeUnobservedFacts(record9.unobserved)?.fields.includes("running")) {
     return "unknown";
   }
-  if (record8.running === true) {
+  if (record9.running === true) {
     return "running";
   }
-  if (record8.running === false) {
+  if (record9.running === false) {
     return "stopped";
   }
   return "unknown";
 }
 function normalizeIdentityInspectViewState(value) {
-  const record8 = value && typeof value === "object" ? value : null;
+  const record9 = value && typeof value === "object" ? value : null;
   const statusRow = normalizeIdentityStatusRow(value);
-  if (!record8 || !statusRow) {
+  if (!record9 || !statusRow) {
     return null;
   }
-  const continuityRecord = record8.continuity && typeof record8.continuity === "object" ? record8.continuity : {};
+  const continuityRecord = record9.continuity && typeof record9.continuity === "object" ? record9.continuity : {};
   return {
     ...statusRow,
     continuity: {
@@ -20720,67 +20720,67 @@ function normalizeIdentityInspectViewState(value) {
       ...trimString(continuityRecord.session_id) ? { session_id: trimString(continuityRecord.session_id) } : {},
       ...trimString(continuityRecord.agent_runtime_id) ? { agent_runtime_id: trimString(continuityRecord.agent_runtime_id) } : {}
     },
-    ...trimString(record8.output_preview) !== void 0 ? { output_preview: trimString(record8.output_preview) ?? null } : {},
-    ...typeof record8.is_final === "boolean" || record8.is_final === null ? { is_final: record8.is_final } : {},
-    ...normalizeFiniteNumber(record8.peer_reachable_count) !== void 0 ? { peer_reachable_count: normalizeFiniteNumber(record8.peer_reachable_count) } : record8.peer_reachable_count === null ? { peer_reachable_count: null } : {},
-    ...normalizeStringArray(record8.topology_peers) ? { topology_peers: normalizeStringArray(record8.topology_peers) } : {},
-    ...Array.isArray(record8.recent_tool_calls) ? { recent_tool_calls: record8.recent_tool_calls } : {},
-    ...normalizeFiniteNumber(record8.last_activity_ms) !== void 0 ? { last_activity_ms: normalizeFiniteNumber(record8.last_activity_ms) } : record8.last_activity_ms === null ? { last_activity_ms: null } : {}
+    ...trimString(record9.output_preview) !== void 0 ? { output_preview: trimString(record9.output_preview) ?? null } : {},
+    ...typeof record9.is_final === "boolean" || record9.is_final === null ? { is_final: record9.is_final } : {},
+    ...normalizeFiniteNumber(record9.peer_reachable_count) !== void 0 ? { peer_reachable_count: normalizeFiniteNumber(record9.peer_reachable_count) } : record9.peer_reachable_count === null ? { peer_reachable_count: null } : {},
+    ...normalizeStringArray(record9.topology_peers) ? { topology_peers: normalizeStringArray(record9.topology_peers) } : {},
+    ...Array.isArray(record9.recent_tool_calls) ? { recent_tool_calls: record9.recent_tool_calls } : {},
+    ...normalizeFiniteNumber(record9.last_activity_ms) !== void 0 ? { last_activity_ms: normalizeFiniteNumber(record9.last_activity_ms) } : record9.last_activity_ms === null ? { last_activity_ms: null } : {}
   };
 }
 function normalizeGatingAuditEntry(value) {
-  const record8 = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  const detail = record8.detail && typeof record8.detail === "object" && !Array.isArray(record8.detail) ? record8.detail : {};
-  const tier = record8.risk_tier;
+  const record9 = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const detail = record9.detail && typeof record9.detail === "object" && !Array.isArray(record9.detail) ? record9.detail : {};
+  const tier = record9.risk_tier;
   return {
-    auditId: trimString(record8.audit_id),
-    pendingId: trimString(record8.pending_id),
-    actionId: trimString(record8.action_id),
-    eventType: trimString(record8.event_type),
-    actorId: trimString(record8.actor_id),
+    auditId: trimString(record9.audit_id),
+    pendingId: trimString(record9.pending_id),
+    actionId: trimString(record9.action_id),
+    eventType: trimString(record9.event_type),
+    actorId: trimString(record9.actor_id),
     riskTier: tier === "r0" || tier === "r1" || tier === "r2" || tier === "r3" ? tier : "unknown",
     recordedRiskTier: trimString(tier),
-    outcome: trimString(record8.outcome),
+    outcome: trimString(record9.outcome),
     decision: trimString(detail.decision),
     approverId: trimString(detail.approver_id),
-    automaticAllowance: record8.event_type === "evaluated" && (record8.outcome === "allowed" || record8.outcome === "allowed_with_audit")
+    automaticAllowance: record9.event_type === "evaluated" && (record9.outcome === "allowed" || record9.outcome === "allowed_with_audit")
   };
 }
 function normalizeGatingActionResult(value) {
-  const record8 = value && typeof value === "object" ? value : null;
-  if (!record8) {
+  const record9 = value && typeof value === "object" ? value : null;
+  if (!record9) {
     return null;
   }
-  const pendingId = trimString(record8.pending_id);
-  const actionId = trimString(record8.action_id);
-  const approverId = trimString(record8.approver_id);
-  const decidedAt = normalizeFiniteNumber(record8.decided_at_ms);
+  const pendingId = trimString(record9.pending_id);
+  const actionId = trimString(record9.action_id);
+  const approverId = trimString(record9.approver_id);
+  const decidedAt = normalizeFiniteNumber(record9.decided_at_ms);
   if (!pendingId || !actionId || !approverId || decidedAt === void 0) {
     return null;
   }
-  if (record8.decision !== "approve" && record8.decision !== "reject" && record8.decision !== "escalate") {
+  if (record9.decision !== "approve" && record9.decision !== "reject" && record9.decision !== "escalate") {
     return null;
   }
-  if (record8.outcome !== "allowed" && record8.outcome !== "safe_draft" && record8.outcome !== "pending_approval") {
+  if (record9.outcome !== "allowed" && record9.outcome !== "safe_draft" && record9.outcome !== "pending_approval") {
     return null;
   }
   return {
     pending_id: pendingId,
     action_id: actionId,
     approver_id: approverId,
-    decision: record8.decision,
-    outcome: record8.outcome,
+    decision: record9.decision,
+    outcome: record9.outcome,
     decided_at_ms: decidedAt,
-    ...trimString(record8.reason) ? { reason: trimString(record8.reason) } : {},
-    ...trimString(record8.next_pending_id) ? { next_pending_id: trimString(record8.next_pending_id) } : {}
+    ...trimString(record9.reason) ? { reason: trimString(record9.reason) } : {},
+    ...trimString(record9.next_pending_id) ? { next_pending_id: trimString(record9.next_pending_id) } : {}
   };
 }
 function normalizeRoutingSectionView(value) {
-  const record8 = value && typeof value === "object" ? value : null;
-  if (!record8) {
+  const record9 = value && typeof value === "object" ? value : null;
+  if (!record9) {
     return null;
   }
-  const routes = Array.isArray(record8.routes) ? record8.routes.map((entry) => {
+  const routes = Array.isArray(record9.routes) ? record9.routes.map((entry) => {
     const route = entry && typeof entry === "object" ? entry : null;
     if (!route) {
       return null;
@@ -20803,7 +20803,7 @@ function normalizeRoutingSectionView(value) {
       ...normalizeFiniteNumber(route.rate_limit_per_minute) !== void 0 ? { rate_limit_per_minute: normalizeFiniteNumber(route.rate_limit_per_minute) } : {}
     };
   }).filter((entry) => Boolean(entry)) : [];
-  const deliveries = Array.isArray(record8.deliveries) ? record8.deliveries.map((entry) => {
+  const deliveries = Array.isArray(record9.deliveries) ? record9.deliveries.map((entry) => {
     const delivery = entry && typeof entry === "object" ? entry : null;
     if (!delivery) {
       return null;
@@ -20853,13 +20853,13 @@ function normalizeRoutingSectionView(value) {
   return { routes, deliveries };
 }
 function normalizeReplayUnavailableError(value) {
-  const record8 = value && typeof value === "object" ? value : null;
-  if (!record8 || record8.error !== "replay_unavailable" && record8.type !== "replay_unavailable") {
+  const record9 = value && typeof value === "object" ? value : null;
+  if (!record9 || record9.error !== "replay_unavailable" && record9.type !== "replay_unavailable") {
     return null;
   }
-  const explicitStream = record8.stream === "identity" || record8.stream === "all_events" || record8.stream === "timeline" ? record8.stream : null;
-  const requested = trimString(record8.requested_last_event_id) || trimString(record8.requested_cursor);
-  const latest = trimString(record8.latest_event_id) || trimString(record8.latest_cursor);
+  const explicitStream = record9.stream === "identity" || record9.stream === "all_events" || record9.stream === "timeline" ? record9.stream : null;
+  const requested = trimString(record9.requested_last_event_id) || trimString(record9.requested_cursor);
+  const latest = trimString(record9.latest_event_id) || trimString(record9.latest_cursor);
   const stream = explicitStream || (requested?.startsWith("console:") || latest?.startsWith("console:") ? "timeline" : null);
   if (!stream || !requested || !latest) {
     return null;
@@ -20872,12 +20872,12 @@ function normalizeReplayUnavailableError(value) {
   };
 }
 function normalizeConsoleInteractionRejectedError(value) {
-  const record8 = value && typeof value === "object" ? value : null;
-  if (!record8) {
+  const record9 = value && typeof value === "object" ? value : null;
+  if (!record9) {
     return null;
   }
-  const code4 = record8.code;
-  const message = trimString(record8.message);
+  const code4 = record9.code;
+  const message = trimString(record9.message);
   if (code4 !== -32001 && code4 !== -32002 && code4 !== -32003 && code4 !== -32004 && code4 !== -32602 && code4 !== -32603) {
     return null;
   }
@@ -21661,25 +21661,25 @@ function trimmedString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 function runtimeEventFromFrame(eventType, data) {
-  const record8 = recordOf(data);
-  const peerRecord = recordOf(record8?.peer);
+  const record9 = recordOf(data);
+  const peerRecord = recordOf(record9?.peer);
   const peer = peerRecord ? {
     id: trimmedString(peerRecord.id),
     displayName: trimmedString(peerRecord.display_name)
   } : null;
   return {
     eventType,
-    kind: trimmedString(record8?.kind),
+    kind: trimmedString(record9?.kind),
     peer: peer && (peer.id || peer.displayName) ? peer : null,
-    senderTaint: trimmedString(record8?.sender_taint),
+    senderTaint: trimmedString(record9?.sender_taint),
     payload: data
   };
 }
 function entryOriginFromFrameData(data) {
-  const record8 = recordOf(data);
-  const sendOrigin = trimmedString(record8?.origin);
-  const originKind = trimmedString(record8?.origin_kind);
-  const renderMetadata = recordOf(recordOf(record8?.message)?.render_metadata);
+  const record9 = recordOf(data);
+  const sendOrigin = trimmedString(record9?.origin);
+  const originKind = trimmedString(record9?.origin_kind);
+  const renderMetadata = recordOf(recordOf(record9?.message)?.render_metadata);
   const renderClass = trimmedString(renderMetadata?.class);
   if (!sendOrigin && !originKind && !renderClass) return null;
   return {
@@ -21692,8 +21692,8 @@ function runtimeEventText(event, options = {}) {
   if (event.peer) {
     return describeRuntimeEvent(event, null, options).sentence || "";
   }
-  const record8 = recordOf(event.payload);
-  const detail = trimmedString(record8?.message) || trimmedString(record8?.error) || trimmedString(record8?.reason) || trimmedString(record8?.text) || trimmedString(record8?.result) || trimmedString(record8?.delta);
+  const record9 = recordOf(event.payload);
+  const detail = trimmedString(record9?.message) || trimmedString(record9?.error) || trimmedString(record9?.reason) || trimmedString(record9?.text) || trimmedString(record9?.result) || trimmedString(record9?.delta);
   const title = humanizeRuntimeEventType(event.eventType);
   return detail ? "".concat(title, ": ").concat(detail) : "".concat(title, ".");
 }
@@ -23902,12 +23902,12 @@ var byteLength = (text9) => new TextEncoder().encode(text9).length;
 function validateConsoleContexts(records) {
   if (records.length > MAX_CONSOLE_CONTEXTS) throw new Error("A message can include at most 8 quotes.");
   const ids = /* @__PURE__ */ new Set();
-  for (const record8 of records) {
-    if (record8.version !== 1 || typeof record8.id !== "string" || !record8.id || ids.has(record8.id) || typeof record8.sourceScope !== "string" || !record8.sourceScope || typeof record8.sourceIdentity !== "string" || !record8.sourceIdentity || typeof record8.messageId !== "string" || !record8.messageId || typeof record8.quote !== "string" || !record8.quote || typeof record8.label !== "string" || !record8.label || record8.conversationId !== void 0 && typeof record8.conversationId !== "string") {
+  for (const record9 of records) {
+    if (record9.version !== 1 || typeof record9.id !== "string" || !record9.id || ids.has(record9.id) || typeof record9.sourceScope !== "string" || !record9.sourceScope || typeof record9.sourceIdentity !== "string" || !record9.sourceIdentity || typeof record9.messageId !== "string" || !record9.messageId || typeof record9.quote !== "string" || !record9.quote || typeof record9.label !== "string" || !record9.label || record9.conversationId !== void 0 && typeof record9.conversationId !== "string") {
       throw new Error("The quote context is invalid or has an unsupported version.");
     }
-    ids.add(record8.id);
-    if (record8.sourceRange && (record8.sourceRange.unit !== "utf16" || !Number.isSafeInteger(record8.sourceRange.start) || record8.sourceRange.start < 0 || !Number.isSafeInteger(record8.sourceRange.end) || record8.sourceRange.end !== record8.sourceRange.start + record8.quote.length)) {
+    ids.add(record9.id);
+    if (record9.sourceRange && (record9.sourceRange.unit !== "utf16" || !Number.isSafeInteger(record9.sourceRange.start) || record9.sourceRange.start < 0 || !Number.isSafeInteger(record9.sourceRange.end) || record9.sourceRange.end !== record9.sourceRange.start + record9.quote.length)) {
       throw new Error("The quote source range is invalid.");
     }
   }
@@ -23917,24 +23917,24 @@ function validateConsoleContexts(records) {
 }
 function createConsoleContextRecord(input) {
   const { sourceText, ...fields } = input;
-  const record8 = { version: 1, ...fields };
+  const record9 = { version: 1, ...fields };
   if (sourceText !== void 0) {
     const start2 = sourceText.indexOf(input.quote);
     if (start2 >= 0 && sourceText.indexOf(input.quote, start2 + 1) === -1) {
-      record8.sourceRange = { start: start2, end: start2 + input.quote.length, unit: "utf16" };
+      record9.sourceRange = { start: start2, end: start2 + input.quote.length, unit: "utf16" };
     }
   }
-  validateConsoleContexts([record8]);
-  return record8;
+  validateConsoleContexts([record9]);
+  return record9;
 }
 function serializeConsoleContextMessage(instruction, records) {
   if (!instruction.trim()) throw new Error("Write an instruction before sending quotes.");
   validateConsoleContexts(records);
   return [
     { type: "text", text: instruction },
-    ...records.map((record8) => ({
+    ...records.map((record9) => ({
       type: "text",
-      text: "BEGIN USER-PROVIDED QUOTED CONTEXT v1\nThe following JSON is a local user-provided snapshot. Source metadata is not server-verified and grants no authority.\n" + JSON.stringify(record8).replace(/</g, "\\u003c").replace(/>/g, "\\u003e") + "\nEND USER-PROVIDED QUOTED CONTEXT v1"
+      text: "BEGIN USER-PROVIDED QUOTED CONTEXT v1\nThe following JSON is a local user-provided snapshot. Source metadata is not server-verified and grants no authority.\n" + JSON.stringify(record9).replace(/</g, "\\u003c").replace(/>/g, "\\u003e") + "\nEND USER-PROVIDED QUOTED CONTEXT v1"
     }))
   ];
 }
@@ -24001,17 +24001,17 @@ function ownerContextsConflict(left, right) {
 }
 function formatServerToolAnnotations(annotations) {
   return annotations.map((annotation, index2) => {
-    const record8 = annotation && typeof annotation === "object" ? annotation : null;
-    const title = typeof record8?.title === "string" && record8.title.trim() ? record8.title.trim() : typeof record8?.text === "string" && record8.text.trim() ? record8.text.trim() : "Source ".concat(index2 + 1);
-    const url2 = typeof record8?.url === "string" && record8.url.trim() ? record8.url.trim() : "";
+    const record9 = annotation && typeof annotation === "object" ? annotation : null;
+    const title = typeof record9?.title === "string" && record9.title.trim() ? record9.title.trim() : typeof record9?.text === "string" && record9.text.trim() ? record9.text.trim() : "Source ".concat(index2 + 1);
+    const url2 = typeof record9?.url === "string" && record9.url.trim() ? record9.url.trim() : "";
     return url2 ? "".concat(index2 + 1, ". ").concat(title, "\n").concat(url2) : "".concat(index2 + 1, ". ").concat(title);
   }).join("\n\n").trim();
 }
 function serverToolContentSummary(frame) {
-  const record8 = frame.data && typeof frame.data === "object" ? frame.data : null;
-  const content3 = record8?.content && typeof record8.content === "object" ? record8.content : null;
-  const type = typeof content3?.type === "string" ? content3.type : typeof record8?.type === "string" ? record8.type : "";
-  const status = typeof content3?.status === "string" ? content3.status : typeof record8?.status === "string" ? record8.status : "";
+  const record9 = frame.data && typeof frame.data === "object" ? frame.data : null;
+  const content3 = record9?.content && typeof record9.content === "object" ? record9.content : null;
+  const type = typeof content3?.type === "string" ? content3.type : typeof record9?.type === "string" ? record9.type : "";
+  const status = typeof content3?.status === "string" ? content3.status : typeof record9?.status === "string" ? record9.status : "";
   if (type.includes(".failed") || type.includes(".error") || status === "failed" || status === "error") {
     return { status: "error" };
   }
@@ -24034,8 +24034,8 @@ function isActiveServerToolContentFrame(frame) {
   return serverToolContentSummary(frame)?.status === "pending";
 }
 function isTerminalServerToolContentFrame(frame) {
-  const record8 = frame.data && typeof frame.data === "object" ? frame.data : null;
-  const content3 = record8?.content && typeof record8.content === "object" ? record8.content : null;
+  const record9 = frame.data && typeof frame.data === "object" ? frame.data : null;
+  const content3 = record9?.content && typeof record9.content === "object" ? record9.content : null;
   const type = typeof content3?.type === "string" ? content3.type : "";
   if (type === "message_annotations" || Array.isArray(content3?.annotations)) return false;
   const status = serverToolContentSummary(frame)?.status;
@@ -24056,9 +24056,9 @@ function typedNoticeBlockText(block) {
 }
 function isExternalEventOnlySystemNotice(message) {
   if (!message || typeof message !== "object") return false;
-  const record8 = message;
-  if (textFromUnknown(record8.kind) === "external_event") return true;
-  const blocks = record8.blocks;
+  const record9 = message;
+  if (textFromUnknown(record9.kind) === "external_event") return true;
+  const blocks = record9.blocks;
   if (!Array.isArray(blocks)) return false;
   let sawExternalEventBlock = false;
   for (const block of blocks) {
@@ -24080,16 +24080,16 @@ function systemNoticeMessageRecord(frame) {
   }
   return data;
 }
-function systemNoticeBlockRecords(record8) {
-  const blocks = record8.blocks;
+function systemNoticeBlockRecords(record9) {
+  const blocks = record9.blocks;
   if (!Array.isArray(blocks)) return [];
   return blocks.filter((block) => Boolean(block) && typeof block === "object");
 }
-function legacyPeerNoticeTextCandidates(record8) {
+function legacyPeerNoticeTextCandidates(record9) {
   const candidates = [];
-  const body = textFromUnknown(record8.body).trim();
+  const body = textFromUnknown(record9.body).trim();
   if (body) candidates.push(body);
-  for (const block of systemNoticeBlockRecords(record8)) {
+  for (const block of systemNoticeBlockRecords(record9)) {
     const blockText = typedNoticeBlockText(block).trim();
     if (blockText) candidates.push(blockText);
     const content3 = block.content;
@@ -24111,20 +24111,20 @@ function legacyPeerNoticeTextCandidates(record8) {
 function isLegacyPeerNoticeText(text9) {
   return /^(Peer (?:message|request|response) from|\[COMMS (?:MESSAGE|REQUEST|RESPONSE)\b)/i.test(text9.trim());
 }
-function canUseLegacyPeerNoticeText(record8) {
-  const kind = textFromUnknown(record8.kind);
+function canUseLegacyPeerNoticeText(record9) {
+  const kind = textFromUnknown(record9.kind);
   if (kind && kind !== "generic") return false;
-  const blockTypes = systemNoticeBlockRecords(record8).map((block) => textFromUnknown(block.type)).filter(Boolean);
+  const blockTypes = systemNoticeBlockRecords(record9).map((block) => textFromUnknown(block.type)).filter(Boolean);
   return blockTypes.every((type) => type === "text");
 }
 function systemNoticeClearsBusyState(frame) {
-  const record8 = systemNoticeMessageRecord(frame);
-  if (!record8 || isExternalEventOnlySystemNotice(record8)) return false;
-  if (textFromUnknown(record8.kind) === "comms") return true;
-  const blocks = systemNoticeBlockRecords(record8);
+  const record9 = systemNoticeMessageRecord(frame);
+  if (!record9 || isExternalEventOnlySystemNotice(record9)) return false;
+  if (textFromUnknown(record9.kind) === "comms") return true;
+  const blocks = systemNoticeBlockRecords(record9);
   if (blocks.some((block) => textFromUnknown(block.type) === "comms")) return true;
-  if (!canUseLegacyPeerNoticeText(record8)) return false;
-  return legacyPeerNoticeTextCandidates(record8).some(isLegacyPeerNoticeText);
+  if (!canUseLegacyPeerNoticeText(record9)) return false;
+  return legacyPeerNoticeTextCandidates(record9).some(isLegacyPeerNoticeText);
 }
 function isIntermediateHistoryAssistantStep(frame) {
   if (frame.sourceKind !== "session_history" || frame.event !== "text_complete" && frame.event !== "interaction_complete") return false;
@@ -24481,6 +24481,7 @@ var CONSOLE_RPC_METHODS = {
   respawnIdentity: "meta/respawn",
   resetIdentity: "meta/reset",
   stopMemberRun: "meta/stop_member_run",
+  forkMember: "meta/fork_member",
   routingRoutesList: "meta/routing/routes/list",
   deliveryHistory: "meta/delivery/history",
   gatingPending: "meta/gating/pending",
@@ -25006,6 +25007,7 @@ var CONSOLE_COMMAND_NAMES = {
   respawnIdentity: "respawnIdentity",
   resetIdentity: "resetIdentity",
   stopMemberRun: "stopMemberRun",
+  forkMember: "forkMember",
   listRoutingRoutes: "listRoutingRoutes",
   listDeliveryHistory: "listDeliveryHistory",
   listGatingPending: "listGatingPending",
@@ -25082,6 +25084,15 @@ var CONSOLE_COMMAND_SPECS = {
   // explicitly (the run id comes from the member's `run_started`).
   [CONSOLE_COMMAND_NAMES.stopMemberRun]: {
     method: CONSOLE_RPC_METHODS.stopMemberRun,
+    targetKinds: /* @__PURE__ */ new Set([
+      "meta/identity-chat",
+      "meta/identity-inspect"
+    ])
+  },
+  // Side chat: params carry `source_member_id` and the side chat's
+  // `agent_identity` explicitly; the source is the conversation's agent.
+  [CONSOLE_COMMAND_NAMES.forkMember]: {
+    method: CONSOLE_RPC_METHODS.forkMember,
     targetKinds: /* @__PURE__ */ new Set([
       "meta/identity-chat",
       "meta/identity-inspect"
@@ -25380,8 +25391,8 @@ function normalizePendingApproval(value) {
   const pendingId = text2(raw.pending_id);
   if (!pendingId) return null;
   if (raw.status !== void 0 && raw.status !== "pending" && raw.status !== "settled" && raw.status !== "expired") return null;
-  const record8 = raw.origin && typeof raw.origin === "object" ? raw.origin : void 0;
-  const identity = text2(record8?.identity);
+  const record9 = raw.origin && typeof raw.origin === "object" ? raw.origin : void 0;
+  const identity = text2(record9?.identity);
   const actions = Array.isArray(raw.supported_actions) ? APPROVAL_ACTIONS.filter((action) => raw.supported_actions.includes(action)) : APPROVAL_ACTIONS;
   return {
     pendingId,
@@ -25399,7 +25410,7 @@ function normalizePendingApproval(value) {
     actions,
     createdAtMs: millis(raw.created_at_ms),
     deadlineAtMs: millis(raw.deadline_at_ms),
-    ...identity ? { origin: { identity, conversationId: text2(record8?.conversation_id), interactionId: text2(record8?.interaction_id) } } : {},
+    ...identity ? { origin: { identity, conversationId: text2(record9?.conversation_id), interactionId: text2(record9?.interaction_id) } } : {},
     raw
   };
 }
@@ -25426,12 +25437,12 @@ function browserEnvironment() {
 }
 var errorText = (error48) => error48 instanceof Error ? error48.message : String(error48);
 function unavailableCapability(error48) {
-  const record8 = error48;
-  return record8?.kind === "console-capability-unavailable" && typeof record8.method === "string" && Array.isArray(record8.availableMethods) && record8.availableMethods.every((method) => typeof method === "string") ? { method: record8.method, availableMethods: record8.availableMethods } : null;
+  const record9 = error48;
+  return record9?.kind === "console-capability-unavailable" && typeof record9.method === "string" && Array.isArray(record9.availableMethods) && record9.availableMethods.every((method) => typeof method === "string") ? { method: record9.method, availableMethods: record9.availableMethods } : null;
 }
 var isDenied = (error48) => {
-  const record8 = error48;
-  return record8?.httpStatus === 401 || record8?.httpStatus === 403 || record8?.rpcError?.code === -32030 || record8?.rpcError?.data?.kind === "access_denied";
+  const record9 = error48;
+  return record9?.httpStatus === 401 || record9?.httpStatus === 403 || record9?.rpcError?.code === -32030 || record9?.rpcError?.data?.kind === "access_denied";
 };
 function createPendingApprovalResource(input) {
   const env2 = input.environment || browserEnvironment();
@@ -25909,10 +25920,10 @@ function describeConsoleCheckFailure(error48, names) {
 
 // ../packages/console-core/src/context-edit.ts
 function editConsoleContextQuote(records, id, quote) {
-  if (!records.some((record8) => record8.id === id)) throw new Error("This quote is no longer in the draft.");
-  const next = records.map((record8) => {
-    if (record8.id !== id || record8.quote === quote) return record8;
-    const { sourceRange: _sourceRange, ...snapshot } = record8;
+  if (!records.some((record9) => record9.id === id)) throw new Error("This quote is no longer in the draft.");
+  const next = records.map((record9) => {
+    if (record9.id !== id || record9.quote === quote) return record9;
+    const { sourceRange: _sourceRange, ...snapshot } = record9;
     return { ...snapshot, quote };
   });
   validateConsoleContexts(next);
@@ -26915,9 +26926,9 @@ function useConversationScrollController(options) {
     const touchesRows = (nodes) => Array.from(nodes).some((node2) => node2 instanceof Element && (node2.matches(ROW_SELECTOR) || node2.querySelector(ROW_SELECTOR) !== null));
     const outsideRows = (node2) => !(node2 instanceof Element ? node2 : node2.parentElement)?.closest(ROW_SELECTOR);
     const mutation = typeof MutationObserver === "undefined" ? null : new MutationObserver((records) => {
-      const rowsChanged = records.some((record8) => record8.type === "childList" && (touchesRows(record8.addedNodes) || touchesRows(record8.removedNodes)));
+      const rowsChanged = records.some((record9) => record9.type === "childList" && (touchesRows(record9.addedNodes) || touchesRows(record9.removedNodes)));
       if (rowsChanged) observeRows();
-      const moved = rowsChanged || records.some((record8) => outsideRows(record8.target));
+      const moved = rowsChanged || records.some((record9) => outsideRows(record9.target));
       const session = sessionRef.current;
       if (moved || !resize || !session || !steadySession(session)) notifyLayoutChange();
     });
@@ -40548,19 +40559,19 @@ function QuoteCopyIcon({ name: name2 }) {
 function DeliveredContextMessage({ message }) {
   return /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: "cc-delivered-context", children: [
     /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("p", { className: "cc-delivered-context__instruction", children: message.instruction }),
-    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "cc-delivered-context__sources", "aria-label": "Quoted context", children: message.records.map((record8) => /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("figure", { className: "cc-delivered-context__source", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("div", { className: "cc-delivered-context__sources", "aria-label": "Quoted context", children: message.records.map((record9) => /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("figure", { className: "cc-delivered-context__source", children: [
       /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("figcaption", { className: "cc-delivered-context__caption", children: [
         /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("span", { children: [
           /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("strong", { children: [
             "Quoted from ",
-            record8.label
+            record9.label
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("small", { children: "User-provided snapshot" })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(CopyButton, { Icon: QuoteCopyIcon, text: record8.quote, label: "Copy quote from ".concat(record8.label), copiedLabel: "Copied quote" })
+        /* @__PURE__ */ (0, import_jsx_runtime18.jsx)(CopyButton, { Icon: QuoteCopyIcon, text: record9.quote, label: "Copy quote from ".concat(record9.label), copiedLabel: "Copied quote" })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("blockquote", { className: "cc-delivered-context__quote", children: record8.quote })
-    ] }, record8.id)) })
+      /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("blockquote", { className: "cc-delivered-context__quote", children: record9.quote })
+    ] }, record9.id)) })
   ] });
 }
 
@@ -41795,11 +41806,11 @@ function commsBlocksFromFrameData(data) {
   const blocks = [];
   for (const candidate of candidates) {
     if (!candidate || typeof candidate !== "object") continue;
-    const record8 = candidate;
-    const recordKind = textFromUnknown3(record8.kind);
-    if (recordKind === "comms") blocks.push(record8);
-    if (!Array.isArray(record8.blocks)) continue;
-    for (const block of record8.blocks) {
+    const record9 = candidate;
+    const recordKind = textFromUnknown3(record9.kind);
+    if (recordKind === "comms") blocks.push(record9);
+    if (!Array.isArray(record9.blocks)) continue;
+    for (const block of record9.blocks) {
       if (!block || typeof block !== "object") continue;
       const blockRecord = block;
       if (textFromUnknown3(blockRecord.type) === "comms") blocks.push(blockRecord);
@@ -43590,9 +43601,9 @@ function QuoteActionIcon({ action }) {
     /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("path", { d: "m10.8 5.2 4 4" })
   ] }) : action === "remove" ? /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("path", { d: "m5 5 10 10M15 5 5 15" }) : action === "up" ? /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("path", { d: "M10 16V4m-5 5 5-5 5 5" }) : /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("path", { d: "M10 4v12m-5-5 5 5 5-5" }) });
 }
-function QuoteContextChip({ record: record8, index: index2, records, onEdit, onRemove, onReorder }) {
+function QuoteContextChip({ record: record9, index: index2, records, onEdit, onRemove, onReorder }) {
   const [editing, setEditing] = (0, import_react28.useState)(false);
-  const [draft, setDraft] = (0, import_react28.useState)(record8.quote);
+  const [draft, setDraft] = (0, import_react28.useState)(record9.quote);
   const [saving, setSaving] = (0, import_react28.useState)(false);
   const [error48, setError] = (0, import_react28.useState)("");
   const editorRef = (0, import_react28.useRef)(null);
@@ -43620,10 +43631,10 @@ function QuoteContextChip({ record: record8, index: index2, records, onEdit, onR
   async function save() {
     if (!onEdit || saving) return;
     try {
-      editConsoleContextQuote(records, record8.id, draft);
+      editConsoleContextQuote(records, record9.id, draft);
       setSaving(true);
       setError("");
-      await onEdit(record8.id, draft);
+      await onEdit(record9.id, draft);
       cancel();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -43633,12 +43644,12 @@ function QuoteContextChip({ record: record8, index: index2, records, onEdit, onR
   }
   return /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("li", { className: "cc-context-chip".concat(editing && onEdit ? " cc-context-chip--editing" : ""), children: editing && onEdit ? /* @__PURE__ */ (0, import_jsx_runtime41.jsxs)("div", { className: "cc-context-chip__editor", children: [
     /* @__PURE__ */ (0, import_jsx_runtime41.jsxs)("label", { children: [
-      record8.label,
+      record9.label,
       /* @__PURE__ */ (0, import_jsx_runtime41.jsx)(
         "textarea",
         {
           ref: editorRef,
-          "aria-label": "Quote from ".concat(record8.label),
+          "aria-label": "Quote from ".concat(record9.label),
           value: draft,
           rows: 4,
           "aria-invalid": !!error48,
@@ -43664,25 +43675,25 @@ function QuoteContextChip({ record: record8, index: index2, records, onEdit, onR
       /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("button", { type: "button", onClick: cancel, disabled: saving, "aria-label": "Cancel quote edit", children: "Cancel" })
     ] })
   ] }) : /* @__PURE__ */ (0, import_jsx_runtime41.jsxs)(import_jsx_runtime41.Fragment, { children: [
-    /* @__PURE__ */ (0, import_jsx_runtime41.jsxs)(RowDetails, { part: "quote:".concat(record8.id), children: [
-      /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("summary", { children: record8.label }),
-      /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("blockquote", { children: record8.quote }),
+    /* @__PURE__ */ (0, import_jsx_runtime41.jsxs)(RowDetails, { part: "quote:".concat(record9.id), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("summary", { children: record9.label }),
+      /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("blockquote", { children: record9.quote }),
       /* @__PURE__ */ (0, import_jsx_runtime41.jsxs)("small", { children: [
         "User-provided snapshot",
-        record8.sourceRange ? "" : "; original source range unavailable"
+        record9.sourceRange ? "" : "; original source range unavailable"
       ] })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime41.jsxs)("div", { className: "cc-context-chip__actions", children: [
       onReorder ? /* @__PURE__ */ (0, import_jsx_runtime41.jsxs)(import_jsx_runtime41.Fragment, { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("button", { type: "button", disabled: index2 === 0, onClick: () => onReorder(record8.id, "up"), "aria-label": "Move quote from ".concat(record8.label, " earlier"), title: "Move quote earlier", children: /* @__PURE__ */ (0, import_jsx_runtime41.jsx)(QuoteActionIcon, { action: "up" }) }),
-        /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("button", { type: "button", disabled: index2 === records.length - 1, onClick: () => onReorder(record8.id, "down"), "aria-label": "Move quote from ".concat(record8.label, " later"), title: "Move quote later", children: /* @__PURE__ */ (0, import_jsx_runtime41.jsx)(QuoteActionIcon, { action: "down" }) })
+        /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("button", { type: "button", disabled: index2 === 0, onClick: () => onReorder(record9.id, "up"), "aria-label": "Move quote from ".concat(record9.label, " earlier"), title: "Move quote earlier", children: /* @__PURE__ */ (0, import_jsx_runtime41.jsx)(QuoteActionIcon, { action: "up" }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("button", { type: "button", disabled: index2 === records.length - 1, onClick: () => onReorder(record9.id, "down"), "aria-label": "Move quote from ".concat(record9.label, " later"), title: "Move quote later", children: /* @__PURE__ */ (0, import_jsx_runtime41.jsx)(QuoteActionIcon, { action: "down" }) })
       ] }) : null,
       onEdit ? /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("button", { type: "button", ref: editButtonRef, onClick: () => {
-        setDraft(record8.quote);
+        setDraft(record9.quote);
         setError("");
         setEditing(true);
-      }, "aria-label": "Edit quote from ".concat(record8.label), title: "Edit quote", children: /* @__PURE__ */ (0, import_jsx_runtime41.jsx)(QuoteActionIcon, { action: "edit" }) }) : null,
-      onRemove ? /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("button", { type: "button", onClick: () => onRemove(record8.id), "aria-label": "Remove quote from ".concat(record8.label), title: "Remove quote", children: /* @__PURE__ */ (0, import_jsx_runtime41.jsx)(QuoteActionIcon, { action: "remove" }) }) : null
+      }, "aria-label": "Edit quote from ".concat(record9.label), title: "Edit quote", children: /* @__PURE__ */ (0, import_jsx_runtime41.jsx)(QuoteActionIcon, { action: "edit" }) }) : null,
+      onRemove ? /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("button", { type: "button", onClick: () => onRemove(record9.id), "aria-label": "Remove quote from ".concat(record9.label), title: "Remove quote", children: /* @__PURE__ */ (0, import_jsx_runtime41.jsx)(QuoteActionIcon, { action: "remove" }) }) : null
     ] })
   ] }) });
 }
@@ -43693,7 +43704,7 @@ function QuoteContextChips({ records, destinationLabel, ...actions }) {
       "Quoted context for ",
       destinationLabel
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("ul", { children: records.map((record8, index2) => /* @__PURE__ */ (0, import_jsx_runtime41.jsx)(QuoteContextChip, { record: record8, index: index2, records, ...actions }, record8.id)) })
+    /* @__PURE__ */ (0, import_jsx_runtime41.jsx)("ul", { children: records.map((record9, index2) => /* @__PURE__ */ (0, import_jsx_runtime41.jsx)(QuoteContextChip, { record: record9, index: index2, records, ...actions }, record9.id)) })
   ] });
 }
 
@@ -43727,6 +43738,7 @@ var CONSOLE_RPC_METHODS2 = {
   respawnIdentity: "meta/respawn",
   resetIdentity: "meta/reset",
   stopMemberRun: "meta/stop_member_run",
+  forkMember: "meta/fork_member",
   routingRoutesList: "meta/routing/routes/list",
   deliveryHistory: "meta/delivery/history",
   gatingPending: "meta/gating/pending",
@@ -44020,16 +44032,16 @@ function asNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : void 0;
 }
 function frameToolName(frame) {
-  const record8 = asRecord(frame.data);
-  if (!record8) return void 0;
-  return asString(record8.name) || asString(record8.tool_name);
+  const record9 = asRecord(frame.data);
+  if (!record9) return void 0;
+  return asString(record9.name) || asString(record9.tool_name);
 }
 function isCouncilToolFrame(frame) {
   if (!COUNCIL_TOOL_EVENTS.has(frame.event)) return false;
   return frameToolName(frame) === COUNCIL_TOOL_NAME;
 }
-function parseResultPayload(record8) {
-  const raw = record8.result;
+function parseResultPayload(record9) {
+  const raw = record9.result;
   if (typeof raw === "string") {
     try {
       return asRecord(JSON.parse(raw));
@@ -44039,15 +44051,15 @@ function parseResultPayload(record8) {
   }
   return asRecord(raw);
 }
-function parseArgsPayload(record8) {
-  if (typeof record8.arguments === "string") {
+function parseArgsPayload(record9) {
+  if (typeof record9.arguments === "string") {
     try {
-      return asRecord(JSON.parse(record8.arguments));
+      return asRecord(JSON.parse(record9.arguments));
     } catch {
       return null;
     }
   }
-  return asRecord(record8.arguments) || asRecord(record8.args);
+  return asRecord(record9.arguments) || asRecord(record9.args);
 }
 function councilStatusFromExitReason(reason) {
   if (!reason) return "pending";
@@ -44132,16 +44144,16 @@ function artifactClaimRows(merge3) {
   });
 }
 function councilEntryFromFrame(frame, identity, argsByCallId) {
-  const record8 = asRecord(frame.data);
-  if (!record8) return null;
-  const payload = parseResultPayload(record8);
+  const record9 = asRecord(frame.data);
+  if (!record9) return null;
+  const payload = parseResultPayload(record9);
   if (!payload) return null;
   const result = asRecord(payload.result);
   if (!result) return null;
   const councilId = asString(result.council_id);
   if (!councilId) return null;
-  const callId = asString(record8.tool_call_id) || asString(record8.id);
-  const args = parseArgsPayload(record8) || (callId ? argsByCallId?.get(callId) ?? null : null);
+  const callId = asString(record9.tool_call_id) || asString(record9.id);
+  const args = parseArgsPayload(record9) || (callId ? argsByCallId?.get(callId) ?? null : null);
   const exit3 = asRecord(result.exit_reason);
   const exitReason = exit3 ? asString(exit3.reason) : void 0;
   const merge3 = asRecord(result.merge);
@@ -44191,11 +44203,11 @@ function councilArgsByCallId(frames) {
   const out = /* @__PURE__ */ new Map();
   for (const frame of frames) {
     if (!isCouncilToolFrame(frame)) continue;
-    const record8 = asRecord(frame.data);
-    if (!record8) continue;
-    const callId = asString(record8.tool_call_id) || asString(record8.id);
+    const record9 = asRecord(frame.data);
+    if (!record9) continue;
+    const callId = asString(record9.tool_call_id) || asString(record9.id);
     if (!callId) continue;
-    const args = parseArgsPayload(record8);
+    const args = parseArgsPayload(record9);
     if (args && !out.has(callId)) out.set(callId, args);
   }
   return out;
@@ -44209,12 +44221,12 @@ function nonEmptyString(value) {
   return typeof value === "string" && value.trim() ? value : "";
 }
 function summarizeFailureData(data) {
-  const record8 = recordOf2(data);
-  if (!record8) return { message: "", reasonType: "" };
-  const report = recordOf2(record8.error_report);
-  const reason = recordOf2(report?.reason) ?? recordOf2(record8.reason);
-  const reasonType = nonEmptyString(reason?.reason_type) || nonEmptyString(record8.reason) || nonEmptyString(reason?.kind);
-  const message = nonEmptyString(report?.message) || nonEmptyString(record8.error) || nonEmptyString(record8.message);
+  const record9 = recordOf2(data);
+  if (!record9) return { message: "", reasonType: "" };
+  const report = recordOf2(record9.error_report);
+  const reason = recordOf2(report?.reason) ?? recordOf2(record9.reason);
+  const reasonType = nonEmptyString(reason?.reason_type) || nonEmptyString(record9.reason) || nonEmptyString(reason?.kind);
+  const message = nonEmptyString(report?.message) || nonEmptyString(record9.error) || nonEmptyString(record9.message);
   return { message, reasonType };
 }
 function describeFailure(data, fallback = "error") {
@@ -44420,15 +44432,15 @@ function summarizeFrameData(data) {
     return data;
   }
   if (typeof data === "object" && data !== null) {
-    const record8 = data;
-    if (typeof record8.delta === "string") return record8.delta;
-    if (typeof record8.text === "string" && record8.text.trim()) return record8.text;
-    if (typeof record8.result === "string") return record8.result;
-    if (typeof record8.message === "string" && record8.message.trim()) return record8.message;
-    if (typeof record8.error === "string" && record8.error.trim()) return record8.error;
-    if (typeof record8.reason === "string" && record8.reason.trim()) return record8.reason;
-    if (typeof record8.kind === "string" && typeof record8.event_type === "string") return "";
-    return JSON.stringify(record8);
+    const record9 = data;
+    if (typeof record9.delta === "string") return record9.delta;
+    if (typeof record9.text === "string" && record9.text.trim()) return record9.text;
+    if (typeof record9.result === "string") return record9.result;
+    if (typeof record9.message === "string" && record9.message.trim()) return record9.message;
+    if (typeof record9.error === "string" && record9.error.trim()) return record9.error;
+    if (typeof record9.reason === "string" && record9.reason.trim()) return record9.reason;
+    if (typeof record9.kind === "string" && typeof record9.event_type === "string") return "";
+    return JSON.stringify(record9);
   }
   return String(data ?? "");
 }
@@ -44477,9 +44489,9 @@ function describeMemoryTimelineEvent2(event, data) {
     case "memory.quarantine.release_blocked": {
       const verdict = memoryString(data, "verdict");
       const action = verdict === "promote_pending_gate" ? "promotion" : verdict || "release";
-      const record8 = memoryString(data, "record_id");
+      const record9 = memoryString(data, "record_id");
       const cls = memoryString(data, "class");
-      return "Quarantine ".concat(action, " blocked").concat(record8 ? " for ".concat(record8) : "").concat(cls ? " \u2014 matches secret pattern ".concat(cls) : "");
+      return "Quarantine ".concat(action, " blocked").concat(record9 ? " for ".concat(record9) : "").concat(cls ? " \u2014 matches secret pattern ".concat(cls) : "");
     }
     case "memory.conflict.signal": {
       const entity = memoryString(data, "entity");
@@ -44544,8 +44556,8 @@ function describeMemoryTimelineEvent2(event, data) {
 function isSteerDeliveryTerminalFrame(frame) {
   if (frame.event !== "interaction_complete") return false;
   if (!frame.data || typeof frame.data !== "object") return false;
-  const record8 = frame.data;
-  return record8.reason === "steer_delivered";
+  const record9 = frame.data;
+  return record9.reason === "steer_delivered";
 }
 function eventSortRank(event) {
   switch (event) {
@@ -44705,12 +44717,12 @@ function textFromReasoningValue(value) {
     return value.map((item) => textFromReasoningValue(item)).filter(Boolean).join("\n\n").trim();
   }
   if (!value || typeof value !== "object") return "";
-  const record8 = value;
+  const record9 = value;
   const parts = [];
-  appendDistinctText(parts, textFromReasoningValue(record8.summary));
-  appendDistinctText(parts, textFromReasoningValue(record8.text));
-  appendDistinctText(parts, textFromReasoningValue(record8.content));
-  appendDistinctText(parts, textFromReasoningValue(record8.delta));
+  appendDistinctText(parts, textFromReasoningValue(record9.summary));
+  appendDistinctText(parts, textFromReasoningValue(record9.text));
+  appendDistinctText(parts, textFromReasoningValue(record9.content));
+  appendDistinctText(parts, textFromReasoningValue(record9.delta));
   return parts.join("\n\n").trim();
 }
 function reasoningBlockText(block) {
@@ -44757,42 +44769,42 @@ function isoFromTimestampMs(timestampMs) {
   return new Date(timestampMs).toISOString();
 }
 function parseToolCallId(frame) {
-  const record8 = frame.data && typeof frame.data === "object" ? frame.data : null;
+  const record9 = frame.data && typeof frame.data === "object" ? frame.data : null;
   if (frame.event === "server_tool_content") {
-    const content3 = record8?.content && typeof record8.content === "object" ? record8.content : null;
+    const content3 = record9?.content && typeof record9.content === "object" ? record9.content : null;
     const type = typeof content3?.type === "string" ? content3.type : "";
     const isAnnotationPayload = type === "message_annotations" || Array.isArray(content3?.annotations);
-    const id2 = isAnnotationPayload ? content3?.item_id ?? record8?.item_id ?? record8?.tool_call_id : content3?.item_id ?? content3?.id ?? record8?.item_id ?? record8?.tool_call_id ?? record8?.id;
+    const id2 = isAnnotationPayload ? content3?.item_id ?? record9?.item_id ?? record9?.tool_call_id : content3?.item_id ?? content3?.id ?? record9?.item_id ?? record9?.tool_call_id ?? record9?.id;
     return typeof id2 === "string" && id2.trim() ? id2.trim() : null;
   }
-  const id = record8?.tool_call_id ?? record8?.id;
+  const id = record9?.tool_call_id ?? record9?.id;
   return typeof id === "string" && id.trim() ? id.trim() : null;
 }
 function parseToolName(frame) {
-  const record8 = frame.data && typeof frame.data === "object" ? frame.data : null;
+  const record9 = frame.data && typeof frame.data === "object" ? frame.data : null;
   if (frame.event === "server_tool_content") {
-    const content3 = record8?.content && typeof record8.content === "object" ? record8.content : null;
-    const name2 = content3?.name ?? record8?.tool_name ?? record8?.name ?? record8?.kind;
+    const content3 = record9?.content && typeof record9.content === "object" ? record9.content : null;
+    const name2 = content3?.name ?? record9?.tool_name ?? record9?.name ?? record9?.kind;
     return typeof name2 === "string" && name2.trim() ? name2.trim() : "tool";
   }
-  return typeof record8?.name === "string" && record8.name.trim() ? record8.name : "tool";
+  return typeof record9?.name === "string" && record9.name.trim() ? record9.name : "tool";
 }
 function parseToolArguments(frame) {
-  const record8 = frame.data && typeof frame.data === "object" ? frame.data : null;
+  const record9 = frame.data && typeof frame.data === "object" ? frame.data : null;
   if (frame.event === "server_tool_content") {
-    const content3 = record8?.content && typeof record8.content === "object" ? record8.content : null;
+    const content3 = record9?.content && typeof record9.content === "object" ? record9.content : null;
     const action = content3?.action && typeof content3.action === "object" ? content3.action : null;
     const queries = Array.isArray(action?.queries) ? action.queries.filter((query2) => typeof query2 === "string" && query2.trim().length > 0) : [];
     const query = queries.length > 0 ? queries.join("\n") : content3?.query ?? content3?.input ?? action?.query;
     return typeof query === "string" && query.trim() ? query.trim() : "";
   }
-  if (typeof record8?.arguments === "string" && record8.arguments.trim()) {
-    return record8.arguments;
+  if (typeof record9?.arguments === "string" && record9.arguments.trim()) {
+    return record9.arguments;
   }
-  if ("args" in (record8 || {}) && record8?.args !== void 0) {
-    return JSON.stringify(record8.args);
+  if ("args" in (record9 || {}) && record9?.args !== void 0) {
+    return JSON.stringify(record9.args);
   }
-  return JSON.stringify(record8 || {});
+  return JSON.stringify(record9 || {});
 }
 function normalizeToolArgumentsForSignature(argumentsText) {
   const trimmed = (argumentsText || "").trim();
@@ -44885,16 +44897,16 @@ function summarizePeerPayload(value) {
     return parts.length ? parts.join(" ") : void 0;
   }
   if (value && typeof value === "object") {
-    const record8 = value;
-    const type = typeof record8.type === "string" ? record8.type : "";
+    const record9 = value;
+    const type = typeof record9.type === "string" ? record9.type : "";
     if (type === "image" || type === "image_ref" || type === "image_upload") {
-      return typeof record8.alt === "string" && record8.alt.trim() ? record8.alt.trim() : type === "image_ref" ? "referenced image" : "attached image";
+      return typeof record9.alt === "string" && record9.alt.trim() ? record9.alt.trim() : type === "image_ref" ? "referenced image" : "attached image";
     }
     for (const key of PEER_PAYLOAD_TEXT_KEYS) {
-      const summary = summarizePeerPayload(record8[key]);
+      const summary = summarizePeerPayload(record9[key]);
       if (summary) return summary;
     }
-    return JSON.stringify(record8);
+    return JSON.stringify(record9);
   }
   return void 0;
 }
@@ -44928,11 +44940,11 @@ function peerTargetFromArgs(argsRecord, peerRegistry) {
   return registryName ? peerLastSegment2(registryName) : typeof argsRecord?.display_name === "string" && argsRecord.display_name.trim() ? peerLastSegment2(argsRecord.display_name.trim()) : typeof argsRecord?.to === "string" && argsRecord.to.trim() ? peerLastSegment2(argsRecord.to.trim()) : peerId ? peerId.slice(0, 8) : void 0;
 }
 function parseToolResult(frame, blobBaseUrl) {
-  const record8 = frame.data && typeof frame.data === "object" ? frame.data : null;
+  const record9 = frame.data && typeof frame.data === "object" ? frame.data : null;
   const completionEvidence = toolCompletionFromFrame(frame, parseToolCallId(frame) || "");
   const status = completionEvidence.outcome === "success" ? "success" : completionEvidence.outcome === "error" ? "error" : "pending";
   const feedback = operationFeedbackFromFrame(frame);
-  const { text: text9, images } = toolResultTextAndImages(record8, blobBaseUrl);
+  const { text: text9, images } = toolResultTextAndImages(record9, blobBaseUrl);
   const result = feedback ? feedback.detail : text9;
   return {
     ...result !== void 0 ? { result } : {},
@@ -45126,7 +45138,7 @@ function workGraphToolNameOf(frame, namesByCallId) {
 function workGraphString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : void 0;
 }
-function workGraphOwnerLabel(record8) {
+function workGraphOwnerLabel(record9) {
   const fromOwner = (value) => {
     if (!value || typeof value !== "object") return void 0;
     const owner = value;
@@ -45135,14 +45147,14 @@ function workGraphOwnerLabel(record8) {
     const key = owner.key && typeof owner.key === "object" ? owner.key : null;
     return workGraphString(key?.id);
   };
-  const direct = fromOwner(record8.owner);
+  const direct = fromOwner(record9.owner);
   if (direct) return direct;
-  const claim = record8.claim && typeof record8.claim === "object" ? record8.claim : null;
+  const claim = record9.claim && typeof record9.claim === "object" ? record9.claim : null;
   return fromOwner(claim?.owner);
 }
-function workGraphEvidenceLines(record8) {
-  if (!Array.isArray(record8.evidence_refs) || record8.evidence_refs.length === 0) return void 0;
-  const lines = record8.evidence_refs.map((value) => {
+function workGraphEvidenceLines(record9) {
+  if (!Array.isArray(record9.evidence_refs) || record9.evidence_refs.length === 0) return void 0;
+  const lines = record9.evidence_refs.map((value) => {
     if (!value || typeof value !== "object") return "";
     const evidence = value;
     const label = workGraphString(evidence.label) || workGraphString(evidence.summary);
@@ -45155,10 +45167,10 @@ function workGraphEvidenceLines(record8) {
 }
 function foldWorkGraphItem(state, value, frameIso) {
   if (!value || typeof value !== "object") return null;
-  const record8 = value;
-  const itemId2 = workGraphString(record8.id);
+  const record9 = value;
+  const itemId2 = workGraphString(record9.id);
   if (!itemId2) return null;
-  const revision = typeof record8.revision === "number" ? record8.revision : void 0;
+  const revision = typeof record9.revision === "number" ? record9.revision : void 0;
   const existing = state.items.get(itemId2);
   if (existing && existing.revision !== void 0 && (revision === void 0 || existing.revision > revision)) {
     if (frameIso) existing.lastEventAt = frameIso;
@@ -45166,26 +45178,26 @@ function foldWorkGraphItem(state, value, frameIso) {
   }
   state.items.set(itemId2, {
     itemId: itemId2,
-    title: workGraphString(record8.title) || itemId2,
-    status: workGraphString(record8.status) || "open",
-    priority: workGraphString(record8.priority),
-    ownerLabel: workGraphOwnerLabel(record8),
+    title: workGraphString(record9.title) || itemId2,
+    status: workGraphString(record9.status) || "open",
+    priority: workGraphString(record9.priority),
+    ownerLabel: workGraphOwnerLabel(record9),
     revision,
-    dueAt: workGraphString(record8.due_at),
-    description: workGraphString(record8.description),
-    labels: Array.isArray(record8.labels) ? record8.labels.filter((label) => typeof label === "string") : void 0,
-    evidence: workGraphEvidenceLines(record8),
-    createdAt: workGraphString(record8.created_at),
-    updatedAt: workGraphString(record8.updated_at),
+    dueAt: workGraphString(record9.due_at),
+    description: workGraphString(record9.description),
+    labels: Array.isArray(record9.labels) ? record9.labels.filter((label) => typeof label === "string") : void 0,
+    evidence: workGraphEvidenceLines(record9),
+    createdAt: workGraphString(record9.created_at),
+    updatedAt: workGraphString(record9.updated_at),
     lastEventAt: frameIso || existing?.lastEventAt
   });
   return itemId2;
 }
 function workGraphBindingStatus(value) {
-  const record8 = value && typeof value === "object" ? value : null;
-  const state = workGraphString(record8?.state) || "active";
+  const record9 = value && typeof value === "object" ? value : null;
+  const state = workGraphString(record9?.state) || "active";
   if (state === "paused") {
-    const until = formatWorkGraphTimestamp(workGraphString(record8?.until), { date: true });
+    const until = formatWorkGraphTimestamp(workGraphString(record9?.until), { date: true });
     return {
       label: until ? "paused until ".concat(until) : "paused",
       active: false
@@ -45194,11 +45206,11 @@ function workGraphBindingStatus(value) {
   return { label: state, active: state === "active" };
 }
 function workGraphTargetLabel(value) {
-  const record8 = value && typeof value === "object" ? value : null;
-  if (!record8) return void 0;
-  const sessionId = workGraphString(record8.session_id);
+  const record9 = value && typeof value === "object" ? value : null;
+  if (!record9) return void 0;
+  const sessionId = workGraphString(record9.session_id);
   if (sessionId) return sessionId;
-  const ownerKey = record8.owner_key && typeof record8.owner_key === "object" ? record8.owner_key : null;
+  const ownerKey = record9.owner_key && typeof record9.owner_key === "object" ? record9.owner_key : null;
   if (ownerKey) {
     const kind = workGraphString(ownerKey.kind);
     const id = workGraphString(ownerKey.id);
@@ -45208,35 +45220,35 @@ function workGraphTargetLabel(value) {
 }
 function foldWorkGraphBinding(state, value, frameIso) {
   if (!value || typeof value !== "object") return null;
-  const record8 = value;
-  const bindingId = workGraphString(record8.binding_id);
+  const record9 = value;
+  const bindingId = workGraphString(record9.binding_id);
   if (!bindingId) return null;
-  const machineState = record8.machine_state && typeof record8.machine_state === "object" ? record8.machine_state : null;
+  const machineState = record9.machine_state && typeof record9.machine_state === "object" ? record9.machine_state : null;
   const revision = typeof machineState?.revision === "number" ? machineState.revision : void 0;
   const existing = state.bindings.get(bindingId);
   if (existing && existing.revision !== void 0 && (revision === void 0 || existing.revision > revision)) {
     return bindingId;
   }
-  const workRef = record8.work_ref && typeof record8.work_ref === "object" ? record8.work_ref : null;
-  const status = workGraphBindingStatus(record8.status);
+  const workRef = record9.work_ref && typeof record9.work_ref === "object" ? record9.work_ref : null;
+  const status = workGraphBindingStatus(record9.status);
   state.bindings.set(bindingId, {
     bindingId,
-    mode: workGraphString(record8.mode) || "pursue",
+    mode: workGraphString(record9.mode) || "pursue",
     statusLabel: status.label,
     active: status.active,
-    targetLabel: workGraphTargetLabel(record8.target),
+    targetLabel: workGraphTargetLabel(record9.target),
     revision,
     itemId: workGraphString(workRef?.item_id) || existing?.itemId,
-    updatedAt: workGraphString(record8.updated_at) || frameIso
+    updatedAt: workGraphString(record9.updated_at) || frameIso
   });
   return bindingId;
 }
 function foldWorkGraphEdge(state, value) {
   if (!value || typeof value !== "object") return;
-  const record8 = value;
-  if (workGraphString(record8.kind) !== "parent") return;
-  const child = workGraphString(record8.from_id);
-  const parent = workGraphString(record8.to_id);
+  const record9 = value;
+  if (workGraphString(record9.kind) !== "parent") return;
+  const child = workGraphString(record9.from_id);
+  const parent = workGraphString(record9.to_id);
   if (!child || !parent || child === parent) return;
   const first = state.parents.get(child);
   if (first === void 0) {
@@ -45250,13 +45262,13 @@ function foldWorkGraphEdge(state, value) {
 }
 function foldWorkGraphEvent(state, value) {
   if (!value || typeof value !== "object") return;
-  const record8 = value;
-  const kind = workGraphString(record8.kind);
+  const record9 = value;
+  const kind = workGraphString(record9.kind);
   if (!kind) return;
-  let dedupeKey = typeof record8.seq === "number" ? "seq:".concat(record8.seq) : "";
+  let dedupeKey = typeof record9.seq === "number" ? "seq:".concat(record9.seq) : "";
   if (!dedupeKey) {
     try {
-      dedupeKey = "content:".concat(JSON.stringify(record8));
+      dedupeKey = "content:".concat(JSON.stringify(record9));
     } catch {
       dedupeKey = "";
     }
@@ -45265,11 +45277,11 @@ function foldWorkGraphEvent(state, value) {
     if (state.seenEventKeys.has(dedupeKey)) return;
     state.seenEventKeys.add(dedupeKey);
   }
-  const at = workGraphString(record8.at);
+  const at = workGraphString(record9.at);
   const clock = formatWorkGraphTimestamp(at);
   state.events.push({
     at,
-    itemId: workGraphString(record8.item_id),
+    itemId: workGraphString(record9.item_id),
     text: [kind.replace(/_/g, " "), clock].filter(Boolean).join(" \xB7 ")
   });
 }
@@ -45279,8 +45291,8 @@ function workGraphFailureLine(name2, raw) {
   if (typeof raw === "string") {
     message = raw.trim();
   } else if (raw && typeof raw === "object") {
-    const record8 = raw;
-    message = workGraphString(record8.message) || workGraphString(record8.detail) || workGraphString(record8.error) || "";
+    const record9 = raw;
+    message = workGraphString(record9.message) || workGraphString(record9.detail) || workGraphString(record9.error) || "";
     if (!message) {
       try {
         message = JSON.stringify(raw);
@@ -45297,9 +45309,9 @@ function workGraphFailureLine(name2, raw) {
 var parsedWorkGraphResultCache = /* @__PURE__ */ new Map();
 var PARSED_WORKGRAPH_RESULT_CACHE_LIMIT = 4e3;
 function parseWorkGraphResult(frame) {
-  const record8 = frame.data && typeof frame.data === "object" ? frame.data : null;
-  if (!record8 || record8.is_error === true) return null;
-  const raw = record8.result;
+  const record9 = frame.data && typeof frame.data === "object" ? frame.data : null;
+  if (!record9 || record9.is_error === true) return null;
+  const raw = record9.result;
   if (raw && typeof raw === "object") return raw;
   if (typeof raw !== "string") return null;
   const cacheKey = "".concat(frame.id, "@").concat(frame.frameVersion ?? 0);
@@ -45468,8 +45480,8 @@ function buildWorkGraphEntries(agent, frames, namesByCallId) {
       bindingIds: [],
       outcome: void 0
     };
-    const record8 = frame.data && typeof frame.data === "object" ? frame.data : null;
-    const args = record8?.args && typeof record8.args === "object" ? record8.args : null;
+    const record9 = frame.data && typeof frame.data === "object" ? frame.data : null;
+    const args = record9?.args && typeof record9.args === "object" ? record9.args : null;
     const toolCallId = parseToolCallId(frame);
     let argItemId = workGraphString(args?.id);
     let argBindingId = workGraphString(args?.binding_id);
@@ -45484,12 +45496,12 @@ function buildWorkGraphEntries(agent, frames, namesByCallId) {
     if (argBindingId) contribution.bindingIds.push(argBindingId);
     const isOperatorResult = frame.event === WORKGRAPH_OPERATOR_RESULT_EVENT;
     if (frame.event === "tool_result_received" || frame.event === "tool_execution_completed" || isOperatorResult) {
-      const failed = record8?.is_error === true;
-      const isRefresh = record8?.refresh === true;
+      const failed = record9?.is_error === true;
+      const isRefresh = record9?.refresh === true;
       if (!isRefresh) {
         contribution.outcome = failed ? "error" : "ok";
       }
-      const failureDetail = record8?.result ?? record8?.content;
+      const failureDetail = record9?.result ?? record9?.content;
       const bodilessExecutionFact = frame.event === "tool_execution_completed" && failureDetail === void 0;
       if (failed && !bodilessExecutionFact && (!toolCallId || !failureNotedCallIds.has(toolCallId))) {
         if (toolCallId) failureNotedCallIds.add(toolCallId);
@@ -45498,7 +45510,7 @@ function buildWorkGraphEntries(agent, frames, namesByCallId) {
           itemId: argItemId || (argBindingId ? state.bindings.get(argBindingId)?.itemId : void 0),
           interactionId: contribution.interactionId,
           text: workGraphFailureLine(
-            isOperatorResult ? workGraphOperatorDisplayName(record8?.method) : workGraphToolNameOf(frame, namesByCallId),
+            isOperatorResult ? workGraphOperatorDisplayName(record9?.method) : workGraphToolNameOf(frame, namesByCallId),
             failureDetail
           )
         });
@@ -45537,8 +45549,8 @@ function buildWorkGraphEntries(agent, frames, namesByCallId) {
           for (const event of result.events) foldWorkGraphEvent(state, event);
           if (toolCallId) {
             eventItemIdsByCallId.set(toolCallId, result.events.map((event) => {
-              const record9 = event && typeof event === "object" ? event : null;
-              return workGraphString(record9?.kind) ? workGraphString(record9?.item_id) : void 0;
+              const record10 = event && typeof event === "object" ? event : null;
+              return workGraphString(record10?.kind) ? workGraphString(record10?.item_id) : void 0;
             }));
           }
         }
@@ -45848,9 +45860,9 @@ function renderTerminalEntry(agent, frame, entryId, streamedText = "", textMode 
 function terminalFrameVisibleText(frame) {
   if (isSteerDeliveryTerminalFrame(frame)) return "";
   if (frame.event === "text_complete") {
-    const record8 = frame.data && typeof frame.data === "object" ? frame.data : null;
-    if (typeof record8?.content === "string") return record8.content;
-    if (typeof record8?.text === "string") return record8.text;
+    const record9 = frame.data && typeof frame.data === "object" ? frame.data : null;
+    if (typeof record9?.content === "string") return record9.content;
+    if (typeof record9?.text === "string") return record9.text;
   }
   if (frame.event === "interaction_complete" || frame.event === "run_completed" || frame.event === "text_complete") {
     return summarizeFrameData(frame.data);
@@ -45891,18 +45903,18 @@ function assistantOwnerKey(frame) {
 }
 function canonicalHistoryAssistantText(frame) {
   if (frame.sourceKind !== "session_history") return void 0;
-  const record8 = frame.data && typeof frame.data === "object" ? frame.data : {};
-  const message = record8.message && typeof record8.message === "object" ? record8.message : {};
+  const record9 = frame.data && typeof frame.data === "object" ? frame.data : {};
+  const message = record9.message && typeof record9.message === "object" ? record9.message : {};
   if (message.role !== "assistant" && message.role !== "block_assistant") return void 0;
-  if (typeof record8.text === "string") return record8.text;
-  if (typeof record8.result === "string") return record8.result;
+  if (typeof record9.text === "string") return record9.text;
+  if (typeof record9.result === "string") return record9.result;
   return void 0;
 }
 function historyAssistantSource(frame) {
   const canonical = canonicalHistoryAssistantText(frame);
   if (canonical !== void 0) return canonical;
-  const record8 = frame.data && typeof frame.data === "object" ? frame.data : {};
-  const parsed = historyMessageText(record8.message);
+  const record9 = frame.data && typeof frame.data === "object" ? frame.data : {};
+  const parsed = historyMessageText(record9.message);
   return parsed.role === "assistant" ? parsed.text : terminalFrameVisibleText(frame);
 }
 function buildAssistantHistoryReconciliation(frames, renderTextDeltas) {
@@ -45997,8 +46009,8 @@ function buildAssistantHistoryReconciliation(frames, renderTextDeltas) {
   };
 }
 function historyHasAssistantSiblings(frame) {
-  const record8 = frame.data && typeof frame.data === "object" ? frame.data : {};
-  const message = record8.message && typeof record8.message === "object" ? record8.message : {};
+  const record9 = frame.data && typeof frame.data === "object" ? frame.data : {};
+  const message = record9.message && typeof record9.message === "object" ? record9.message : {};
   return message.role === "block_assistant" && Array.isArray(message.blocks) && message.blocks.some((block) => {
     if (!block || typeof block !== "object") return false;
     const item = block;
@@ -46107,11 +46119,11 @@ function conversationEntryVisibleText(entry) {
   if (!("blocks" in entry) || !Array.isArray(entry.blocks)) return "";
   return entry.blocks.map((block) => {
     if (!block || typeof block !== "object") return "";
-    const record8 = block;
-    if (record8.type === "thinking") return "";
-    if (record8.type === "markdown" && typeof record8.source === "string") return record8.source;
-    if (typeof record8.text === "string") return record8.text;
-    if (typeof record8.peerBody === "string") return record8.peerBody;
+    const record9 = block;
+    if (record9.type === "thinking") return "";
+    if (record9.type === "markdown" && typeof record9.source === "string") return record9.source;
+    if (typeof record9.text === "string") return record9.text;
+    if (typeof record9.peerBody === "string") return record9.peerBody;
     return "";
   }).filter(Boolean).join("\n");
 }
@@ -46162,9 +46174,9 @@ function renderHistoryUserEntry(frame, entryId, blobBaseUrl, textMode = "markdow
   if (typeof frame.data !== "object" || frame.data === null) {
     return null;
   }
-  const record8 = frame.data;
-  const content3 = record8.content;
-  const origin = entryOriginFromFrameData(record8);
+  const record9 = frame.data;
+  const content3 = record9.content;
+  const origin = entryOriginFromFrameData(record9);
   const realtimeOrigin = realtimeMessageOrigin(frame);
   if (Array.isArray(content3)) {
     const contextMessage = parseConsoleContextMessage(content3);
@@ -46249,10 +46261,10 @@ function renderRunStartedPromptEntries(frame, entryId, options = {}) {
   if (frame.event !== "run_started" || typeof frame.data !== "object" || frame.data === null) {
     return [];
   }
-  const record8 = frame.data;
+  const record9 = frame.data;
   const textMode = options.textMode ?? "markdown";
-  const promptBlocks = contentToUserBlocks(record8.prompt, options.blobBaseUrl, textMode);
-  const source = extractPromptText(record8.prompt);
+  const promptBlocks = contentToUserBlocks(record9.prompt, options.blobBaseUrl, textMode);
+  const source = extractPromptText(record9.prompt);
   const prompt = textMode === "markdown" ? source : source.trim();
   if (!prompt) {
     return [];
@@ -46305,9 +46317,9 @@ function extractTextFromContentBlocks(blocks) {
   return blocks.map((block) => {
     if (typeof block === "string") return block;
     if (!block || typeof block !== "object") return "";
-    const record8 = block;
-    if (typeof record8.text === "string") return record8.text;
-    if (typeof record8.content === "string") return record8.content;
+    const record9 = block;
+    if (typeof record9.text === "string") return record9.text;
+    if (typeof record9.content === "string") return record9.content;
     return "";
   }).filter((value) => value.trim().length > 0).join("");
 }
@@ -46317,9 +46329,9 @@ function extractPromptText(prompt) {
   return prompt.map((block) => {
     if (typeof block === "string") return block;
     if (!block || typeof block !== "object") return "";
-    const record8 = block;
-    if (typeof record8.text === "string") return record8.text;
-    if (typeof record8.content === "string") return record8.content;
+    const record9 = block;
+    if (typeof record9.text === "string") return record9.text;
+    if (typeof record9.content === "string") return record9.content;
     return "";
   }).filter((value) => value.trim().length > 0).join("\n");
 }
@@ -46337,18 +46349,18 @@ function contentToUserBlocks(content3, blobBaseUrl, textMode = "markdown") {
       continue;
     }
     if (!block || typeof block !== "object") continue;
-    const record8 = block;
-    const type = typeof record8.type === "string" ? record8.type : "";
+    const record9 = block;
+    const type = typeof record9.type === "string" ? record9.type : "";
     if (type === "text") {
-      const text9 = typeof record8.text === "string" ? record8.text : typeof record8.content === "string" ? record8.content : "";
+      const text9 = typeof record9.text === "string" ? record9.text : typeof record9.content === "string" ? record9.content : "";
       blocks.push(...messageTextBlocks(text9, textMode));
       continue;
     }
     if (type === "image" || type === "image_ref") {
-      const image3 = record8.image && typeof record8.image === "object" ? record8.image : record8;
+      const image3 = record9.image && typeof record9.image === "object" ? record9.image : record9;
       const blobRef = image3.blob_ref && typeof image3.blob_ref === "object" ? image3.blob_ref : image3.blobRef && typeof image3.blobRef === "object" ? image3.blobRef : null;
       const source = typeof image3.source === "string" ? image3.source : "";
-      const blobId = typeof record8.blob_id === "string" ? record8.blob_id : typeof image3.blob_id === "string" ? image3.blob_id : typeof record8.blobId === "string" ? record8.blobId : typeof image3.blobId === "string" ? image3.blobId : typeof blobRef?.blob_id === "string" ? blobRef.blob_id : typeof blobRef?.blobId === "string" ? blobRef.blobId : "";
+      const blobId = typeof record9.blob_id === "string" ? record9.blob_id : typeof image3.blob_id === "string" ? image3.blob_id : typeof record9.blobId === "string" ? record9.blobId : typeof image3.blobId === "string" ? image3.blobId : typeof blobRef?.blob_id === "string" ? blobRef.blob_id : typeof blobRef?.blobId === "string" ? blobRef.blobId : "";
       const mediaType = typeof image3.media_type === "string" ? image3.media_type : typeof image3.mediaType === "string" ? image3.mediaType : typeof blobRef?.media_type === "string" ? blobRef.media_type : typeof blobRef?.mediaType === "string" ? blobRef.mediaType : "image/png";
       const inlineData = typeof image3.data === "string" ? image3.data : typeof image3.base64 === "string" ? image3.base64 : "";
       const directSrc = typeof image3.src === "string" && image3.src.trim() ? image3.src.trim() : typeof image3.url === "string" && image3.url.trim() ? image3.url.trim() : "";
@@ -46387,8 +46399,8 @@ function summarizePeersResult(result) {
   const preview = [];
   for (const peer of peers) {
     if (!peer || typeof peer !== "object") continue;
-    const record8 = peer;
-    const rawName = typeof record8.name === "string" && record8.name.trim() ? record8.name.trim() : typeof record8.address?.endpoint === "string" ? String(record8.address.endpoint).trim() : typeof record8.peer_id === "string" ? record8.peer_id.trim() : "";
+    const record9 = peer;
+    const rawName = typeof record9.name === "string" && record9.name.trim() ? record9.name.trim() : typeof record9.address?.endpoint === "string" ? String(record9.address.endpoint).trim() : typeof record9.peer_id === "string" ? record9.peer_id.trim() : "";
     if (!rawName) continue;
     const parts = rawName.split("/").filter(Boolean);
     const role = parts.length >= 2 ? parts[parts.length - 2] : "peer";
@@ -46411,17 +46423,17 @@ function summarizeToolResultForDisplay(toolName2, result) {
 }
 function formatServerToolAnnotations2(annotations) {
   return annotations.map((annotation, index2) => {
-    const record8 = annotation && typeof annotation === "object" ? annotation : null;
-    const title = typeof record8?.title === "string" && record8.title.trim() ? record8.title.trim() : typeof record8?.text === "string" && record8.text.trim() ? record8.text.trim() : "Source ".concat(index2 + 1);
-    const url2 = typeof record8?.url === "string" && record8.url.trim() ? record8.url.trim() : "";
+    const record9 = annotation && typeof annotation === "object" ? annotation : null;
+    const title = typeof record9?.title === "string" && record9.title.trim() ? record9.title.trim() : typeof record9?.text === "string" && record9.text.trim() ? record9.text.trim() : "Source ".concat(index2 + 1);
+    const url2 = typeof record9?.url === "string" && record9.url.trim() ? record9.url.trim() : "";
     return url2 ? "".concat(index2 + 1, ". ").concat(title, "\n").concat(url2) : "".concat(index2 + 1, ". ").concat(title);
   }).join("\n\n").trim();
 }
 function serverToolContentSummary2(frame) {
-  const record8 = frame.data && typeof frame.data === "object" ? frame.data : null;
-  const content3 = record8?.content && typeof record8.content === "object" ? record8.content : null;
-  const type = typeof content3?.type === "string" ? content3.type : typeof record8?.type === "string" ? record8.type : "";
-  const status = typeof content3?.status === "string" ? content3.status : typeof record8?.status === "string" ? record8.status : "";
+  const record9 = frame.data && typeof frame.data === "object" ? frame.data : null;
+  const content3 = record9?.content && typeof record9.content === "object" ? record9.content : null;
+  const type = typeof content3?.type === "string" ? content3.type : typeof record9?.type === "string" ? record9.type : "";
+  const status = typeof content3?.status === "string" ? content3.status : typeof record9?.status === "string" ? record9.status : "";
   if (type.includes(".failed") || type.includes(".error") || status === "failed" || status === "error") {
     return { status: "error" };
   }
@@ -46458,10 +46470,10 @@ function splitToolResultImages(content3, blobBaseUrl) {
   }
   return { images, residual };
 }
-function toolResultTextAndImages(record8, blobBaseUrl) {
-  const carrier2 = record8?.result ?? record8?.content;
+function toolResultTextAndImages(record9, blobBaseUrl) {
+  const carrier2 = record9?.result ?? record9?.content;
   const split = splitToolResultImages(carrier2, blobBaseUrl);
-  const images = split.images.length > 0 || carrier2 === record8?.content ? split.images : splitToolResultImages(record8?.content, blobBaseUrl).images;
+  const images = split.images.length > 0 || carrier2 === record9?.content ? split.images : splitToolResultImages(record9?.content, blobBaseUrl).images;
   const residualEmpty = split.images.length > 0 && Array.isArray(split.residual) && split.residual.length === 0;
   const text9 = residualEmpty ? void 0 : toolResultTextFromContent(split.residual);
   return { ...text9 !== void 0 ? { text: text9 } : {}, images };
@@ -46471,8 +46483,8 @@ function toolResultTextFromContent(content3) {
   if (content3 === void 0 || content3 === null) return void 0;
   if (Array.isArray(content3) && content3.length > 0 && content3.every((block) => {
     if (!block || typeof block !== "object") return false;
-    const record8 = block;
-    return record8.type === "text" && typeof record8.text === "string" && Object.keys(record8).every((key) => key === "type" || key === "text");
+    const record9 = block;
+    return record9.type === "text" && typeof record9.text === "string" && Object.keys(record9).every((key) => key === "type" || key === "text");
   })) {
     return content3.map((block) => block.text).join("");
   }
@@ -46653,9 +46665,9 @@ function stripBareCommsIntentBodyPrefix(text9) {
 }
 function isExternalEventOnlySystemNotice2(message) {
   if (!message || typeof message !== "object") return false;
-  const record8 = message;
-  if (textFromUnknown4(record8.kind) === "external_event") return true;
-  const blocks = record8.blocks;
+  const record9 = message;
+  if (textFromUnknown4(record9.kind) === "external_event") return true;
+  const blocks = record9.blocks;
   if (!Array.isArray(blocks)) return false;
   let sawExternalEventBlock = false;
   for (const block of blocks) {
@@ -46688,19 +46700,19 @@ function commsNoticeMessageRecord(frame) {
   }
   const message = frame.data.message;
   if (!message || typeof message !== "object") return null;
-  const record8 = message;
-  return textFromUnknown4(record8.role) === "system_notice" ? record8 : null;
+  const record9 = message;
+  return textFromUnknown4(record9.role) === "system_notice" ? record9 : null;
 }
-function systemNoticeBlockRecords2(record8) {
-  const blocks = record8.blocks;
+function systemNoticeBlockRecords2(record9) {
+  const blocks = record9.blocks;
   if (!Array.isArray(blocks)) return [];
   return blocks.filter((block) => Boolean(block) && typeof block === "object");
 }
-function legacyPeerNoticeTextCandidates2(record8) {
+function legacyPeerNoticeTextCandidates2(record9) {
   const candidates = [];
-  const body = textFromUnknown4(record8.body).trim();
+  const body = textFromUnknown4(record9.body).trim();
   if (body) candidates.push(body);
-  for (const block of systemNoticeBlockRecords2(record8)) {
+  for (const block of systemNoticeBlockRecords2(record9)) {
     const blockText = typedNoticeBlockText2(block).trim();
     if (blockText) candidates.push(blockText);
     const content3 = block.content;
@@ -46841,9 +46853,9 @@ function commsKindFromText(text9) {
   return match?.[1]?.toLowerCase() || "";
 }
 function systemNoticeCommsSignatures(frame) {
-  const record8 = commsNoticeMessageRecord(frame);
-  if (!record8 || isExternalEventOnlySystemNotice2(record8)) return [];
-  const isCommsNotice = textFromUnknown4(record8.kind) === "comms" || systemNoticeBlockRecords2(record8).some((block) => textFromUnknown4(block.type) === "comms") || canUseLegacyPeerNoticeText2(record8) && legacyPeerNoticeTextCandidates2(record8).some(isLegacyPeerNoticeText2);
+  const record9 = commsNoticeMessageRecord(frame);
+  if (!record9 || isExternalEventOnlySystemNotice2(record9)) return [];
+  const isCommsNotice = textFromUnknown4(record9.kind) === "comms" || systemNoticeBlockRecords2(record9).some((block) => textFromUnknown4(block.type) === "comms") || canUseLegacyPeerNoticeText2(record9) && legacyPeerNoticeTextCandidates2(record9).some(isLegacyPeerNoticeText2);
   if (!isCommsNotice) return [];
   const signatures = [];
   const seenSignatures = /* @__PURE__ */ new Set();
@@ -46873,15 +46885,15 @@ function systemNoticeCommsSignatures(frame) {
       sourceKind: frame.sourceKind
     });
   };
-  const noticeOccurrenceId = textFromUnknown4(record8.request_id) || textFromUnknown4(record8.correlation_id) || textFromUnknown4(record8.id);
-  const noticeBlocks = systemNoticeBlockRecords2(record8);
+  const noticeOccurrenceId = textFromUnknown4(record9.request_id) || textFromUnknown4(record9.correlation_id) || textFromUnknown4(record9.id);
+  const noticeBlocks = systemNoticeBlockRecords2(record9);
   const typedCommsBlocks = noticeBlocks.filter((block) => textFromUnknown4(block.type) === "comms");
   if (!typedCommsBlocks.length) {
-    for (const candidate of legacyPeerNoticeTextCandidates2(record8)) {
+    for (const candidate of legacyPeerNoticeTextCandidates2(record9)) {
       pushCandidate(candidate, [], noticeOccurrenceId);
     }
   }
-  const body = textFromUnknown4(record8.body);
+  const body = textFromUnknown4(record9.body);
   if (body && !typedCommsBlocks.length) pushCandidate(body, [], noticeOccurrenceId);
   for (let index2 = 0; index2 < typedCommsBlocks.length; index2++) {
     const block = typedCommsBlocks[index2];
@@ -47027,8 +47039,8 @@ function commsNoticeDuplicateKey(key, frame, emitted) {
 function markCommsNoticeDedupeKey(key, frame, emitted) {
   emitted.set(key, { sourceKind: frame.sourceKind, timestampMs: frame.timestampMs });
 }
-function commsNoticeDedupeKeysFromBlock(record8, fallbackBody, index2) {
-  const type = textFromUnknown4(record8.type);
+function commsNoticeDedupeKeysFromBlock(record9, fallbackBody, index2) {
+  const type = textFromUnknown4(record9.type);
   const keys2 = [];
   const pushKey = (candidate, peerAliases = [], occurrenceId, kind, direction) => {
     const aliases = peerAliases.length ? peerAliases : normalizedPeerAliases(peerFromCommsText(candidate));
@@ -47046,29 +47058,29 @@ function commsNoticeDedupeKeysFromBlock(record8, fallbackBody, index2) {
     if (!keys2.includes(key)) keys2.push(key);
   };
   if (type === "comms") {
-    const peer = record8.peer && typeof record8.peer === "object" ? record8.peer : {};
+    const peer = record9.peer && typeof record9.peer === "object" ? record9.peer : {};
     const peerAliases = normalizedPeerAliases(
       textFromUnknown4(peer.display_name),
       textFromUnknown4(peer.id)
     );
-    const contentText = typedNoticeContentBlocks(record8.content).map((item) => item.type === "paragraph" ? item.text : "").filter(Boolean).join("\n");
-    const stableBodyText = typedCommsStableBodyText(record8);
-    const occurrenceId = textFromUnknown4(record8.request_id) || textFromUnknown4(record8.correlation_id) || textFromUnknown4(record8.id) || "".concat(index2);
+    const contentText = typedNoticeContentBlocks(record9.content).map((item) => item.type === "paragraph" ? item.text : "").filter(Boolean).join("\n");
+    const stableBodyText = typedCommsStableBodyText(record9);
+    const occurrenceId = textFromUnknown4(record9.request_id) || textFromUnknown4(record9.correlation_id) || textFromUnknown4(record9.id) || "".concat(index2);
     pushKey(
       contentText || stableBodyText || fallbackBody,
       peerAliases,
       occurrenceId,
-      textFromUnknown4(record8.kind) || "message",
-      textFromUnknown4(record8.direction) || "incoming"
+      textFromUnknown4(record9.kind) || "message",
+      textFromUnknown4(record9.direction) || "incoming"
     );
     return keys2;
   }
   if (type && type !== "text") return keys2;
-  const blockText = typedNoticeBlockText2(record8).trim();
+  const blockText = typedNoticeBlockText2(record9).trim();
   if (blockText && isLegacyPeerNoticeText2(blockText)) {
     pushKey(blockText);
   }
-  const content3 = record8.content;
+  const content3 = record9.content;
   if (Array.isArray(content3)) {
     for (const item of content3) {
       if (!item || typeof item !== "object") continue;
@@ -47106,8 +47118,8 @@ function shouldSuppressDuplicateCommsNotice(frame, emitted) {
   if (duplicateCount === keys2.length) {
     return true;
   }
-  const record8 = systemNoticeMessageRecord2(frame);
-  const hasBlockLevelComms = record8 ? systemNoticeBlockRecords2(record8).some((block, index2) => commsNoticeDedupeKeysFromBlock(block, textFromUnknown4(record8.body), index2).length > 0) : false;
+  const record9 = systemNoticeMessageRecord2(frame);
+  const hasBlockLevelComms = record9 ? systemNoticeBlockRecords2(record9).some((block, index2) => commsNoticeDedupeKeysFromBlock(block, textFromUnknown4(record9.body), index2).length > 0) : false;
   if (!hasBlockLevelComms) {
     for (const key of keys2) {
       markCommsNoticeDedupeKey(key, frame, emitted);
@@ -47121,20 +47133,20 @@ function structuredCommsBodyShouldPreserveLeadingEnvelope(body, peerAliases) {
   }
   return peerAliases.some((alias) => alias && !alias.startsWith("implicit-"));
 }
-function canUseLegacyPeerNoticeText2(record8) {
-  const kind = textFromUnknown4(record8.kind);
+function canUseLegacyPeerNoticeText2(record9) {
+  const kind = textFromUnknown4(record9.kind);
   if (kind && kind !== "generic") return false;
-  const blockTypes = systemNoticeBlockRecords2(record8).map((block) => textFromUnknown4(block.type)).filter(Boolean);
+  const blockTypes = systemNoticeBlockRecords2(record9).map((block) => textFromUnknown4(block.type)).filter(Boolean);
   return blockTypes.every((type) => type === "text");
 }
 function systemNoticeClearsBusyState2(frame) {
-  const record8 = systemNoticeMessageRecord2(frame);
-  if (!record8 || isExternalEventOnlySystemNotice2(record8)) return false;
-  if (textFromUnknown4(record8.kind) === "comms") return true;
-  const blocks = systemNoticeBlockRecords2(record8);
+  const record9 = systemNoticeMessageRecord2(frame);
+  if (!record9 || isExternalEventOnlySystemNotice2(record9)) return false;
+  if (textFromUnknown4(record9.kind) === "comms") return true;
+  const blocks = systemNoticeBlockRecords2(record9);
   if (blocks.some((block) => textFromUnknown4(block.type) === "comms")) return true;
-  if (!canUseLegacyPeerNoticeText2(record8)) return false;
-  return legacyPeerNoticeTextCandidates2(record8).some(isLegacyPeerNoticeText2);
+  if (!canUseLegacyPeerNoticeText2(record9)) return false;
+  return legacyPeerNoticeTextCandidates2(record9).some(isLegacyPeerNoticeText2);
 }
 function typedSystemNoticeBlocksToRich(blocks, body, blobBaseUrl, sourceKind, consumeDuplicateCommsBlock, textMode = "legacy") {
   const rich = [];
@@ -47147,15 +47159,15 @@ function typedSystemNoticeBlocksToRich(blocks, body, blobBaseUrl, sourceKind, co
   for (let index2 = 0; index2 < blocks.length; index2++) {
     const block = blocks[index2];
     if (!block || typeof block !== "object") continue;
-    const record8 = block;
-    const type = textFromUnknown4(record8.type);
+    const record9 = block;
+    const type = textFromUnknown4(record9.type);
     if (type === "comms") {
-      const dedupeKeys = commsNoticeDedupeKeysFromBlock(record8, bodyText, index2);
+      const dedupeKeys = commsNoticeDedupeKeysFromBlock(record9, bodyText, index2);
       if (consumeCommsNoticeBlockDedupeKeys(dedupeKeys, consumeDuplicateCommsBlock)) {
         consumedDuplicateCommsBlock = true;
         continue;
       }
-      const kickoff = memberKickoffNotice(record8);
+      const kickoff = memberKickoffNotice(record9);
       if (kickoff) {
         const member = decodeMemberAlias(kickoff.member);
         rich.push({
@@ -47167,33 +47179,33 @@ function typedSystemNoticeBlocksToRich(blocks, body, blobBaseUrl, sourceKind, co
         });
         continue;
       }
-      const peer = record8.peer && typeof record8.peer === "object" ? record8.peer : {};
+      const peer = record9.peer && typeof record9.peer === "object" ? record9.peer : {};
       const peerLabel = peerLastSegment2(textFromUnknown4(peer.display_name) || textFromUnknown4(peer.id) || "peer");
       const peerAliases = normalizedPeerAliases(
         textFromUnknown4(peer.display_name),
         textFromUnknown4(peer.id)
       );
-      const kind = textFromUnknown4(record8.kind) || "message";
-      const direction = textFromUnknown4(record8.direction);
-      const intent = textFromUnknown4(record8.intent);
-      const requestId = textFromUnknown4(record8.request_id) || "typed-comms:".concat(peerLabel, ":").concat(kind);
-      const contentBlocks2 = typedNoticeContentBlocks(record8.content, blobBaseUrl);
+      const kind = textFromUnknown4(record9.kind) || "message";
+      const direction = textFromUnknown4(record9.direction);
+      const intent = textFromUnknown4(record9.intent);
+      const requestId = textFromUnknown4(record9.request_id) || "typed-comms:".concat(peerLabel, ":").concat(kind);
+      const contentBlocks2 = typedNoticeContentBlocks(record9.content, blobBaseUrl);
       const contentText = contentBlocks2.map((item) => item.type === "paragraph" ? item.text : "").filter(Boolean).join("\n").trim();
       const peerImages = contentBlocks2.filter((item) => item.type === "image");
       const runtimeNotice = kind === "lifecycle" || kind === "request" && intent.startsWith("mob.kickoff_");
-      const displayBodySource = (runtimeNotice ? "" : stripPeerTransportScaffold(contentText)) || stripPeerTransportScaffold(typedCommsStableBodyText(record8)) || stripPeerTransportScaffold(bodyText);
+      const displayBodySource = (runtimeNotice ? "" : stripPeerTransportScaffold(contentText)) || stripPeerTransportScaffold(typedCommsStableBodyText(record9)) || stripPeerTransportScaffold(bodyText);
       const preserveStructuredContentEnvelope = structuredCommsBodyShouldPreserveLeadingEnvelope(
         displayBodySource,
         peerAliases
       );
-      const ownerContentText = typeof record8.content === "string" ? record8.content : Array.isArray(record8.content) ? record8.content.map((part) => {
+      const ownerContentText = typeof record9.content === "string" ? record9.content : Array.isArray(record9.content) ? record9.content.map((part) => {
         if (typeof part === "string") return part;
         if (!part || typeof part !== "object") return "";
         const textPart = part;
         if (textPart.type !== "text") return "";
         return typeof textPart.text === "string" ? textPart.text : typeof textPart.content === "string" ? textPart.content : "";
       }).join("") : "";
-      const exactDisplayBody = !runtimeNotice && ownerContentText || [record8.summary, record8.body, record8.detail].filter((part) => typeof part === "string").join("\n") || (typeof body === "string" ? body : "");
+      const exactDisplayBody = !runtimeNotice && ownerContentText || [record9.summary, record9.body, record9.detail].filter((part) => typeof part === "string").join("\n") || (typeof body === "string" ? body : "");
       const displayBody = textMode === "markdown" ? exactDisplayBody : normalizeStructuredCommsBodyText(
         displayBodySource,
         preserveStructuredContentEnvelope ? [] : peerAliases
@@ -47202,7 +47214,7 @@ function typedSystemNoticeBlocksToRich(blocks, body, blobBaseUrl, sourceKind, co
         type: "tool-call",
         toolCallId: requestId,
         name: "peer_".concat(kind),
-        arguments: JSON.stringify(record8.payload ?? {}, null, 2),
+        arguments: JSON.stringify(record9.payload ?? {}, null, 2),
         status: "success",
         peerIncoming: direction !== "outgoing",
         peerTarget: peerLabel,
@@ -47215,7 +47227,7 @@ function typedSystemNoticeBlocksToRich(blocks, body, blobBaseUrl, sourceKind, co
       });
       continue;
     }
-    const legacyDedupeKeys = commsNoticeDedupeKeysFromBlock(record8, bodyText, index2);
+    const legacyDedupeKeys = commsNoticeDedupeKeysFromBlock(record9, bodyText, index2);
     if (consumeCommsNoticeBlockDedupeKeys(legacyDedupeKeys, consumeDuplicateCommsBlock)) {
       consumedDuplicateCommsBlock = true;
       continue;
@@ -47224,34 +47236,34 @@ function typedSystemNoticeBlocksToRich(blocks, body, blobBaseUrl, sourceKind, co
       continue;
     }
     if (type === "tool_config" || type === "mcp") {
-      const payload = record8.payload && typeof record8.payload === "object" ? record8.payload : record8;
+      const payload = record9.payload && typeof record9.payload === "object" ? record9.payload : record9;
       const label = type === "mcp" ? "MCP" : "Tool config";
-      const text9 = bodyText || typedNoticeBlockText2(payload) || typedNoticeBlockText2(record8) || label;
+      const text9 = bodyText || typedNoticeBlockText2(payload) || typedNoticeBlockText2(record9) || label;
       rich.push({ type: "divider", text: text9 });
       continue;
     }
-    if (type === "background_job" && typeof record8.job_id === "string" && record8.job_id.trim() && typeof record8.status === "string" && record8.status.trim()) {
+    if (type === "background_job" && typeof record9.job_id === "string" && record9.job_id.trim() && typeof record9.status === "string" && record9.status.trim()) {
       rich.push({
         type: "background-job",
-        jobId: record8.job_id,
-        status: record8.status,
-        ...typeof record8.display_name === "string" ? { displayName: record8.display_name } : {},
-        detail: typeof record8.detail === "string" ? record8.detail : "",
-        copyText: typedNoticeBlockText2(record8) || bodyText
+        jobId: record9.job_id,
+        status: record9.status,
+        ...typeof record9.display_name === "string" ? { displayName: record9.display_name } : {},
+        detail: typeof record9.detail === "string" ? record9.detail : "",
+        copyText: typedNoticeBlockText2(record9) || bodyText
       });
       continue;
     }
     if (type === "background_job" || type === "auth" || type === "runtime_notice") {
-      const text9 = typedNoticeBlockText2(record8) || type.replace(/_/g, " ");
+      const text9 = typedNoticeBlockText2(record9) || type.replace(/_/g, " ");
       rich.push({ type: "paragraph", text: text9 });
       continue;
     }
-    const contentBlocks = typedNoticeContentBlocks(record8.content, blobBaseUrl);
+    const contentBlocks = typedNoticeContentBlocks(record9.content, blobBaseUrl);
     if (contentBlocks.length > 0) {
       rich.push(...contentBlocks);
       continue;
     }
-    rich.push({ type: "divider", text: typedNoticeBlockText2(record8) || "Runtime metadata" });
+    rich.push({ type: "divider", text: typedNoticeBlockText2(record9) || "Runtime metadata" });
   }
   if (rich.length === 0 && bodyText && !consumedDuplicateCommsBlock) {
     rich.push({ type: "paragraph", text: bodyText });
@@ -47262,36 +47274,36 @@ function historyMessageText(message, peerRegistry, blobBaseUrl, toolResults, sou
   if (!message || typeof message !== "object") {
     return { role: null, text: "" };
   }
-  const record8 = message;
-  const role = typeof record8.role === "string" ? record8.role : null;
+  const record9 = message;
+  const role = typeof record9.role === "string" ? record9.role : null;
   switch (role) {
     case "user": {
-      const text9 = extractTextFromContentBlocks(record8.content);
+      const text9 = extractTextFromContentBlocks(record9.content);
       return { role: "user", text: text9 };
     }
     case "system_notice": {
       const blocks = typedSystemNoticeBlocksToRich(
-        record8.blocks,
-        record8.body,
+        record9.blocks,
+        record9.body,
         blobBaseUrl,
         sourceKind,
         consumeDuplicateCommsBlock,
         textMode
       );
       const duplicateCommsConsumed = Boolean(
-        consumeDuplicateCommsBlock && blocks.length === 0 && systemNoticeBlockRecords2(record8).some((block, index2) => commsNoticeDedupeKeysFromBlock(
+        consumeDuplicateCommsBlock && blocks.length === 0 && systemNoticeBlockRecords2(record9).some((block, index2) => commsNoticeDedupeKeysFromBlock(
           block,
-          textFromUnknown4(record8.body),
+          textFromUnknown4(record9.body),
           index2
         ).length > 0)
       );
-      const text9 = duplicateCommsConsumed ? "" : typeof record8.body === "string" ? record8.body : blocks.map((block) => block.type === "paragraph" || block.type === "divider" ? block.text : "").filter(Boolean).join("\n");
+      const text9 = duplicateCommsConsumed ? "" : typeof record9.body === "string" ? record9.body : blocks.map((block) => block.type === "paragraph" || block.type === "divider" ? block.text : "").filter(Boolean).join("\n");
       return { role: "meta", text: text9, ...blocks.length > 0 ? { blocks } : {} };
     }
     case "assistant":
-      return { role: "assistant", text: typeof record8.content === "string" ? record8.content : "" };
+      return { role: "assistant", text: typeof record9.content === "string" ? record9.content : "" };
     case "block_assistant": {
-      const blocks = Array.isArray(record8.blocks) ? record8.blocks : [];
+      const blocks = Array.isArray(record9.blocks) ? record9.blocks : [];
       const richBlocks = blockAssistantRichBlocks(blocks, peerRegistry, toolResults, textMode, blobBaseUrl);
       const text9 = blocks.map((block) => {
         if (!block || typeof block !== "object") return "";
@@ -47307,15 +47319,15 @@ function historyMessageText(message, peerRegistry, blobBaseUrl, toolResults, sou
       return { role: "assistant", text: text9, ...richBlocks.length > 0 ? { blocks: richBlocks } : {} };
     }
     case "system":
-      return { role: "system", text: typeof record8.content === "string" ? record8.content : "" };
+      return { role: "system", text: typeof record9.content === "string" ? record9.content : "" };
     default:
       return { role: null, text: "" };
   }
 }
 function renderSessionHistoryTextCompleteEntry(agent, frame, entryId, options = {}) {
   if (frame.sourceKind !== "session_history") return null;
-  const record8 = frame.data && typeof frame.data === "object" ? frame.data : {};
-  const message = record8.message && typeof record8.message === "object" ? record8.message : null;
+  const record9 = frame.data && typeof frame.data === "object" ? frame.data : {};
+  const message = record9.message && typeof record9.message === "object" ? record9.message : null;
   const projectedMessage = message?.role === "block_assistant" ? { ...message, blocks: Array.isArray(message.blocks) ? message.blocks.filter((block) => {
     if (!block || typeof block !== "object") return true;
     const item = block;
@@ -47323,7 +47335,7 @@ function renderSessionHistoryTextCompleteEntry(agent, frame, entryId, options = 
     if (kind === "text" && options.suppressAssistantText) return false;
     if (kind === "reasoning" && options.consumeDuplicateReasoningBlock?.(reasoningBlockText(item))) return false;
     return true;
-  }) : [] } : options.suppressAssistantText && message?.role === "assistant" ? { ...message, content: "" } : record8.message;
+  }) : [] } : options.suppressAssistantText && message?.role === "assistant" ? { ...message, content: "" } : record9.message;
   const parsed = historyMessageText(
     projectedMessage,
     options.peerRegistry,
@@ -47380,14 +47392,14 @@ function renderSessionHistoryTextCompleteEntry(agent, frame, entryId, options = 
 }
 function renderSystemNoticeEntry(frame, entryId, options = {}) {
   if (frame.event !== "system_notice") return null;
-  const record8 = frame.data && typeof frame.data === "object" ? frame.data : {};
-  const rawMessage = record8.message && typeof record8.message === "object" ? record8.message : null;
+  const record9 = frame.data && typeof frame.data === "object" ? frame.data : {};
+  const rawMessage = record9.message && typeof record9.message === "object" ? record9.message : null;
   const message = rawMessage ? textFromUnknown4(rawMessage.role) ? rawMessage : { role: "system_notice", ...rawMessage } : {
     role: "system_notice",
-    kind: record8.kind,
-    render_class: record8.render_class,
-    body: record8.body,
-    blocks: record8.blocks
+    kind: record9.kind,
+    render_class: record9.render_class,
+    body: record9.body,
+    blocks: record9.blocks
   };
   if (isExternalEventOnlySystemNotice2(message)) return null;
   const parsed = historyMessageText(
@@ -48372,8 +48384,8 @@ function canonicalConsoleIdentityFromMap(identity, aliases) {
   return aliases.get(normalized) ?? normalized;
 }
 function normalizeModelCapabilities(entry) {
-  const record8 = entry && typeof entry === "object" ? entry : {};
-  const caps = record8.model_capabilities && typeof record8.model_capabilities === "object" ? record8.model_capabilities : {};
+  const record9 = entry && typeof entry === "object" ? entry : {};
+  const caps = record9.model_capabilities && typeof record9.model_capabilities === "object" ? record9.model_capabilities : {};
   return { image_input: caps.image_input === true };
 }
 function normalizeAgents(experience, modules) {
@@ -48415,6 +48427,7 @@ function normalizeAgents(experience, modules) {
         ...entry.subgroup !== void 0 && { subgroup: String(entry.subgroup) },
         ...entry.addressable !== void 0 ? { addressable: Boolean(entry.addressable) } : statusRow?.addressability ? { addressable: statusRow.addressability === "addressable" } : {},
         ...entry.affordances !== void 0 && { affordances: entry.affordances },
+        ...typeof entry.side_chat_of === "string" && entry.side_chat_of.trim() ? { side_chat_of: entry.side_chat_of.trim() } : {},
         model_capabilities: modelCapabilities,
         ...watchFields,
         ...(() => {
@@ -48564,28 +48577,28 @@ function createSingleFlight() {
 // src/lib/conversation-visibility.ts
 function richBlockHasVisibleContent(block) {
   if (!block || typeof block !== "object") return false;
-  const record8 = block;
-  if (record8.type === "background-job") {
-    return typeof record8.jobId === "string" && record8.jobId.trim().length > 0 && typeof record8.status === "string" && record8.status.trim().length > 0;
+  const record9 = block;
+  if (record9.type === "background-job") {
+    return typeof record9.jobId === "string" && record9.jobId.trim().length > 0 && typeof record9.status === "string" && record9.status.trim().length > 0;
   }
-  if (record8.type === "member-kickoff") {
-    return typeof record8.member === "string" && record8.member.trim().length > 0 && typeof record8.phase === "string" && record8.phase.trim().length > 0;
+  if (record9.type === "member-kickoff") {
+    return typeof record9.member === "string" && record9.member.trim().length > 0 && typeof record9.phase === "string" && record9.phase.trim().length > 0;
   }
-  if (record8.type === "markdown") return typeof record8.source === "string" && record8.source.trim().length > 0;
+  if (record9.type === "markdown") return typeof record9.source === "string" && record9.source.trim().length > 0;
   const scalarText = [
-    typeof record8.text === "string" ? record8.text : "",
-    typeof record8.label === "string" ? record8.label : "",
-    typeof record8.result === "string" ? record8.result : "",
-    typeof record8.body === "string" ? record8.body : "",
-    typeof record8.title === "string" ? record8.title : "",
-    typeof record8.name === "string" ? record8.name : ""
+    typeof record9.text === "string" ? record9.text : "",
+    typeof record9.label === "string" ? record9.label : "",
+    typeof record9.result === "string" ? record9.result : "",
+    typeof record9.body === "string" ? record9.body : "",
+    typeof record9.title === "string" ? record9.title : "",
+    typeof record9.name === "string" ? record9.name : ""
   ].join(" ").trim();
   if (scalarText.length > 0) return true;
-  if (record8.type === "image" && (typeof record8.src === "string" || typeof record8.blobId === "string"))
+  if (record9.type === "image" && (typeof record9.src === "string" || typeof record9.blobId === "string"))
     return true;
-  if (Array.isArray(record8.headers) && record8.headers.some((v) => String(v || "").trim().length > 0))
+  if (Array.isArray(record9.headers) && record9.headers.some((v) => String(v || "").trim().length > 0))
     return true;
-  if (Array.isArray(record8.rows) && record8.rows.some(
+  if (Array.isArray(record9.rows) && record9.rows.some(
     (row) => Array.isArray(row) && row.some((v) => String(v || "").trim().length > 0)
   ))
     return true;
@@ -48619,9 +48632,9 @@ function unwrapConsoleEnvelope(eventName, data) {
   if (!data || typeof data !== "object") {
     return { data };
   }
-  const record8 = data;
-  if (typeof record8.type === "string" && "frame" in record8) {
-    const frame = timelineFrameToConsoleFrame(record8.frame);
+  const record9 = data;
+  if (typeof record9.type === "string" && "frame" in record9) {
+    const frame = timelineFrameToConsoleFrame(record9.frame);
     const isUpdateEnvelope = eventName === "frame_updated";
     return {
       id: frame.id,
@@ -48648,47 +48661,47 @@ function timelineFrameToConsoleFrame(raw) {
   if (!raw || typeof raw !== "object") {
     return { id: "", event: "event", data: raw };
   }
-  const record8 = raw;
-  const cursor = typeof record8.cursor === "string" ? record8.cursor : void 0;
-  const payload = "payload" in record8 ? record8.payload : record8;
-  const source = record8.source && typeof record8.source === "object" ? record8.source : null;
-  if (record8.kind === "frame_updated" && payload && typeof payload === "object" && "frame" in payload) {
+  const record9 = raw;
+  const cursor = typeof record9.cursor === "string" ? record9.cursor : void 0;
+  const payload = "payload" in record9 ? record9.payload : record9;
+  const source = record9.source && typeof record9.source === "object" ? record9.source : null;
+  if (record9.kind === "frame_updated" && payload && typeof payload === "object" && "frame" in payload) {
     const updated = timelineFrameToConsoleFrame(payload.frame);
     return {
-      id: String(record8.id || cursor || ""),
+      id: String(record9.id || cursor || ""),
       event: "frame_updated",
-      identity: typeof record8.identity === "string" ? record8.identity : updated.identity,
-      interactionId: typeof record8.interaction_id === "string" ? record8.interaction_id : updated.interactionId,
-      timestampMs: typeof record8.timestamp_ms === "number" ? record8.timestamp_ms : void 0,
+      identity: typeof record9.identity === "string" ? record9.identity : updated.identity,
+      interactionId: typeof record9.interaction_id === "string" ? record9.interaction_id : updated.interactionId,
+      timestampMs: typeof record9.timestamp_ms === "number" ? record9.timestamp_ms : void 0,
       cursor,
-      runtimeKey: typeof record8.runtime_key === "string" ? record8.runtime_key : updated.runtimeKey,
-      sessionId: typeof record8.session_id === "string" ? record8.session_id : updated.sessionId,
-      status: typeof record8.status === "string" ? record8.status : updated.status,
+      runtimeKey: typeof record9.runtime_key === "string" ? record9.runtime_key : updated.runtimeKey,
+      sessionId: typeof record9.session_id === "string" ? record9.session_id : updated.sessionId,
+      status: typeof record9.status === "string" ? record9.status : updated.status,
       sourceKind: source && typeof source.kind === "string" ? source.kind : updated.sourceKind,
       sourceCursor: source && typeof source.source_cursor === "string" ? source.source_cursor : updated.sourceCursor,
-      frameVersion: typeof record8.frame_version === "number" ? record8.frame_version : updated.frameVersion,
-      updatedAtMs: typeof record8.updated_at_ms === "number" ? record8.updated_at_ms : updated.updatedAtMs,
-      turnId: typeof record8.turn_id === "string" ? record8.turn_id : updated.turnId,
-      runId: typeof record8.run_id === "string" ? record8.run_id : updated.runId,
+      frameVersion: typeof record9.frame_version === "number" ? record9.frame_version : updated.frameVersion,
+      updatedAtMs: typeof record9.updated_at_ms === "number" ? record9.updated_at_ms : updated.updatedAtMs,
+      turnId: typeof record9.turn_id === "string" ? record9.turn_id : updated.turnId,
+      runId: typeof record9.run_id === "string" ? record9.run_id : updated.runId,
       data: { frame: updated }
     };
   }
   return {
-    id: String(record8.id || cursor || ""),
-    event: String(record8.kind || "event"),
-    identity: typeof record8.identity === "string" ? record8.identity : void 0,
-    interactionId: typeof record8.interaction_id === "string" ? record8.interaction_id : void 0,
-    timestampMs: typeof record8.timestamp_ms === "number" ? record8.timestamp_ms : void 0,
+    id: String(record9.id || cursor || ""),
+    event: String(record9.kind || "event"),
+    identity: typeof record9.identity === "string" ? record9.identity : void 0,
+    interactionId: typeof record9.interaction_id === "string" ? record9.interaction_id : void 0,
+    timestampMs: typeof record9.timestamp_ms === "number" ? record9.timestamp_ms : void 0,
     cursor,
-    runtimeKey: typeof record8.runtime_key === "string" ? record8.runtime_key : void 0,
-    sessionId: typeof record8.session_id === "string" ? record8.session_id : void 0,
-    status: typeof record8.status === "string" ? record8.status : void 0,
+    runtimeKey: typeof record9.runtime_key === "string" ? record9.runtime_key : void 0,
+    sessionId: typeof record9.session_id === "string" ? record9.session_id : void 0,
+    status: typeof record9.status === "string" ? record9.status : void 0,
     sourceKind: source && typeof source.kind === "string" ? source.kind : void 0,
     sourceCursor: source && typeof source.source_cursor === "string" ? source.source_cursor : void 0,
-    frameVersion: typeof record8.frame_version === "number" ? record8.frame_version : void 0,
-    updatedAtMs: typeof record8.updated_at_ms === "number" ? record8.updated_at_ms : void 0,
-    turnId: typeof record8.turn_id === "string" ? record8.turn_id : void 0,
-    runId: typeof record8.run_id === "string" ? record8.run_id : void 0,
+    frameVersion: typeof record9.frame_version === "number" ? record9.frame_version : void 0,
+    updatedAtMs: typeof record9.updated_at_ms === "number" ? record9.updated_at_ms : void 0,
+    turnId: typeof record9.turn_id === "string" ? record9.turn_id : void 0,
+    runId: typeof record9.run_id === "string" ? record9.run_id : void 0,
     data: payload
   };
 }
@@ -48835,9 +48848,9 @@ function responseTextErrorPreview(text9) {
   try {
     const parsed = JSON.parse(trimmed);
     if (parsed && typeof parsed === "object") {
-      const record8 = parsed;
-      const message = typeof record8.message === "string" ? record8.message : void 0;
-      const error48 = record8.error && typeof record8.error === "object" ? record8.error : null;
+      const record9 = parsed;
+      const message = typeof record9.message === "string" ? record9.message : void 0;
+      const error48 = record9.error && typeof record9.error === "object" ? record9.error : null;
       const errorMessage2 = error48 && typeof error48.message === "string" ? error48.message : void 0;
       const errorCode = error48 && (typeof error48.code === "string" || typeof error48.code === "number") ? String(error48.code) : void 0;
       const selected = [
@@ -49004,14 +49017,14 @@ async function uploadConsoleBlobMultipart2(baseUrl, input, timeoutMs = DEFAULT_C
   if (result.error) {
     throw new Error("".concat(CONSOLE_RPC_METHODS2.blobUpload, " RPC error: ").concat(result.error.message || JSON.stringify(result.error)));
   }
-  const record8 = result.result && typeof result.result === "object" ? result.result : {};
-  const blobId = typeof record8.blob_id === "string" ? record8.blob_id : "";
+  const record9 = result.result && typeof result.result === "object" ? result.result : {};
+  const blobId = typeof record9.blob_id === "string" ? record9.blob_id : "";
   if (!blobId) {
     throw new Error("".concat(CONSOLE_RPC_METHODS2.blobUpload, " returned an invalid blob payload"));
   }
   return {
     blob_id: blobId,
-    url: typeof record8.url === "string" ? record8.url : void 0
+    url: typeof record9.url === "string" ? record9.url : void 0
   };
 }
 async function readConsoleBlob2(baseUrl, blobId, timeoutMs = DEFAULT_CONSOLE_FETCH_TIMEOUT_MS2, signal) {
@@ -49047,9 +49060,9 @@ function matchesCorrelation(candidate, correlation, allowUnscoped = true) {
   if (candidate === null || typeof candidate !== "object") {
     return allowUnscoped;
   }
-  const record8 = candidate;
-  const sessionId = record8.session_id ?? record8.sessionId;
-  const interactionId = record8.interaction_id ?? record8.interactionId;
+  const record9 = candidate;
+  const sessionId = record9.session_id ?? record9.sessionId;
+  const interactionId = record9.interaction_id ?? record9.interactionId;
   const hasScopedField = sessionId !== void 0 || interactionId !== void 0;
   if (!hasScopedField) {
     return allowUnscoped;
@@ -49063,8 +49076,8 @@ function matchesCorrelation(candidate, correlation, allowUnscoped = true) {
   return false;
 }
 function isTerminalTurnCompletedData(data) {
-  const record8 = data && typeof data === "object" ? data : {};
-  const stopReason = record8.stop_reason ?? record8.stopReason;
+  const record9 = data && typeof data === "object" ? data : {};
+  const stopReason = record9.stop_reason ?? record9.stopReason;
   return typeof stopReason === "string" ? stopReason !== "tool_use" : true;
 }
 function isTerminalSseFrame(frame) {
@@ -49120,14 +49133,14 @@ async function queryTimeline2(baseUrl, target, limit = 400, timeoutMs = DEFAULT_
   if (!result || typeof result !== "object") {
     return { frames: [], available: false };
   }
-  const record8 = result;
-  const rawFrames = Array.isArray(record8.frames) ? record8.frames : [];
+  const record9 = result;
+  const rawFrames = Array.isArray(record9.frames) ? record9.frames : [];
   return {
     frames: rawFrames.map(timelineFrameToConsoleFrame),
-    nextCursor: typeof record8.next_cursor === "string" ? record8.next_cursor : void 0,
-    latestCursor: typeof record8.latest_cursor === "string" ? record8.latest_cursor : void 0,
-    exhausted: record8.exhausted === true,
-    available: record8.available !== false
+    nextCursor: typeof record9.next_cursor === "string" ? record9.next_cursor : void 0,
+    latestCursor: typeof record9.latest_cursor === "string" ? record9.latest_cursor : void 0,
+    exhausted: record9.exhausted === true,
+    available: record9.available !== false
   };
 }
 async function sendConsole2(baseUrl, identity, content3, origin, idempotencyKey, handlingMode = "queue", timeoutMs = DEFAULT_CONSOLE_FETCH_TIMEOUT_MS2) {
@@ -49143,22 +49156,22 @@ async function sendConsole2(baseUrl, identity, content3, origin, idempotencyKey,
   if (!accepted || typeof accepted !== "object") {
     throw new Error("".concat(CONSOLE_RPC_METHODS2.send, " returned an invalid acceptance payload"));
   }
-  const record8 = accepted;
-  return normalizeConsoleTimelineAccepted(record8);
+  const record9 = accepted;
+  return normalizeConsoleTimelineAccepted(record9);
 }
 function normalizeConsoleTimelineAccepted(accepted) {
-  const record8 = accepted && typeof accepted === "object" ? accepted : {};
-  if (typeof record8.interaction_id !== "string" || !record8.interaction_id.trim() || typeof record8.identity !== "string" || !record8.identity.trim() || "input_frame_id" in record8 && record8.input_frame_id != null && (typeof record8.input_frame_id !== "string" || !record8.input_frame_id.trim())) {
+  const record9 = accepted && typeof accepted === "object" ? accepted : {};
+  if (typeof record9.interaction_id !== "string" || !record9.interaction_id.trim() || typeof record9.identity !== "string" || !record9.identity.trim() || "input_frame_id" in record9 && record9.input_frame_id != null && (typeof record9.input_frame_id !== "string" || !record9.input_frame_id.trim())) {
     throw new Error("".concat(CONSOLE_RPC_METHODS2.send, " returned an invalid acceptance payload"));
   }
   return {
-    interaction_id: record8.interaction_id,
-    identity: record8.identity,
-    conversation_id: typeof record8.conversation_id === "string" ? record8.conversation_id : void 0,
-    session_id: typeof record8.session_id === "string" ? record8.session_id : void 0,
-    input_frame_id: typeof record8.input_frame_id === "string" ? record8.input_frame_id : void 0,
-    cursor: typeof record8.cursor === "string" ? record8.cursor : void 0,
-    status: typeof record8.status === "string" ? record8.status : void 0
+    interaction_id: record9.interaction_id,
+    identity: record9.identity,
+    conversation_id: typeof record9.conversation_id === "string" ? record9.conversation_id : void 0,
+    session_id: typeof record9.session_id === "string" ? record9.session_id : void 0,
+    input_frame_id: typeof record9.input_frame_id === "string" ? record9.input_frame_id : void 0,
+    cursor: typeof record9.cursor === "string" ? record9.cursor : void 0,
+    status: typeof record9.status === "string" ? record9.status : void 0
   };
 }
 async function callConsoleRpc2(baseUrl, method, params = {}, timeoutMs = DEFAULT_CONSOLE_FETCH_TIMEOUT_MS2, signal) {
@@ -49201,6 +49214,7 @@ var CONSOLE_COMMAND_NAMES2 = {
   respawnIdentity: "respawnIdentity",
   resetIdentity: "resetIdentity",
   stopMemberRun: "stopMemberRun",
+  forkMember: "forkMember",
   listRoutingRoutes: "listRoutingRoutes",
   listDeliveryHistory: "listDeliveryHistory",
   listGatingPending: "listGatingPending",
@@ -49278,6 +49292,15 @@ var CONSOLE_COMMAND_SPECS2 = {
   // explicitly (the run id comes from the member's `run_started`).
   [CONSOLE_COMMAND_NAMES2.stopMemberRun]: {
     method: CONSOLE_RPC_METHODS2.stopMemberRun,
+    targetKinds: /* @__PURE__ */ new Set([
+      "meta/identity-chat",
+      "meta/identity-inspect"
+    ])
+  },
+  // Side chat: params carry `source_member_id` and the side chat's
+  // `agent_identity` explicitly; the source is the conversation's agent.
+  [CONSOLE_COMMAND_NAMES2.forkMember]: {
+    method: CONSOLE_RPC_METHODS2.forkMember,
     targetKinds: /* @__PURE__ */ new Set([
       "meta/identity-chat",
       "meta/identity-inspect"
@@ -49653,15 +49676,15 @@ function createFactFactory() {
   };
 }
 function normalizeCapabilities(value) {
-  const record8 = value && typeof value === "object" ? value : {};
-  const methods = Array.isArray(record8.methods) ? Array.from(new Set(record8.methods.filter((method) => typeof method === "string" && method.trim().length > 0))) : [];
+  const record9 = value && typeof value === "object" ? value : {};
+  const methods = Array.isArray(record9.methods) ? Array.from(new Set(record9.methods.filter((method) => typeof method === "string" && method.trim().length > 0))) : [];
   return {
     methods,
-    version: typeof record8.version === "string" ? record8.version : void 0,
-    ...typeof record8.read_only === "boolean" ? { readOnly: record8.read_only } : {},
-    runtime_capabilities: record8.runtime_capabilities,
-    method_capabilities: record8.method_capabilities,
-    ...record8.topology_control && typeof record8.topology_control === "object" ? { topologyControl: record8.topology_control } : {}
+    version: typeof record9.version === "string" ? record9.version : void 0,
+    ...typeof record9.read_only === "boolean" ? { readOnly: record9.read_only } : {},
+    runtime_capabilities: record9.runtime_capabilities,
+    method_capabilities: record9.method_capabilities,
+    ...record9.topology_control && typeof record9.topology_control === "object" ? { topologyControl: record9.topology_control } : {}
   };
 }
 var ConsoleCapabilityUnavailableError2 = class extends Error {
@@ -50404,13 +50427,13 @@ function parseRunStopResult(result) {
   if (!receipt || typeof receipt !== "object") {
     throw new Error("invalid meta/stop_member_run result: missing receipt");
   }
-  const record8 = receipt;
-  if (typeof record8.run_id !== "string") {
+  const record9 = receipt;
+  if (typeof record9.run_id !== "string") {
     throw new Error("invalid meta/stop_member_run receipt: missing run_id");
   }
-  switch (record8.outcome) {
+  switch (record9.outcome) {
     case "stopped":
-      if (!Array.isArray(record8.contributors) || !record8.contributors.every(
+      if (!Array.isArray(record9.contributors) || !record9.contributors.every(
         (row) => !!row && typeof row === "object" && typeof row.input_id === "string" && typeof row.completion === "string"
       )) {
         throw new Error("invalid meta/stop_member_run receipt: malformed contributors");
@@ -50419,12 +50442,12 @@ function parseRunStopResult(result) {
     case "not_current":
       break;
     case "not_stoppable":
-      if (typeof record8.state !== "string") {
+      if (typeof record9.state !== "string") {
         throw new Error("invalid meta/stop_member_run receipt: missing state");
       }
       break;
     default:
-      throw new Error("invalid meta/stop_member_run receipt outcome: ".concat(String(record8.outcome)));
+      throw new Error("invalid meta/stop_member_run receipt outcome: ".concat(String(record9.outcome)));
   }
   return receipt;
 }
@@ -50442,6 +50465,127 @@ function describeRunStopReceipt(receipt) {
     case "not_stoppable":
       return "The run cannot be stopped right now (runtime ".concat(receipt.state, ").");
   }
+}
+
+// src/lib/side-chat.ts
+var SIDE_CHAT_FORK_REFUSED_CODE = -32055;
+var FORK_INSTRUCTION_REFUSED_CODE = -32037;
+var ALIAS_BASE_MAX_CHARS = 40;
+var ALIAS_NONCE_MAX_CHARS = 12;
+function record6(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function nonEmptyString2(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+function sideChatSource(agent) {
+  return nonEmptyString2(agent?.side_chat_of);
+}
+function sideChatAlias(sourceIdentity, nonce) {
+  let base = sourceIdentity.trim();
+  while (base.startsWith("rt:") || base.startsWith("mk--")) {
+    base = base.startsWith("rt:") ? base.slice(3) : base.slice(4);
+  }
+  base = base.replace(/[^A-Za-z0-9:_-]+/g, "-").replace(/^[-:_]+/, "").slice(0, ALIAS_BASE_MAX_CHARS).replace(/[-:_]+$/, "");
+  const suffix = nonce.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, ALIAS_NONCE_MAX_CHARS);
+  return "".concat(base || "agent", "-side-").concat(suffix || "0");
+}
+function sideChatForkOffered(input) {
+  const agent = input.agent;
+  if (input.readOnly || !input.offered || !input.canSpawnMembers || !agent) return false;
+  return !(input.accessEnforcing && agent.affordances?.can_send_message === false);
+}
+function restartOffered(agent) {
+  return sideChatSource(agent) === null;
+}
+function sideChatSourceMemberId(agent) {
+  return (agent.identity || agent.member_id).trim();
+}
+function sideChatForkBlockedReason(input) {
+  if (input.busy || input.phase !== null || (input.responsePhase ?? null) !== null || input.queued > 0) {
+    return "Available when the agent is idle";
+  }
+  return null;
+}
+function parseSideChatForkResult(result) {
+  const body = record6(result);
+  const agentIdentity2 = nonEmptyString2(body?.agent_identity);
+  const sideChatOf = nonEmptyString2(body?.side_chat_of);
+  if (!body || !agentIdentity2 || !sideChatOf) {
+    throw new Error("invalid meta/fork_member result: missing agent_identity or side_chat_of");
+  }
+  const instructions = [];
+  for (const entry of Array.isArray(body.instructions) ? body.instructions : []) {
+    const row = record6(entry);
+    const namespace = nonEmptyString2(row?.namespace);
+    const key = nonEmptyString2(row?.key);
+    if (!row || !namespace || !key) continue;
+    const state = row.state === "inherited" ? "inherited" : "inactive";
+    const reasonKind = nonEmptyString2(record6(row.reason)?.kind);
+    instructions.push({
+      namespace,
+      key,
+      state,
+      ...state === "inactive" && reasonKind ? { reason: reasonKind } : {}
+    });
+  }
+  return {
+    agentIdentity: agentIdentity2,
+    sideChatOf,
+    displayName: nonEmptyString2(body.display_name) ?? agentIdentity2,
+    ...nonEmptyString2(body.session_id) ? { sessionId: nonEmptyString2(body.session_id) } : {},
+    instructions
+  };
+}
+var INSTRUCTION_GAP_TEXT = {
+  not_effective_in_source: "not active in the source",
+  body_unreadable: "its text could not be read",
+  activation_refused: "the runtime refused it"
+};
+function inactiveInstructionNotice(instructions) {
+  const inactive = instructions.filter((instruction) => instruction.state === "inactive");
+  if (inactive.length === 0) return null;
+  const names = inactive.map((instruction) => {
+    const why = instruction.reason ? INSTRUCTION_GAP_TEXT[instruction.reason] : void 0;
+    return "".concat(instruction.namespace, "/").concat(instruction.key).concat(why ? " (".concat(why, ")") : "");
+  });
+  return "Not inherited: ".concat(names.join(", "), ". This side chat cannot answer until ").concat(inactive.length === 1 ? "it is" : "they are", " activated.");
+}
+function sideChatForkErrorMessage(error48) {
+  const rpc2 = error48?.rpcError;
+  const data = record6(rpc2?.data);
+  if (rpc2?.code === SIDE_CHAT_FORK_REFUSED_CODE && data) {
+    if (data.kind === "fork_source_unavailable") {
+      switch (data.cause) {
+        case "running":
+          return "The agent is working. Fork to a side chat when it is idle.";
+        case "no_session":
+          return "This agent has no conversation to fork.";
+        case "remote_read_unavailable":
+          return "This agent runs on another host; its conversation cannot be forked here.";
+        default:
+          return "This agent cannot be forked right now. Try again shortly.";
+      }
+    }
+    if (data.kind === "unwired_seat_unavailable") {
+      return data.retired === false ? "The side chat was seated with peers and could not be closed again. Close it from the agent list." : "The side chat was seated with peers, so it was closed again: a side chat must stay private.";
+    }
+    if (data.kind === "fork_source_changed") {
+      return data.retired === false ? "The agent was reset or respawned while it was forked, and the side chat could not be closed again. Close it from the agent list." : "The agent was reset or respawned while it was forked, so the side chat was closed again. Fork it again.";
+    }
+  }
+  if (rpc2?.code === FORK_INSTRUCTION_REFUSED_CODE) {
+    return "This agent's activated instructions may not be copied into a side chat on this gateway.";
+  }
+  if (error48 instanceof Error && error48.message) return error48.message;
+  return String(error48);
+}
+function findSideChatAgent(agents, alias) {
+  const wanted = alias.trim().toLowerCase();
+  if (!wanted) return null;
+  return agents.find(
+    (agent) => [agent.identity, agent.member_id, agent.agent_id].some((key) => key?.trim().toLowerCase() === wanted)
+  ) ?? null;
 }
 
 // src/lib/read-only-override.ts
@@ -50886,7 +51030,7 @@ function GatingInboxPanel({
   }, [selectedPendingId, selectedRequestAvailable, tab2]);
   const auditEntries = audit.map(normalizeGatingAuditEntry);
   const automaticallyAllowed = auditEntries.filter((entry) => entry.automaticAllowance);
-  const currentList = tab2 === "pending" ? pending.map((raw) => ({ raw, record: normalizeGatingAuditEntry(raw) })) : (tab2 === "auto" ? automaticallyAllowed : auditEntries).map((record8) => ({ raw: void 0, record: record8 }));
+  const currentList = tab2 === "pending" ? pending.map((raw) => ({ raw, record: normalizeGatingAuditEntry(raw) })) : (tab2 === "auto" ? automaticallyAllowed : auditEntries).map((record9) => ({ raw: void 0, record: record9 }));
   return /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gating", "data-testid": "gating-panel", children: [
     /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gating__head", children: [
       /* @__PURE__ */ (0, import_jsx_runtime45.jsx)("h2", { children: "Approvals" }),
@@ -50957,14 +51101,14 @@ function GatingInboxPanel({
         tab2,
         " items."
       ] }),
-      currentList.map(({ raw, record: record8 }, index2) => {
+      currentList.map(({ raw, record: record9 }, index2) => {
         const r2 = raw && typeof raw === "object" ? raw : {};
-        const pid = (tab2 === "pending" ? record8.pendingId : record8.auditId) || "item-".concat(index2);
-        const action = record8.actionId || record8.eventType || "Unknown action";
-        const agent = record8.actorId || (tab2 === "pending" ? String(r2.agent || r2.identity || r2.actor || "") : "");
+        const pid = (tab2 === "pending" ? record9.pendingId : record9.auditId) || "item-".concat(index2);
+        const action = record9.actionId || record9.eventType || "Unknown action";
+        const agent = record9.actorId || (tab2 === "pending" ? String(r2.agent || r2.identity || r2.actor || "") : "");
         const waited = formatWaited(r2);
-        const risk = record8.riskTier;
-        const tierLabel = risk === "unknown" ? "Unknown".concat(record8.recordedRiskTier ? " (".concat(record8.recordedRiskTier, ")") : "") : risk.toUpperCase();
+        const risk = record9.riskTier;
+        const tierLabel = risk === "unknown" ? "Unknown".concat(record9.recordedRiskTier ? " (".concat(record9.recordedRiskTier, ")") : "") : risk.toUpperCase();
         const payload = tab2 === "pending" ? payloadSummary(r2) : "";
         const selected = selectedId === pid;
         const showActions = tab2 === "pending" && !readOnly;
@@ -50992,19 +51136,19 @@ function GatingInboxPanel({
                 tab2 !== "pending" && /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)(import_jsx_runtime45.Fragment, { children: [
                   /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gitem__agent", children: [
                     "Event: ",
-                    record8.eventType || "Not recorded"
+                    record9.eventType || "Not recorded"
                   ] }),
                   /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gitem__agent", children: [
                     "Decision: ",
-                    record8.decision || "Not recorded"
+                    record9.decision || "Not recorded"
                   ] }),
-                  record8.approverId && /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gitem__agent", children: [
+                  record9.approverId && /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gitem__agent", children: [
                     "Approver: ",
-                    record8.approverId
+                    record9.approverId
                   ] }),
                   /* @__PURE__ */ (0, import_jsx_runtime45.jsxs)("div", { className: "gitem__agent", children: [
                     "Outcome: ",
-                    record8.outcome || "Not recorded"
+                    record9.outcome || "Not recorded"
                   ] })
                 ] })
               ] }),
@@ -51825,8 +51969,8 @@ function resolveMemoryTabAlias(tab2) {
   if (tab2 === "quarantine") return "pipeline";
   return MEMORY_TABS.includes(tab2) ? tab2 : null;
 }
-function realmOfRecord(record8) {
-  return record8.scope.realm;
+function realmOfRecord(record9) {
+  return record9.scope.realm;
 }
 function scopeGroupKey(scope) {
   switch (scope.scope) {
@@ -51866,19 +52010,19 @@ function scopeGroupRank(scope) {
 }
 function groupRecordsByScope(records) {
   const byKey = /* @__PURE__ */ new Map();
-  for (const record8 of records) {
-    const key = scopeGroupKey(record8.scope);
+  for (const record9 of records) {
+    const key = scopeGroupKey(record9.scope);
     let group = byKey.get(key);
     if (!group) {
       group = {
         key,
-        label: scopeGroupLabel(record8.scope),
-        scope: record8.scope,
+        label: scopeGroupLabel(record9.scope),
+        scope: record9.scope,
         records: []
       };
       byKey.set(key, group);
     }
-    group.records.push(record8);
+    group.records.push(record9);
   }
   return Array.from(byKey.values()).sort((a, b2) => {
     const rankDelta = scopeGroupRank(a.scope) - scopeGroupRank(b2.scope);
@@ -52115,16 +52259,16 @@ function createMemoryRecordsPager(deps) {
   return pager;
 }
 var DEAD_INJECTION_THRESHOLD = 3;
-function recordUtility(record8) {
-  const injected = record8.usage?.injected_count ?? 0;
-  const recalled = record8.usage?.explicit_recall_count ?? 0;
-  const useful = record8.usage?.judged_useful_count ?? 0;
+function recordUtility(record9) {
+  const injected = record9.usage?.injected_count ?? 0;
+  const recalled = record9.usage?.explicit_recall_count ?? 0;
+  const useful = record9.usage?.judged_useful_count ?? 0;
   return {
     injected,
     recalled,
     useful,
     ratio: injected > 0 ? useful / injected : null,
-    bytesSpent: injected * (record8.body_bytes ?? 0),
+    bytesSpent: injected * (record9.body_bytes ?? 0),
     dead: injected >= DEAD_INJECTION_THRESHOLD && useful === 0
   };
 }
@@ -52139,8 +52283,8 @@ function sortRecordsByUtility(records) {
     return ub.bytesSpent - ua.bytesSpent;
   });
 }
-function utilityLine(record8) {
-  const u2 = recordUtility(record8);
+function utilityLine(record9) {
+  const u2 = recordUtility(record9);
   const ratio = u2.ratio === null ? "\u2014" : u2.ratio.toFixed(2);
   return "inj ".concat(u2.injected, " \xB7 recall ").concat(u2.recalled, " \xB7 useful ").concat(u2.useful, " \xB7 ratio ").concat(ratio, " \xB7 ~").concat(formatBytes(u2.bytesSpent), " spent");
 }
@@ -52154,27 +52298,27 @@ var LATTICE_WALK_MAX_RECORDS = 2e3;
 var LATTICE_WALK_PAGE_LIMIT = 200;
 function latticeInvariants(records, options) {
   const llmCeilingViolations = [];
-  const byId = new Map(records.map((record8) => [record8.id, record8]));
-  for (const record8 of records) {
-    const author = record8.provenance?.author?.author;
-    const rank = record8.trust ? TRUST_RANK[record8.trust] : void 0;
+  const byId = new Map(records.map((record9) => [record9.id, record9]));
+  for (const record9 of records) {
+    const author = record9.provenance?.author?.author;
+    const rank = record9.trust ? TRUST_RANK[record9.trust] : void 0;
     if ((author === "agent" || author === "distiller" || author === "steward") && typeof rank === "number" && rank > TRUST_RANK.agent_observed) {
-      llmCeilingViolations.push({ id: record8.id, realm: realmOfRecord(record8) });
+      llmCeilingViolations.push({ id: record9.id, realm: realmOfRecord(record9) });
     }
   }
   const chainViolations = /* @__PURE__ */ new Map();
-  for (const record8 of records) {
-    const path2 = /* @__PURE__ */ new Set([record8.id]);
-    let cursor = record8.supersedes;
+  for (const record9 of records) {
+    const path2 = /* @__PURE__ */ new Set([record9.id]);
+    let cursor = record9.supersedes;
     while (cursor) {
       if (path2.has(cursor)) {
-        chainViolations.set(record8.id, { id: record8.id, realm: realmOfRecord(record8) });
+        chainViolations.set(record9.id, { id: record9.id, realm: realmOfRecord(record9) });
         break;
       }
       const parent = byId.get(cursor);
       if (!parent) {
         if (options.complete) {
-          chainViolations.set(record8.id, { id: record8.id, realm: realmOfRecord(record8) });
+          chainViolations.set(record9.id, { id: record9.id, realm: realmOfRecord(record9) });
         }
         break;
       }
@@ -52189,7 +52333,7 @@ function latticeInvariants(records, options) {
 }
 function latticeFingerprint(records, realms, baseCursor) {
   const rows = records.map(
-    (record8) => "".concat(record8.id, ":").concat(record8.supersedes || "", ":").concat(record8.trust, ":").concat(record8.status?.status || "", ":").concat(record8.updated_at_ms || 0)
+    (record9) => "".concat(record9.id, ":").concat(record9.supersedes || "", ":").concat(record9.trust, ":").concat(record9.status?.status || "", ":").concat(record9.updated_at_ms || 0)
   ).join("|");
   return "".concat(realms.join(","), "#").concat(baseCursor || "", "#").concat(records.length, "#").concat(rows);
 }
@@ -52298,8 +52442,8 @@ function computeVerdictTiles(inputs) {
       targetTab: "records"
     });
   } else {
-    const dead = inputs.records.filter((record8) => recordUtility(record8).dead);
-    const deadBytes = dead.reduce((sum, record8) => sum + recordUtility(record8).bytesSpent, 0);
+    const dead = inputs.records.filter((record9) => recordUtility(record9).dead);
+    const deadBytes = dead.reduce((sum, record9) => sum + recordUtility(record9).bytesSpent, 0);
     tiles.push({
       id: "recall",
       label: "RECALL",
@@ -52386,11 +52530,11 @@ function scopeOverviewRows(records) {
     const counts = { active: 0, quarantined: 0, superseded: 0, tombstoned: 0 };
     let bytes = 0;
     const trustCounts = /* @__PURE__ */ new Map();
-    for (const record8 of group.records) {
-      const status = record8.status?.status;
+    for (const record9 of group.records) {
+      const status = record9.status?.status;
       if (status && status in counts) counts[status] += 1;
-      bytes += record8.body_bytes ?? 0;
-      const trust = trustLabel(record8.trust);
+      bytes += record9.body_bytes ?? 0;
+      const trust = trustLabel(record9.trust);
       trustCounts.set(trust, (trustCounts.get(trust) || 0) + 1);
     }
     const trustMix = Array.from(trustCounts.entries()).sort((a, b2) => b2[1] - a[1] || a[0].localeCompare(b2[0])).map(([trust, count]) => "".concat(count, " ").concat(trust)).join(" \xB7 ");
@@ -52520,9 +52664,9 @@ function normalizeDreamRunDetail(detail) {
   return { phases, verdicts, skips, raw: null };
 }
 function lineageLane(chain, currentId) {
-  return [...chain].reverse().map((record8) => ({
-    record: record8,
-    current: record8.id === currentId
+  return [...chain].reverse().map((record9) => ({
+    record: record9,
+    current: record9.id === currentId
   }));
 }
 function dreamRunsTouching(dreams, recordId) {
@@ -52551,8 +52695,8 @@ function evidenceExcerptLines(entries, range, maxLines = 30) {
 }
 function identityOptions(records) {
   const identities = /* @__PURE__ */ new Set();
-  for (const record8 of records) {
-    if (record8.scope.scope === "identity") identities.add(record8.scope.identity);
+  for (const record9 of records) {
+    if (record9.scope.scope === "identity") identities.add(record9.scope.identity);
   }
   return Array.from(identities).sort((a, b2) => a.localeCompare(b2));
 }
@@ -52562,26 +52706,26 @@ function knowledgeComposition(records, identity) {
     {
       label: "identity:".concat(identity),
       count: count(
-        (record8) => record8.scope.scope === "identity" && record8.scope.identity === identity
+        (record9) => record9.scope.scope === "identity" && record9.scope.identity === identity
       ),
       filter: { scope: "identity", key: identity },
       approximate: false
     },
     {
       label: "mob (all mobs)",
-      count: count((record8) => record8.scope.scope === "mob"),
+      count: count((record9) => record9.scope.scope === "mob"),
       filter: { scope: "mob" },
       approximate: true
     },
     {
       label: "operator",
-      count: count((record8) => record8.scope.scope === "operator"),
+      count: count((record9) => record9.scope.scope === "operator"),
       filter: { scope: "operator" },
       approximate: true
     },
     {
       label: "realm",
-      count: count((record8) => record8.scope.scope === "realm"),
+      count: count((record9) => record9.scope.scope === "realm"),
       filter: { scope: "realm" },
       approximate: true
     }
@@ -52610,8 +52754,8 @@ function memoryFramePivot(frame) {
   const realm = typeof data.realm === "string" && data.realm.trim() ? data.realm.trim() : void 0;
   return { recordId, realm };
 }
-function canDecideQuarantinedRecord(record8) {
-  return record8.status.status === "quarantined" && record8.scope.scope === "identity" && typeof record8.content_hash === "string" && record8.content_hash.length > 0;
+function canDecideQuarantinedRecord(record9) {
+  return record9.status.status === "quarantined" && record9.scope.scope === "identity" && typeof record9.content_hash === "string" && record9.content_hash.length > 0;
 }
 var QUARANTINE_RATIONALE_MAX_BYTES = 400;
 function quarantineRationaleProblem(rationale) {
@@ -52675,28 +52819,28 @@ function SectionNote({
   return /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "memory-note", "data-testid": testid, children });
 }
 function RecordRow({
-  record: record8,
+  record: record9,
   utilityMode,
   onSelect
 }) {
-  const utility = utilityMode ? recordUtility(record8) : null;
+  const utility = utilityMode ? recordUtility(record9) : null;
   return /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)(
     "button",
     {
       type: "button",
       className: "memory-row",
-      "data-testid": "memory-record:".concat(record8.id),
+      "data-testid": "memory-record:".concat(record9.id),
       onClick: onSelect,
       children: [
-        /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "memory-row__title", children: record8.title || record8.id }),
+        /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "memory-row__title", children: record9.title || record9.id }),
         /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("span", { className: "memory-row__meta", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: record8.kind }),
-          /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: trustLabel(record8.trust), tone: trustTone(record8.trust) }),
-          /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: statusLabel(record8.status), tone: statusTone(record8.status) }),
+          /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: record9.kind }),
+          /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: trustLabel(record9.trust), tone: trustTone(record9.trust) }),
+          /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: statusLabel(record9.status), tone: statusTone(record9.status) }),
           utility?.dead ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: "DEAD", tone: "warning" }) : null,
-          /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "memory-row__age", children: relativeAge(record8.updated_at_ms) })
+          /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "memory-row__age", children: relativeAge(record9.updated_at_ms) })
         ] }),
-        utility ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "memory-row__meta memory-row__utility", children: utilityLine(record8) }) : null
+        utility ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "memory-row__meta memory-row__utility", children: utilityLine(record9) }) : null
       ]
     }
   );
@@ -52706,7 +52850,7 @@ function evidenceKey(evidence, index2) {
 }
 function QuarantineDecisionBlock({
   realm,
-  record: record8,
+  record: record9,
   onDecide
 }) {
   const [rationale, setRationale] = import_react33.default.useState("");
@@ -52732,7 +52876,7 @@ function QuarantineDecisionBlock({
     /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("div", { className: "memory-detail__line", children: [
       "Release makes this an active agent_observed record of",
       " ",
-      record8.scope.scope === "identity" ? record8.scope.identity : "this scope",
+      record9.scope.scope === "identity" ? record9.scope.identity : "this scope",
       " (realm ",
       realm,
       "); it stays capped below verified trust because it was quarantined. Tombstone discards it."
@@ -52785,16 +52929,16 @@ function BiographyView({
   onDecideQuarantine,
   decisionNotice
 }) {
-  const { record: record8, chain, injections } = detail;
-  const provenance = record8.provenance;
+  const { record: record9, chain, injections } = detail;
+  const provenance = record9.provenance;
   const evidence = provenance?.evidence || [];
   const verification = provenance?.verification;
-  const usage = record8.usage;
-  const lane = lineageLane(chain, record8.id);
-  const touchingRuns = dreamRunsTouching(dreams, record8.id);
+  const usage = record9.usage;
+  const lane = lineageLane(chain, record9.id);
+  const touchingRuns = dreamRunsTouching(dreams, record9.id);
   const [evidenceState, setEvidenceState] = import_react33.default.useState(null);
   const evidenceSeqRef = import_react33.default.useRef(0);
-  const recordIdentity = record8.scope.scope === "identity" ? record8.scope.identity : provenance?.author?.author === "agent" ? provenance.author.identity : void 0;
+  const recordIdentity = record9.scope.scope === "identity" ? record9.scope.identity : provenance?.author?.author === "agent" ? provenance.author.identity : void 0;
   async function openEvidence(ref, index2) {
     if (!onLoadEvidence) return;
     const key = evidenceKey(ref, index2);
@@ -52812,34 +52956,34 @@ function BiographyView({
   return /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("div", { className: "memory-detail", "data-testid": "memory-detail", children: [
     /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("div", { className: "memory-detail__head", children: [
       /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("button", { type: "button", className: "memory-back", onClick: onBack, "data-testid": "memory-detail-back", children: "\u2190 Back" }),
-      /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("h3", { children: record8.title || record8.id }),
+      /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("h3", { children: record9.title || record9.id }),
       /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("span", { className: "memory-detail__chips", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: record8.kind }),
-        /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: trustLabel(record8.trust), tone: trustTone(record8.trust) }),
-        /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: statusLabel(record8.status), tone: statusTone(record8.status) })
+        /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: record9.kind }),
+        /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: trustLabel(record9.trust), tone: trustTone(record9.trust) }),
+        /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: statusLabel(record9.status), tone: statusTone(record9.status) })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
         CopyButton,
         {
-          text: JSON.stringify(record8, null, 2),
+          text: JSON.stringify(record9, null, 2),
           label: "Copy record JSON",
           className: "memory-copy-json"
         }
       )
     ] }),
-    record8.description ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("p", { className: "memory-detail__description", children: record8.description }) : null,
-    /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("pre", { className: "memory-detail__body", "data-testid": "memory-detail-body", children: record8.body }),
+    record9.description ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("p", { className: "memory-detail__description", children: record9.description }) : null,
+    /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("pre", { className: "memory-detail__body", "data-testid": "memory-detail-body", children: record9.body }),
     decisionNotice ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "memory-note", "data-testid": "memory-quarantine-outcome", children: decisionNotice }) : null,
-    onDecideQuarantine && canDecideQuarantinedRecord(record8) ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
+    onDecideQuarantine && canDecideQuarantinedRecord(record9) ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
       QuarantineDecisionBlock,
       {
         realm: detail.realm,
-        record: record8,
-        onDecide: (verdict, rationale) => onDecideQuarantine(record8, verdict, rationale)
+        record: record9,
+        onDecide: (verdict, rationale) => onDecideQuarantine(record9, verdict, rationale)
       },
-      record8.id
+      record9.id
     ) : null,
-    record8.tags && record8.tags.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "memory-detail__tags", children: record8.tags.map((tag) => /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: tag, tone: "muted" }, tag)) }) : null,
+    record9.tags && record9.tags.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "memory-detail__tags", children: record9.tags.map((tag) => /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: tag, tone: "muted" }, tag)) }) : null,
     /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("div", { className: "memory-detail__section", "data-testid": "memory-detail-born", children: [
       /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "memory-detail__label", children: "Born" }),
       /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "memory-detail__line", children: authorLine(provenance?.author) }),
@@ -53058,12 +53202,12 @@ function MemoryPanel({
 }) {
   const [tab2, setTab] = import_react33.default.useState("holdings");
   const [decisionNotice, setDecisionNotice] = import_react33.default.useState(null);
-  const decideQuarantine = onDecideQuarantine ? async (record8, verdict, rationale) => {
+  const decideQuarantine = onDecideQuarantine ? async (record9, verdict, rationale) => {
     if (!detail) return;
     const realm = detail.realm;
-    const result = await onDecideQuarantine(realm, record8, verdict, rationale);
+    const result = await onDecideQuarantine(realm, record9, verdict, rationale);
     setDecisionNotice(quarantineDecisionSummary(result));
-    onSelectRecord(realm, result.successor?.memory_id ?? record8.id);
+    onSelectRecord(realm, result.successor?.memory_id ?? record9.id);
   } : void 0;
   const [filter, setFilter] = import_react33.default.useState({});
   const [sortMode, setSortMode] = import_react33.default.useState("recency");
@@ -53488,23 +53632,23 @@ function MemoryPanel({
         pageLoading ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "gating__empty", children: "Loading records\u2026" }) : null,
         !pageLoading && listView.records.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "gating__empty", "data-testid": "memory-records-empty", children: recordsDenied || listView.denied ? "Records: no grant." : "No memory records yet." }) : null,
         !pageLoading && listView.denied && listView.records.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(SectionNote, { testid: "memory-records-denied-note", children: "Further pages: no grant \u2014 the continuation of this query was denied for this principal." }) : null,
-        !pageLoading && listView.records.length > 0 ? listView.mode === "flat" ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "memory-group", children: listView.records.map((record8) => /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
+        !pageLoading && listView.records.length > 0 ? listView.mode === "flat" ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "memory-group", children: listView.records.map((record9) => /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
           RecordRow,
           {
-            record: record8,
+            record: record9,
             utilityMode: sortMode === "utility",
-            onSelect: () => onSelectRecord(realmOfRecord(record8), record8.id)
+            onSelect: () => onSelectRecord(realmOfRecord(record9), record9.id)
           },
-          record8.id
+          record9.id
         )) }) : listView.groups.map((group) => /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("div", { className: "memory-group", "data-testid": "memory-group:".concat(group.key), children: [
           /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "memory-group__label", children: group.label }),
-          group.records.map((record8) => /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
+          group.records.map((record9) => /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
             RecordRow,
             {
-              record: record8,
-              onSelect: () => onSelectRecord(realmOfRecord(record8), record8.id)
+              record: record9,
+              onSelect: () => onSelectRecord(realmOfRecord(record9), record9.id)
             },
-            record8.id
+            record9.id
           ))
         ] }, group.key)) : null,
         listView.cursor && onQueryRecords ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
@@ -53677,25 +53821,25 @@ function MemoryPanel({
           ] }) : null,
           quarantineRecords.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("div", { className: "memory-group", children: [
             /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "memory-group__label", children: "Quarantined records" }),
-            quarantineRecords.map((record8) => {
-              const reason = record8.status.status === "quarantined" ? record8.status.reason : void 0;
+            quarantineRecords.map((record9) => {
+              const reason = record9.status.status === "quarantined" ? record9.status.reason : void 0;
               return /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)(
                 "button",
                 {
                   type: "button",
                   className: "memory-row",
-                  "data-testid": "memory-quarantine-record:".concat(record8.id),
-                  onClick: () => onSelectRecord(realmOfRecord(record8), record8.id),
+                  "data-testid": "memory-quarantine-record:".concat(record9.id),
+                  onClick: () => onSelectRecord(realmOfRecord(record9), record9.id),
                   children: [
-                    /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "memory-row__title", children: record8.title || record8.id }),
+                    /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "memory-row__title", children: record9.title || record9.id }),
                     /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("span", { className: "memory-row__meta", children: [
                       reason ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "memory-row__reason", children: reason }) : null,
-                      /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: trustLabel(record8.trust), tone: trustTone(record8.trust) }),
-                      /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "memory-row__age", children: relativeAge(record8.created_at_ms) })
+                      /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { label: trustLabel(record9.trust), tone: trustTone(record9.trust) }),
+                      /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "memory-row__age", children: relativeAge(record9.created_at_ms) })
                     ] })
                   ]
                 },
-                record8.id
+                record9.id
               );
             })
           ] }) : null
@@ -53870,8 +54014,8 @@ function stateLabel(state) {
 function displayPeer(peer) {
   if (typeof peer === "string") return peer.split("/").pop() || peer;
   if (peer && typeof peer === "object") {
-    const record8 = peer;
-    const value = record8.label ?? record8.display_name ?? record8.name ?? record8.identity ?? record8.member_id ?? record8.id;
+    const record9 = peer;
+    const value = record9.label ?? record9.display_name ?? record9.name ?? record9.identity ?? record9.member_id ?? record9.id;
     if (typeof value === "string") return value.split("/").pop() || value;
   }
   return "";
@@ -54011,8 +54155,8 @@ function RosterPanel({
         /* @__PURE__ */ (0, import_jsx_runtime49.jsxs)("div", { className: "rd__actions", children: [
           actionVisibility?.inspect !== false ? /* @__PURE__ */ (0, import_jsx_runtime49.jsx)("button", { onClick: () => onDetails(active), children: actionLabels?.inspect || "Details" }) : null,
           actionVisibility?.chat !== false ? /* @__PURE__ */ (0, import_jsx_runtime49.jsx)("button", { onClick: () => onChat(active), children: actionLabels?.chat || "Open chat" }) : null,
-          actionVisibility?.respawn !== false && active.affordances?.can_respawn ? /* @__PURE__ */ (0, import_jsx_runtime49.jsx)("button", { onClick: () => onLifecycle(activeIdentity, "meta/respawn"), children: actionLabels?.respawn || "Respawn" }) : null,
-          actionVisibility?.reset !== false && canResetLifecycle ? /* @__PURE__ */ (0, import_jsx_runtime49.jsx)("button", { onClick: () => onLifecycle(activeIdentity, "meta/reset"), children: actionLabels?.reset || "Reset" }) : null,
+          actionVisibility?.respawn !== false && active.affordances?.can_respawn && restartOffered(active) ? /* @__PURE__ */ (0, import_jsx_runtime49.jsx)("button", { onClick: () => onLifecycle(activeIdentity, "meta/respawn"), children: actionLabels?.respawn || "Respawn" }) : null,
+          actionVisibility?.reset !== false && canResetLifecycle && restartOffered(active) ? /* @__PURE__ */ (0, import_jsx_runtime49.jsx)("button", { onClick: () => onLifecycle(activeIdentity, "meta/reset"), children: actionLabels?.reset || "Reset" }) : null,
           actionVisibility?.retire !== false && active.affordances?.can_retire ? /* @__PURE__ */ (0, import_jsx_runtime49.jsx)("button", { className: "danger", onClick: () => onLifecycle(activeIdentity, "meta/retire"), children: actionLabels?.retire || "Retire" }) : null
         ] })
       ] }) })
@@ -55187,8 +55331,8 @@ var HIDDEN_HISTORY_BLOCK_TYPES = /* @__PURE__ */ new Set([
 function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function historyBlockType(record8) {
-  const raw = record8.block_type ?? record8.type;
+function historyBlockType(record9) {
+  const raw = record9.block_type ?? record9.type;
   return typeof raw === "string" ? raw : void 0;
 }
 function sanitizeLogValue(value) {
@@ -55614,6 +55758,13 @@ function explicitHostId(a) {
   return a.labels?.delegate_host_identity || a.labels?.host_identity || a.labels?.parent_identity || a.labels?.spawned_by || null;
 }
 function findSpawnHost(a, agents, commander) {
+  const sideChatOf = a.side_chat_of;
+  if (sideChatOf) {
+    const match = agents.find(
+      (candidate) => candidate.member_id !== a.member_id && agentKeys(candidate).some((key) => referenceMatchesAgentKey(sideChatOf, key))
+    );
+    if (match) return match;
+  }
   const spawnedBy = a.labels?.spawned_by;
   if (spawnedBy) {
     const match = agents.find(
@@ -56373,6 +56524,7 @@ function renderAgentRow(row, selectedMemberId, recentActivity, grouping, pinnedA
       className: "agent ".concat(childOfHost ? "agent--child" : "", " ").concat(agent.member_id === selectedMemberId ? "is-active" : ""),
       "data-state": stateAttr,
       "data-child-of-host": childOfHost ? "true" : void 0,
+      "data-side-chat": agent.side_chat_of ? "true" : void 0,
       "data-depth": childOfHost ? String(Math.min(depth, 3)) : void 0,
       "data-testid": "sidebar-agent:".concat(agent.member_id),
       onClick: () => onSelect(agent),
@@ -56389,19 +56541,31 @@ function renderAgentRow(row, selectedMemberId, recentActivity, grouping, pinnedA
         /* @__PURE__ */ (0, import_jsx_runtime55.jsxs)("span", { className: "agent__body", children: [
           /* @__PURE__ */ (0, import_jsx_runtime55.jsx)("span", { className: "agent__name", children: agent.label }),
           /* @__PURE__ */ (0, import_jsx_runtime55.jsx)("span", { className: "agent__id", children: agent.identity || agent.member_id }),
-          badges.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime55.jsx)("span", { className: "agent__badges", children: badges.map((badge) => /* @__PURE__ */ (0, import_jsx_runtime55.jsxs)(
-            "span",
-            {
-              className: "agent__badge",
-              "data-tone": badge.tone || "neutral",
-              title: "".concat(badge.label, ": ").concat(badge.value),
-              children: [
-                /* @__PURE__ */ (0, import_jsx_runtime55.jsx)("span", { children: badge.label }),
-                /* @__PURE__ */ (0, import_jsx_runtime55.jsx)("strong", { children: badge.value })
-              ]
-            },
-            badge.id
-          )) }) : null
+          badges.length > 0 || agent.side_chat_of ? /* @__PURE__ */ (0, import_jsx_runtime55.jsxs)("span", { className: "agent__badges", children: [
+            agent.side_chat_of ? /* @__PURE__ */ (0, import_jsx_runtime55.jsx)(
+              "span",
+              {
+                className: "agent__badge",
+                "data-tone": "neutral",
+                "data-testid": "sidebar-side-chat:".concat(agent.member_id),
+                title: "Side chat of ".concat(agent.side_chat_of),
+                children: /* @__PURE__ */ (0, import_jsx_runtime55.jsx)("span", { children: "Side chat" })
+              }
+            ) : null,
+            badges.map((badge) => /* @__PURE__ */ (0, import_jsx_runtime55.jsxs)(
+              "span",
+              {
+                className: "agent__badge",
+                "data-tone": badge.tone || "neutral",
+                title: "".concat(badge.label, ": ").concat(badge.value),
+                children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime55.jsx)("span", { children: badge.label }),
+                  /* @__PURE__ */ (0, import_jsx_runtime55.jsx)("strong", { children: badge.value })
+                ]
+              },
+              badge.id
+            ))
+          ] }) : null
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime55.jsx)("span", { className: "agent__actions", children: onTogglePinnedAgent ? /* @__PURE__ */ (0, import_jsx_runtime55.jsx)(
           "button",
@@ -57028,8 +57192,8 @@ function textFromValue(value) {
     return value.map(textFromValue).filter(Boolean).join(" ").trim();
   }
   if (value && typeof value === "object") {
-    const record8 = value;
-    const direct = record8.summary ?? record8.message ?? record8.text ?? record8.body ?? record8.reply ?? record8.result ?? record8.content ?? record8.subject ?? record8.request_subject ?? record8.prompt ?? record8.description ?? record8.token;
+    const record9 = value;
+    const direct = record9.summary ?? record9.message ?? record9.text ?? record9.body ?? record9.reply ?? record9.result ?? record9.content ?? record9.subject ?? record9.request_subject ?? record9.prompt ?? record9.description ?? record9.token;
     const text9 = textFromValue(direct);
     if (text9) return text9;
   }
@@ -57063,11 +57227,11 @@ function sessionHistoryAssistantReply(frame, data) {
   }
   const blocks = Array.isArray(message.blocks) ? message.blocks : [];
   const text9 = blocks.map((block) => {
-    const record8 = recordOf3(block);
-    const blockType = typeof record8.block_type === "string" ? record8.block_type : typeof record8.type === "string" ? record8.type : "";
+    const record9 = recordOf3(block);
+    const blockType = typeof record9.block_type === "string" ? record9.block_type : typeof record9.type === "string" ? record9.type : "";
     if (blockType !== "text") return "";
-    const blockData = recordOf3(record8.data);
-    return textFromValue(blockData.text ?? record8.text);
+    const blockData = recordOf3(record9.data);
+    return textFromValue(blockData.text ?? record9.text);
   }).filter(Boolean).join(" ").trim();
   return text9;
 }
@@ -57532,7 +57696,7 @@ var failureMessages = {
   cancelled: "Initial context preparation was cancelled.",
   authority_rejected: "The session authority refused the initial context; no fallback was attempted."
 };
-function record6(raw) {
+function record7(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("Invalid voice context status.");
   }
@@ -57547,10 +57711,10 @@ function isFailure(value) {
   return typeof value === "string" && Object.hasOwn(failureMessages, value);
 }
 function parseVoiceContextStatus(raw, scope) {
-  const result = record6(raw);
+  const result = record7(raw);
   exactKeys(result, ["identity", "request_id", "channel_id", "context_preparation"]);
   if (result.identity !== scope.identity || result.request_id !== scope.requestId || result.channel_id !== scope.channelId) throw new Error("Voice context status does not match the active call.");
-  const preparation = record6(result.context_preparation);
+  const preparation = record7(result.context_preparation);
   switch (preparation.phase) {
     case "not_requested":
     case "provider_acknowledged":
@@ -59339,6 +59503,13 @@ function ChatPane({
   onStopRun,
   stopRunLabel = "Stop run",
   runStopNotice = null,
+  onForkSideChat,
+  forkSideChatLabel = "Fork to side chat",
+  forkSideChatDisabledReason = null,
+  sideChatOfLabel = null,
+  onCloseSideChat,
+  closeSideChatLabel = "Close side chat",
+  sideChatNotice = null,
   inspectLabel = "Details",
   respawnLabel = "Respawn",
   retireLabel = "Retire",
@@ -59953,6 +60124,7 @@ function ChatPane({
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime58.jsx)("div", { className: "conv__actions", children: [
             { id: "details", label: inspectLabel, icon: "i-info", onClick: onInspect },
+            { id: "fork-side-chat", label: forkSideChatLabel, icon: "i-branch", onClick: onForkSideChat, disabledReason: forkSideChatDisabledReason },
             { id: "stop-run", label: stopRunLabel, icon: "i-stop", onClick: onStopRun },
             { id: "respawn", label: respawnLabel, icon: "i-refresh", onClick: agent?.affordances?.can_respawn ? onRespawn : void 0 },
             { id: "retire", label: retireLabel, icon: "i-archive", onClick: agent?.affordances?.can_retire ? onRetire : void 0 }
@@ -59962,8 +60134,9 @@ function ChatPane({
               type: "button",
               className: "conv__action",
               onClick: action.onClick,
+              disabled: Boolean(action.disabledReason),
               "aria-label": action.label,
-              title: "".concat(action.label, " - ").concat(identity),
+              title: action.disabledReason ? "".concat(action.label, " - ").concat(action.disabledReason) : "".concat(action.label, " - ").concat(identity),
               "data-testid": "conv-action:".concat(action.id),
               children: [
                 /* @__PURE__ */ (0, import_jsx_runtime58.jsx)("span", { className: "conv__action-icon", "aria-hidden": "true", children: /* @__PURE__ */ (0, import_jsx_runtime58.jsx)(Icon, { name: action.icon }) }),
@@ -59973,6 +60146,28 @@ function ChatPane({
             action.id
           )) })
         ] }) }),
+        sideChatOfLabel ? /* @__PURE__ */ (0, import_jsx_runtime58.jsxs)("div", { className: "conv__notice conv__notice--side-chat", role: "note", "data-testid": "side-chat-banner:".concat(identity), children: [
+          /* @__PURE__ */ (0, import_jsx_runtime58.jsxs)("span", { className: "conv__notice-text", children: [
+            "Side chat of ",
+            /* @__PURE__ */ (0, import_jsx_runtime58.jsx)("strong", { children: sideChatOfLabel }),
+            ". It started from the agent's conversation; the agent itself is unchanged."
+          ] }),
+          onCloseSideChat ? /* @__PURE__ */ (0, import_jsx_runtime58.jsxs)(
+            "button",
+            {
+              type: "button",
+              className: "conv__notice-action",
+              onClick: onCloseSideChat,
+              "aria-label": closeSideChatLabel,
+              "data-testid": "side-chat-close:".concat(identity),
+              children: [
+                /* @__PURE__ */ (0, import_jsx_runtime58.jsx)(Icon, { name: "i-close" }),
+                /* @__PURE__ */ (0, import_jsx_runtime58.jsx)("span", { children: closeSideChatLabel })
+              ]
+            }
+          ) : null
+        ] }) : null,
+        sideChatNotice ? /* @__PURE__ */ (0, import_jsx_runtime58.jsx)("div", { className: "conv__notice", role: "status", "data-testid": "side-chat-notice:".concat(identity), children: sideChatNotice }) : null,
         runStopNotice ? /* @__PURE__ */ (0, import_jsx_runtime58.jsx)("div", { className: "conv__notice", role: "status", "data-testid": "run-stop-notice:".concat(identity), children: runStopNotice }) : null,
         /* @__PURE__ */ (0, import_jsx_runtime58.jsx)(
           TranscriptView,
@@ -61262,7 +61457,7 @@ var VOICE_CAPTIONS_METHOD = "meta/console/voice/captions";
 function invalid() {
   throw new Error("Invalid voice captions.");
 }
-function record7(raw) {
+function record8(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) invalid();
   return raw;
 }
@@ -61274,14 +61469,14 @@ function itemId(value) {
   return value;
 }
 function parseVoiceCaptions(raw, scope, after) {
-  const result = record7(raw);
+  const result = record8(raw);
   exactKeys2(result, ["identity", "request_id", "channel_id", "cursor", "captions"]);
   if (result.identity !== scope.identity || result.request_id !== scope.requestId || result.channel_id !== scope.channelId) throw new Error("Voice captions do not match the active call.");
   const cursor = result.cursor;
   if (typeof cursor !== "number" || !Number.isSafeInteger(cursor) || cursor < after) invalid();
   if (!Array.isArray(result.captions)) invalid();
   const captions = result.captions.map((raw2) => {
-    const caption = record7(raw2);
+    const caption = record8(raw2);
     if (caption.kind === "caption") {
       exactKeys2(caption, ["kind", "item_id", "text"]);
       if (typeof caption.text !== "string") invalid();
@@ -62734,8 +62929,8 @@ function actionVisible(actions, key) {
 function normalizeConsoleInspectResult(value) {
   const direct = normalizeIdentityInspectViewState(value);
   if (direct) return direct;
-  const record8 = value && typeof value === "object" ? value : {};
-  const identityRecord = record8.identity && typeof record8.identity === "object" ? record8.identity : null;
+  const record9 = value && typeof value === "object" ? value : {};
+  const identityRecord = record9.identity && typeof record9.identity === "object" ? record9.identity : null;
   if (!identityRecord) return null;
   return normalizeIdentityInspectViewState({
     identity: identityRecord.identity,
@@ -62749,7 +62944,7 @@ function normalizeConsoleInspectResult(value) {
       session_id: identityRecord.session_id,
       agent_runtime_id: identityRecord.runtime_member_id
     },
-    topology_peers: Array.isArray(record8.peers) ? record8.peers : []
+    topology_peers: Array.isArray(record9.peers) ? record9.peers : []
   });
 }
 var DEFAULT_APPROVER_ID = "console-ops-lead";
@@ -62763,6 +62958,8 @@ function isWorkGraphSignalFrame(frame) {
   return name2.startsWith("workgraph_");
 }
 var DOCK_LAYOUT_STORAGE_PREFIX = "meta-console-dock-state";
+var SIDE_CHAT_LIST_ATTEMPTS = 6;
+var SIDE_CHAT_LIST_RETRY_MS = 500;
 function createIdempotencyKey() {
   return createConsoleId("console");
 }
@@ -62845,9 +63042,9 @@ function isTerminalTurnCompletedFrame(frame) {
 }
 function isActiveServerToolContentFrame2(frame) {
   if (frame.event !== "server_tool_content") return false;
-  const record8 = frame.data && typeof frame.data === "object" ? frame.data : null;
-  const content3 = record8?.content && typeof record8.content === "object" ? record8.content : null;
-  const type = typeof content3?.type === "string" ? content3.type : typeof record8?.type === "string" ? record8.type : "";
+  const record9 = frame.data && typeof frame.data === "object" ? frame.data : null;
+  const content3 = record9?.content && typeof record9.content === "object" ? record9.content : null;
+  const type = typeof content3?.type === "string" ? content3.type : typeof record9?.type === "string" ? record9.type : "";
   if (type === "message_annotations" || Array.isArray(content3?.annotations) || type.includes(".completed") || type.includes(".done") || type.includes(".failed") || type.includes(".error")) {
     return false;
   }
@@ -62855,10 +63052,10 @@ function isActiveServerToolContentFrame2(frame) {
 }
 function isTerminalServerToolContentFrame2(frame) {
   if (frame.event !== "server_tool_content") return false;
-  const record8 = frame.data && typeof frame.data === "object" ? frame.data : null;
-  const content3 = record8?.content && typeof record8.content === "object" ? record8.content : null;
-  const type = typeof content3?.type === "string" ? content3.type : typeof record8?.type === "string" ? record8.type : "";
-  const status = typeof content3?.status === "string" ? content3.status : typeof record8?.status === "string" ? record8.status : "";
+  const record9 = frame.data && typeof frame.data === "object" ? frame.data : null;
+  const content3 = record9?.content && typeof record9.content === "object" ? record9.content : null;
+  const type = typeof content3?.type === "string" ? content3.type : typeof record9?.type === "string" ? record9.type : "";
+  const status = typeof content3?.status === "string" ? content3.status : typeof record9?.status === "string" ? record9.status : "";
   if (type === "message_annotations" || Array.isArray(content3?.annotations)) {
     return false;
   }
@@ -63186,6 +63383,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [error48, setError] = import_react49.default.useState("");
   const [actionError, setActionError] = import_react49.default.useState("");
   const [runStopNotices, setRunStopNotices] = import_react49.default.useState({});
+  const [sideChatsOffered, setSideChatsOffered] = import_react49.default.useState(false);
+  const [sideChatNotices, setSideChatNotices] = import_react49.default.useState({});
+  const [forkingPanels, setForkingPanels] = import_react49.default.useState(() => /* @__PURE__ */ new Set());
   const [transportState, setTransportState] = import_react49.default.useState({
     phase: "connecting",
     stale: true,
@@ -63508,8 +63708,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   function clearOptimisticUserByContent(identity, frame) {
     if (frame.event !== "interaction_started" && frame.event !== "user_input" && frame.event !== "run_started")
       return false;
-    const record8 = frame.data && typeof frame.data === "object" ? frame.data : {};
-    const contentValue = frame.event === "run_started" ? record8.prompt : record8.content;
+    const record9 = frame.data && typeof frame.data === "object" ? frame.data : {};
+    const contentValue = frame.event === "run_started" ? record9.prompt : record9.content;
     const content3 = typeof contentValue === "string" ? contentValue.trim() : "";
     if (!content3) return false;
     const clearedPanelKeys = [];
@@ -64420,6 +64620,26 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const consoleReadOnly = frontendReadOnly || experience?.console_policy?.read_only === true || !accessEnforcing && experience?.runtime_capabilities?.can_send_messages === false;
   const consoleReadOnlyRef = import_react49.default.useRef(false);
   consoleReadOnlyRef.current = consoleReadOnly;
+  const canSpawnMembers = experience?.runtime_capabilities?.can_spawn_members === true;
+  import_react49.default.useEffect(() => {
+    if (!canSpawnMembers) {
+      setSideChatsOffered(false);
+      return;
+    }
+    let active = true;
+    void Promise.resolve().then(() => consoleTransport.capabilities()).then((capabilities) => {
+      if (active) {
+        setSideChatsOffered(
+          capabilities.methods.includes(consoleCommandMethod2(CONSOLE_COMMAND_NAMES2.forkMember))
+        );
+      }
+    }).catch(() => {
+      if (active) setSideChatsOffered(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, [consoleTransport, canSpawnMembers, sendScope]);
   const resendUncertain = experience?.send_dedupe?.durable === true;
   const resendUncertainRef = import_react49.default.useRef(false);
   resendUncertainRef.current = resendUncertain;
@@ -64950,17 +65170,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     [baseUrl, panelRuntimeKey]
   );
   const decideMemoryQuarantine = import_react49.default.useCallback(
-    async (realm, record8, verdict, rationale) => {
-      const identity = record8.scope.scope === "identity" ? record8.scope.identity : void 0;
+    async (realm, record9, verdict, rationale) => {
+      const identity = record9.scope.scope === "identity" ? record9.scope.identity : void 0;
       const result = await executeHeadlessCommand(
         CONSOLE_COMMAND_NAMES2.decideMemoryQuarantine,
         controlWorkbenchTarget("memory"),
         {
           realm,
           identity,
-          memory_id: record8.id,
+          memory_id: record9.id,
           verdict,
-          expected_content_hash: record8.content_hash,
+          expected_content_hash: record9.content_hash,
           ...rationale ? { rationale } : {}
         }
       );
@@ -65592,8 +65812,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     try {
       const inspection = await inspectIdentityViaHeadless(original.destination);
       if (!active()) return;
-      const record8 = inspection && typeof inspection === "object" ? inspection : null;
-      const owner = record8?.identity && typeof record8.identity === "object" ? record8.identity : record8;
+      const record9 = inspection && typeof inspection === "object" ? inspection : null;
+      const owner = record9?.identity && typeof record9.identity === "object" ? record9.identity : record9;
       if (typeof owner?.identity !== "string" || !owner.identity.trim()) {
         answer("Couldn't check: ".concat(names.agent, " couldn't be found."));
         return;
@@ -65644,7 +65864,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     if (!saved) throw new Error("The quote edit was not saved. Keep this draft and try again.");
   }
   function reorderContexts(contexts, id, direction) {
-    const index2 = contexts.findIndex((record8) => record8.id === id);
+    const index2 = contexts.findIndex((record9) => record9.id === id);
     const to = index2 + (direction === "up" ? -1 : 1);
     if (index2 < 0 || to < 0 || to >= contexts.length) return contexts;
     const next = contexts.slice();
@@ -65776,6 +65996,69 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     } catch (stopError) {
       setActionError(errorMessage(stopError));
     }
+  }
+  async function onForkSideChat(panelId, source) {
+    if (consoleReadOnly || forkingPanels.has(panelId)) return;
+    const sourceMemberId = sideChatSourceMemberId(source);
+    const alias = sideChatAlias(sourceMemberId, createConsoleId("side").slice(-8));
+    setForkingPanels((current) => new Set(current).add(panelId));
+    try {
+      const result = parseSideChatForkResult(
+        await executeHeadlessCommand(
+          CONSOLE_COMMAND_NAMES2.forkMember,
+          identityWorkbenchTarget(sourceMemberId, "chat"),
+          { source_member_id: sourceMemberId, agent_identity: alias }
+        )
+      );
+      setActionError("");
+      const notice = inactiveInstructionNotice(result.instructions);
+      if (notice) {
+        setSideChatNotices((current) => ({ ...current, [result.agentIdentity]: notice }));
+      }
+      let sideChat = null;
+      for (let attempt = 0; attempt < SIDE_CHAT_LIST_ATTEMPTS && !sideChat; attempt += 1) {
+        if (attempt > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, SIDE_CHAT_LIST_RETRY_MS));
+        }
+        sideChat = findSideChatAgent(await loadExperience(), result.agentIdentity);
+      }
+      if (!sideChat) {
+        setActionError("".concat(result.displayName, " was created and appears in the sidebar once the console lists it."));
+        return;
+      }
+      dock.focusPanel(panelId);
+      openAgentChat(sideChat, "split_right");
+    } catch (forkError) {
+      setActionError(sideChatForkErrorMessage(forkError));
+    } finally {
+      setForkingPanels((current) => {
+        const next = new Set(current);
+        next.delete(panelId);
+        return next;
+      });
+    }
+  }
+  async function onCloseSideChat(panelId, identity) {
+    if (consoleReadOnly) return;
+    try {
+      await executeHeadlessCommand(
+        CONSOLE_COMMAND_NAMES2.retireIdentity,
+        identityWorkbenchTarget(identity, "chat"),
+        { identity }
+      );
+      setActionError("");
+    } catch (closeError) {
+      setActionError(errorMessage(closeError));
+      return;
+    }
+    dock.closePanel(panelId);
+    setSideChatNotices((current) => {
+      if (!(identity in current)) return current;
+      const next = { ...current };
+      delete next[identity];
+      return next;
+    });
+    await loadExperience().catch(() => []);
   }
   async function onGatingDecision(pendingId, decision) {
     await approvalResourceRef.current?.decide(pendingId, decision);
@@ -66269,6 +66552,24 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     } catch {
     }
     const agentBusy = isIdentityBusy(identity);
+    const sideChatOf = sideChatSource(agent);
+    const sideChatSourceAgent = sideChatOf ? agents.find(
+      (candidate) => [candidate.identity, candidate.member_id, candidate.agent_id].includes(sideChatOf)
+    ) ?? null : null;
+    const canForkSideChat = sideChatForkOffered({
+      readOnly: consoleReadOnly,
+      offered: sideChatsOffered,
+      canSpawnMembers,
+      accessEnforcing,
+      agent
+    });
+    const forkSideChatBlocked = forkingPanels.has(panel.id) ? "Forking the conversation" : sideChatForkBlockedReason({
+      busy: agentBusy,
+      phase: phase2,
+      responsePhase: agent?.response_phase,
+      queued: stackItems.length
+    });
+    const canCloseSideChat = sideChatOf !== null && !consoleReadOnly && agent?.affordances?.can_retire === true;
     const stackSlot = /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)(import_jsx_runtime61.Fragment, { children: [
       stackItems.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("small", { className: "queue-storage-note", role: "status", children: persistentSendScopeRef.current ? "Saved in this browser until sent" : "Not saved: these messages are lost if you reload" }) : null,
       pendingStorageErrorRef.current[identity] && /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("p", { role: "alert", children: pendingStorageErrorRef.current[identity] }),
@@ -66308,7 +66609,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             if (item?.envelopeJson) void dispatchPendingAttempt(identity, itemId2, JSON.parse(item.envelopeJson).handling_mode, true);
           },
           onReconcile: (itemId2) => onStackReconcile(identity, itemId2),
-          onRemoveContext: (itemId2, contextId) => updatePendingContexts(identity, itemId2, (contexts) => contexts.filter((record8) => record8.id !== contextId)),
+          onRemoveContext: (itemId2, contextId) => updatePendingContexts(identity, itemId2, (contexts) => contexts.filter((record9) => record9.id !== contextId)),
           onEditContext: (itemId2, contextId, quote) => editPendingContext(identity, itemId2, contextId, quote),
           onReorderContext: (itemId2, contextId, direction) => updatePendingContexts(identity, itemId2, (contexts) => reorderContexts(contexts, contextId, direction)),
           onTrash: (itemId2) => onStackTrash(identity, itemId2),
@@ -66367,7 +66668,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           setContextDrafts((current) => ({ ...current, [draftKey]: next }));
         }, onRemove: (id) => {
           if (sendScope !== sendScopeRef.current) return;
-          const next = quotedContexts.filter((record8) => record8.id !== id);
+          const next = quotedContexts.filter((record9) => record9.id !== id);
           setContextDrafts((current) => ({ ...current, [draftKey]: next }));
           persistComposerDraft(identity, panelKey, draft, next);
         }, onReorder: (id, direction) => {
@@ -66394,10 +66695,21 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         onInspect: configuredActionVisibility.inspect ? () => {
           if (agent) handleShowRosterDetails(agent);
         } : void 0,
-        onRespawn: canRespawn ? () => void onLifecycleAction(identity, "meta/respawn") : void 0,
-        onRetire: canRetire ? () => void onLifecycleAction(identity, "meta/retire") : void 0,
+        onRespawn: (
+          // A side chat is closed and forked again, never respawned.
+          canRespawn && restartOffered(agent) ? () => void onLifecycleAction(identity, "meta/respawn") : void 0
+        ),
+        onRetire: (
+          // A side chat closes through its own banner action.
+          canRetire && sideChatOf === null ? () => void onLifecycleAction(identity, "meta/retire") : void 0
+        ),
         onStopRun: canStopRun && activeRunId ? () => void onStopRun(identity, activeRunId) : void 0,
         runStopNotice: runStopNotices[identity] ?? null,
+        onForkSideChat: canForkSideChat && agent ? () => void onForkSideChat(panel.id, agent) : void 0,
+        forkSideChatDisabledReason: canForkSideChat ? forkSideChatBlocked : null,
+        sideChatOfLabel: sideChatOf ? sideChatSourceAgent?.label || sideChatOf : null,
+        onCloseSideChat: canCloseSideChat ? () => void onCloseSideChat(panel.id, identity) : void 0,
+        sideChatNotice: sideChatNotices[identity] ?? null,
         inspectLabel: configuredActionLabels.inspect,
         respawnLabel: configuredActionLabels.respawn,
         retireLabel: configuredActionLabels.retire,
@@ -66429,9 +66741,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const agent = agents.find(
       (candidate) => candidate.identity === target.identity || candidate.member_id === target.identity
     );
-    const canRespawn = !consoleReadOnly && configuredActionVisibility.respawn && agent?.affordances?.can_respawn === true;
+    const canRespawn = !consoleReadOnly && configuredActionVisibility.respawn && agent?.affordances?.can_respawn === true && restartOffered(agent);
     const canRetire = !consoleReadOnly && configuredActionVisibility.retire && agent?.affordances?.can_retire === true;
-    const canReset = !consoleReadOnly && configuredActionVisibility.reset && experience?.runtime_capabilities?.can_retire_members === true;
+    const canReset = !consoleReadOnly && configuredActionVisibility.reset && experience?.runtime_capabilities?.can_retire_members === true && restartOffered(agent);
     return /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)(
       "div",
       {
@@ -66684,9 +66996,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             auditVerdicts: memoryData.auditVerdicts,
             auditVerdictsDenied: memoryData.auditVerdictsDenied,
             liveFrames: framesForPanelRuntime(activityRef.current, experience?.panel_runtimes ? panelRuntimeKey : void 0),
-            onRefresh: (record8) => {
-              if (record8) {
-                void loadMemoryRecordDetail(record8.realm, record8.memoryId, true);
+            onRefresh: (record9) => {
+              if (record9) {
+                void loadMemoryRecordDetail(record9.realm, record9.memoryId, true);
               } else {
                 void refreshMemoryData();
               }

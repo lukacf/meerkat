@@ -11256,6 +11256,37 @@ svg[data-svg=fit],
   font-size: 13px;
   flex: none;
 }
+.conv__notice--side-chat {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--accent-soft);
+}
+.conv__notice-text {
+  flex: 1;
+  min-width: 0;
+}
+.conv__notice-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  color: var(--ink-muted);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  font-family: var(--disp);
+  background: transparent;
+}
+.conv__notice-action svg {
+  width: 12px;
+  height: 12px;
+}
+.conv__notice-action:hover {
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
 .conv__avatar {
   width: 28px;
   height: 28px;

@@ -1806,8 +1806,8 @@ pub struct MobMemberListEntry {
     pub kickoff: Option<MobMemberKickoffSnapshot>,
     /// Whether the mob definition's wiring rules apply to the member's
     /// current incarnation, as MobMachine records it
-    /// (`member_definition_wiring_exempt`). Read through
-    /// [`Self::definition_wiring`]; not part of the serialized shape.
+    /// (`member_definition_wiring_exempt`). Read through the
+    /// `definition_wiring()` accessor; not part of the serialized shape.
     #[serde(skip)]
     pub(crate) definition_wiring: crate::DefinitionWiring,
     // --- Bridge internals (pub(crate)) ---

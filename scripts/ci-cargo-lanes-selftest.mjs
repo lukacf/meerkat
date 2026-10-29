@@ -2185,6 +2185,17 @@ for (const path of [
   const mobLines = Object.fromEntries(mobGithub.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
   assert.equal(Number(mobLines.main_archive_build_count), JSON.parse(mobLines.main_archive_build_matrix).include.length);
   assert.equal(Number(mobLines.main_archive_run_count), JSON.parse(mobLines.main_archive_run_matrix).include.length);
+  // meerkat-connect builds meerkat-mob through toolkit-mobkit's native host,
+  // so a Connect change runs its Console suite on the push, never in the
+  // pull request.
+  const connectLib = "connect/crates/meerkat-connect/src/lib.rs";
+  const connectPr = planFor([connectLib], ["--event", "pull_request"]);
+  assert.ok(connectPr.package_model["meerkat-connect"].heavy_chain, "meerkat-connect's unit lane compiles meerkat-mob");
+  assert.deepEqual(connectPr.unit_feature_shards, [], "a Connect pull request runs no feature suite");
+  assert.ok(
+    planFor([connectLib]).main_feature_unit_shards.some((suite) => suite.package_flags === "-p meerkat-connect --features console"),
+    "a Connect push runs its Console suite",
+  );
   // An unrelated leaf change carries no pull-request suite; docs carry none anywhere.
   assert.deepEqual(planFor(["crates/meerkat-sqlite/src/lib.rs"]).unit_feature_shards, []);
   const docs = planFor(["docs/index.mdx"]);

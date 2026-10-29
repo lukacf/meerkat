@@ -384,7 +384,9 @@ the environment, then `valid`, `reauth_required` or `released`).
 
 The token goes only to `api.github.com` (the identity lookup) and to an
 `https` `githubcopilot.com` API host; a redirect is refused, and the token
-never appears in an error or a log line. Meerkat stores no token it reads
+never appears in an error or a log line: a failed lookup or model listing is
+reported by its status and GitHub's own error message, never by the response
+body. Meerkat stores no token it reads
 from the environment, a command or a resolver; a stored token uses the
 configured credential store, like an API key. A token in the host environment
 is inherited by shell tools the host runs without confinement, so hosts that

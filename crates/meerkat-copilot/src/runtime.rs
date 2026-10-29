@@ -108,10 +108,13 @@ enum CopilotHttpTransportError {
 enum CopilotModelDiscoveryError {
     #[error("Copilot model discovery transport failed")]
     Transport(#[source] CopilotHttpTransportError),
-    #[error("Copilot model discovery returned HTTP {status}: {body}")]
+    /// An HTTP failure, carried as its status and GitHub's bounded error
+    /// message ([`github_error_message`]), never the raw body: a proxy or
+    /// gateway page can echo the request's headers, the bearer included.
+    #[error("Copilot model discovery returned HTTP {status}: {message}")]
     Http {
         status: u16,
-        body: String,
+        message: String,
         retry_after: Option<StdDuration>,
     },
     #[error("invalid Copilot model-discovery request headers")]
@@ -1792,10 +1795,9 @@ async fn fetch_copilot_models(
         .await
         .map_err(CopilotModelDiscoveryError::Transport)?;
     if !(200..=299).contains(&response.status) {
-        let body = String::from_utf8_lossy(&response.body);
         return Err(CopilotModelDiscoveryError::Http {
             status: response.status,
-            body: body.into_owned(),
+            message: github_error_message(&response.body),
             retry_after: response.retry_after,
         });
     }
@@ -2563,14 +2565,16 @@ fn models_refusal(
     error: &CopilotModelDiscoveryError,
     installation: bool,
 ) -> Option<OperatorRefusal> {
-    let CopilotModelDiscoveryError::Http { status, body, .. } = error else {
+    let CopilotModelDiscoveryError::Http {
+        status, message, ..
+    } = error
+    else {
         return None;
     };
-    let message = github_error_message(body.as_bytes());
     match *status {
         401 if installation => Some(OperatorRefusal::TokenRejected {
             status: 401,
-            message,
+            message: message.clone(),
         }),
         401 | 403 => Some(OperatorRefusal::Refused(format!(
             "GitHub Copilot refused this token ({status}): {message}"
@@ -3542,7 +3546,7 @@ mod tests {
         let now = DateTime::from_timestamp(1_800_000_000, 0).expect("valid timestamp");
         let error = CopilotModelDiscoveryError::Http {
             status: 429,
-            body: "busy".to_string(),
+            message: "busy".to_string(),
             retry_after: Some(StdDuration::from_secs(u64::MAX)),
         };
 
@@ -6175,7 +6179,12 @@ mod tests {
                             serde_json::json!({"message": "Unauthorized"}),
                         )),
                     ],
-                    token,
+                    token.clone(),
+                ),
+                (
+                    "models 500 echoing the request",
+                    vec![Ok(svc_bot()), Ok(echoing_failure(&token))],
+                    token.clone(),
                 ),
                 ("classic", Vec::new(), format!("ghp_{CANARY}")),
             ];
@@ -6202,13 +6211,44 @@ mod tests {
                     }
                 }
             }
+            // The CLI's check, whose error the CLI prints, on a model listing
+            // that fails with a page echoing the request.
+            let echoing = OutcomeTransport::new([Ok(svc_bot()), Ok(echoing_failure(&token))]);
+            let checked = verify_operator_token_with(
+                &*echoing,
+                &token,
+                &CopilotBackendConfig::default(),
+                Utc::now(),
+            )
+            .await
+            .expect_err("the model listing failed");
+            rendered.push_str(&format!("check: {checked} {checked:?}"));
             rendered.push_str(&log.0.lock());
 
             assert!(
                 rendered.contains("GitHub Copilot accepted the operator token"),
                 "the capture saw the runtime's log lines: {rendered}"
             );
+            assert!(
+                rendered.contains("model discovery returned HTTP 500"),
+                "the capture saw the model listing failure: {rendered}"
+            );
             assert!(!rendered.contains(CANARY), "{rendered}");
+        }
+
+        /// A gateway's 500 page that echoes the request's headers, the
+        /// bearer included.
+        fn echoing_failure(token: &str) -> CopilotHttpResponse {
+            CopilotHttpResponse {
+                status: 500,
+                body: format!(
+                    "<html><body>upstream error; request headers: Authorization: Bearer {token}</body></html>"
+                )
+                .into_bytes(),
+                retry_after: None,
+                rate_limited: false,
+                rate_limit_reset: None,
+            }
         }
 
         /// T11: no token in any variable, or only whitespace, is

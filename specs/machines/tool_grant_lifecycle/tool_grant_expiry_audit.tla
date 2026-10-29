@@ -256,9 +256,9 @@ AuditCrash ==
                     last_dispatch, expired_by, down_at_deadline, admitted_after_end,
                     rolled_back_after_end >>
 
-\* A new process serves the session. Open names are never persisted, so the
-\* gate restores closed; nothing settles the row until the first boundary,
-\* dispatch, read or timer fire.
+\* A new process serves the session. Every build clears the open names it
+\* restores, so the gate restores closed; nothing settles the row until the
+\* first boundary, dispatch, read or timer fire.
 AuditRestart ==
     /\ ~up
     /\ up' = TRUE

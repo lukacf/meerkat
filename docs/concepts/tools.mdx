@@ -218,6 +218,63 @@ Since 0.9.4 the `tool_config_changed` event that reports the outcome carries `se
 
 See the [built-in tools reference](/reference/builtin-tools) for the mechanical details of factory flags and per-build overrides.
 
+### Scoped tool grants
+
+A build can mark built-in tool families and individual tool names
+**grant-gated**. A gated name is mounted, a gated family as if it were enabled,
+but it stays hidden from the model and is refused at dispatch until a live
+scoped tool grant that covers it is admitted. A grant never widens a session
+past its build: it opens only names the build gated, and the static tool
+policy, the application tool policy, governed authority, review and
+confinement all still apply to every call it opens.
+
+- **Gating a build.** In Rust, set `grant_gated_tools` on
+  `SessionBuildOptions` or `AgentBuildConfig`, for example
+  `GrantGatedTools::default().with_family("shell").with_tool("deploy")`. The
+  session records its gate, and a resume that names none restores it. The
+  factory refuses a gate that no grant could honour with
+  `BuildAgentError::GrantGate`: an unknown family, a gated family the build
+  disables, a gated name no tool source of the build provides (a name a still
+  connecting MCP server may provide is gated from the moment it appears), a
+  name the build's tool policy refuses, a capability the provider serves
+  natively (such as provider-native web search), and a build without the
+  runtime's grant service.
+- **Granting.** `MeerkatMachine::grant_tool` issues a grant for a subject (a
+  session), a target (one tool name, or a built-in family with the names it
+  provides, which `meerkat::tool_family_names` answers) and a window of at most
+  the host policy's maximum lifetime, 24 hours by default.
+  `revoke_tool_grant`, `list_tool_grants` and `read_tool_grant_audit` complete
+  the Rust API; `ToolGrantService` offers the same operations over any
+  `RuntimeStore`.
+- **Adjudication.** Every model-request boundary opens the gated names a live
+  grant admits at that moment, and every gated call is adjudicated again
+  immediately before it is handed to its tool, so a call at or after the
+  deadline is refused even when the boundary that showed the tool ran before
+  it. A refusal is an ordinary `policy_denied` tool error with the code
+  `tool_grant_required`, `tool_grant_expired`, `tool_grant_revoked` or
+  `tool_grant_unavailable`. When the grants cannot be read, the gate stays
+  closed and the session records a warning notice.
+- **Lifecycle.** The canonical `ToolGrantLifecycleMachine` owns each grant:
+  issued, then expired at its fixed deadline or revoked before it. Expired and
+  revoked grants stay ended across restarts and host clock rollbacks. The
+  runtime's deadline timer expires a served session's grants on time, and a
+  list or audit read settles the due grants of any session without loading
+  it; nothing about a grant wakes a dormant member. Grants live in the runtime
+  store, on SQLite in the `runtime-tool-grants` schema domain that the first
+  grant write creates. With the in-memory store, Web/WASM included, they last
+  only for the process.
+- **Audit.** Each subject's grants append to one audit log: `granted`,
+  `expired` (with the driver that observed the expiry), `revoked` and
+  `refused` rows. A lifecycle row commits with the grant's change; a failed
+  refusal row never admits the call.
+
+A scoped tool grant confers no authority of its own: it only opens, for a
+bounded time, names the build gated. Governed authority grants
+([Agent authorization](/concepts/authorization)) decide whether an operation
+may run at all, and an application tool policy's member tool grants
+(`CompiledMemberToolGrant`) decide which tools a member may use and with what
+consequence. Both still apply to a call a scoped grant opened.
+
 ## Multimodal tool results
 
 Tools can return rich content beyond plain text. The injected runtime shape is `ToolResult.content: Vec<ContentBlock>`, with helper constructors for text-only or multimodal output.

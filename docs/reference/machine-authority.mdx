@@ -35,7 +35,7 @@ The canonical registry is `canonical_machine_schemas()` in
 
 | Machine | Production owner | Scope |
 | --- | --- | --- |
-| `MeerkatMachine` | `meerkat-runtime::meerkat_machine::dsl` | Session runtime lifecycle, input admission, turn execution, tool visibility, comms drain, peer interaction, durable-tail recovery authorization. |
+| `MeerkatMachine` | `meerkat-runtime::meerkat_machine::dsl` | Session runtime lifecycle, input admission, turn execution, tool visibility (with the scoped tool grant gate: the names a build gated and the gated names a boundary's live grants opened), comms drain, peer interaction, durable-tail recovery authorization. |
 | `MobMachine` | `meerkat-mob::machines::mob_machine` | Mob lifecycle, roster, member runtime bindings, wiring, flows, tasks, and supervisor handoffs. |
 | `ScheduleLifecycleMachine` | `meerkat-schedule::machines::schedule_lifecycle` | Schedule definition lifecycle, trigger state, and revision handling. |
 | `OccurrenceLifecycleMachine` | `meerkat-schedule::machines::occurrence_lifecycle` | Claimed occurrence delivery and terminal outcomes. |
@@ -57,7 +57,8 @@ The canonical registry is `canonical_machine_schemas()` in
 `MeerkatMachine` and `MobMachine` are the two runtime kernels. The other
 canonical machines protect narrower domain facts: auth and approval, schedules
 and occurrences, detached jobs and runtime delivery, session document and turn
-admission, and WorkGraph lifecycle, attention, and execution. WorkGraph is an
+admission, WorkGraph lifecycle, attention, and execution, and scoped tool
+grants. WorkGraph is an
 optional subsystem authority for durable agent commitments, dependency-aware
 claim state, and goal attention bindings. `WorkExecutionLifecycleMachine` owns
 the cross-system obligation for one execution attempt without absorbing either

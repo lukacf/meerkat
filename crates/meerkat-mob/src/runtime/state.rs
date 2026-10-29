@@ -1491,6 +1491,17 @@ pub(super) enum MobCommand {
             Result<Vec<super::dormant_seat::DormantSeatOutcome>, crate::MobError>,
         >,
     },
+    /// The adoption of one legacy member as an identity entry
+    /// (`MobHandle::adopt_legacy_identity_entry`). MobMachine decides it from
+    /// the handle's observation of the spawn row of the member's incarnation
+    /// at `generation`; an adoption's row is journaled before it commits.
+    AdoptLegacyIdentityEntry {
+        agent_identity: crate::ids::AgentIdentity,
+        generation: crate::ids::Generation,
+        legacy_roster_member: bool,
+        reply_tx:
+            oneshot::Sender<Result<mob_dsl::LegacyIdentityEntryAdoptionKind, crate::MobError>>,
+    },
     /// An off-actor member-status observation returning to the actor, with
     /// every caller that joined it.
     ProjectMemberStatusObserved {
@@ -2241,6 +2252,7 @@ impl MobCommand {
             Self::PlanMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::StartMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::CommitDormantSeats { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::AdoptLegacyIdentityEntry { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityIntent { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityConvergenceStatus { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdoptMemberIdentityDeclaration { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2472,6 +2484,7 @@ impl MobCommand {
             Self::PlanMemberRotation { .. } => "PlanMemberRotation",
             Self::StartMemberRotation { .. } => "StartMemberRotation",
             Self::CommitDormantSeats { .. } => "CommitDormantSeats",
+            Self::AdoptLegacyIdentityEntry { .. } => "AdoptLegacyIdentityEntry",
             Self::ProjectMemberStatusObserved { .. } => "ProjectMemberStatusObserved",
             Self::GetIdentityIntent { .. } => "GetIdentityIntent",
             Self::GetIdentityConvergenceStatus { .. } => "GetIdentityConvergenceStatus",

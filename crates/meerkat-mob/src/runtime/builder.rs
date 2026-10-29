@@ -1615,6 +1615,10 @@ fn recovered_session_bindings_without_endpoint(
             MobEventKind::MemberSpawned(member_spawned) => {
                 recovered.remove(&member_spawned.agent_identity);
             }
+            // The adoption of a legacy member as an identity entry carries
+            // the member's binding unchanged: it moves no binding.
+            MobEventKind::MemberSessionBindingRecovered(binding)
+                if binding.identity_entry().is_some() => {}
             MobEventKind::MemberSessionBindingRecovered(binding) => {
                 if let Some(bridge_session_id) = binding.bridge_session_id() {
                     if binding.member_peer_endpoint().is_none() {
@@ -4245,6 +4249,24 @@ fn seed_mob_authority_sync_from_events(
                         "recover_member_definition_wiring_exempt",
                     )?;
                 }
+                // The member of an identity entry: its row records the
+                // entry's origin, and the replay records the entry again
+                // before the boot plan is sealed.
+                if let Some(origin) = member_spawned.identity_entry() {
+                    apply_seeded_mob_signal(
+                        authority,
+                        mob_dsl::MobMachineSignal::RecoverIdentityEntry {
+                            agent_identity: mob_dsl::AgentIdentity::from_domain(
+                                &member_spawned.agent_identity,
+                            ),
+                            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                                &member_spawned.agent_runtime_id,
+                            ),
+                            origin: origin.to_machine(),
+                        },
+                        "recover_member_identity_entry",
+                    )?;
+                }
                 if member_spawned.placed_spawn_id().is_none()
                     && let Some(member_peer_endpoint) = member_spawned.member_peer_endpoint()
                 {
@@ -4396,6 +4418,24 @@ fn seed_mob_authority_sync_from_events(
                 // session lost later is never recreated empty.
                 if let Some(row) = event.kind.seat_session_row() {
                     recover_seat_session_row(authority, row)?;
+                }
+                // The adoption of a legacy member as an identity entry: its
+                // row carries the member's binding unchanged, with the
+                // entry's origin, and the replay records the entry again.
+                if let Some(origin) = recovered.identity_entry() {
+                    apply_seeded_mob_signal(
+                        authority,
+                        mob_dsl::MobMachineSignal::RecoverIdentityEntry {
+                            agent_identity: mob_dsl::AgentIdentity::from_domain(
+                                &recovered.agent_identity,
+                            ),
+                            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                                &recovered.agent_runtime_id,
+                            ),
+                            origin: origin.to_machine(),
+                        },
+                        "recover_adopted_identity_entry",
+                    )?;
                 }
             }
             // Retirement start is deliberately replayed in a second pass.

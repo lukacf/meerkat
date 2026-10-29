@@ -212,8 +212,27 @@ impl MobActor {
         // AlreadySeated; any other seat is the caller's rotation (a
         // rotation plans its next incarnation over the seated one).
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
+        // A seat without entry custody never takes an identity entry's name:
+        // MobMachine's admission verdict refuses it typed, seated or not.
+        if mode == SeatPlanMode::Seat
+            && self.member_admission_verdict(&agent_identity, spec.entry_custody)?
+                == mob_dsl::MemberAdmissionVerdictKind::IdentityMemberRejected
+        {
+            return Err(MobError::IdentityMember {
+                member_id: agent_identity,
+            });
+        }
         let state = self.dsl_authority.state();
         let seated_now = state.identity_to_runtime.contains_key(&dsl_identity);
+        // A seat with entry custody of an identity a worker holds is not
+        // that worker's seat: the worker keeps the name.
+        if mode == SeatPlanMode::Seat
+            && seated_now
+            && spec.entry_custody
+            && !state.identity_entry_origins.contains_key(&dsl_identity)
+        {
+            return Err(MobError::MemberAlreadyExists(agent_identity));
+        }
         if mode == SeatPlanMode::Seat && seated_now {
             let current_generation = state
                 .identity_runtime_generations
@@ -393,6 +412,7 @@ impl MobActor {
             effective_profile_override,
             effective_model_override,
             definition_wiring: spec.definition_wiring,
+            entry_custody: spec.entry_custody,
             authorize_input,
             authorized,
             observations,
@@ -491,7 +511,13 @@ impl MobActor {
                 let mut transitions = transitions.into_iter();
                 for (index, entry) in staged {
                     let own = transitions.by_ref().take(entry.input_count()).collect();
-                    outcomes[index] = settled.settle(&self.definition.id, index, entry, Ok(own))?;
+                    outcomes[index] = settled.settle(
+                        &self.definition.id,
+                        index,
+                        entry,
+                        Ok(own),
+                        authority.state(),
+                    )?;
                 }
             }
             // One identity's refusal: the batch left the prepared authority
@@ -499,7 +525,13 @@ impl MobActor {
             Err(_) => {
                 for (index, entry) in staged {
                     let applied = authority.apply_batch(entry.inputs());
-                    outcomes[index] = settled.settle(&self.definition.id, index, entry, applied)?;
+                    outcomes[index] = settled.settle(
+                        &self.definition.id,
+                        index,
+                        entry,
+                        applied,
+                        authority.state(),
+                    )?;
                 }
             }
         }
@@ -730,6 +762,10 @@ impl MobActor {
             placed_operation_owner_session_id: None,
             effective_profile_override_present: false,
             effective_model_override_present: false,
+            // The seat acts for its name's identity entry exactly when its
+            // spec carried entry custody; CommitDormantSeat then records the
+            // member an entry in the same step.
+            entry_custody: candidate.entry_custody,
         };
         let seat = mob_dsl::MobMachineInput::CommitDormantSeat {
             agent_identity: dsl_identity,
@@ -1209,6 +1245,15 @@ impl MobActor {
         spawned.effective_profile_override = candidate.effective_profile_override.clone();
         spawned.effective_model_override = candidate.effective_model_override.clone();
         spawned.definition_wiring = candidate.definition_wiring;
+        // Durable: the rotation keeps the identity's standing, and the next
+        // incarnation's row records the identity entry MobMachine holds for
+        // it, so replay (which ends the entry with the retired incarnation)
+        // records it again.
+        let identity_entry = super::super::identity_entry::machine_entry_origin(
+            prepared.authority.state(),
+            identity,
+        );
+        let spawned = spawned.with_identity_entry(identity_entry);
         let mut batch = vec![
             NewMobEvent {
                 mob_id: self.definition.id.clone(),
@@ -1402,13 +1447,17 @@ impl SettledSeatChunk {
     /// transitions, in order): its outcome now, or `None` for a seat, whose
     /// outcome follows the commit. A machine refusal answers the entry
     /// alone. A seat whose transitions lack what it must carry is a defect,
-    /// and nothing of the chunk commits.
+    /// and nothing of the chunk commits. `state` is the chunk's prepared
+    /// state after the entry applied: a seat's row records the identity
+    /// entry it holds for the seated member (entries of one chunk name
+    /// distinct identities).
     fn settle(
         &mut self,
         mob_id: &MobId,
         index: usize,
         entry: StagedSeatEntry,
         applied: Result<Vec<mob_dsl::MobMachineTransition>, mob_dsl::MobMachineTransitionError>,
+        state: &mob_dsl::MobMachineState,
     ) -> Result<Option<DormantSeatOutcome>, MobError> {
         let host_preparation_refused =
             |error: mob_dsl::MobMachineTransitionError| MobError::MobMachineRejected {
@@ -1472,7 +1521,15 @@ impl SettledSeatChunk {
                         }));
                     }
                 };
-                let event = seat.member_spawned(&transitions)?;
+                // Durable: the identity entry MobMachine recorded for the
+                // seated member in the seat's own step, so replay records it
+                // again.
+                let event = seat.member_spawned(&transitions)?.with_identity_entry(
+                    super::super::identity_entry::machine_entry_origin(
+                        state,
+                        &seat.candidate.agent_identity,
+                    ),
+                );
                 for transition in transitions {
                     self.effects.extend(transition.into_effects());
                 }

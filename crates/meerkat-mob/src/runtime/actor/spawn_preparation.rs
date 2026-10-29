@@ -100,6 +100,8 @@ pub(super) struct SpawnPreparationCarry {
     pub(super) fork_source: Option<meerkat_core::ForkBuildSource>,
     pub(super) fork_overlay: super::super::ForkOverlayOrigin,
     pub(super) definition_wiring: crate::DefinitionWiring,
+    /// Whether the spawn acts for the identity entry of its name.
+    pub(super) entry_custody: bool,
     pub(super) owner_bridge_session_id: Option<SessionId>,
     pub(super) ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
     /// Held spawn request, handed to the provisioning task.

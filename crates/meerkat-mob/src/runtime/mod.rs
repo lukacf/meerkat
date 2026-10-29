@@ -239,6 +239,7 @@ mod fork_context;
 pub mod forked_participant_routing;
 mod handle;
 mod held_spawn;
+mod identity_entry;
 mod identity_incarnation_custody;
 mod identity_local_services;
 #[cfg(any(test, feature = "test-support"))]
@@ -521,6 +522,12 @@ pub use held_spawn::HeldSpawnDeadline;
 pub use held_spawn::{HeldSpawn, HeldSpawnSettlement, HeldSpawnStart, abort_all_held};
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use host_schedule::HostObservationScheduleMobHost;
+pub use identity_entry::{
+    EntryStanding, IDENTITY_ENTRY_PAGE_MAX, IdentityCensus, IdentityEntryOrigin, IdentityEntryPage,
+    IdentityEntryRead, IdentityEntryView, LegacyIdentityEntryAdoption, MemberBrokenFact,
+    MemberLifecycleEvent, MemberLifecyclePage, MemberLifecycleRecord, MobJournalCursor,
+    SeatedMember, WorkerMember,
+};
 pub use identity_local_services::{
     IdentityLocalExternalToolsError, IdentityLocalExternalToolsProvider,
     IdentityLocalMaterializationKey,

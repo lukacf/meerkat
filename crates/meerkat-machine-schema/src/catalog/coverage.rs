@@ -804,7 +804,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "mob_membership_classifier_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/actor.rs",
-                    "MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate or admitted from machine-owned binding and pending-spawn state; compute respawn generation successor; reconcile desired members to spawn retain or retire against current bindings emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects",
+                    "MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate, admitted or refused as an identity entry's name without entry custody from machine-owned binding, pending-spawn and entry state; compute respawn generation successor; reconcile desired workers to spawn retain or retire against current bindings, never an identity entry, emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects",
                     CoverageClaims::none()
                         .transitions(&[
                             "RetireMember",
@@ -822,6 +822,34 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "MemberSpawnRequired",
                             "MemberRetainRequired",
                             "MemberRetireRequired",
+                        ]),
+                ),
+                machine_anchor(
+                    "mob_identity_entry_authority",
+                    "MobMachine",
+                    "crates/meerkat-mob/src/runtime/actor/identity_entry_admission.rs",
+                    "MobMachine identity entries realized by the actor: refuse an agent-lane member command addressed to an identity entry from the resolved agent lane member admission, and adopt a legacy member as an identity entry from the shell's observation of its spawn row, journaling the adoption before it commits; the entry is seated, local, spared by the worker reconcile, and its custody belongs to an open spawn ladder, emitting the agent lane member admission resolved and legacy identity entry adoption resolved effects",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "AdoptLegacyIdentityEntryAdopted",
+                            "AdoptLegacyIdentityEntryNameHeldByWorker",
+                            "AdoptLegacyIdentityEntryNotAdoptable",
+                            "AdoptLegacyIdentityEntryStaleObservation",
+                            "AdoptLegacyIdentityEntryNotSeated",
+                            "AdoptLegacyIdentityEntryAlreadyAnEntry",
+                            "AdoptLegacyIdentityEntryNonAuthoritative",
+                            "ResolveAgentLaneMemberAdmissionAdmittedRunning",
+                            "ResolveAgentLaneMemberAdmissionIdentityMemberRunning",
+                        ])
+                        .effects(&[
+                            "LegacyIdentityEntryAdoptionResolved",
+                            "AgentLaneMemberAdmissionResolved",
+                        ])
+                        .invariants(&[
+                            "entry_is_seated_or_has_an_unseated_cause",
+                            "identity_entry_is_local",
+                            "worker_reconcile_spares_entries",
+                            "entry_custody_ladder_is_open",
                         ]),
                 ),
                 machine_anchor(

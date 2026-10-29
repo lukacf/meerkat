@@ -151,7 +151,11 @@ impl MobCommand {
             | Self::StartMemberRotation { .. }
             | Self::AdoptMemberIdentityDeclaration { .. }
             | Self::ApplyMemberToolDeclaration { .. }
-            | Self::ResolveIdentityConvergenceBlock { .. } => Some(ControlScope::Retire),
+            | Self::ResolveIdentityConvergenceBlock { .. }
+            // Adopting a legacy member as an identity entry changes the
+            // member's standing: no worker reconcile or agent-lane command
+            // acts on it afterwards.
+            | Self::AdoptLegacyIdentityEntry { .. } => Some(ControlScope::Retire),
 
             // ── WireTopology: trust/topology configuration ──
             Self::Wire { .. }
@@ -381,6 +385,44 @@ impl MobCommand {
         }
     }
 
+    /// The members an agent-lane command addresses as members: the ones the
+    /// agent lane's identity-entry admission
+    /// (`ResolveAgentLaneMemberAdmission`) answers for, and an identity
+    /// entry among them refuses the command with
+    /// [`MobError::IdentityMember`]. The agent lane does not retire, respawn,
+    /// rotate, release, reload, cancel or wire an entry's member, nor release
+    /// its host's run-start hold. Spawns and seats are not listed: their own
+    /// admission refuses an entry's name to a request without entry custody,
+    /// and an agent-lane request never carries it. Reads and work deliveries
+    /// are not member commands. A member command added later names its
+    /// targets here.
+    pub(super) fn agent_lane_member_targets(&self) -> Vec<&crate::ids::AgentIdentity> {
+        match self {
+            Self::Retire { agent_identity, .. }
+            | Self::Respawn { agent_identity, .. }
+            | Self::ReleaseMember { agent_identity, .. }
+            | Self::ReloadMemberRegistration { agent_identity, .. }
+            | Self::ReleaseMemberRunStarts { agent_identity, .. }
+            | Self::ForceCancel { agent_identity, .. }
+            | Self::HardCancelMember { agent_identity, .. }
+            | Self::StopMemberRun { agent_identity, .. }
+            | Self::AdoptLegacyIdentityEntry { agent_identity, .. } => vec![agent_identity],
+            Self::PlanMemberRotation { spec, .. } => vec![&spec.identity],
+            Self::StartMemberRotation { candidate, .. } => vec![&candidate.agent_identity],
+            Self::Wire { local, target, .. } | Self::Unwire { local, target, .. } => match target {
+                super::handle::PeerTarget::Local(peer) => vec![local, peer],
+                super::handle::PeerTarget::ExternalName(_)
+                | super::handle::PeerTarget::ExternalBinding(_)
+                | super::handle::PeerTarget::External(_) => vec![local],
+            },
+            Self::WireMembersBatch { edges, .. } => edges
+                .iter()
+                .flat_map(|(local, peer)| [local, peer])
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub(super) fn reject_scope_denied(self, denial: ScopeDenial) {
         self.reject_with_error(MobError::ScopeDenied(denial));
     }
@@ -481,6 +523,9 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::CommitDormantSeats { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::AdoptLegacyIdentityEntry { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             // Settling closes the waiter set; the actor's in-flight map prunes

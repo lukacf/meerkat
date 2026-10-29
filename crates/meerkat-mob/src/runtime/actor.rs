@@ -16,6 +16,7 @@ mod dormant_kickoff;
 mod dormant_seat;
 mod dormant_wiring;
 pub(super) mod explicit_resume;
+mod identity_entry_admission;
 #[cfg(feature = "openai-live")]
 pub(super) mod live_durable_source_loads;
 pub(super) mod member_effect_lane;
@@ -6986,6 +6987,9 @@ pub(super) struct PendingSpawn {
     /// Whether the definition's wiring rules apply to the member, recorded
     /// with its membership commit and persisted with its spawn event.
     pub(super) definition_wiring: crate::DefinitionWiring,
+    /// Whether the spawn acts for the identity entry of its name
+    /// (`SpawnMemberSpec::entry_custody`), carried to its ladder's open.
+    pub(super) entry_custody: bool,
     /// Objective causality inherited from the spawning turn.
     pub(super) objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Per-spawn external-tool overlay carried to the finalize commit so the
@@ -7842,6 +7846,10 @@ struct RespawnSnapshot {
     /// Whether the definition's wiring rules apply to the member, carried to
     /// the replacement incarnation.
     definition_wiring: crate::DefinitionWiring,
+    /// Whether the member is an identity entry (MobMachine's
+    /// `identity_entry_origins`): its replacement is spawned with entry
+    /// custody, so the successor is the entry's member.
+    entry_custody: bool,
     /// The old member is already in a partial-retire state and respawn should
     /// retry cleanup instead of re-admitting the original Respawn transition.
     cleanup_retry: bool,
@@ -7902,6 +7910,10 @@ struct SpawnFinalizeCtx {
     /// member is recorded in its membership commit's own step and persisted
     /// with its spawn event and roster entry.
     definition_wiring: crate::DefinitionWiring,
+    /// Whether the spawn acts for the identity entry of its name: its
+    /// ladder's open carries it, and its membership commit records the
+    /// member an entry (MobMachine's `spawn_exec_entry_custody`).
+    entry_custody: bool,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     authorized_profile_material: AuthorizedSpawnProfileMaterial,
@@ -8015,6 +8027,7 @@ impl SpawnActivateState {
             fork_source,
             fork_overlay,
             definition_wiring,
+            entry_custody: _,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material: _,
@@ -17629,6 +17642,7 @@ impl MobActor {
         agent_identity: &AgentIdentity,
         authorized_profile_material: &AuthorizedSpawnProfileMaterial,
         bridge_session_id: Option<&SessionId>,
+        entry_custody: bool,
     ) -> Result<(), MobError> {
         let domain_identity = AgentIdentity::from(agent_identity.as_str());
         let generation = self.mint_spawn_generation(agent_identity)?;
@@ -17682,6 +17696,7 @@ impl MobActor {
                 placed_operation_owner_session_id: None,
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
+                entry_custody,
             },
             "spawn_command_admission",
         )
@@ -17692,20 +17707,48 @@ impl MobActor {
     fn preview_spawn_command_admission(
         &self,
         agent_identity: &AgentIdentity,
+        entry_custody: bool,
     ) -> Result<(), MobError> {
         self.require_member_operation_eligible()?;
-        self.probe_member_admission(agent_identity)
+        self.probe_member_admission(agent_identity, entry_custody)
     }
 
     /// Read-only MobMachine probe for member-admission duplication. The machine
     /// guard covers live runtime bindings, session bindings, and in-flight
     /// pending spawns, so this fully replaces the former shell-side
-    /// `pending_spawns.contains_member` prechecks.
-    ///
-    fn probe_member_admission(&self, agent_identity: &AgentIdentity) -> Result<(), MobError> {
+    /// `pending_spawns.contains_member` prechecks. An identity entry's name,
+    /// probed without entry custody, is refused
+    /// [`MobError::IdentityMember`] before anything is created.
+    fn probe_member_admission(
+        &self,
+        agent_identity: &AgentIdentity,
+        entry_custody: bool,
+    ) -> Result<(), MobError> {
+        match self.member_admission_verdict(agent_identity, entry_custody)? {
+            mob_dsl::MemberAdmissionVerdictKind::Admitted => Ok(()),
+            mob_dsl::MemberAdmissionVerdictKind::DuplicateRejected => {
+                Err(MobError::MemberAlreadyExists(agent_identity.clone()))
+            }
+            mob_dsl::MemberAdmissionVerdictKind::IdentityMemberRejected => {
+                Err(MobError::IdentityMember {
+                    member_id: agent_identity.clone(),
+                })
+            }
+        }
+    }
+
+    /// MobMachine's member-admission verdict (`ProbeMemberAdmission`, a pure
+    /// verdict in every lifecycle phase) for `agent_identity`, requested with
+    /// or without entry custody.
+    fn member_admission_verdict(
+        &self,
+        agent_identity: &AgentIdentity,
+        entry_custody: bool,
+    ) -> Result<mob_dsl::MemberAdmissionVerdictKind, MobError> {
         let prepared = self.prepare_dsl_input(
             mob_dsl::MobMachineInput::ProbeMemberAdmission {
                 agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                entry_custody,
             },
             "probe_member_admission",
         )?;
@@ -17719,15 +17762,9 @@ impl MobActor {
                 }
             }
         }
-        match verdict {
-            Some(mob_dsl::MemberAdmissionVerdictKind::Admitted) => Ok(()),
-            Some(mob_dsl::MemberAdmissionVerdictKind::DuplicateRejected) => {
-                Err(MobError::MemberAlreadyExists(agent_identity.clone()))
-            }
-            None => Err(MobError::Internal(
-                "MobMachine emitted no member-admission verdict".into(),
-            )),
-        }
+        verdict.ok_or_else(|| {
+            MobError::Internal("MobMachine emitted no member-admission verdict".into())
+        })
     }
 
     /// Spawn-lane generation mint (ADJ-24): every spawn takes its generation
@@ -18281,6 +18318,8 @@ impl MobActor {
             placed_operation_owner_session_id: None,
             effective_profile_override_present: false,
             effective_model_override_present: false,
+            // A policy auto-spawn is a worker: it never acts for an entry.
+            entry_custody: false,
         };
         mob_dsl::MobMachineMutator::apply(&mut authority, begin_spawn)
             .map_err(|_| self.invalid_transition_to(MobState::Running))?;
@@ -24076,8 +24115,18 @@ impl MobActor {
         match authority.kind() {
             // §15.2: the agent authority lane's own gates (machine-composed
             // MobToolAuthorityContext admission) already ran; principal
-            // grants neither gate nor are satisfied here.
-            CommandAuthorityKind::AgentLane => ScopeAdmission::Admitted(cmd),
+            // grants neither gate nor are satisfied here. The agent lane does
+            // not act on an identity entry as a member: MobMachine refuses a
+            // member command addressed to one.
+            CommandAuthorityKind::AgentLane => {
+                match self.agent_lane_identity_member_refusal(&cmd) {
+                    Ok(None) => ScopeAdmission::Admitted(cmd),
+                    Ok(Some(error)) | Err(error) => {
+                        cmd.reject_with_error(error);
+                        ScopeAdmission::Denied
+                    }
+                }
+            }
             // An operator-class command minted without authority is a wiring
             // fault: fail closed at runtime, loud in test lanes (ADJ-P5-15).
             // Any legitimate case found later must be explicitly
@@ -31417,6 +31466,20 @@ impl MobActor {
                     let result = Box::pin(self.commit_dormant_seats(entries)).await;
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::AdoptLegacyIdentityEntry {
+                    agent_identity,
+                    generation,
+                    legacy_roster_member,
+                    reply_tx,
+                } => {
+                    let result = Box::pin(self.adopt_legacy_identity_entry(
+                        agent_identity,
+                        generation,
+                        legacy_roster_member,
+                    ))
+                    .await;
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::ProjectMemberStatusObserved {
                     agent_identity,
                     expected_target,
@@ -35367,6 +35430,7 @@ impl MobActor {
             fork_source: entry.fork_source,
             fork_overlay: entry.fork_overlay,
             definition_wiring: entry.definition_wiring,
+            entry_custody: false,
             objective_id: None,
             per_spawn_external_tools: None,
             authorized_profile_material,
@@ -35725,6 +35789,7 @@ impl MobActor {
             budget_limits,
             auto_wire_parent,
             definition_wiring,
+            entry_custody,
             additional_instructions,
             shell_env,
             inherited_tool_filter,
@@ -35758,7 +35823,7 @@ impl MobActor {
         let agent_identity = AgentIdentity::from(identity.as_str());
         self.inline_step_watchdog
             .set_spawn_stage(SpawnInlineStage::CommandAdmission);
-        if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
+        if let Err(error) = self.preview_spawn_command_admission(&agent_identity, entry_custody) {
             reject_spawn_before_custody!("command_admission", error);
         }
         // Normalize launch-mode resume/fork details for the provisioning path.
@@ -35974,6 +36039,7 @@ impl MobActor {
             fork_source: fork_source.clone(),
             fork_overlay,
             definition_wiring,
+            entry_custody,
             owner_bridge_session_id: owner_bridge_session_id.clone(),
             ops_registry: ops_registry.clone(),
             held,
@@ -36602,6 +36668,7 @@ impl MobActor {
             fork_source,
             fork_overlay,
             definition_wiring,
+            entry_custody,
             owner_bridge_session_id,
             ops_registry,
             held,
@@ -36684,7 +36751,7 @@ impl MobActor {
             .set_spawn_stage(SpawnInlineStage::PreparedAdmission);
         // Actor state may have moved while the preparation ran: the mob may
         // have stopped, or the identity may have been admitted meanwhile.
-        if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
+        if let Err(error) = self.preview_spawn_command_admission(&agent_identity, entry_custody) {
             reject_spawn_before_custody!("prepared_command_admission", error);
         }
         if self.roster.read().await.get(&agent_identity).is_some() {
@@ -36710,6 +36777,7 @@ impl MobActor {
                 &agent_identity,
                 &authorized_profile_material,
                 Some(&bridge_session_id),
+                entry_custody,
             ) {
                 reject_spawn_before_custody!("resume_admission", error);
             }
@@ -36811,6 +36879,7 @@ impl MobActor {
                 fork_source: fork_source.clone(),
                 fork_overlay,
                 definition_wiring,
+                entry_custody,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -36859,6 +36928,7 @@ impl MobActor {
             &agent_identity,
             &authorized_profile_material,
             spawn_bridge_session_id,
+            entry_custody,
         ) {
             reject_spawn_before_custody!("spawn_admission", error);
         }
@@ -37012,6 +37082,7 @@ impl MobActor {
             fork_source,
             fork_overlay,
             definition_wiring,
+            entry_custody,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material,
@@ -38001,6 +38072,7 @@ impl MobActor {
             budget_limits,
             auto_wire_parent,
             definition_wiring,
+            entry_custody,
             additional_instructions,
             shell_env,
             inherited_tool_filter,
@@ -38046,6 +38118,14 @@ impl MobActor {
                  definition's wiring rules is local"
             )));
         }
+        // An identity entry's member is local: a placed spawn never acts for
+        // one (MobMachine's remote ladder refuses entry custody as well).
+        if entry_custody {
+            fail!(MobError::WiringError(format!(
+                "'{identity}' cannot be placed on a member host: an identity entry's member is \
+                 local"
+            )));
+        }
         if tool_dispatch_admission.is_some() {
             fail!(MobError::WiringError(
                 "process-local tool dispatch admission cannot cross member-host placement"
@@ -38067,7 +38147,7 @@ impl MobActor {
             )));
         }
         let agent_identity = AgentIdentity::from(identity.as_str());
-        if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
+        if let Err(error) = self.preview_spawn_command_admission(&agent_identity, entry_custody) {
             fail!(error);
         }
         if agent_identity.is_system_reserved() {
@@ -38421,6 +38501,7 @@ impl MobActor {
                 )),
                 effective_profile_override_present: effective_profile_override.is_some(),
                 effective_model_override_present: effective_model_override.is_some(),
+                entry_custody,
             },
             "enqueue_spawn_remote_open",
         ) {
@@ -38921,6 +39002,8 @@ impl MobActor {
             fork_overlay: super::ForkOverlayOrigin::default(),
             // Refused above: a placed member is never exempt.
             definition_wiring: crate::DefinitionWiring::Applies,
+            // Refused above: a placed spawn never acts for an identity entry.
+            entry_custody: false,
             objective_id,
             authorized_profile_material,
             continuity_intent,
@@ -39215,6 +39298,7 @@ impl MobActor {
                 fork_source,
                 fork_overlay,
                 definition_wiring,
+                entry_custody,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -39418,6 +39502,7 @@ impl MobActor {
                                 fork_source: fork_source.clone(),
                                 fork_overlay,
                                 definition_wiring,
+                                entry_custody,
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -39501,6 +39586,7 @@ impl MobActor {
                                 fork_source: fork_source.clone(),
                                 fork_overlay,
                                 definition_wiring,
+                                entry_custody,
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -39621,6 +39707,8 @@ impl MobActor {
             // A policy auto-spawn is built from the definition:
             // `SpawnMemberSpec::new` leaves the definition's wiring rules on.
             definition_wiring: _,
+            // Nor entry custody: a policy auto-spawn is a worker.
+            entry_custody: _,
             additional_instructions,
             shell_env,
             inherited_tool_filter,
@@ -39654,7 +39742,7 @@ impl MobActor {
                 "meerkat id '{agent_identity}' uses reserved system identifier namespace"
             )));
         }
-        self.probe_member_admission(agent_identity)?;
+        self.probe_member_admission(agent_identity, false)?;
         {
             let roster = self.roster.read().await;
             if roster.get(agent_identity).is_some() {
@@ -39862,6 +39950,7 @@ impl MobActor {
             fork_overlay: super::ForkOverlayOrigin::default(),
             // Built from the definition: its wiring rules apply.
             definition_wiring: crate::DefinitionWiring::Applies,
+            entry_custody: false,
             objective_id: None,
             per_spawn_external_tools: per_spawn_external_tools.clone(),
             authorized_profile_material: authorized_profile_material.clone(),
@@ -40414,6 +40503,9 @@ impl MobActor {
                     placed_operation_owner_session_id: None,
                     effective_profile_override_present: false,
                     effective_model_override_present: false,
+                    // The spawn acts for its name's identity entry exactly
+                    // when its spec carried entry custody.
+                    entry_custody: ctx.entry_custody,
                 },
                 "finalize_spawn_admit_begin_spawn_exec",
             );
@@ -40891,6 +40983,14 @@ impl MobActor {
         // Durable: replay records an exempt member in MobMachine again, and
         // its roster entry keeps it for its respawn.
         spawned_event.definition_wiring = ctx.definition_wiring;
+        // Durable: the identity entry MobMachine records for the member in
+        // the membership commit's own step (a spawn with entry custody), so
+        // replay records the entry again.
+        let identity_entry = super::identity_entry::machine_entry_origin(
+            prepared_spawn.authority.state(),
+            &identity,
+        );
+        spawned_event = spawned_event.with_identity_entry(identity_entry);
         spawned_event = spawned_event.with_placed_spawn_id(None);
         if let Err(append_error) = boxed_arm_future(|| {
             self.append_member_spawned_with_identity_fence(
@@ -50538,6 +50638,14 @@ impl MobActor {
                 ),
                 fork_job: entry.fork_job,
                 definition_wiring: entry.definition_wiring,
+                // MobMachine's fact, read in the snapshot's own actor step:
+                // the successor of an identity entry's member is the
+                // entry's member.
+                entry_custody: self
+                    .dsl_authority
+                    .state()
+                    .identity_entry_origins
+                    .contains_key(&mob_dsl::AgentIdentity::from_domain(&agent_identity)),
                 cleanup_retry,
             }
         };
@@ -50616,6 +50724,11 @@ impl MobActor {
             &mut replacement_spec,
         )
         .map_err(MobRespawnError::from)?;
+        // The member's standing belongs to the identity, read from MobMachine
+        // with the snapshot: the successor of an identity entry's member is
+        // the entry's member again, and a worker's successor is a worker,
+        // whatever the successor spec or a customizer says.
+        replacement_spec.entry_custody = snapshot.entry_custody;
         if replacement_spec.identity != original_identity {
             return Err(MobRespawnError::from(MobError::Internal(format!(
                 "spawn customizer cannot change respawn identity from '{original_identity}' to '{}'",
@@ -66786,6 +66899,7 @@ mod runtime_observation_tests {
                 placed_operation_owner_session_id: None,
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
+                entry_custody: false,
             },
         )
         .expect("BeginSpawnExec should open the spawn-exec phase");

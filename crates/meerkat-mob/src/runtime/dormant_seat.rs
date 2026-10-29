@@ -428,6 +428,11 @@ pub(in crate::runtime) struct DormantSeatCandidate {
     /// exempt one is recorded in MobMachine in the seat's (or rotation's)
     /// own step and journaled with its `MemberSpawned` row.
     pub(in crate::runtime) definition_wiring: crate::DefinitionWiring,
+    /// Whether the seat acts for the identity entry of its name: its spawn
+    /// ladder's open carries it, and the seat's step records the member an
+    /// entry. A rotation of a seated identity keeps the identity's standing
+    /// and does not read it.
+    pub(in crate::runtime) entry_custody: bool,
     /// The generated `AuthorizeSpawnProfile` input and the authorization it
     /// must answer with.
     pub(in crate::runtime) authorize_input: mob_dsl::MobMachineInput,

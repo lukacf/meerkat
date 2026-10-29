@@ -438,14 +438,21 @@ impl ResumeOperationRegistry {
 /// What a caller that joined a singleflight retirement slot answers for the
 /// slot's published result. A scoped step's declined re-check is an outcome,
 /// not an error, so every error a slot publishes reaches its joiners exactly
-/// as before: anything but an in-progress, admission-pending or stuck answer
-/// is a shared retirement failure.
+/// as before: anything but an in-progress, admission-pending or stuck answer,
+/// or the refusal of an identity entry's retirement on the agent lane, is a
+/// shared retirement failure.
 fn joined_retirement_result(
     result: &Result<RetireStepOutcome, Arc<MobError>>,
 ) -> Result<RetireStepOutcome, MobError> {
     match result {
         Ok(outcome) => Ok(outcome.clone()),
         Err(error) => Err(match error.as_ref() {
+            // The agent lane's admission refused the retirement of an
+            // identity entry before anything ran: the typed refusal, as the
+            // other member commands answer it.
+            MobError::IdentityMember { member_id } => MobError::IdentityMember {
+                member_id: member_id.clone(),
+            },
             MobError::RetirementInProgress { session_id, stage } => {
                 MobError::RetirementInProgress {
                     session_id: session_id.clone(),
@@ -2801,6 +2808,12 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::MemberNotFound(_) => mob_dsl::MobSpawnManyFailureObservationKind::MemberNotFound,
         MobError::MemberAlreadyExists(_) => {
             mob_dsl::MobSpawnManyFailureObservationKind::MemberAlreadyExists
+        }
+        // The machine's admission probe refused an identity entry's name to
+        // a spawn without entry custody: the same family as the machine
+        // refusing the requested transition.
+        MobError::IdentityMember { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
         }
         MobError::NotExternallyAddressable(_) => {
             mob_dsl::MobSpawnManyFailureObservationKind::NotExternallyAddressable
@@ -7043,6 +7056,22 @@ pub struct SpawnMemberSpec {
     /// `MemberSpawned` row and roster entry record it, and its restore and
     /// respawn keep it. A placed member cannot be exempt.
     pub definition_wiring: crate::DefinitionWiring,
+    /// Whether the request acts for the identity entry of its name (see
+    /// [`crate::IdentityEntryRead`]). A spawn or a dormant seat with entry
+    /// custody may take a name that is an identity entry, and the member it
+    /// seats is recorded an identity entry (origin
+    /// [`crate::IdentityEntryOrigin::Declared`]): no worker reconcile spawns
+    /// or retires it, the agent lane does not act on it, and its
+    /// `MemberSpawned` row records it, so a restart restores it. A request
+    /// without it (the default) cannot take an entry's name: it is refused
+    /// [`crate::MobError::IdentityMember`]. A respawn of an entry carries the
+    /// predecessor's entry to its successor. A seated identity's rotation
+    /// ([`super::MobHandle::rotate_member`]) keeps the identity's standing,
+    /// an entry or a worker, whatever the spec says. A dormant seat with
+    /// entry custody of an identity a worker holds is refused
+    /// [`crate::MobError::MemberAlreadyExists`]. Only a local member is an
+    /// identity entry: a placed spawn refuses it.
+    pub entry_custody: bool,
     /// Additional instruction sections appended to the system prompt for this member.
     pub additional_instructions: Option<Vec<String>>,
     /// Per-agent environment variables injected into shell tool subprocesses.
@@ -7180,6 +7209,7 @@ impl std::fmt::Debug for SpawnMemberSpec {
             .field("budget_limits", &self.budget_limits)
             .field("auto_wire_parent", &self.auto_wire_parent)
             .field("definition_wiring", &self.definition_wiring)
+            .field("entry_custody", &self.entry_custody)
             .field("additional_instructions", &self.additional_instructions)
             .field("shell_env", &self.shell_env)
             .field("inherited_tool_filter", &self.inherited_tool_filter)
@@ -7218,6 +7248,10 @@ impl std::fmt::Debug for SpawnMemberSpec {
 }
 
 impl SpawnMemberSpec {
+    /// An agent-lane request claims neither a host root nor an identity
+    /// entry: an agent never declares an entry, so its request carries no
+    /// entry custody, and an entry's name is refused to it
+    /// ([`MobError::IdentityMember`]).
     fn mark_agent_creation(&mut self) {
         if matches!(
             self.creation_origin,
@@ -7225,6 +7259,7 @@ impl SpawnMemberSpec {
         ) {
             self.creation_origin = crate::member_creation::MemberCreationOrigin::Unproven;
         }
+        self.entry_custody = false;
     }
 
     /// Attach exact runtime-proven parent ancestry to a child launch.
@@ -7254,6 +7289,7 @@ impl SpawnMemberSpec {
             budget_limits: None,
             auto_wire_parent: false,
             definition_wiring: crate::DefinitionWiring::Applies,
+            entry_custody: false,
             additional_instructions: None,
             shell_env: None,
             inherited_tool_filter: None,
@@ -7315,6 +7351,14 @@ impl SpawnMemberSpec {
     #[must_use]
     pub fn with_definition_wiring(mut self, definition_wiring: crate::DefinitionWiring) -> Self {
         self.definition_wiring = definition_wiring;
+        self
+    }
+
+    /// Set whether the request acts for the identity entry of its name (see
+    /// [`Self::entry_custody`]).
+    #[must_use]
+    pub fn with_entry_custody(mut self, entry_custody: bool) -> Self {
+        self.entry_custody = entry_custody;
         self
     }
 
@@ -9956,6 +10000,234 @@ impl MobHandle {
             &self.machine_state_watch_rx.borrow(),
             identity,
         )
+    }
+
+    /// Read the machine state the actor last published under `scope`, with
+    /// no actor command and without copying the state: the handle's
+    /// principal must hold `scope` in that same state's grant projection.
+    fn read_published_machine_state<T>(
+        &self,
+        scope: crate::ControlScope,
+        read: impl FnOnce(&mob_dsl::MobMachineState) -> T,
+    ) -> Result<T, MobError> {
+        let state = self.machine_state_watch_rx.borrow();
+        let now_ms = super::scope_gate::control_now_ms();
+        let policy = match self.command_authority.control_principal() {
+            Some(principal) => {
+                crate::control_policy::ResolvedControlPolicy::resolve(principal, &state, now_ms)
+            }
+            None => crate::control_policy::ResolvedControlPolicy::resolve(
+                &crate::control_policy::MobControlPrincipal::Unresolved,
+                &state,
+                now_ms,
+            ),
+        };
+        policy.require(scope)?;
+        Ok(read(&state))
+    }
+
+    /// Whether `identity` is an identity entry, and where its member stands:
+    /// [`super::IdentityEntryRead::Entry`] with the entry's origin, its
+    /// member's standing (seated or retiring, its generation, session,
+    /// profile and runtime mode), whether it is Broken, whether its host
+    /// preparation is pending and whether a rotation of it is in flight; or
+    /// [`super::IdentityEntryRead::NotAnEntry`] with the worker member that
+    /// holds the identity, if any. See [`super::IdentityEntryRead`] for the
+    /// entry concept.
+    ///
+    /// Read from the machine state the actor last published, as
+    /// [`Self::member_unmaterialized`] is: no actor command, and reading it
+    /// never wakes a member. The answer can be stale by the time the caller
+    /// acts on it, and it never says whether a member is materialized in this
+    /// process. The handle's principal must hold
+    /// [`crate::ControlScope::List`]; a refusal is
+    /// [`MobError::ScopeDenied`].
+    pub fn identity_entry(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<super::IdentityEntryRead, MobError> {
+        self.read_published_machine_state(crate::ControlScope::List, |state| {
+            super::identity_entry::identity_entry_read(state, identity)
+        })
+    }
+
+    /// One page of this mob's identity entries, in identity order: the
+    /// entries after `after` (from the first with `None`), at most `limit`
+    /// of them, clamped to 1..=[`super::IDENTITY_ENTRY_PAGE_MAX`]. The page's
+    /// `next` is the identity to read the next page after; `None` on the
+    /// last page. Read as [`Self::identity_entry`] is: no actor command, no
+    /// wake, the [`crate::ControlScope::List`] scope.
+    pub fn identity_entries(
+        &self,
+        after: Option<&AgentIdentity>,
+        limit: usize,
+    ) -> Result<super::IdentityEntryPage, MobError> {
+        self.read_published_machine_state(crate::ControlScope::List, |state| {
+            super::identity_entry::identity_entry_page(state, after, limit)
+        })
+    }
+
+    /// The counts of this mob's identity entries: declared, seated,
+    /// retiring, Broken, host preparation pending, rotation in flight. Read
+    /// as [`Self::identity_entry`] is: no actor command, no wake, the
+    /// [`crate::ControlScope::List`] scope.
+    pub fn identity_census(&self) -> Result<super::IdentityCensus, MobError> {
+        self.read_published_machine_state(crate::ControlScope::List, |state| {
+            super::identity_entry::identity_census(state)
+        })
+    }
+
+    /// The members whose run starts this mob's host holds for `reason`, in
+    /// identity order: the members whose session registration still
+    /// stages that hold, as [`Self::release_member_run_starts`] would release
+    /// it. Read from the published machine state and the runtime's hold
+    /// registry, with no actor command and no wake; the
+    /// [`crate::ControlScope::List`] scope. A mob without the runtime adapter
+    /// holds no member's run starts.
+    pub fn members_holding_run_starts(
+        &self,
+        reason: super::stop_report::HostRunStartHoldReason,
+    ) -> Result<Vec<AgentIdentity>, MobError> {
+        let sessions = self.read_published_machine_state(crate::ControlScope::List, |state| {
+            state
+                .member_session_bindings
+                .iter()
+                // A placed member's session lives on its host.
+                .filter(|(identity, _)| !state.member_placement.contains_key(*identity))
+                .map(|(identity, session)| (identity.0.clone(), session.0.clone()))
+                .collect::<Vec<_>>()
+        })?;
+        #[cfg(feature = "runtime-adapter")]
+        {
+            let Some(adapter) = self.runtime_adapter.as_ref() else {
+                return Ok(Vec::new());
+            };
+            let mut held = Vec::new();
+            for (identity, session) in sessions {
+                let session_id = SessionId::parse(&session).map_err(|error| {
+                    MobError::Internal(format!(
+                        "member '{identity}' holds an invalid session binding: {error}"
+                    ))
+                })?;
+                if adapter.registration_run_start_hold_staged(&session_id, reason.runtime()) {
+                    held.push(AgentIdentity::from(identity.as_str()));
+                }
+            }
+            Ok(held)
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        {
+            let _ = (sessions, reason);
+            Ok(Vec::new())
+        }
+    }
+
+    /// One page of this mob's member lifecycle journal: the member
+    /// lifecycle facts of the journal events after `after` (from the first
+    /// with [`super::MobJournalCursor::START`]), reading at most `limit`
+    /// events, clamped to 1..=[`super::IDENTITY_ENTRY_PAGE_MAX`]: spawns and
+    /// seats (with the identity entry a seat records), legacy adoptions,
+    /// retirement starts, retirements, member resets and mob resets. The
+    /// page's `next` is the cursor to read the next page after; a page that
+    /// read nothing answers the cursor it was asked for.
+    ///
+    /// A store read: no actor command (a busy actor cannot delay it), and it
+    /// never wakes a member. The handle's principal must hold
+    /// [`crate::ControlScope::SubscribeEvents`].
+    pub async fn member_lifecycle_events(
+        &self,
+        after: super::MobJournalCursor,
+        limit: usize,
+    ) -> Result<super::MemberLifecyclePage, MobError> {
+        self.read_published_machine_state(crate::ControlScope::SubscribeEvents, |_| ())?;
+        let limit = limit.clamp(1, super::IDENTITY_ENTRY_PAGE_MAX);
+        let events = self.events.poll(after.get(), limit).await?;
+        Ok(super::identity_entry::member_lifecycle_page(
+            self.mob_id(),
+            after,
+            &events,
+        ))
+    }
+
+    /// Adopt a legacy member as an identity entry, once, in the first
+    /// declaration after an upgrade: a member a host seated before identity
+    /// entries existed, whose spawn row carries the durable-identity
+    /// continuity marker
+    /// ([`SpawnContinuityIntent::DurableIdentity`](super::SpawnContinuityIntent::DurableIdentity))
+    /// or the legacy `agent_identity` label naming its own identity.
+    ///
+    /// MobMachine decides the adoption (`AdoptLegacyIdentityEntry`) from this
+    /// handle's observation of the spawn row of the member's current
+    /// incarnation, read from the member binding history. An adopted member
+    /// is an identity entry from then on: its adoption is journaled, a
+    /// restart restores it from that row, and the label is never read for it
+    /// again. An identity that is an entry already answers
+    /// [`super::LegacyIdentityEntryAdoption::AlreadyAnEntry`] without
+    /// reading its spawn row. A worker holding the name answers
+    /// [`super::LegacyIdentityEntryAdoption::NameHeldByWorker`]; a placed
+    /// member, a member bound to no session or a retiring one
+    /// [`super::LegacyIdentityEntryAdoption::NotAdoptable`]; an identity no
+    /// member holds [`super::LegacyIdentityEntryAdoption::NotSeated`]; a
+    /// non-authoritative composition
+    /// [`super::LegacyIdentityEntryAdoption::NonAuthoritative`]. None of
+    /// these changes anything.
+    ///
+    /// Refused typed unless the mob is Running. The handle's principal must
+    /// hold [`crate::ControlScope::Retire`]. A storage composition without
+    /// the built-in atomic identity/member store refuses with
+    /// [`crate::store::MobStoreError::IdentityMemberAtomicPersistenceUnavailable`].
+    pub async fn adopt_legacy_identity_entry(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<super::LegacyIdentityEntryAdoption, MobError> {
+        // An observation whose incarnation moved before MobMachine decided
+        // is observed again, a bounded number of times.
+        const LEGACY_ADOPTION_OBSERVATIONS: usize = 3;
+        // The adoption ran: the spawn row is not read again.
+        let already_an_entry = super::identity_entry::machine_entry_origin(
+            &self.machine_state_watch_rx.borrow(),
+            identity,
+        )
+        .is_some();
+        if already_an_entry {
+            return Ok(super::LegacyIdentityEntryAdoption::AlreadyAnEntry);
+        }
+        let store = self
+            .identity_member
+            .as_ref()
+            .ok_or(crate::store::MobStoreError::IdentityMemberAtomicPersistenceUnavailable)?;
+        for _ in 0..LEGACY_ADOPTION_OBSERVATIONS {
+            let history = self
+                .member_binding_fold
+                .read(store.as_ref(), self.mob_id())
+                .await?;
+            let (generation, legacy_roster_member) = match history.last_binding(identity) {
+                Some(binding) => (
+                    binding.generation(),
+                    super::identity_entry::legacy_roster_member(binding),
+                ),
+                // No incarnation since the latest mob reset: MobMachine
+                // answers from its own seat.
+                None => (crate::ids::Generation::INITIAL, false),
+            };
+            let verdict = self
+                .send_actor_command(|reply_tx| MobCommand::AdoptLegacyIdentityEntry {
+                    agent_identity: identity.clone(),
+                    generation,
+                    legacy_roster_member,
+                    reply_tx,
+                })
+                .await??;
+            if let Some(answer) = super::identity_entry::legacy_adoption_answer(verdict) {
+                return Ok(answer);
+            }
+        }
+        Err(MobError::MobMachineRejected {
+            context: "adopt_legacy_identity_entry",
+            reason: format!(
+                "the incarnation of '{identity}' changed each time its spawn row was observed"
+            ),
+        })
     }
 
     /// Wait until no explicit-resume lifecycle operation is pending for
@@ -21417,6 +21689,7 @@ mod tests {
                 placed_operation_owner_session_id: None,
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
+                entry_custody: false,
             },
         )
         .expect("begin spawn exec should admit");
@@ -21523,6 +21796,7 @@ mod tests {
                     placed_operation_owner_session_id: None,
                     effective_profile_override_present: false,
                     effective_model_override_present: false,
+                    entry_custody: false,
                 },
             )
             .expect("begin spawn exec should admit");
@@ -21883,6 +22157,7 @@ mod tests {
                 placed_operation_owner_session_id: None,
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
+                entry_custody: false,
             },
         )
         .expect("begin spawn exec should admit");

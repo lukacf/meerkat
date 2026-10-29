@@ -332,6 +332,7 @@ impl LocalApprovals {
     /// No remote decision or saved approval is accepted by this invocation.
     /// Attribution of this installed presenter only. The actual verified Human
     /// and task/login checks remain with the caller and native decision owner.
+    #[cfg(feature = "console")]
     pub(crate) fn create_console_setup(
         parent: &Path,
     ) -> Result<(Self, ApprovalPresenter), ConnectError> {
@@ -505,6 +506,7 @@ impl LocalApprovals {
         ))
     }
 
+    #[cfg(feature = "console")]
     pub(crate) fn with_service_tasks(
         mut self,
         tasks: Option<toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource>,
@@ -626,6 +628,7 @@ impl LocalApprovals {
             .try_send(ApprovalPrompt {
                 record,
                 presentation: ApprovalPresentation::AccessReview,
+                #[cfg(feature = "console")]
                 service_task: None,
                 shared: self.shared.clone(),
                 response: Some(response),
@@ -1289,6 +1292,7 @@ impl ApprovalPresenter {
     }
 }
 
+#[cfg(feature = "console")]
 impl ApprovalPresenter {
     pub(crate) async fn next_for_review(
         &mut self,
@@ -1322,6 +1326,7 @@ enum ApprovalPresentation {
 pub struct ApprovalPrompt {
     record: ApprovalRecord,
     presentation: ApprovalPresentation,
+    #[cfg(feature = "console")]
     service_task: Option<toolkit_mobkit::private_originals::InstalledServiceTask>,
     shared: Arc<Shared>,
     response: Option<oneshot::Sender<ApprovalDecision>>,
@@ -1338,6 +1343,7 @@ impl ApprovalPrompt {
     pub fn decide(&mut self, decision: ApprovalDecision) -> Result<(), ConnectError> {
         self.decide_current(decision, None)
     }
+    #[cfg(feature = "console")]
     pub(crate) fn console_task(
         &self,
     ) -> Option<&toolkit_mobkit::private_originals::InstalledServiceTask> {
@@ -1345,6 +1351,7 @@ impl ApprovalPrompt {
             .as_ref()
             .filter(|task| task.console_login().is_some())
     }
+    #[cfg(feature = "console")]
     pub(crate) fn decide_console(
         &mut self,
         decision: ApprovalDecision,
@@ -1613,6 +1620,7 @@ impl Shared {
                 .try_send(ApprovalPrompt {
                     record,
                     presentation: ApprovalPresentation::ToolCall,
+                    #[cfg(feature = "console")]
                     service_task: task.clone(),
                     shared: self.clone(),
                     response: Some(response),

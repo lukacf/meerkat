@@ -2,18 +2,25 @@
 //! Values are accepted only by the protected transport, never tool arguments.
 
 use super::*;
+#[cfg(feature = "console")]
 use crate::service_install::{InstalledConnectorSelection, ServiceCredentialSlot};
+#[cfg(feature = "console")]
 use meerkat_core::McpServerConfig;
+#[cfg(feature = "console")]
 use std::collections::BTreeSet;
 
 #[cfg(all(unix, feature = "console"))]
 pub(crate) mod administration;
 #[cfg(all(unix, feature = "console"))]
 mod driver;
+#[cfg(feature = "console")]
 pub(crate) mod outcome;
+#[cfg(feature = "console")]
 pub(crate) mod transport;
+#[cfg(feature = "console")]
 use outcome::CredentialReply;
 
+#[cfg(feature = "console")]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CredentialProposal {
@@ -31,12 +38,14 @@ struct CredentialProposal {
     tool_policy: Option<ServiceToolPolicySelection>,
 }
 
+#[cfg(feature = "console")]
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Authentication {
     DeclaredSecretSlots,
 }
 
+#[cfg(feature = "console")]
 #[derive(Serialize)]
 struct CredentialSelection {
     operations: BTreeSet<String>,
@@ -46,6 +55,7 @@ struct CredentialSelection {
     tool_policy: Option<ServiceToolPolicySelection>,
 }
 
+#[cfg(feature = "console")]
 fn parse(raw: &str) -> Result<CredentialProposal, ToolError> {
     if raw.len() > 32 * 1024 {
         return Err(invalid());
@@ -78,6 +88,7 @@ fn parse(raw: &str) -> Result<CredentialProposal, ToolError> {
     Ok(proposal)
 }
 
+#[cfg(feature = "console")]
 fn invalid() -> ToolError {
     ToolError::InvalidArguments {
         name: SETUP_ACCOUNT_REQUEST.into(),
@@ -85,6 +96,7 @@ fn invalid() -> ToolError {
     }
 }
 
+#[cfg(feature = "console")]
 fn checked_configuration(
     selected: &InstalledConnectorSelection,
     selection: &CredentialSelection,
@@ -107,6 +119,7 @@ fn checked_configuration(
     Ok((config, slots))
 }
 
+#[cfg(feature = "console")]
 fn credential_review_request(
     selected: &InstalledConnectorSelection,
     config: &McpServerConfig,
@@ -187,6 +200,7 @@ pub(super) fn proposal_schema() -> Value {
 
 /// This request comes only from the native borrowed setup invocation. Neither
 /// the protected body nor tool arguments can select its task or native entry.
+#[cfg(feature = "console")]
 pub(crate) struct InstalledCredentialRequest {
     selected: InstalledConnectorSelection,
     config: McpServerConfig,
@@ -197,6 +211,7 @@ pub(crate) struct InstalledCredentialRequest {
     current: CurrentRequest,
     response: oneshot::Sender<CredentialReply>,
 }
+#[cfg(feature = "console")]
 impl InstalledCredentialRequest {
     pub(crate) fn console_task(
         &self,
@@ -223,6 +238,7 @@ impl InstalledCredentialRequest {
 
 /// Select a closed alternative without accepting either alternative's fields.
 /// The full parser below still rejects mixed, duplicate and unknown fields.
+#[cfg(feature = "console")]
 pub(super) fn is_proposal(raw: &str) -> Result<bool, ToolError> {
     if raw.len() > 32 * 1024 {
         return Err(invalid());
@@ -231,6 +247,7 @@ pub(super) fn is_proposal(raw: &str) -> Result<bool, ToolError> {
     Ok(value.get("authentication").is_some())
 }
 
+#[cfg(feature = "console")]
 pub(super) async fn dispatch(
     owner: &RequestTool,
     call: ToolCallView<'_>,
@@ -341,5 +358,5 @@ pub(super) async fn dispatch(
         .map_err(|_| unavailable())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "console"))]
 mod tests;

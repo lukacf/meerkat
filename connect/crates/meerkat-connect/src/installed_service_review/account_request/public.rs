@@ -2,20 +2,28 @@
 //! No account is invented and no standalone realm finalizer is composed here.
 
 use super::*;
+#[cfg(feature = "console")]
 use crate::approval::ApprovalPresenter;
+#[cfg(feature = "console")]
 use crate::service_install::{ConnectorSelectionError, PublicServiceSelection};
+#[cfg(feature = "console")]
 use crate::stdio::PromptBridge;
+#[cfg(feature = "console")]
 use meerkat_core::McpServerConfig;
 use meerkat_toolkit::setup::SETUP_PUBLIC_SERVICE_REQUEST;
+#[cfg(feature = "console")]
 use std::{
     collections::BTreeSet,
     future::Future,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
+#[cfg(feature = "console")]
 use toolkit_mobkit::private_originals::InstalledServiceTask;
+#[cfg(feature = "console")]
 mod batch;
 
+#[cfg(feature = "console")]
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PublicSelection {
@@ -27,6 +35,7 @@ struct PublicSelection {
     tool_policy: Option<ServiceToolPolicySelection>,
 }
 
+#[cfg(feature = "console")]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PublicProposal {
@@ -39,6 +48,7 @@ struct PublicProposal {
     tool_policy: Option<ServiceToolPolicySelection>,
 }
 
+#[cfg(feature = "console")]
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum PublicState {
@@ -46,6 +56,7 @@ enum PublicState {
     Denied,
 }
 
+#[cfg(feature = "console")]
 #[derive(Serialize)]
 struct PublicReply {
     state: PublicState,
@@ -57,10 +68,12 @@ struct PublicReply {
 
 /// Custody of this actual native invocation, separate from account sign-in.
 /// The selected task and login cannot be decoded from model arguments.
+#[cfg(feature = "console")]
 pub(crate) enum InstalledPublicRequest {
     Single(Box<InstalledPublicSingleRequest>),
     Batch(Box<batch::InstalledPublicBatchRequest>),
 }
+#[cfg(feature = "console")]
 pub(crate) struct InstalledPublicSingleRequest {
     selected: PublicServiceSelection,
     config: McpServerConfig,
@@ -70,6 +83,7 @@ pub(crate) struct InstalledPublicSingleRequest {
     current: CurrentRequest,
     response: oneshot::Sender<PublicReply>,
 }
+#[cfg(feature = "console")]
 impl InstalledPublicRequest {
     pub(crate) fn console_task(&self) -> Option<&InstalledServiceTask> {
         let task = match self {
@@ -85,6 +99,7 @@ impl InstalledPublicRequest {
         }
     }
 }
+#[cfg(feature = "console")]
 impl InstalledPublicSingleRequest {
     fn console_task(&self) -> Option<&InstalledServiceTask> {
         self.task
@@ -93,6 +108,7 @@ impl InstalledPublicSingleRequest {
     }
 }
 
+#[cfg(feature = "console")]
 fn unavailable() -> ToolError {
     ToolError::unavailable(
         SETUP_PUBLIC_SERVICE_REQUEST,
@@ -102,6 +118,7 @@ fn unavailable() -> ToolError {
 
 /// Shared singleton/batch selection feedback, after the caller's native check.
 /// This only projects the existing owner's refusal; it performs no setup work.
+#[cfg(feature = "console")]
 pub(crate) fn select_public_job(
     checked: &Arc<CheckedInstalls>,
     realm: &RealmLocator,
@@ -123,10 +140,12 @@ pub(crate) fn select_public_job(
     })
 }
 
+#[cfg(feature = "console")]
 fn invalid() -> ToolError {
     ToolError::InvalidArguments { name: SETUP_PUBLIC_SERVICE_REQUEST.into(),
         reason: "Provide one exact reconciled public job, raw operations, intended consumer agent and explicit lifetime. Commands, credentials, accounts and authority are not accepted.".into() }
 }
+#[cfg(feature = "console")]
 fn parse(raw: &str) -> Result<PublicProposal, ToolError> {
     if raw.len() > 32 * 1024 {
         return Err(invalid());
@@ -158,6 +177,7 @@ fn parse(raw: &str) -> Result<PublicProposal, ToolError> {
     Ok(proposal)
 }
 
+#[cfg(feature = "console")]
 pub(super) async fn dispatch(
     owner: &RequestTool,
     call: ToolCallView<'_>,
@@ -334,6 +354,7 @@ pub fn installed_public_service_request_definition() -> ToolDef {
     )
 }
 
+#[cfg(feature = "console")]
 impl InstalledAccountRequests {
     /// Same enrollment, prompt transport and native entry custody as account
     /// requests, with no account state or callback work on this branch.
@@ -509,6 +530,7 @@ impl InstalledAccountRequests {
     }
 }
 
+#[cfg(feature = "console")]
 impl InstalledServiceReview {
     async fn review_public_with_task(
         &self,
@@ -621,6 +643,7 @@ impl InstalledServiceReview {
     }
 }
 
+#[cfg(feature = "console")]
 fn public_review_body(
     selected: &PublicServiceSelection,
     config: &McpServerConfig,
@@ -646,6 +669,7 @@ fn public_review_body(
     Ok(body)
 }
 
+#[cfg(feature = "console")]
 fn public_review_request(
     selected: &PublicServiceSelection,
     config: &McpServerConfig,
@@ -683,5 +707,5 @@ fn public_review_request(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "console"))]
 mod tests;

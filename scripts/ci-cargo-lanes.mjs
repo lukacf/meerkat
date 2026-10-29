@@ -420,6 +420,12 @@ export const FEATURE_UNIT_SUITES = [
   // Its rows carry Meta's test stack (ci/products.json).
   { package: "meerkat-meta", id: "openai-live", features: ["openai-live"] },
   { package: "meerkat-meta", id: "extension-state", features: ["extension-state", "announcement-test-faults", "console-test-faults"] },
+  // Connect (connect/): the Console code its default features compile out
+  // (the application gateway, the installed account, public service and
+  // credential requests and their presenters). meerkat-connect builds
+  // meerkat-mob through toolkit-mobkit's native host, so like its default
+  // unit lane this suite runs on the push only.
+  { package: "meerkat-connect", id: "console", features: ["console"] },
 ];
 
 // Integration-test suites. Every unit lane runs `--lib --bins`, so a crate's

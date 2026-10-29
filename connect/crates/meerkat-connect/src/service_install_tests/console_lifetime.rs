@@ -237,6 +237,7 @@ async fn exact_decision_refusal_does_not_record_or_wake_software_dispatch() {
     );
     assert_eq!(f.count(), 0);
     // No synthetic Human/task was supplied, so the Console entry API refuses.
+    #[cfg(feature = "console")]
     assert!(
         prompt
             .decide_console(ApprovalDecision::Approve, Arc::new(|| true))

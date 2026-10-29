@@ -175,7 +175,7 @@ pub struct ProtectedAccountCompletion {
 }
 
 impl InstalledServiceReview {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "console"))]
     pub(crate) fn fixture_checked(
         realm: RealmLocator,
         session: SessionId,
@@ -199,7 +199,7 @@ impl InstalledServiceReview {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "console"))]
     pub(crate) fn fixture_account_started(&self) -> bool {
         self.control.started().is_some()
     }

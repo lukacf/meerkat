@@ -2084,7 +2084,8 @@ only: no method loads, registers or wakes the session.
   omit them). Exactly one of `duration_ms` and `expires_at_ms` (UNIX ms)
   bounds the grant, at most the host's maximum lifetime (24 hours by default).
   A session still waiting for its deferred first turn is granted from its
-  staged build.
+  staged build. A gate no grant could honour fails the session's build, which
+  a deferred create reports at its first `turn/start`.
 - **`tool_grants/revoke`** ends a grant before its deadline. It is idempotent:
   revoking a grant that already ended answers it as it stands, and `changed`
   says whether this revoke ended it. A revoke at or after the deadline records
@@ -2097,7 +2098,13 @@ only: no method loads, registers or wakes the session.
   `expired` (with the `driver` that observed it: `timer`, `boundary`,
   `dispatch`, `read` or `revoke`), `revoked` and `refused` rows, in `sequence`
   order after `after_sequence`. `limit` defaults to 100 rows and caps at 1000;
-  a full page carries `next_sequence`, the next page's `after_sequence`.
+  a full page carries `next_sequence`, the next page's `after_sequence`. A row
+  this server cannot read is named in `unreadable` with its `sequence`, and the
+  rest of the page is served.
+
+List and audit read the session's grant rows without checking that the
+session exists: an archived session's grants stay listable and auditable, and
+a session id with no grants, or one no session has, answers empty.
 
 A grant's `status` is `active`, `expired` or `revoked`; `requested` and
 `declined` are reserved for grant requests. Every closed vocabulary (status,
@@ -2110,6 +2117,10 @@ session does not gate, family `names` in a request, and an unknown or
 malformed grant id; `SESSION_NOT_FOUND` for a grant to a session that does not
 exist or is archived; capability unavailable for an `identity` subject (this
 server grants to sessions only) or a store without grant support.
+
+The stock governed stdio pipe serves a fixed method set: it does not serve the
+`tool_grants/*` methods, and its `session/create` refuses `grant_gated_tools`
+as an unsupported parameter.
 
 <Warning>
 `rkat-rpc` does not authenticate the caller of these methods: a grant's issuer

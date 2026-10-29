@@ -139,7 +139,10 @@ them.
   or audit read settles due grants of any session without loading it. A grant
   row this binary cannot read (written by a newer binary, or damaged) admits
   nothing and blocks none of its subject's readable grants: a list reports it
-  (`ToolGrantListing::unreadable`), and a revoke of it is refused.
+  (`ToolGrantListing::unreadable`), and a revoke of it is refused. An audit
+  row this binary cannot read is reported in its page
+  (`ToolGrantAuditPage::unreadable`, logged) and the rest of the page is
+  served.
   `RuntimeStore` gains `load_tool_grant`, `list_tool_grants`,
   `put_tool_grant_if_absent`, `compare_and_put_tool_grant`,
   `append_tool_grant_audit` and `read_tool_grant_audit`, whose defaults answer
@@ -170,15 +173,19 @@ them.
   `changed`; a list settles due grants as expired first, lists ended grants
   only with `include_ended` and reports rows the server cannot read; an audit
   read pages by `sequence` (`after_sequence`, `limit` up to 1000,
-  `next_sequence`). An `identity` subject is refused as capability
-  unavailable. `meerkat-contracts` adds `GrantToolParams`, `GrantToolResult`,
-  `RevokeToolGrantParams`, `RevokeToolGrantResult`, `ListToolGrantsParams`,
-  `ListToolGrantsResult`, `ToolGrantAuditParams`, `ToolGrantAuditResult`,
-  `WireGrantGatedTools`, `WireToolGrant`, `WireToolGrantSubject`,
-  `WireToolGrantTarget`, `WireToolGrantIssuer`, `WireToolGrantStatus`,
-  `WireToolGrantAuditRow`, `WireToolGrantAuditEvent`,
-  `WireToolGrantExpiryDriver`, `WireToolGrantRefusalKind` and
-  `WireUnreadableToolGrant`; each closed vocabulary decodes a value a later
+  `next_sequence`) and names a row it cannot read in `unreadable`. List and
+  audit do not check that the session exists, so an archived session's grants
+  stay auditable. An `identity` subject is refused as capability unavailable,
+  and the stock governed stdio pipe serves neither these methods nor
+  `grant_gated_tools`. `meerkat-contracts` adds `GrantToolParams`,
+  `GrantToolResult`, `RevokeToolGrantParams`, `RevokeToolGrantResult`,
+  `ListToolGrantsParams`, `ListToolGrantsResult`, `ToolGrantAuditParams`,
+  `ToolGrantAuditResult`, `WireGrantGatedTools`, `WireToolGrant`,
+  `WireToolGrantSubject`, `WireToolGrantTarget`, `WireToolGrantIssuer`,
+  `WireToolGrantStatus`, `WireToolGrantAuditRow`, `WireToolGrantAuditEvent`,
+  `WireToolGrantExpiryDriver`, `WireToolGrantRefusalKind`,
+  `WireUnreadableToolGrant` and `WireUnreadableToolGrantAuditRow`; each closed
+  vocabulary decodes a value a later
   version adds as `unknown`. `meerkat-runtime` adds `tool_grant::wire`, the
   projection of grants, listings and audit rows onto them, and `meerkat`'s
   `StagedSessionRegistry` gains `grant_gated_tools`. Python (`grant_tool`,

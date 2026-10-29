@@ -284,7 +284,8 @@ confinement all still apply to every call it opens.
   by a gate; a gated one is refused at dispatch until a grant opens it. A
   grant row this binary cannot read (written by a newer binary, or damaged)
   opens nothing and blocks none of its subject's other grants; a list reports
-  it. A binary older than scoped tool grants does not know a session's gate:
+  it, and an audit read reports an audit row it cannot read and serves the
+  rest of the page. A binary older than scoped tool grants does not know a session's gate:
   it resumes a gated session with its gated tools ungated, so upgrade every
   host that serves gated sessions before relying on a gate.
 

@@ -19,6 +19,10 @@
 //!   Core builds the member, so its first turn offers them. A refused
 //!   preparation keeps the member Dormant and refuses the delivery
 //!   retryable with the host's reason; the next delivery tries again.
+//! - A governed input after a clean restart wakes its member the same way:
+//!   one `customize_build`, with the inputs of the member's last build before
+//!   the restart, and no `after_create`; the member's next turn calls the
+//!   tool through the handler that build registered.
 //! - A member Core builds before the composition (a start that restores
 //!   every member, or one whose run a kill left open) is held
 //!   (`HostRunStartHoldReason::ToolsNotPublished`) until the roster pass
@@ -53,12 +57,15 @@ use meerkat_client::{LlmError, LlmEvent, LlmRequest};
 use meerkat_core::types::{StopReason, ToolCallView, ToolDef};
 use meerkat_core::{AgentToolDispatcher, ToolDispatchOutcome, ToolError};
 use meerkat_meta::UnifiedRuntimeBuilder;
-use meerkat_meta::identity_first::contracts::{AgentCustomizer, RosterProvider};
+use meerkat_meta::identity_first::contracts::{AgentCustomizer, RosterProvider, TopologyProvider};
 use meerkat_meta::identity_first::{
-    AgentAddressability, AgentBuildContext, AgentBuildDraft, AgentIdentity, CustomizerError,
-    DurableAgentSpec, IdentityBootstrapMode, IdentityLifecycleState, IdentityRuntimeError,
-    IdentityStatus, LocalExternalToolOverlay, MemberRestore, RosterContext, RosterError,
+    AgentAddressability, AgentBuildContext, AgentBuildDraft, AgentIdentity, BoundGovernedInput,
+    CustomizerError, DurableAgentSpec, GovernedBindContext, GovernedInputBinder,
+    GovernedInputError, GovernedSettlement, IdentityBootstrapMode, IdentityLifecycleState,
+    IdentityRuntimeError, IdentityStatus, LocalExternalToolOverlay, ManagedPeerEdge, MemberRestore,
+    RosterContext, RosterError, TopologyContext, TopologyError,
 };
+use meerkat_meta::mob_handle_runtime::SessionCreatedContext;
 use meerkat_mob::{MobDefinition, ProfileName};
 use tokio::time::sleep;
 
@@ -2759,4 +2766,558 @@ async fn a_seated_member_core_cannot_wake_reads_broken_after_its_refused_wake() 
             .expect("run the step in a child process");
         assert!(child.success(), "the {step} step failed: {child}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// A governed input after a clean restart
+// ---------------------------------------------------------------------------
+
+/// The second roster identity of the governed-input row. The row's topology
+/// wires it to [`MEMBER`], so every build context carries a managed edge.
+const GOVERNED_PEER: &str = "personal:dana";
+/// The governed input the row sends after the restart.
+const GOVERNED_INPUT: &str = "the first governed input after the restart";
+/// What the row's binder answers every bind with.
+const BIND_REFUSED: &str = "the host binds nothing in this row";
+/// Work whose turn [`ToolTurnModel`] answers with one call of [`TOOL`].
+const TOOL_TURN: &str = "LOOKUP-THE-WORKSPACE-RECORD";
+/// The id of that call.
+const TOOL_TURN_CALL: &str = "call-lookup-the-workspace-record";
+
+/// The governed-input row's topology: one managed edge, [`MEMBER`] to
+/// [`GOVERNED_PEER`].
+struct PairTopology;
+
+#[async_trait]
+impl TopologyProvider for PairTopology {
+    async fn compute_edges(
+        &self,
+        _target_identities: &[AgentIdentity],
+        _context: &TopologyContext,
+    ) -> Result<Vec<ManagedPeerEdge>, TopologyError> {
+        Ok(vec![edge(MEMBER, GOVERNED_PEER)])
+    }
+}
+
+/// The managed edge between `a` and `b`.
+fn edge(a: &str, b: &str) -> ManagedPeerEdge {
+    ManagedPeerEdge::new(id(a), id(b)).expect("a managed edge")
+}
+
+/// A managed edge as [`BuildInputs`] holds one: its ends in canonical order.
+fn edge_ends(managed: &ManagedPeerEdge) -> (AgentIdentity, AgentIdentity) {
+    (managed.a().clone(), managed.b().clone())
+}
+
+/// What one `customize_build` was handed: its context (the managed edges
+/// as a set, and whether it carried the runtime's services), the roster row,
+/// and the base draft in its serialized form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuildInputs {
+    identity: AgentIdentity,
+    active_peers: Vec<AgentIdentity>,
+    managed_edges: BTreeSet<(AgentIdentity, AgentIdentity)>,
+    runtime_services: bool,
+    spec: DurableAgentSpec,
+    draft: serde_json::Value,
+}
+
+impl BuildInputs {
+    fn of(context: &AgentBuildContext, spec: &DurableAgentSpec, draft: &AgentBuildDraft) -> Self {
+        Self {
+            identity: context.identity.clone(),
+            active_peers: context.active_peers.clone(),
+            managed_edges: context.managed_edges.iter().map(edge_ends).collect(),
+            runtime_services: context.runtime_services.mob_handle().is_some(),
+            spec: spec.clone(),
+            draft: serde_json::to_value(draft).expect("the base draft serializes"),
+        }
+    }
+}
+
+/// One `customize_build`: what it was handed, and the tag of the [`TOOL`]
+/// handler it registered.
+#[derive(Debug, Clone)]
+struct BuildCall {
+    inputs: BuildInputs,
+    tag: String,
+}
+
+/// A host customizer that records every `customize_build` and counts every
+/// `after_create`. Each build registers its own [`TOOL`] handler, tagged
+/// `{boot}-{n}` for the customizer's `n`th build, and a handler that serves
+/// a call records its tag in `served`, which the row's boots share: a tool
+/// call names the build whose handler served it.
+struct RecordingCustomizer {
+    boot: &'static str,
+    builds: std::sync::Mutex<Vec<BuildCall>>,
+    after_creates: AtomicUsize,
+    served: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl RecordingCustomizer {
+    fn new(boot: &'static str, served: &Arc<std::sync::Mutex<Vec<String>>>) -> Self {
+        Self {
+            boot,
+            builds: std::sync::Mutex::new(Vec::new()),
+            after_creates: AtomicUsize::new(0),
+            served: Arc::clone(served),
+        }
+    }
+
+    fn builds(&self) -> Vec<BuildCall> {
+        self.builds.lock().unwrap().clone()
+    }
+
+    fn after_creates(&self) -> usize {
+        self.after_creates.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl AgentCustomizer for RecordingCustomizer {
+    async fn customize_build(
+        &self,
+        context: &AgentBuildContext,
+        spec: &DurableAgentSpec,
+        draft: &mut AgentBuildDraft,
+    ) -> Result<(), CustomizerError> {
+        let inputs = BuildInputs::of(context, spec, draft);
+        let tag = {
+            let mut builds = self.builds.lock().unwrap();
+            let tag = format!("{}-{}", self.boot, builds.len() + 1);
+            builds.push(BuildCall {
+                inputs,
+                tag: tag.clone(),
+            });
+            tag
+        };
+        draft.local_external_tools = LocalExternalToolOverlay::new(Arc::new(TaggedTools {
+            tag,
+            served: Arc::clone(&self.served),
+        }));
+        Ok(())
+    }
+
+    async fn after_create(
+        &self,
+        _identity: &AgentIdentity,
+        _session_id: &meerkat_core::types::SessionId,
+        _context: &SessionCreatedContext,
+    ) -> Result<(), CustomizerError> {
+        self.after_creates.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// [`TOOL`] as one build registered it: its handler records the build's tag
+/// in `served` when it serves a call, and answers with the tag.
+struct TaggedTools {
+    tag: String,
+    served: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl AgentToolDispatcher for TaggedTools {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        HostTools.tools()
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        self.served.lock().unwrap().push(self.tag.clone());
+        Ok(meerkat_core::ToolResult {
+            host_metadata: Default::default(),
+            tool_use_id: call.id.to_string(),
+            content: vec![meerkat_core::ContentBlock::Text {
+                text: self.tag.clone(),
+            }],
+            is_error: false,
+            settlement_failures: Vec::new(),
+        }
+        .into())
+    }
+}
+
+/// The controller [`ToolTurnModel`] reports, as a governed member's
+/// selection owner does: a composition that pins the member's controller
+/// can then bind an input for it.
+fn tool_turn_controller() -> meerkat_core::ControllerModelSelection {
+    meerkat_core::ControllerModelSelection::new(
+        meerkat_core::SessionLlmIdentity {
+            model: "gpt-5.5".into(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        },
+        serde_json::from_value(
+            serde_json::json!({"realm": "customizer-restart", "account": "tool-turn-controller"}),
+        )
+        .expect("nonsecret identity of the fixture transport"),
+        "tool-turn-profile".into(),
+        "tool-turn-transport".into(),
+    )
+}
+
+/// The model of the governed-input row. It records every request. A request
+/// whose work carries [`TOOL_TURN`] and holds no tool result yet is answered
+/// with one call of [`TOOL`]; every other request is answered with text.
+#[derive(Clone, Default)]
+struct ToolTurnModel {
+    requests: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ToolTurnModel {
+    fn count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+    fn requests(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl meerkat_client::LlmClient for ToolTurnModel {
+    fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
+        Some(tool_turn_controller())
+    }
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+    fn stream<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+        let rendered = serde_json::to_string(request).unwrap_or_default();
+        self.requests.lock().unwrap().push(rendered.clone());
+        let answered = request
+            .messages
+            .iter()
+            .any(|message| matches!(message, meerkat_core::Message::ToolResults { .. }));
+        let call_tool = rendered.contains(TOOL_TURN) && !answered;
+        let [usage, done] = llm_usage::usage_then_done(
+            request,
+            meerkat::Provider::OpenAI,
+            if call_tool {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            },
+        );
+        Box::pin(async_stream::stream! {
+            if call_tool {
+                yield Ok(LlmEvent::ToolCallComplete {
+                    id: TOOL_TURN_CALL.to_string(),
+                    name: TOOL.to_string(),
+                    args: serde_json::json!({}),
+                    meta: None,
+                });
+            } else {
+                yield Ok(LlmEvent::TextDelta { delta: "ok".to_string(), meta: None });
+            }
+            yield Ok(usage);
+            yield Ok(done);
+        })
+    }
+    fn provider(&self) -> meerkat::Provider {
+        meerkat::Provider::OpenAI
+    }
+    fn health_check<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), LlmError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// The trusted host's binder of the governed-input row. It binds nothing: at
+/// each bind it records how many builds the host's customizer has prepared
+/// in this process, and refuses, so nothing is submitted.
+struct RefusingBinder {
+    customizer: Arc<RecordingCustomizer>,
+    builds_at_bind: std::sync::Mutex<Vec<usize>>,
+}
+
+impl RefusingBinder {
+    fn new(customizer: Arc<RecordingCustomizer>) -> Self {
+        Self {
+            customizer,
+            builds_at_bind: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn builds_at_bind(&self) -> Vec<usize> {
+        self.builds_at_bind.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl GovernedInputBinder for RefusingBinder {
+    async fn bind(
+        &self,
+        _context: &GovernedBindContext,
+        _input: meerkat_runtime::Input,
+    ) -> Result<BoundGovernedInput, String> {
+        let builds = self.customizer.builds().len();
+        self.builds_at_bind.lock().unwrap().push(builds);
+        Err(BIND_REFUSED.to_string())
+    }
+
+    fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {
+        panic!("nothing is submitted, so no admission is left unresolved");
+    }
+}
+
+/// A boot of the governed-input row over `state`: the roster lists
+/// [`MEMBER`] and [`GOVERNED_PEER`], [`PairTopology`] wires them, and the
+/// host builds with `customizer`.
+async fn boot_governed(
+    mob_id: &str,
+    state: &Path,
+    model: ToolTurnModel,
+    customizer: Arc<RecordingCustomizer>,
+) -> meerkat_meta::UnifiedRuntime {
+    Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(
+                MobDefinition::from_toml(&MOB_TOML.replace("{MOB_ID}", mob_id))
+                    .expect("definition"),
+            )
+            .persistent_state(state)
+            .continuity_from_state_dir(state)
+            .await
+            .expect("open the state-dir identity substrate")
+            .roster_provider(Arc::new(ListedRoster(&[MEMBER, GOVERNED_PEER])))
+            .topology_provider(Arc::new(PairTopology))
+            .agent_customizer(customizer)
+            .identity_bootstrap_mode(IdentityBootstrapMode::EagerMaterialize)
+            .identity_runtime_instance_id(mob_id)
+            .comms(true)
+            .default_llm_client(Arc::new(model))
+            .build(),
+    )
+    .await
+    .expect("build the governed-input row's runtime")
+}
+
+/// Wait (bounded) until `ready` holds.
+async fn wait_until(what: &str, ready: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ready() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The lazy restore contract of Meta 0.9.6, for a governed input. Meta
+/// 0.9.5 ran `customize_build` for every roster identity at a restart,
+/// before the mob was restored, built every member at start, and called
+/// `after_create` after every build, wakes included. Since 0.9.6 a governed
+/// input after a clean restart wakes its member the way an ordinary
+/// delivery does
+/// ([`a_clean_restart_builds_no_member_and_answers_resolved_tools_from_its_record`]):
+///
+/// - before any input the restart has called `customize_build` for no
+///   identity, the member reads active and is not materialized, and
+///   `meta/identity/resolved_tools` answers its last build from the record
+///   (`tools_source` `recorded`);
+/// - the governed input's wake prepares the member's build with exactly one
+///   `customize_build`, whose inputs equal those of the member's last build
+///   before the restart: the identity, every roster identity as
+///   `active_peers`, the managed edges compared as a set, the runtime's
+///   services, the roster row and the base draft. An in-process customizer
+///   is handed no scope id: the publication of its build is the scope;
+/// - the member is built once, on the session and generation it had, and
+///   the restored process calls no `after_create`;
+/// - `resolved_tools` then answers `live`, and the member's next turn calls
+///   the tool through the handler that one `customize_build` registered,
+///   never through one an earlier build registered.
+///
+/// The governed input itself is refused before anything is submitted, so
+/// the tool call is the next ordinary turn's. Native admission takes only a
+/// bound input (an authority association and an ingress context) on a
+/// member whose runtime machine carries the host's native grant work
+/// configuration, and the one fixture that admits one
+/// (`support/governed_mob.rs`) is an in-memory mob spawned live, with no
+/// roster, customizer, build preparer or restart. The library builder gives
+/// its identity bridge no controller pin source either (the stock gateways
+/// give theirs one), so the send is refused typed after Core's wake and
+/// before the host's bind. With a pinned controller the bind is reached,
+/// after the wake's one build, and this row's binder refuses it.
+///
+/// RED on Meta 0.9.5 behaviour (by reasoning; not run there): no
+/// `customize_build` and no materialized member before the input (the
+/// restart made one call per roster identity and built every member),
+/// `tools_source` `recorded` and `live` (the field is new in 0.9.6), exactly
+/// one `customize_build` for the governed input (its member was already
+/// built, so the wake made none), and no `after_create` in the restored
+/// process. The status, the session and generation, and the tool routing
+/// would hold on both.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_governed_input_after_a_clean_restart_makes_one_customize_build_and_no_after_create() {
+    const MOB_ID: &str = "customizer-tools-restart-q";
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let served = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    // The first boot seats both identities, wires them, and builds the
+    // member with one ordinary delivery.
+    let (first_status, first_tools, first_build) = {
+        let model = ToolTurnModel::default();
+        let customizer = Arc::new(RecordingCustomizer::new("first-boot", &served));
+        let runtime = boot_governed(MOB_ID, &state, model.clone(), customizer.clone()).await;
+        send_member(&runtime, "hello")
+            .await
+            .expect("send boot-1 turn");
+        wait_until("boot 1's turn", || model.count() >= 1).await;
+        let requests = model.requests();
+        let request = requests.first().expect("boot 1's request");
+        assert!(offers_tool(request), "the build offers the customizer tool");
+        let answer = resolved_tools_answer(&runtime).await;
+        assert_eq!(answer["tools_source"], "live", "{answer}");
+        let tools = answered_tools(&answer);
+        assert!(tools.contains(&TOOL.to_string()), "{answer}");
+        let status = member_status(&runtime).await;
+        // The seats' after_create shows the hook is called at all, so the
+        // restored process's zero below is not vacuous.
+        wait_until("the seats' after_create", || customizer.after_creates() > 0).await;
+        let builds = customizer.builds();
+        let build = builds
+            .iter()
+            .rfind(|call| call.inputs.identity == id(MEMBER))
+            .expect("the member's build was prepared")
+            .inputs
+            .clone();
+        assert!(
+            build
+                .managed_edges
+                .contains(&edge_ends(&edge(MEMBER, GOVERNED_PEER))),
+            "the member's build context carries its managed edge: {build:?}"
+        );
+        // The build's report is written off Core's actor once the member is
+        // live.
+        sleep(Duration::from_millis(500)).await;
+        runtime.shutdown().await;
+        (status, tools, build)
+    };
+    assert!(
+        served.lock().unwrap().is_empty(),
+        "the first boot calls no tool"
+    );
+
+    // The clean restart builds nothing and calls the host for no identity.
+    let model = ToolTurnModel::default();
+    let customizer = Arc::new(RecordingCustomizer::new("restored", &served));
+    let runtime = boot_governed(MOB_ID, &state, model.clone(), customizer.clone()).await;
+    assert!(
+        customizer.builds().is_empty(),
+        "the restart builds no member, so it calls customize_build for none: {:?}",
+        customizer.builds()
+    );
+    let status = member_status(&runtime).await;
+    assert_eq!(status.state, IdentityLifecycleState::Active, "{status:?}");
+    assert!(status.customizer_tools_pending.is_none(), "{status:?}");
+    assert_eq!(
+        member_run_starts_held(&runtime).await,
+        None,
+        "no member is materialized"
+    );
+    let first_session = first_status
+        .session_id
+        .as_ref()
+        .expect("the first boot's member has a session")
+        .to_string();
+    let answer = resolved_tools_answer(&runtime).await;
+    assert_eq!(answer["tools_source"], "recorded", "{answer}");
+    assert_eq!(answer["session_id"], first_session.as_str(), "{answer}");
+    assert_eq!(answered_tools(&answer), first_tools, "{answer}");
+    assert_eq!(model.count(), 0, "nothing ran");
+
+    // The first governed input: Core wakes the member for it before its
+    // bind, and nothing is submitted.
+    let binder = Arc::new(RefusingBinder::new(Arc::clone(&customizer)));
+    let sent = runtime
+        .identity_runtime()
+        .expect("identity runtime")
+        .send_governed_with_turn_ticket(
+            &id(MEMBER),
+            None,
+            meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(GOVERNED_INPUT, None)),
+            binder.clone(),
+        )
+        .await;
+    match &sent {
+        // The library builder's identity bridge has no controller pin source:
+        // the send is refused typed after Core's wake, before the host's bind.
+        Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Unsupported(reason)))
+            if reason.contains("controller pin source") =>
+        {
+            assert!(binder.builds_at_bind().is_empty(), "{sent:?}");
+        }
+        // A composition that pins the controller reaches the bind, which
+        // this binder refuses: the wake's one build came before it.
+        Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(reason)))
+            if reason.as_str() == BIND_REFUSED =>
+        {
+            assert_eq!(binder.builds_at_bind(), [1], "{sent:?}");
+        }
+        other => panic!("the governed input is refused before anything is submitted: {other:?}"),
+    }
+    assert_eq!(model.count(), 0, "nothing was submitted, so nothing ran");
+
+    // Exactly one customize_build, made by the governed input's wake, with
+    // the inputs of the member's last build before the restart.
+    let builds = customizer.builds();
+    let [woken] = builds.as_slice() else {
+        panic!("the wake prepares the member's build exactly once, inline: {builds:?}");
+    };
+    assert_eq!(
+        woken.inputs, first_build,
+        "the wake's customize_build has the member's context, roster row and base draft"
+    );
+
+    // The member was built once, on the session and generation it had.
+    assert_eq!(
+        member_run_starts_held(&runtime).await,
+        Some(false),
+        "the governed input's wake built the member, unheld"
+    );
+    let status = member_status(&runtime).await;
+    assert_eq!(status.session_id, first_status.session_id, "{status:?}");
+    assert_eq!(status.generation, first_status.generation, "{status:?}");
+    let answer = resolved_tools_answer(&runtime).await;
+    assert_eq!(answer["tools_source"], "live", "{answer}");
+    assert_eq!(answered_tools(&answer), first_tools, "{answer}");
+
+    // The member's next turn calls the tool through the handler the wake's
+    // customize_build registered.
+    send_member(&runtime, TOOL_TURN)
+        .await
+        .expect("send the tool turn");
+    wait_until("the tool call", || !served.lock().unwrap().is_empty()).await;
+    wait_until("the turn after the tool call", || model.count() >= 2).await;
+    let requests = model.requests();
+    let request = requests.first().expect("the tool turn's request");
+    assert!(offers_tool(request), "the turn offers the customizer tool");
+    assert_eq!(
+        *served.lock().unwrap(),
+        [woken.tag.clone()],
+        "the call reaches the handler of the wake's customize_build, never an earlier build's"
+    );
+    assert_eq!(
+        customizer.builds().len(),
+        1,
+        "the live member's turn prepares no other build"
+    );
+    assert_eq!(
+        customizer.after_creates(),
+        0,
+        "the restored process calls no after_create: a wake's build never calls it"
+    );
+    runtime.shutdown().await;
 }

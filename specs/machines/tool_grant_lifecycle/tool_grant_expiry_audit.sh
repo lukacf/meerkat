@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Bounded TLC audit of scoped tool grant expiry over the generated
 # ToolGrantLifecycleMachine model: the deadline timer, the model-request
-# boundary that shows a gated name, the dispatch gate's fresh admission,
-# revocation, reads that settle a due grant without loading the session,
-# crash and restart, and one bounded host clock rollback.
+# boundary that shows a gated name, the dispatch gate's fresh admission and
+# the expiry write it makes after a refusal (or loses), revocation, reads
+# that settle a due grant without loading the session, crash and restart,
+# and one bounded host clock rollback.
 #
 # usage: tool_grant_expiry_audit.sh <max-steps> [--mutants] [extra tlc args...]
 #
@@ -16,7 +17,8 @@
 # report exactly that violation, so no property holds vacuously:
 #   - the deadline timer observes the expiry (ExpiredByTimer);
 #   - a boundary before the deadline showed the name, and the racing call
-#     adjudicated at the deadline is refused (ExpiredAtDispatch);
+#     adjudicated at the deadline is refused and its expiry written
+#     (ExpiredAtDispatch);
 #   - the deadline passes while the process is down, and a read settles it
 #     (ExpiredWhileDownSettledOnRead);
 #   - a call one millisecond before the deadline is handed on
@@ -24,7 +26,10 @@
 #   - after the expiry the clock rolls back before the deadline, and a call
 #     there is still refused (RollbackAfterExpiryStillRefused);
 #   - a revoked grant refuses a call (RevokedThenRefused);
-#   - a revoke at the deadline records expiry (RevokeAfterDeadlineRecordsExpiry).
+#   - a revoke at the deadline records expiry (RevokeAfterDeadlineRecordsExpiry);
+#   - a dispatch refuses a call at the deadline and loses its expiry write,
+#     and after a clock rollback a call before the deadline is handed on
+#     (UnpersistedRefusalThenAdmitted).
 # With --mutants it seeds six defects and requires TLC to refuse each with
 # the property it targets. TLC reports only the first violated invariant of a
 # state, and one defect can break different properties in different states
@@ -198,7 +203,7 @@ fi
 
 for witness in ExpiredByTimer ExpiredAtDispatch ExpiredWhileDownSettledOnRead \
   AdmittedOneTickBeforeDeadline RollbackAfterExpiryStillRefused RevokedThenRefused \
-  RevokeAfterDeadlineRecordsExpiry; do
+  RevokeAfterDeadlineRecordsExpiry UnpersistedRefusalThenAdmitted; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" none "" "
   NotAuditWitness${witness}"

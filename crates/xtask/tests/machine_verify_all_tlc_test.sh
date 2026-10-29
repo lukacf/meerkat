@@ -484,16 +484,17 @@ fi
 
 # Scoped tool grant expiry (the ToolGrantLifecycleMachine deadline guards,
 # the deadline timer, the boundary that shows a gated name, the dispatch
-# gate's fresh admission, revocation, reads that settle a due grant without
-# loading the session, crash, restart and one bounded clock rollback) spans
-# the shell's use of the machine, which the machine's own ci sweep cannot
-# see. A hand-written audit over the same generated model drives one grant
-# with deadline 2 on a clock in 0..3, under every generated invariant plus
-# five invariants and one action property (no call handed on at or after the
-# deadline or after the grant ended; an ended grant is latched across crash,
+# gate's fresh admission and the expiry write it makes after a refusal or
+# loses, revocation, reads that settle a due grant without loading the
+# session, crash, restart and one bounded clock rollback) spans the shell's
+# use of the machine, which the machine's own ci sweep cannot see. A
+# hand-written audit over the same generated model drives one grant with
+# deadline 2 on a clock in 0..3, under every generated invariant plus five
+# invariants and one action property (no call handed on at or after the
+# deadline or after the grant ended; a persisted end is latched across crash,
 # restart and rollback; expiry is never early; revocation precedes the
 # deadline; a visible name was shown before the deadline). It requires its
-# seven witnesses reached and refuses six seeded defects (--mutants): an
+# eight witnesses reached and refuses six seeded defects (--mutants): an
 # early expiry guard, an inclusive admission guard, a dispatch that reuses
 # the boundary's verdict, a restart that revives an ended grant, a revoked
 # grant handed on, and a boundary that trusts the stored phase. 6 steps reach

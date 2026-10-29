@@ -8,18 +8,26 @@
 \* read, a revoke, a deadline timer fire) rebuilds the machine from the row
 \* and applies one generated input at the host clock it reads. A crash
 \* therefore loses only process-local state: the session's projection of the
-\* gated name (visible, visible_at) and the armed deadline timer.
+\* gated name (visible, visible_at), the armed deadline timer, and any expiry
+\* a dispatch decided but has not written yet.
+\*
+\* Adjudication is linearized at the row read: a boundary or a dispatch reads
+\* the row and decides at one clock reading in a single step, as the service
+\* reads the clock right after its row read and awaits nothing between that
+\* reading and the hand-off.
 \*
 \* Explored, at every interleaving: issuing the grant from any process;
 \* the host clock advancing one millisecond at a time and rolling back once
 \* (the clock is host-trusted, not rollback-resistant); the served session's
 \* deadline timer firing early or due (Expire); the boundary applying
-\* AdmitUse and showing the name only on admission; a gated dispatch
-\* applying its own fresh AdmitUse right before the hand-off, so the
-\* admission time is the hand-off time; an operator revoke from any
-\* process; a read from any process settling a due grant (Expire) without
-\* loading the session; and the serving process crashing and restarting,
-\* the restored gate starting closed.
+\* AdmitUse, writing any expiry it observes before it decides, and showing
+\* the name only on admission; a gated dispatch deciding from its own fresh
+\* AdmitUse right before the hand-off, so the admission time is the hand-off
+\* time, and writing an expiry it observed only after it refused the call,
+\* in a separate step that can fail or be lost to a crash; an operator
+\* revoke from any process; a read from any process settling a due grant
+\* (Expire) without loading the session; and the serving process crashing
+\* and restarting, the restored gate starting closed.
 \*
 \* Properties:
 \*
@@ -28,7 +36,10 @@
 \*   AuditTerminalNeverAdmits: no gated call is handed on once the grant
 \*     expired or was revoked.
 \*   AuditTerminalLatched (action property): an expired or revoked grant
-\*     never changes again, across crash, restart and clock rollback.
+\*     never changes again, across crash, restart and clock rollback. It
+\*     covers persisted ends only: an expiry a dispatch decided but has not
+\*     written (or whose write was lost) is not an end of the row, and a call
+\*     after a rollback before the deadline may still be admitted then.
 \*   AuditExpiryNotEarly: an expired grant was observed at or after its
 \*     deadline.
 \*   AuditRevokedBeforeDeadline: a revoked grant ended before its deadline.
@@ -72,13 +83,19 @@ VARIABLES
     \* on after the grant ended, and whether the clock rolled back after it
     \* ended.
     admissions, refused_before_deadline, last_dispatch, expired_by, down_at_deadline,
-    admitted_after_end, rolled_back_after_end
+    admitted_after_end, rolled_back_after_end,
+    \* Process-local: the clock readings at which a dispatch refused a call
+    \* as expired and has not written that expiry yet. History: whether such
+    \* a write was lost, and whether a call was handed on after one was.
+    pending_writes, write_lost, admitted_after_lost_write
 
 audit_vars == << clock, rollback_used, up, visible, visible_at, timer, admissions,
                  refused_before_deadline, last_dispatch, expired_by, down_at_deadline,
                  admitted_after_end, rolled_back_after_end >>
 
-all_vars == << vars, audit_vars >>
+write_vars == << pending_writes, write_lost, admitted_after_lost_write >>
+
+all_vars == << vars, audit_vars, write_vars >>
 
 \* The grant ended. Expired and Revoked are terminal.
 Ended == phase = "Expired" \/ phase = "Revoked"
@@ -98,6 +115,9 @@ AuditInit ==
     /\ down_at_deadline = FALSE
     /\ admitted_after_end = FALSE
     /\ rolled_back_after_end = FALSE
+    /\ pending_writes = {}
+    /\ write_lost = FALSE
+    /\ admitted_after_lost_write = FALSE
 
 \* An operator issues the grant from any process; a past or empty window is
 \* refused. A served session's deadline timer is armed by the grant.
@@ -108,6 +128,7 @@ AuditIssue ==
     /\ UNCHANGED << clock, rollback_used, up, visible, visible_at, admissions,
                     refused_before_deadline, last_dispatch, expired_by, down_at_deadline,
                     admitted_after_end, rolled_back_after_end >>
+    /\ UNCHANGED write_vars
 
 \* The host clock advances one millisecond.
 AuditTick ==
@@ -118,6 +139,7 @@ AuditTick ==
     /\ UNCHANGED << rollback_used, up, visible, visible_at, timer, admissions,
                     refused_before_deadline, last_dispatch, expired_by, admitted_after_end,
                     rolled_back_after_end >>
+    /\ UNCHANGED write_vars
 
 \* One bounded rollback of the host clock.
 AuditRollback ==
@@ -129,6 +151,7 @@ AuditRollback ==
     /\ UNCHANGED vars
     /\ UNCHANGED << up, visible, visible_at, timer, admissions, refused_before_deadline,
                     last_dispatch, expired_by, down_at_deadline, admitted_after_end >>
+    /\ UNCHANGED write_vars
 
 \* The served session's deadline timer fires, early or due, and applies
 \* Expire at the current clock. An early fire changes nothing and re-arms.
@@ -148,10 +171,13 @@ AuditTimerFire ==
     /\ UNCHANGED << clock, rollback_used, up, visible, visible_at, admissions,
                     refused_before_deadline, last_dispatch, down_at_deadline,
                     admitted_after_end, rolled_back_after_end >>
+    /\ UNCHANGED write_vars
 
 \* The model-request boundary: the service applies AdmitUse at the current
-\* clock, and the session shows the gated name only on UseAdmitted. Every
-\* boundary arms the timer while the grant is live.
+\* clock, writes any expiry it observes before it decides (a failed write
+\* closes the gate, as a refusal does), and the session shows the gated name
+\* only on UseAdmitted. Every boundary arms the timer while the grant is
+\* live.
 AuditBoundary ==
     /\ up
     /\ IF AuditMutant = "boundary_trusts_durable_phase"
@@ -180,44 +206,76 @@ AuditBoundary ==
     /\ UNCHANGED << clock, rollback_used, up, admissions, refused_before_deadline,
                     last_dispatch, down_at_deadline, admitted_after_end,
                     rolled_back_after_end >>
+    /\ UNCHANGED write_vars
 
 \* The gated call is handed on at the current clock.
 Admit ==
     /\ admissions' = admissions \cup {clock}
     /\ last_dispatch' = "admitted"
     /\ admitted_after_end' = (admitted_after_end \/ Ended)
+    /\ admitted_after_lost_write' = (admitted_after_lost_write \/ write_lost)
     /\ UNCHANGED refused_before_deadline
 
 \* The gated call is refused at the current clock.
 Refuse ==
     /\ refused_before_deadline' = (refused_before_deadline \/ clock < AuditDeadline)
     /\ last_dispatch' = "refused"
-    /\ UNCHANGED << admissions, admitted_after_end >>
+    /\ UNCHANGED << admissions, admitted_after_end, admitted_after_lost_write >>
 
-\* A gated call: the dispatcher applies its own AdmitUse at the current clock
-\* after every other await of its entry, and hands the call on only on
-\* UseAdmitted. Nothing awaits between the comparison and the hand-off.
+\* A gated call: the dispatcher decides from its own AdmitUse at the current
+\* clock after every other await of its entry, and hands the call on only on
+\* UseAdmitted. Nothing awaits between the comparison and the hand-off. A
+\* call the reading finds at or past the deadline is refused before anything
+\* is written: the expiry write follows (AuditDispatchWrite) or is lost.
 AuditDispatch ==
     /\ up
     /\ IF AuditMutant = "dispatch_reuses_boundary_verdict"
        THEN /\ visible
             /\ UNCHANGED vars
             /\ Admit
-            /\ UNCHANGED expired_by
+            /\ UNCHANGED << expired_by, pending_writes >>
        ELSE \/ /\ AdmitLive(clock)
                /\ Admit
-               /\ UNCHANGED expired_by
-            \/ /\ AdmitDue(clock)
+               /\ UNCHANGED << expired_by, pending_writes >>
+            \/ /\ ENABLED AdmitDue(clock)
+               /\ UNCHANGED vars
                /\ Refuse
-               /\ expired_by' = "dispatch"
+               /\ pending_writes' = pending_writes \cup {clock}
+               /\ UNCHANGED expired_by
             \/ /\ AdmitEndedExpired(clock)
                /\ Refuse
-               /\ UNCHANGED expired_by
+               /\ UNCHANGED << expired_by, pending_writes >>
             \/ /\ AdmitEndedRevoked(clock)
                /\ IF AuditMutant = "revoked_admits" THEN Admit ELSE Refuse
-               /\ UNCHANGED expired_by
+               /\ UNCHANGED << expired_by, pending_writes >>
     /\ UNCHANGED << clock, rollback_used, up, visible, visible_at, timer, down_at_deadline,
-                    rolled_back_after_end >>
+                    rolled_back_after_end, write_lost >>
+
+\* The dispatch writes an expiry it decided, at the reading it decided at,
+\* to the row as it now stands: the write reloads a row another actor
+\* changed meanwhile and applies AdmitUse once more, which leaves an ended
+\* row as it is.
+AuditDispatchWrite ==
+    /\ up
+    /\ \E t \in pending_writes :
+        /\ pending_writes' = pending_writes \ {t}
+        /\ \/ /\ AdmitDue(t)
+              /\ expired_by' = "dispatch"
+           \/ /\ (AdmitEndedExpired(t) \/ AdmitEndedRevoked(t))
+              /\ UNCHANGED expired_by
+    /\ UNCHANGED << clock, rollback_used, up, visible, visible_at, timer, admissions,
+                    refused_before_deadline, last_dispatch, down_at_deadline,
+                    admitted_after_end, rolled_back_after_end, write_lost,
+                    admitted_after_lost_write >>
+
+\* A decided expiry write fails: the refusal stands and the row stays as it
+\* was, so the grant is not ended until another actor observes the expiry.
+AuditDispatchWriteLost ==
+    /\ \E t \in pending_writes : pending_writes' = pending_writes \ {t}
+    /\ write_lost' = TRUE
+    /\ UNCHANGED vars
+    /\ UNCHANGED audit_vars
+    /\ UNCHANGED admitted_after_lost_write
 
 \* An operator revokes the grant from any process. A revoke at or after the
 \* deadline records the expiry instead.
@@ -231,6 +289,7 @@ AuditRevoke ==
     /\ UNCHANGED << clock, rollback_used, up, visible, visible_at, timer, admissions,
                     refused_before_deadline, last_dispatch, down_at_deadline,
                     admitted_after_end, rolled_back_after_end >>
+    /\ UNCHANGED write_vars
 
 \* A list or audit read from any process settles a due grant with Expire. It
 \* touches only the grant row: it neither loads nor wakes the session.
@@ -242,19 +301,23 @@ AuditRead ==
     /\ UNCHANGED << clock, rollback_used, up, visible, visible_at, timer, admissions,
                     refused_before_deadline, last_dispatch, down_at_deadline,
                     admitted_after_end, rolled_back_after_end >>
+    /\ UNCHANGED write_vars
 
-\* The serving process dies. The durable row survives; the projection and
-\* the armed timer are process-local and are lost.
+\* The serving process dies. The durable row survives; the projection, the
+\* armed timer and any expiry a dispatch decided but has not written are
+\* process-local and are lost.
 AuditCrash ==
     /\ up
     /\ up' = FALSE
     /\ visible' = FALSE
     /\ visible_at' = 0
     /\ timer' = FALSE
+    /\ pending_writes' = {}
+    /\ write_lost' = (write_lost \/ pending_writes # {})
     /\ UNCHANGED vars
     /\ UNCHANGED << clock, rollback_used, admissions, refused_before_deadline,
                     last_dispatch, expired_by, down_at_deadline, admitted_after_end,
-                    rolled_back_after_end >>
+                    rolled_back_after_end, admitted_after_lost_write >>
 
 \* A new process serves the session. Every build clears the open names it
 \* restores, so the gate restores closed; nothing settles the row until the
@@ -274,6 +337,7 @@ AuditRestart ==
     /\ UNCHANGED << clock, rollback_used, admissions, refused_before_deadline,
                     last_dispatch, expired_by, down_at_deadline, admitted_after_end,
                     rolled_back_after_end >>
+    /\ UNCHANGED write_vars
 
 AuditNext ==
     \/ AuditIssue
@@ -282,6 +346,8 @@ AuditNext ==
     \/ AuditTimerFire
     \/ AuditBoundary
     \/ AuditDispatch
+    \/ AuditDispatchWrite
+    \/ AuditDispatchWriteLost
     \/ AuditRevoke
     \/ AuditRead
     \/ AuditCrash
@@ -316,7 +382,7 @@ AuditVisibleOnlyWhileLive == visible => visible_at < AuditDeadline
 NotAuditWitnessExpiredByTimer == ~(expired_by = "timer")
 
 \* A boundary before the deadline showed the name, and the racing call
-\* adjudicated at the deadline expired the grant and was refused.
+\* adjudicated at the deadline was refused and its expiry written.
 NotAuditWitnessExpiredAtDispatch ==
     ~(expired_by = "dispatch" /\ last_dispatch = "refused" /\ visible)
 
@@ -340,4 +406,9 @@ NotAuditWitnessRevokedThenRefused ==
 \* A revoke at the deadline recorded expiry, not revocation.
 NotAuditWitnessRevokeAfterDeadlineRecordsExpiry == ~(expired_by = "revoke")
 
+\* A dispatch refused a call at the deadline and its expiry write was lost,
+\* so the row never ended; after the clock rolled back before the deadline,
+\* a call was handed on. It was handed on before the deadline, so every
+\* safety property still holds.
+NotAuditWitnessUnpersistedRefusalThenAdmitted == ~admitted_after_lost_write
 ====

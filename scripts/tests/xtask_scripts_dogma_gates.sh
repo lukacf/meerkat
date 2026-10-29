@@ -386,7 +386,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # actions (of module entered_step_audit) generated a state, its three
 # witnesses violated, and with --mutants each seeded defect's invariant or
 # property violated.
-# tool_grant_expiry_audit.sh (tool_grant_lifecycle) requires its seven
+# tool_grant_expiry_audit.sh (tool_grant_lifecycle) requires its eight
 # witnesses violated, and with --mutants each seeded defect's invariant or
 # action property violated.
 printf '%s\n' \
@@ -639,6 +639,7 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessRollbackAfterExpiryStillRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessRevokedThenRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessRevokeAfterDeadlineRecordsExpiry is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUnpersistedRefusalThenAdmitted is violated."' \
   'echo "Error: Invariant AuditExpiryNotEarly is violated."' \
   'echo "Error: Invariant AuditNoAdmitAtOrAfterDeadline is violated."' \
   'echo "Error: Action property AuditTerminalLatched is violated."' \

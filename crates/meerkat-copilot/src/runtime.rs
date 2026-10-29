@@ -6020,6 +6020,176 @@ mod tests {
                 "{refused}"
             );
         }
+
+        // Live probe rows P2-P5 of the operator-token design: real GitHub and
+        // Copilot HTTP, ignored in every lane, run by hand before a release
+        // with the token each row names. For example, P3 with the GitHub CLI
+        // login of an account that has a Copilot seat:
+        //
+        //   COPILOT_LIVE_USER_TOKEN="$(gh auth token)" ./scripts/repo-cargo test \
+        //     -p meerkat-copilot --lib live_operator_ -- --ignored --nocapture
+        //
+        // A row whose variable is unset fails. P1, one turn on each route, is
+        // `copilot_live_operator_token_routes` in the `copilot_live_e2e`
+        // integration suite.
+
+        fn live_token(name: &str) -> String {
+            std::env::var(name)
+                .ok()
+                .filter(|token| !token.trim().is_empty())
+                .unwrap_or_else(|| panic!("{name} is required for this live probe"))
+        }
+
+        /// Resolve the OpenAI route of a live token over real HTTP.
+        async fn resolve_live(
+            operator: &OperatorEnv,
+            token: &str,
+        ) -> Result<CopilotResolvedAuth, ProviderAuthError> {
+            operator.set("COPILOT_GITHUB_TOKEN", token);
+            CopilotRuntime::new()
+                .resolve(
+                    &token_binding(CopilotProviderRoute::OpenAi, env_source()),
+                    &operator.env,
+                )
+                .await
+        }
+
+        /// Live probe P2 and P3: a user token of an account with a Copilot
+        /// seat (P2: a fine-grained personal access token with Copilot
+        /// Requests, such as a machine user's on a Business seat; P3: the
+        /// account's `gh auth token`) resolves to its login, plan and API
+        /// host, lists the account's models there with the token as the
+        /// bearer, and leaves the account lease valid.
+        #[tokio::test]
+        #[ignore = "live probe: needs COPILOT_LIVE_USER_TOKEN, a GitHub user token with Copilot access"]
+        async fn live_operator_user_token_resolves_identity_and_models() {
+            let token = live_token("COPILOT_LIVE_USER_TOKEN");
+            let identity = verify_operator_token(&token, &CopilotBackendConfig::default())
+                .await
+                .expect("GitHub and Copilot accept the token");
+            eprintln!(
+                "copilot-live-token login={:?} plan={:?} api_base={}",
+                identity.login, identity.plan, identity.api_base
+            );
+            assert!(!identity.installation, "a user token has a user");
+            assert!(
+                identity.login.is_some(),
+                "the identity lookup names the login"
+            );
+            assert!(
+                operator_api_base(Some(identity.api_base.as_str())).is_ok(),
+                "the plan's API host must be a githubcopilot.com host: {}",
+                identity.api_base
+            );
+
+            let operator = OperatorEnv::new();
+            let resolved = resolve_live(&operator, &token)
+                .await
+                .expect("the token route resolves");
+            assert_eq!(resolved.metadata().account_id, identity.login);
+            assert!(
+                resolved
+                    .model_snapshot()
+                    .is_some_and(|snapshot| snapshot.models().next().is_some()),
+                "the account lists no model"
+            );
+            assert_eq!(
+                resolved.concrete_authorizer().account_identity(),
+                Some(identity)
+            );
+            assert_eq!(operator.lease().phase, Some(AuthLeasePhase::Valid));
+        }
+
+        /// Live probe P4: a GitHub App installation token of an organization
+        /// that allows server-to-server Copilot requests skips the identity
+        /// lookup, lists models on the default Copilot API host, and leaves
+        /// the account lease valid.
+        #[tokio::test]
+        #[ignore = "live probe: needs COPILOT_LIVE_INSTALLATION_TOKEN, a GitHub App installation token"]
+        async fn live_operator_installation_token_lists_models() {
+            let token = live_token("COPILOT_LIVE_INSTALLATION_TOKEN");
+            let identity = verify_operator_token(&token, &CopilotBackendConfig::default())
+                .await
+                .expect("Copilot accepts the installation token");
+            assert!(
+                identity.installation,
+                "a ghs_ token is an installation token"
+            );
+            assert_eq!(identity.login, None);
+
+            let operator = OperatorEnv::new();
+            let resolved = resolve_live(&operator, &token)
+                .await
+                .expect("the installation token route resolves");
+            assert_eq!(resolved.metadata().account_id, None);
+            assert!(
+                resolved
+                    .model_snapshot()
+                    .is_some_and(|snapshot| snapshot.models().next().is_some()),
+                "the installation lists no model"
+            );
+            assert_eq!(operator.lease().phase, Some(AuthLeasePhase::Valid));
+        }
+
+        /// Live probe P5, revoked token: GitHub's refusal of a revoked user
+        /// token is `user_reauth_required`, and the account lease moves to
+        /// `reauth_required`.
+        #[tokio::test]
+        #[ignore = "live probe: needs COPILOT_LIVE_REVOKED_TOKEN, a revoked GitHub user token"]
+        async fn live_operator_revoked_token_requires_reauth() {
+            let token = live_token("COPILOT_LIVE_REVOKED_TOKEN");
+            let checked = verify_operator_token(&token, &CopilotBackendConfig::default()).await;
+            assert!(
+                matches!(
+                    checked,
+                    Err(ProviderAuthError::Auth(AuthError::UserReauthRequired))
+                ),
+                "{checked:?}"
+            );
+
+            let operator = OperatorEnv::new();
+            let resolved = resolve_live(&operator, &token).await;
+            assert!(
+                matches!(
+                    resolved,
+                    Err(ProviderAuthError::Auth(AuthError::UserReauthRequired))
+                ),
+                "a revoked token needs a new token"
+            );
+            assert_eq!(operator.lease().phase, Some(AuthLeasePhase::ReauthRequired));
+        }
+
+        /// Live probe P5, no Copilot access: a token of an account without a
+        /// Copilot seat, or a fine-grained token without the Copilot Requests
+        /// permission, is `refresh_failed` with GitHub's message, and the
+        /// lease stays valid, so the same token works once access is granted.
+        #[tokio::test]
+        #[ignore = "live probe: needs COPILOT_LIVE_NO_ACCESS_TOKEN, a GitHub token without Copilot access"]
+        async fn live_operator_token_without_copilot_access_is_refused() {
+            let token = live_token("COPILOT_LIVE_NO_ACCESS_TOKEN");
+            let refused = verify_operator_token(&token, &CopilotBackendConfig::default())
+                .await
+                .expect_err("Copilot refuses the token");
+            eprintln!("copilot-live-token refusal: {refused}");
+            assert!(
+                matches!(
+                    refused,
+                    ProviderAuthError::Auth(AuthError::RefreshFailed(_))
+                ),
+                "{refused}"
+            );
+
+            let operator = OperatorEnv::new();
+            let resolved = resolve_live(&operator, &token).await;
+            assert!(
+                matches!(
+                    resolved,
+                    Err(ProviderAuthError::Auth(AuthError::RefreshFailed(_)))
+                ),
+                "a refused identity is refresh_failed"
+            );
+            assert_eq!(operator.lease().phase, Some(AuthLeasePhase::Valid));
+        }
     }
 }
 

@@ -2171,6 +2171,36 @@ impl CopilotAuthorizer {
         Err(self.operator_refusal(refusal))
     }
 
+    /// Publish GitHub's refusal of the operator token to the account lease.
+    /// The mark has nothing to do when the lease already left `valid`
+    /// another way while the request was in flight: another account state
+    /// published the same refusal (`reauth_required`), or a logout released
+    /// the lease. The AuthMachine's credential-use verdict says which, and
+    /// the refusal then surfaces as `user_reauth_required` all the same.
+    fn mark_operator_token_refused(&self) -> Result<(), ProviderAuthError> {
+        let auth_lease = self.auth_lease()?;
+        let lease_key = self.lease_key();
+        let Err(error) = auth_lease.mark_reauth_required(&lease_key) else {
+            return Ok(());
+        };
+        match auth_lease
+            .resolve_credential_use_admission(&lease_key, CredentialUseIntent::UseCredential)
+            .map_err(credential_use_admission_error)?
+        {
+            CredentialUseDisposition::ReauthRequired | CredentialUseDisposition::LeaseAbsent => {
+                Ok(())
+            }
+            CredentialUseDisposition::Authorized
+            | CredentialUseDisposition::RefreshRequired
+            | CredentialUseDisposition::RefreshDisallowed
+            | CredentialUseDisposition::AlreadyRefreshing => {
+                Err(ProviderAuthError::SourceResolutionFailed(format!(
+                    "Copilot token refusal could not be published to AuthMachine: {error}"
+                )))
+            }
+        }
+    }
+
     /// Apply a refusal: a token GitHub refused is published to the account
     /// lease (`MarkReauthRequired`) and the account state built for an
     /// earlier token is dropped, and a rate limit pauses the identity lookup
@@ -2189,7 +2219,7 @@ impl CopilotAuthorizer {
                 // refused) and a new value, such as the next token a command
                 // mints, is published and heals the account.
                 *self.state.cache.write() = None;
-                if let Err(error) = self.mark_account_reauth_required() {
+                if let Err(error) = self.mark_operator_token_refused() {
                     return error;
                 }
             }
@@ -5640,6 +5670,88 @@ mod tests {
                 Some(format!("Bearer {replacement}"))
             );
             assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+        }
+
+        /// Runs `before` once, when the first request arrives (a lifecycle
+        /// change landing while that request is in flight), then answers as
+        /// `inner` does.
+        struct InterleavingTransport {
+            inner: Arc<OutcomeTransport>,
+            before: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        }
+
+        #[async_trait]
+        impl CopilotHttpTransport for InterleavingTransport {
+            async fn get(
+                &self,
+                url: &str,
+                headers: HeaderMap,
+            ) -> Result<CopilotHttpResponse, CopilotHttpTransportError> {
+                let before = self.before.lock().take();
+                if let Some(before) = before {
+                    before();
+                }
+                self.inner.get(url, headers).await
+            }
+        }
+
+        /// GitHub's refusal of the token lands on a lease a logout released,
+        /// or another account state already marked `reauth_required`, while
+        /// the identity lookup was in flight: the refusal still surfaces as
+        /// `user_reauth_required`, and the lease keeps what the logout or the
+        /// other refusal made of it.
+        #[tokio::test]
+        async fn refusal_after_a_racing_logout_or_refusal_stays_typed() {
+            for logout in [true, false] {
+                let operator = OperatorEnv::new();
+                operator.set("COPILOT_GITHUB_TOKEN", &user_token("raced"));
+                let lease = operator.auth_lease.clone();
+                let before: Box<dyn FnOnce() + Send> = if logout {
+                    Box::new(move || {
+                        lease
+                            .release_lease(&lease_key())
+                            .expect("a logout lands during the lookup");
+                    })
+                } else {
+                    Box::new(move || {
+                        lease
+                            .mark_reauth_required(&lease_key())
+                            .expect("another refusal lands during the lookup");
+                    })
+                };
+                let inner = OutcomeTransport::new([Ok(json_response(
+                    401,
+                    serde_json::json!({"message": "Bad credentials"}),
+                ))]);
+                let runtime = CopilotRuntime {
+                    accounts: Mutex::new(BTreeMap::new()),
+                    transport: Arc::new(InterleavingTransport {
+                        inner: Arc::clone(&inner),
+                        before: Mutex::new(Some(before)),
+                    }),
+                };
+
+                let refused = runtime
+                    .resolve(
+                        &token_binding(CopilotProviderRoute::OpenAi, env_source()),
+                        &operator.env,
+                    )
+                    .await
+                    .err();
+
+                assert_eq!(
+                    refused,
+                    Some(ProviderAuthError::Auth(AuthError::UserReauthRequired)),
+                    "logout: {logout}"
+                );
+                let expected = if logout {
+                    None
+                } else {
+                    Some(AuthLeasePhase::ReauthRequired)
+                };
+                assert_eq!(operator.lease().phase, expected, "logout: {logout}");
+                assert_eq!(inner.request_count(), 1, "logout: {logout}");
+            }
         }
 
         /// T5: Copilot refusing this identity (403 or 404, chat disabled) is

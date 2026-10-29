@@ -2044,4 +2044,152 @@ mod tests {
             "a released run drops its inputs' holds"
         );
     }
+
+    /// A run marked resumable, with `bound` (an input applied in it, with the
+    /// destination `target`) and `stray` (a queued input that still names the
+    /// run, as a discarded live join or a recovered queued row does, with the
+    /// destination `stray_target` when set), on a registered session.
+    fn resumable_with_stray(
+        bound: &str,
+        target: Option<&str>,
+        stray: &str,
+        stray_target: Option<&str>,
+    ) -> (
+        crate::meerkat_machine::dsl::MeerkatMachineState,
+        crate::meerkat_machine::dsl::RunId,
+    ) {
+        use crate::meerkat_machine::dsl::{MeerkatMachineState, MeerkatPhase, RunId, SessionId};
+        let open = RunId::from("open-run");
+        let mut state = MeerkatMachineState {
+            lifecycle_phase: MeerkatPhase::Idle,
+            session_id: Some(SessionId::from("resumed-session")),
+            resumable_run_id: Some(open.clone()),
+            ..Default::default()
+        };
+        bound_kept_input(&mut state, bound, &open);
+        if let Some(target) = target {
+            state
+                .input_context_targets
+                .insert(bound.to_string(), target.to_string());
+        }
+        queued_input(&mut state, stray, 2, true, false);
+        state
+            .input_run_associations
+            .insert(stray.to_string(), open.clone());
+        if let Some(stray_target) = stray_target {
+            state
+                .input_context_targets
+                .insert(stray.to_string(), stray_target.to_string());
+        }
+        (state, open)
+    }
+
+    /// Prepare and resume `run` on the machine recovered from `state`: the
+    /// machine's state once the run resumed, or `None` when `ResumeRun` was
+    /// refused.
+    fn resume(
+        state: crate::meerkat_machine::dsl::MeerkatMachineState,
+        run: &crate::meerkat_machine::dsl::RunId,
+    ) -> Option<crate::meerkat_machine::dsl::MeerkatMachineState> {
+        use crate::meerkat_machine::dsl::{
+            MeerkatMachineAuthority, MeerkatMachineInput, MeerkatMachineMutator, SessionId,
+        };
+        let mut authority =
+            MeerkatMachineAuthority::recover_from_state(state).expect("a valid machine state");
+        MeerkatMachineMutator::apply(
+            &mut authority,
+            MeerkatMachineInput::Prepare {
+                session_id: SessionId::from("resumed-session"),
+                run_id: run.clone(),
+            },
+        )
+        .expect("the marked run starts");
+        MeerkatMachineMutator::apply(
+            &mut authority,
+            MeerkatMachineInput::ResumeRun {
+                run_id: run.clone(),
+            },
+        )
+        .ok()
+        .map(|_| authority.state().clone())
+    }
+
+    /// A resumed run runs under the destination and batch of the input bound
+    /// to it, never of a queued input that only still names the run (a
+    /// discarded live join keeps its association, and recovery restores a
+    /// queued row's last run). Here the stray input sorts after the bound one
+    /// and names another destination and batch. RED while `ResumeRun` took
+    /// the destination of every input associated with the run: the stray
+    /// input came last and the run took its destination and batch.
+    #[test]
+    fn a_resumed_run_takes_its_bound_inputs_destination_not_a_stray_queued_inputs() {
+        let (state, open) = resumable_with_stray(
+            "bound-a",
+            Some("the-runs-destination"),
+            "stray-z",
+            Some("another-destination"),
+        );
+        let resumed = resume(state, &open).expect("the marked run resumes");
+        assert_eq!(
+            resumed.authority_staged_run.as_ref(),
+            Some(&open),
+            "the resumed run is the staged run"
+        );
+        assert_eq!(
+            resumed.run_context_binding.as_deref(),
+            Some("the-runs-destination"),
+            "the run's destination is its bound input's, not the stray input's"
+        );
+        assert_eq!(
+            resumed.authority_staged_batch.as_deref(),
+            Some("batch-bound-a"),
+            "the run's authority batch is its bound input's, not the stray input's"
+        );
+    }
+
+    /// The destination wait counts the governed inputs bound to the run only.
+    /// On a document that requires a destination and has none bound, a run
+    /// whose bound input is ungoverned resumes, whatever governed queued
+    /// input still names it; with a governed bound input it waits. The
+    /// machine's guard, its resumed-run plan and the runtime's mirror agree.
+    /// RED while they counted every input associated with the run: the
+    /// stray governed input held the run back.
+    #[test]
+    fn the_destination_wait_counts_only_the_governed_inputs_bound_to_the_run() {
+        use crate::meerkat_machine::dsl::command_capabilities::{
+            AuthorizedResumedRun, resumed_run_destination_attached,
+        };
+        let (mut state, open) = resumable_with_stray("bound-a", None, "stray-z", None);
+        state.input_authority_bindings.remove("bound-a");
+        state.input_authority_batch_keys.remove("bound-a");
+        state.scoped_context_required = true;
+        assert!(
+            resumed_run_destination_attached(&state, &open),
+            "no governed input is bound to the run"
+        );
+        assert!(
+            AuthorizedResumedRun::authorize_resumed_run_from_state(&state, &open).is_some(),
+            "the resumed-run plan does not wait for the destination"
+        );
+        assert!(
+            resume(state.clone(), &open).is_some(),
+            "the machine resumes the run"
+        );
+
+        state
+            .input_authority_bindings
+            .insert("bound-a".to_string(), "binding-bound-a".to_string());
+        state
+            .input_authority_batch_keys
+            .insert("bound-a".to_string(), "batch-bound-a".to_string());
+        assert!(
+            !resumed_run_destination_attached(&state, &open),
+            "a governed input bound to the run waits for the destination"
+        );
+        assert!(
+            AuthorizedResumedRun::authorize_resumed_run_from_state(&state, &open).is_none(),
+            "the resumed-run plan waits"
+        );
+        assert!(resume(state, &open).is_none(), "the machine waits");
+    }
 }

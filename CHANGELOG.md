@@ -108,8 +108,7 @@ them.
   token without storing it and returns a `CopilotAccountIdentity`;
   `CopilotAuthorizer::account_identity` and
   `CopilotProviderRoute::token_auth_method` are new;
-  `meerkat_auth_core::resolver::{simple_secret_source_publishes_lifecycle,
-  credential_fingerprint, CredentialFingerprint}` and
+  `meerkat_auth_core::resolver::simple_secret_source_publishes_lifecycle` and
   `meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_URL` are new. The
   OpenAI, Anthropic and Gemini runtimes report the readiness of a
   `github_copilot_token` route from its source, without a network request.

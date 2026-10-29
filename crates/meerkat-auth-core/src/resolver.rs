@@ -177,27 +177,6 @@ pub fn simple_secret_source_publishes_lifecycle(source: &CredentialSourceSpec) -
     matches!(source, CredentialSourceSpec::ManagedStore)
 }
 
-/// Opaque fingerprint of a credential secret: equal secrets give equal
-/// fingerprints, and a fingerprint does not give the secret back. It lets a
-/// caller tell whether a re-read source returned the credential it already
-/// published without keeping a second copy of that credential. In memory
-/// only: it is never serialized, has no `Display`, and its `Debug` is
-/// redacted.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CredentialFingerprint([u8; 32]);
-
-impl std::fmt::Debug for CredentialFingerprint {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("CredentialFingerprint(<redacted>)")
-    }
-}
-
-/// The SHA-256 [`CredentialFingerprint`] of `secret`.
-pub fn credential_fingerprint(secret: &str) -> CredentialFingerprint {
-    use sha2::{Digest, Sha256};
-    CredentialFingerprint(Sha256::digest(secret.as_bytes()).into())
-}
-
 /// Whether a confined process could change what a credential command runs
 /// as the host: its working directory (`cwd_subtree`: with everything under
 /// it; the host's own when none is given, which refuses the command when it
@@ -2539,26 +2518,6 @@ mod tests {
                 "{source:?}"
             );
         }
-    }
-
-    /// Equal secrets give equal fingerprints, different secrets different
-    /// ones, and neither the secret nor its prefix is rendered.
-    #[test]
-    fn credential_fingerprint_compares_secrets_without_rendering_them() {
-        let first = credential_fingerprint("github_pat_fingerprint_canary");
-        assert_eq!(
-            first,
-            credential_fingerprint("github_pat_fingerprint_canary")
-        );
-        assert_ne!(
-            first,
-            credential_fingerprint("github_pat_fingerprint_canary_rotated")
-        );
-        let rendered = format!("{first:?} {first:#?}");
-        assert!(
-            !rendered.contains("canary") && !rendered.contains("github_pat"),
-            "{rendered}"
-        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -8,19 +8,18 @@ use chrono::{DateTime, Duration, Utc};
 use futures::StreamExt;
 use meerkat_auth_core::auth_oauth::{exchange_refresh_token, oauth_refresh_error};
 use meerkat_auth_core::resolver::{
-    CredentialFingerprint, LockedManagedStoreOAuthRefresh, ManagedStoreOAuthRefreshPreparationSlot,
-    OAuthLoginCredentialAdmission, credential_fingerprint,
-    load_managed_store_tokens_with_lifecycle, prepare_managed_store_oauth_refresh_under_lock,
-    resolve_oauth_login_credential_disposition, resolve_simple_secret,
-    simple_secret_source_publishes_lifecycle,
+    LockedManagedStoreOAuthRefresh, ManagedStoreOAuthRefreshPreparationSlot,
+    OAuthLoginCredentialAdmission, load_managed_store_tokens_with_lifecycle,
+    prepare_managed_store_oauth_refresh_under_lock, resolve_oauth_login_credential_disposition,
+    resolve_simple_secret, simple_secret_source_publishes_lifecycle,
 };
 use meerkat_core::auth::{
     PersistedAuthMode, PersistedTokens, ProviderAuthPersistence, RefreshError, RefreshFn,
     TokenStoreAccess,
 };
 use meerkat_core::handles::{
-    AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, CredentialUseDisposition, CredentialUseIntent,
-    DslTransitionError, GeneratedAuthLeaseHandle, LeaseKey,
+    AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, CredentialFingerprint, CredentialUseDisposition,
+    CredentialUseIntent, DslTransitionError, GeneratedAuthLeaseHandle, LeaseKey,
 };
 use meerkat_core::{
     AuthCredentialIdentity, AuthError, AuthMetadata, CredentialSourceSpec,
@@ -1264,28 +1263,6 @@ impl CopilotAccountState {
     }
 }
 
-/// One operator token this process published to an AuthMachine lease: the
-/// lease registry (by owner), the lease, and the fingerprint of the token.
-struct PublishedOperatorToken {
-    lease_owner: Weak<dyn meerkat_core::handles::AuthLeaseHandle>,
-    lease_key: LeaseKey,
-    fingerprint: CredentialFingerprint,
-}
-
-/// The operator tokens this process published, per lease registry and lease.
-///
-/// It is the publisher's memory, not lifecycle state (the AuthMachine owns
-/// that), and it outlives the account states that read it: a token GitHub
-/// refused stays refused, and a logout stays in force, for every later
-/// session of the process until the token value changes or the process
-/// restarts. Entries of a dropped lease registry are pruned. Never holds a
-/// `managed_store` token, whose own writers publish its lease.
-fn published_operator_tokens() -> &'static Mutex<Vec<PublishedOperatorToken>> {
-    static PUBLISHED: std::sync::OnceLock<Mutex<Vec<PublishedOperatorToken>>> =
-        std::sync::OnceLock::new();
-    PUBLISHED.get_or_init(|| Mutex::new(Vec::new()))
-}
-
 struct CopilotRefreshOutcome {
     flight_id: u64,
     source_generation: u64,
@@ -1991,13 +1968,14 @@ impl CopilotAuthorizer {
         })
     }
 
-    /// Publish `token` to the account lease when it is not the value this
-    /// process last published to that lease, or again when the machine asks
-    /// for a refresh (the lease's declared freshness window ran out and the
-    /// source re-asserted the token). The same value otherwise publishes
-    /// nothing, so a token GitHub refused stays refused and a logout is not
-    /// undone. The ledger lock is held across the synchronous acquire, so the
-    /// routes sharing the account never acquire twice for one token.
+    /// Publish `token` to the account lease unless the lease already carries
+    /// it. The AuthMachine decides, from the token's fingerprint and its own
+    /// state, fed the current time first so a declared freshness window that
+    /// ran out reads as such: it publishes a value it does not record,
+    /// renews the recorded value whose window ran out, and publishes nothing
+    /// for the recorded value otherwise. A token GitHub refused therefore
+    /// stays refused, and a logout stays in force, for every session and
+    /// every machine that shares the lease, until the token value changes.
     fn publish_operator_token(
         &self,
         auth_lease: &GeneratedAuthLeaseHandle,
@@ -2005,34 +1983,18 @@ impl CopilotAuthorizer {
         token: &str,
         now: DateTime<Utc>,
     ) -> Result<(), ProviderAuthError> {
-        let fingerprint = credential_fingerprint(token);
-        let lease_owner = Arc::downgrade(&auth_lease.clone_handle());
-        let mut published = published_operator_tokens().lock();
-        published.retain(|entry| entry.lease_owner.strong_count() > 0);
-        let entry = published.iter().position(|entry| {
-            Weak::ptr_eq(&entry.lease_owner, &lease_owner) && entry.lease_key == *lease_key
-        });
-        let unchanged = entry.is_some_and(|index| published[index].fingerprint == fingerprint);
-        let republish = !unchanged
-            || observe_credential_use(auth_lease, lease_key, now)?
-                == CredentialUseDisposition::RefreshRequired;
-        if republish {
-            auth_lease
-                .acquire_lease(lease_key, self.operator_lease_expiry(now))
-                .map_err(|error| {
-                    ProviderAuthError::SourceResolutionFailed(format!(
-                        "AuthMachine lifecycle acquire failed: {error}"
-                    ))
-                })?;
-            match entry {
-                Some(index) => published[index].fingerprint = fingerprint,
-                None => published.push(PublishedOperatorToken {
-                    lease_owner,
-                    lease_key: lease_key.clone(),
-                    fingerprint,
-                }),
-            }
-        }
+        observe_credential_freshness(auth_lease, lease_key, now)?;
+        auth_lease
+            .publish_source_credential(
+                lease_key,
+                &CredentialFingerprint::of_secret(token),
+                self.operator_lease_expiry(now),
+            )
+            .map_err(|error| {
+                ProviderAuthError::SourceResolutionFailed(format!(
+                    "AuthMachine credential publication failed: {error}"
+                ))
+            })?;
         Ok(())
     }
 
@@ -2649,13 +2611,13 @@ fn classic_personal_access_token_refusal() -> ProviderAuthError {
     })
 }
 
-/// Feed the AuthMachine the current time, then take its credential-use
-/// verdict. The machine decides; this never inspects the lease phase.
-fn observe_credential_use(
+/// Feed the AuthMachine the current time, so a declared freshness window that
+/// ran out moves the lease to `Expiring` or `Expired`.
+fn observe_credential_freshness(
     auth_lease: &GeneratedAuthLeaseHandle,
     lease_key: &LeaseKey,
     now: DateTime<Utc>,
-) -> Result<CredentialUseDisposition, ProviderAuthError> {
+) -> Result<(), ProviderAuthError> {
     auth_lease
         .observe_credential_freshness(
             lease_key,
@@ -2666,7 +2628,17 @@ fn observe_credential_use(
             ProviderAuthError::SourceResolutionFailed(format!(
                 "AuthMachine lifecycle freshness observation failed: {error}"
             ))
-        })?;
+        })
+}
+
+/// Feed the AuthMachine the current time, then take its credential-use
+/// verdict. The machine decides; this never inspects the lease phase.
+fn observe_credential_use(
+    auth_lease: &GeneratedAuthLeaseHandle,
+    lease_key: &LeaseKey,
+    now: DateTime<Utc>,
+) -> Result<CredentialUseDisposition, ProviderAuthError> {
+    observe_credential_freshness(auth_lease, lease_key, now)?;
     auth_lease
         .resolve_credential_use_admission(lease_key, CredentialUseIntent::UseCredential)
         .map_err(credential_use_admission_error)
@@ -4853,7 +4825,19 @@ mod tests {
                 configure: impl FnOnce(ResolverEnvironment) -> ResolverEnvironment,
             ) -> Self {
                 let machine = meerkat_runtime::MeerkatMachine::ephemeral();
-                let auth_lease = machine.generated_auth_lease_handle();
+                Self::build(machine.generated_auth_lease_handle(), configure)
+            }
+
+            /// An environment over a lease handle of a host's runtime
+            /// machine.
+            fn over(auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle) -> Self {
+                Self::build(auth_lease, |env| env)
+            }
+
+            fn build(
+                auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
+                configure: impl FnOnce(ResolverEnvironment) -> ResolverEnvironment,
+            ) -> Self {
                 let persistence = ProviderAuthPersistence::new(
                     Arc::new(meerkat_auth_core::auth_store::EphemeralTokenStore::new()),
                     Arc::new(meerkat_auth_core::auth_store::InMemoryCoordinator::new()),
@@ -4887,9 +4871,22 @@ mod tests {
             }
 
             fn lease(&self) -> AuthLeaseSnapshot {
-                self.auth_lease
-                    .snapshot(&LeaseKey::from_credential_identity(&account_identity()))
+                self.auth_lease.snapshot(&lease_key())
             }
+        }
+
+        /// The shared account's AuthMachine lease.
+        fn lease_key() -> LeaseKey {
+            LeaseKey::from_credential_identity(&account_identity())
+        }
+
+        /// A persistent runtime machine over `store`, as a host builds one;
+        /// every machine over one store shares its AuthMachine lease registry.
+        fn persistent_machine(
+            store: &Arc<dyn meerkat_runtime::RuntimeStore>,
+        ) -> meerkat_runtime::MeerkatMachine {
+            meerkat_runtime::MeerkatMachine::persistent_without_blobs(Arc::clone(store))
+                .expect("a runtime machine over the store")
         }
 
         /// A runtime whose GitHub and Copilot HTTP is scripted.
@@ -5348,6 +5345,149 @@ mod tests {
                 .expect("a new token value is accepted");
             assert_eq!(
                 harness.transport.bearer(1),
+                Some(format!("Bearer {replacement}"))
+            );
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+        }
+
+        /// Two runtime machines over one durable store share its AuthMachine
+        /// lease registry, so they agree on the operator token's lifecycle
+        /// although each keeps its own lease handle and account state: a token
+        /// one saw GitHub refuse stays refused for the other with no request,
+        /// and a logout through one stays in force for both, until the token
+        /// value changes.
+        #[tokio::test]
+        async fn two_machines_over_one_store_share_a_refusal_and_a_logout() {
+            let store: Arc<dyn meerkat_runtime::RuntimeStore> =
+                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+            let first_machine = persistent_machine(&store);
+            let second_machine = persistent_machine(&store);
+            let first_lease = first_machine.generated_auth_lease_handle();
+            let second_lease = second_machine.generated_auth_lease_handle();
+            assert!(
+                !first_lease.same_owner(&second_lease),
+                "each machine holds a lease handle of its own"
+            );
+            let first = Harness::with_env(
+                [
+                    Ok(json_response(
+                        401,
+                        serde_json::json!({"message": "Bad credentials"}),
+                    )),
+                    Ok(svc_bot()),
+                    Ok(models_response()),
+                ],
+                OperatorEnv::over(first_lease),
+            );
+            let second = Harness::with_env(std::iter::empty(), OperatorEnv::over(second_lease));
+            let revoked = user_token("shared-revoked");
+            first.operator.set("COPILOT_GITHUB_TOKEN", &revoked);
+            second.operator.set("COPILOT_GITHUB_TOKEN", &revoked);
+
+            assert_eq!(
+                first.resolve(CopilotProviderRoute::OpenAi).await.err(),
+                Some(ProviderAuthError::Auth(AuthError::UserReauthRequired))
+            );
+            let refused = second.operator.lease();
+            assert_eq!(
+                refused.phase,
+                Some(AuthLeasePhase::ReauthRequired),
+                "both machines read the refusal"
+            );
+            assert_eq!(
+                second.resolve(CopilotProviderRoute::Anthropic).await.err(),
+                Some(ProviderAuthError::Auth(AuthError::UserReauthRequired)),
+                "the other machine does not publish the refused token again"
+            );
+            assert_eq!(second.transport.request_count(), 0);
+            assert_eq!(second.operator.lease(), refused);
+
+            // A new value heals the lease for both; a logout through the
+            // second machine then stays in force on both for that value.
+            let replacement = user_token("shared-replacement");
+            first.operator.set("COPILOT_GITHUB_TOKEN", &replacement);
+            second.operator.set("COPILOT_GITHUB_TOKEN", &replacement);
+            first
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("a new token value heals the lease");
+            assert_eq!(second.operator.lease().phase, Some(AuthLeasePhase::Valid));
+            second
+                .operator
+                .auth_lease
+                .release_lease(&lease_key())
+                .expect("log out");
+            for harness in [&first, &second] {
+                assert_eq!(
+                    harness.resolve(CopilotProviderRoute::Gemini).await.err(),
+                    Some(ProviderAuthError::Auth(AuthError::LeaseAbsent)),
+                    "the logout stays in force for the same token value"
+                );
+            }
+            assert_eq!(first.transport.request_count(), 3);
+            assert_eq!(second.transport.request_count(), 0);
+        }
+
+        /// A logout of an environment-sourced route stays in force for the
+        /// same token value, also on a machine built after the one that
+        /// published it is gone (the store's lease registry outlives it), and
+        /// a new token value heals it.
+        #[tokio::test]
+        async fn logout_stays_in_force_for_the_same_token_and_heals_for_a_new_one() {
+            let store: Arc<dyn meerkat_runtime::RuntimeStore> =
+                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+            let token = user_token("logged-out");
+            {
+                let machine = persistent_machine(&store);
+                let harness = Harness::with_env(
+                    [Ok(svc_bot()), Ok(models_response())],
+                    OperatorEnv::over(machine.generated_auth_lease_handle()),
+                );
+                harness.operator.set("COPILOT_GITHUB_TOKEN", &token);
+                let resolved = harness
+                    .resolve(CopilotProviderRoute::OpenAi)
+                    .await
+                    .expect("the token resolves");
+                harness
+                    .operator
+                    .auth_lease
+                    .release_lease(&lease_key())
+                    .expect("log out");
+                assert_eq!(
+                    resolved.concrete_authorizer().prime().await.err(),
+                    Some(ProviderAuthError::Auth(AuthError::LeaseAbsent)),
+                    "the logout stays in force for the same token value"
+                );
+                assert_eq!(harness.transport.request_count(), 2);
+            }
+
+            // A machine built over the same store after the first is gone.
+            let machine = persistent_machine(&store);
+            let harness = Harness::with_env(
+                [Ok(svc_bot()), Ok(models_response())],
+                OperatorEnv::over(machine.generated_auth_lease_handle()),
+            );
+            harness.operator.set("COPILOT_GITHUB_TOKEN", &token);
+            assert_eq!(
+                harness.operator.lease().phase,
+                None,
+                "the store's lease registry holds the logout"
+            );
+            assert_eq!(
+                harness.resolve(CopilotProviderRoute::Anthropic).await.err(),
+                Some(ProviderAuthError::Auth(AuthError::LeaseAbsent)),
+                "the logout stays in force for the same token value on a later machine"
+            );
+            assert_eq!(harness.transport.request_count(), 0);
+
+            let replacement = user_token("after-logout");
+            harness.operator.set("COPILOT_GITHUB_TOKEN", &replacement);
+            harness
+                .resolve(CopilotProviderRoute::Anthropic)
+                .await
+                .expect("a new token value heals the lease");
+            assert_eq!(
+                harness.transport.bearer(0),
                 Some(format!("Bearer {replacement}"))
             );
             assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));

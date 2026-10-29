@@ -2279,6 +2279,80 @@ async fn a_send_to_a_side_chat_the_primed_cache_cannot_resolve_is_refused() -> T
     Ok(())
 }
 
+/// The fail-closed check of a Console with no local runtime reads the
+/// aggregator's identity records fresh, never the read model's last
+/// snapshot: while a refresh is in flight (its lock held here), that
+/// snapshot predates the fork and holds no record of the side chat, and a
+/// send naming the side chat by its bare member id is still refused.
+#[tokio::test]
+async fn the_send_gate_reads_the_identity_records_fresh_while_a_refresh_is_in_flight() -> TestResult
+{
+    use crate::console_aggregator::{ConsoleAggregatorOptions, MetaConsoleAggregator};
+
+    let (_temp_dir, runtime) =
+        persistent_console_runtime("console-side-chat-stale-records", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let aggregator = MetaConsoleAggregator::in_memory_with_options(ConsoleAggregatorOptions {
+        session_history_backfill_enabled: false,
+        ..ConsoleAggregatorOptions::default()
+    });
+    aggregator.register_runtime_handles_with_policy(
+        "runtime-b",
+        "b",
+        runtime.clone(),
+        None,
+        ConsoleEventStore::new(),
+        Arc::new(AllowAllConsoleVisibilityPolicy),
+    );
+    let names_side_chat = |records: Vec<ConsoleIdentityRecord>| {
+        records
+            .iter()
+            .any(|record| record.runtime_member_id == "alpha-side")
+    };
+    assert!(
+        !names_side_chat(aggregator.list_identities().await?),
+        "the read model's snapshot, taken before the fork, holds no side chat"
+    );
+    // A refresh in flight holds the read model's lock from here on: no
+    // refresh replaces the snapshot, and `list_identities` answers it.
+    let _refresh_in_flight = aggregator.hold_identity_refresh_for_test().await;
+    let forked = fork_when_idle(&runtime, "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+    assert!(
+        !names_side_chat(aggregator.list_identities().await?),
+        "the read model still answers the snapshot without the side chat"
+    );
+
+    let controller = enforced(vec![grant(
+        "the-bare-member-id",
+        "bare-sender@example.test",
+        &[ACTION_AGENT_SEND],
+        "alpha-side",
+    )])?;
+    let decisions = RuntimeDecisionState::local_console(
+        crate::ConsolePolicy {
+            require_app_auth: false,
+            ..Default::default()
+        },
+        None,
+    );
+    assert!(
+        matches!(
+            send_gate_without_runtime(
+                &decisions,
+                &aggregator,
+                &controller,
+                "bare-sender@example.test",
+                "alpha-side",
+            )
+            .await,
+            Err(ConsoleSendGateRefusal::AccessDenied)
+        ),
+        "the side chat is refused from the fresh records, not decided by its bare name"
+    );
+    Ok(())
+}
+
 /// The `/console/send` gate of a Console with no local runtime, for
 /// `subject` sending to `identity`.
 async fn send_gate_without_runtime(

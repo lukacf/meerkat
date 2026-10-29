@@ -1549,6 +1549,35 @@ impl MetaConsoleAggregator {
         Ok(identities)
     }
 
+    /// The identity records the registered runtimes hold now, live members
+    /// included, collected fresh: never the read model's last snapshot,
+    /// which [`Self::list_identities`] answers while a refresh is in flight
+    /// and which may predate a member. For a decision that must not rest on
+    /// a stale list; it neither waits for a refresh nor replaces the read
+    /// model.
+    pub(crate) async fn identity_records_now(
+        &self,
+    ) -> ConsoleLogResult<Vec<ConsoleIdentityRecord>> {
+        Box::pin(collect_identity_records(
+            &self.inner,
+            IdentityCollectionMode::IncludeLiveMembers,
+        ))
+        .await
+    }
+
+    /// Test seam: holds the identity read model's refresh lock until the
+    /// guard drops, as a refresh in flight does, so that
+    /// [`Self::list_identities`] answers the read model's last snapshot.
+    #[cfg(test)]
+    pub(crate) async fn hold_identity_refresh_for_test(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.inner
+            .identity_read_model
+            .refresh_lock
+            .clone()
+            .lock_owned()
+            .await
+    }
+
     /// Forward recorded activity for already-authorized identity rows without
     /// entering the member actor or inventing activity for unavailable sources.
     pub(crate) async fn response_phases_for_identities(

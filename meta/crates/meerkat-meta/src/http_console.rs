@@ -2441,12 +2441,15 @@ async fn prime_access_cache_from_aggregator(
 
 /// Whether the aggregator's identity record of `identity` (by identity or
 /// runtime member id) names a lineage parent, or the records cannot be read,
-/// in which case it may.
+/// in which case it may. The records are read fresh
+/// ([`MetaConsoleAggregator::identity_records_now`]): the read model's last
+/// snapshot, which a refresh in flight leaves in place, may predate the
+/// member.
 async fn aggregate_record_names_lineage(
     aggregator: &MetaConsoleAggregator,
     identity: &str,
 ) -> bool {
-    match Box::pin(aggregator.list_identities()).await {
+    match Box::pin(aggregator.identity_records_now()).await {
         Ok(records) => records.iter().any(|record| {
             (record.identity == identity || record.runtime_member_id == identity)
                 && crate::console_spawn::lineage_parent(&record.labels).is_some()

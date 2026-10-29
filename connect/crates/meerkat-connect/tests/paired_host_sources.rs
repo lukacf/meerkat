@@ -209,6 +209,14 @@ fn proposal() -> Value {
     value
 }
 
+/// A test-local catalog record naming the fixture source. The bundled product
+/// catalog names no fixture repository; a host-owned extension source reaches
+/// the agent from elsewhere, and the host judges its eligibility.
+fn fixture_catalog_record() -> Value {
+    json!({"identity":{"publisher":"fixture","name":"example-host-frontend","version":"0.0.0"},
+        "strategies":[{"id":"example-host-frontend.source","sources":[REPO]}]})
+}
+
 fn prepared() -> Value {
     json!({"valid":true,"problems":[],"change":{
         "change_digest":format!("paired-host-change-v1:sha256:{}","a".repeat(64)),
@@ -478,14 +486,16 @@ async fn existing_native_admission_composes_catalog_source_reads_and_preparation
         serde_json::from_str::<Value>(&result.result.text_content()).unwrap()
     };
     let catalog = invoke(TOOLKIT_FRONTEND_CATALOG, json!({})).await;
-    assert!(
-        catalog["entries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry.to_string().contains(REPO))
-    );
-    let listed = invoke(PAIRED_HOST_FRONTEND_SOURCE_TAGS, json!({"repo":REPO})).await;
+    let bundled = catalog["entries"].as_array().unwrap();
+    assert!(!bundled.is_empty());
+    // The product catalog names no fixture source; the test-local record does.
+    assert!(!bundled.iter().any(|entry| entry.to_string().contains(REPO)));
+    let record = fixture_catalog_record();
+    let listed = invoke(
+        PAIRED_HOST_FRONTEND_SOURCE_TAGS,
+        json!({"repo":record["strategies"][0]["sources"][0]}),
+    )
+    .await;
     let inspected = invoke(
         PAIRED_HOST_FRONTEND_SOURCE_INSPECT,
         json!({"repo":listed["repo"],"tag":listed["tags"][0]["tag"]}),
@@ -603,7 +613,8 @@ async fn inspection_correlation_and_closed_unverified_shapes_refuse_host_contrad
         ("/prepare/new_extension/version", json!("9.0")),
         ("/prepare/new_extension/channel/ingress", json!("polling")),
         ("/prepare/new_extension/channel/approved_groups", json!([])),
-        ("/entry_point/group", json!("other.group")),
+        // The host names its own group; only a malformed one contradicts it.
+        ("/entry_point/group", json!("other..group")),
         ("/declared", json!({"secrets":["private-response-marker"]})),
         ("/unverified", json!([])),
     ] {

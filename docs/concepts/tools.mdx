@@ -230,7 +230,9 @@ confinement all still apply to every call it opens.
 
 - **Gating a build.** In Rust, set `grant_gated_tools` on
   `SessionBuildOptions` or `AgentBuildConfig`, for example
-  `GrantGatedTools::default().with_family("shell").with_tool("deploy")`. The
+  `GrantGatedTools::default().with_family("shell").with_tool("deploy")`; over
+  JSON-RPC, pass `grant_gated_tools` (`{"families": [...], "tools": [...]}`)
+  to `session/create`. The
   session records its gate, and a resume that names none restores it. The
   factory refuses a gate that no grant could honour with
   `BuildAgentError::GrantGate`: an unknown family, a gated family the build
@@ -248,7 +250,10 @@ confinement all still apply to every call it opens.
   the host policy's maximum lifetime, 24 hours by default.
   `revoke_tool_grant`, `list_tool_grants` and `read_tool_grant_audit` complete
   the Rust API; `ToolGrantService` offers the same operations over any
-  `RuntimeStore`.
+  `RuntimeStore`. Over JSON-RPC, `tool_grants/grant`, `tool_grants/revoke`,
+  `tool_grants/list` and `tool_grants/audit` serve them for sessions (see
+  [scoped tool grants over JSON-RPC](/api/rpc#scoped-tool-grants)), and the
+  Python and TypeScript SDKs wrap them.
 - **Adjudication.** Every model-request boundary opens the gated names a live
   grant admits at that moment, and every gated call is adjudicated again
   immediately before it is handed to its tool, so a call at or after the

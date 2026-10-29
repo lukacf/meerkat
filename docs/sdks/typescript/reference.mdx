@@ -88,6 +88,8 @@ The package exports more than the core session lifecycle. The `MeerkatClient` al
   authority-checked `metaJob*` worker mutations
 - approvals and artifacts: request/list/get/decide plus
   list/get/download artifacts
+- scoped tool grants: `grantTool`, `revokeToolGrant`, `listToolGrants`,
+  `toolGrantAudit`
 - projected event recovery: `latestEventCursor`, `listEventsSince`,
   `eventSnapshot` when host event projection is enabled
 - live-channel helpers: `liveOpen`, `liveStatus`, `liveClose`, `liveSendInput`,

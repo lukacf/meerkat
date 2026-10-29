@@ -319,6 +319,26 @@ authorize, or execute an action. Records persist when the RPC bundle exposes a
 store path and otherwise remain process-local. See
 [JSON-RPC approvals](/api/rpc#approvals).
 
+### Scoped tool grants
+
+`create_session(..., grant_gated_tools={"families": ["shell"]})` (and the
+streaming and deferred variants) gates built-in tool families and tool names:
+the session mounts them hidden and refuses their calls until a grant opens
+them. The client sends a gate only to a server whose contract is 0.9.8 or
+later, and otherwise raises `CapabilityUnavailableError`: an older server would
+build the session with the gated tools ungated.
+
+```python
+granted = await client.grant_tool(session.id, family="shell", duration_ms=3_600_000)
+await client.revoke_tool_grant(granted["grant"]["grant_id"], reason="done")
+listing = await client.list_tool_grants(session.id, include_ended=True)
+page = await client.tool_grant_audit(session.id, limit=50)
+```
+
+`grant_tool` takes exactly one of `tool` and `family` and one of
+`duration_ms` and `expires_at_ms`. See
+[scoped tool grants](/api/rpc#scoped-tool-grants).
+
 When projection is enabled, use cursor replay or a snapshot after reconnect or
 a typed live-stream lag marker. A live subscriber is an observation surface,
 not the persistence boundary. Explicitly ephemeral memory realms do not expose

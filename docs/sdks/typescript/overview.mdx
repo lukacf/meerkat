@@ -99,6 +99,7 @@ service APIs. For agents that run in the browser itself, use the
 | `jobsGet/jobsList/jobsCancel/jobsProgress/jobsResult/jobsArtifacts/jobsRetry/jobsHealth/jobsSubscribe/jobsUnsubscribe` | Detached job control and observation |
 | `monitorsStart/metaJobHeartbeat/metaJobProgress/metaJobCheckpoint/metaJobComplete/metaJobFail/metaJobCancelAck` | Monitor creation and authority-checked Meta worker updates |
 | `requestApproval/listApprovals/getApproval/decideApproval` | Approval record lifecycle; persists when the RPC bundle exposes a store path |
+| `grantTool/revokeToolGrant/listToolGrants/toolGrantAudit` | Scoped tool grants of a session created with `grantGatedTools` |
 | `listArtifacts/getArtifact/downloadArtifact` | Artifact metadata and payload access |
 | `latestEventCursor/listEventsSince/eventSnapshot` | Cursor replay and snapshots when host event projection is enabled |
 | `createMob(options?)` | Create a mob, return a `Mob` |
@@ -444,6 +445,7 @@ interface SessionOptions {
   enableMob?: boolean;
   enableWebSearch?: boolean;
   toolFilter?: WireToolFilter;
+  grantGatedTools?: { families?: string[]; tools?: string[] };
   keepAlive?: boolean;
   commsName?: string;
   peerMeta?: Record<string, unknown>;
@@ -469,6 +471,14 @@ The turn options also carry `maxTokens`, `outputSchema`, and
 `structuredOutputRetries`, but the server refuses them on a turn with
 `INVALID_PARAMS`: they are build settings, so set them on `createSession(...)`
 or `createDeferredSession(...)`.
+
+`grantGatedTools` gates built-in tool families and tool names: the session
+mounts them hidden and refuses their calls until `grantTool(sessionId, { family
+}, { durationMs })` or `grantTool(sessionId, { tool }, { expiresAtMs })` opens
+them; see [scoped tool grants](/api/rpc#scoped-tool-grants). The client sends a
+gate only to a server whose contract is 0.9.8 or later, and otherwise throws
+`CapabilityUnavailableError`: an older server would build the session with the
+gated tools ungated.
 
 ---
 

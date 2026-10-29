@@ -53,6 +53,10 @@ them.
   `AgentError::ToolGrantGateRefused`: an invalid-params error whose data is
   `{"kind": "tool_grant_gate_refused", "tool_grant_gate_refusal": ...}`.
 
+- `meerkat-rpc`: `handlers::session::CreateSessionParams` gains
+  `grant_gated_tools` (`Option<meerkat_contracts::WireGrantGatedTools>`); a
+  struct literal needs it.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
   MeerkatMachine gains the scoped tool grant gate (see Added).
   `MeerkatMachineState` (meerkat-machine-schema and meerkat-runtime) and the
@@ -150,6 +154,40 @@ them.
   `replace_tool_grant_gate` and `apply_tool_grant_open_set`, whose defaults
   accept only an empty gate.
 
+- `meerkat-rpc`, `meerkat-contracts`, `meerkat-runtime`, `meerkat`, Python and
+  TypeScript SDKs: scoped tool grants over JSON-RPC. `session/create` takes
+  `grant_gated_tools` (`{"families": [...], "tools": [...]}`; a field the gate
+  does not know is refused), and a gate no grant could honour fails the
+  session's build with invalid params whose data is
+  `{"kind": "tool_grant_gate_refused", "tool_grant_gate_refusal": ...}` (a
+  deferred create reports it at its first turn). `tool_grants/grant`,
+  `tool_grants/revoke`, `tool_grants/list` and `tool_grants/audit` manage a
+  session's grants without loading, registering or waking it. A grant opens a
+  tool name or a built-in family the session gates (the server fills in the
+  family's names) for exactly one of `duration_ms` and `expires_at_ms`, and
+  reads the gate from the session's persisted metadata, or from its staged
+  build before a deferred first turn. A revoke is idempotent and reports
+  `changed`; a list settles due grants as expired first, lists ended grants
+  only with `include_ended` and reports rows the server cannot read; an audit
+  read pages by `sequence` (`after_sequence`, `limit` up to 1000,
+  `next_sequence`). An `identity` subject is refused as capability
+  unavailable. `meerkat-contracts` adds `GrantToolParams`, `GrantToolResult`,
+  `RevokeToolGrantParams`, `RevokeToolGrantResult`, `ListToolGrantsParams`,
+  `ListToolGrantsResult`, `ToolGrantAuditParams`, `ToolGrantAuditResult`,
+  `WireGrantGatedTools`, `WireToolGrant`, `WireToolGrantSubject`,
+  `WireToolGrantTarget`, `WireToolGrantIssuer`, `WireToolGrantStatus`,
+  `WireToolGrantAuditRow`, `WireToolGrantAuditEvent`,
+  `WireToolGrantExpiryDriver`, `WireToolGrantRefusalKind` and
+  `WireUnreadableToolGrant`; each closed vocabulary decodes a value a later
+  version adds as `unknown`. `meerkat-runtime` adds `tool_grant::wire`, the
+  projection of grants, listings and audit rows onto them, and `meerkat`'s
+  `StagedSessionRegistry` gains `grant_gated_tools`. Python (`grant_tool`,
+  `revoke_tool_grant`, `list_tool_grants`, `tool_grant_audit`, and
+  `grant_gated_tools` on the create methods) and TypeScript (`grantTool`,
+  `revokeToolGrant`, `listToolGrants`, `toolGrantAudit` and
+  `SessionOptions.grantGatedTools`) wrap them; both refuse to send a gate to a
+  server older than contract 0.9.8, which would build the session ungated.
+
 ### Changed
 
 - `meerkat-core`: a `policy_denied` tool error's model-facing message now
@@ -165,6 +203,11 @@ them.
   sessions before relying on a gate, and do not roll a host that served gated
   sessions back to an older binary. Grant rows and their audit log live in the
   `runtime-tool-grants` schema domain, which an older binary leaves alone.
+
+- An `rkat-rpc` older than scoped tool grants ignores `session/create`
+  `grant_gated_tools` and builds the session with those tools ungated. A
+  JSON-RPC client that is not one of the SDKs (which refuse) must check the
+  server's contract version (0.9.8 or later) before sending a gate.
 
 ## [0.9.7] - 2026-10-28
 

@@ -6,3 +6,7 @@
 # worker stacks inside meerkat-runtime's DSL apply path.
 [env]
 RUST_MIN_STACK = "16777216"
+# Embedding builds must carry meerkat_sqlite::REQUIRED_LIBSQLITE3_FLAGS;
+# Cargo does not load a dependency workspace's configuration. Keep inherited
+# environment values from re-enabling SQLite's process-wide accounting locks.
+LIBSQLITE3_FLAGS = { value = "-DSQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_DISABLE_PAGECACHE_OVERFLOW_STATS", force = true }

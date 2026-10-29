@@ -234,6 +234,27 @@ No data-export protocol or successful ingestion claim is added here.
 
 ## Dependency and verification limits
 
+### SQLite build configuration
+
+Core's embedding contract requires the exact
+`meerkat_sqlite::REQUIRED_LIBSQLITE3_FLAGS` value. The repository's
+`.cargo/config.toml` supplies it as a forced Cargo environment setting; dependency
+workspaces do not supply their Cargo configuration to this application.
+`scripts/repo-cargo` changes to the repository root and forwards arguments
+unchanged. For an explicitly bound native build recipe, pass
+`--config /absolute/path/to/this/checkout/.cargo/config.toml` before the existing
+Cargo subcommand, after any leading `+toolchain`. Keep the existing manifest,
+profile, features, stack configuration and warm lane. Arguments after
+`run --` remain child arguments and must not be interpreted as Cargo settings.
+
+The source configuration and wrapper propagation do not prove the compiled
+SQLite profile. The native qualification owner must check that profile in the
+exact emitted Forge executable and retain its source/configuration binding with
+the matching package. No native build or installed acceptance is implied by
+this configuration change.
+
+### Retained native qualification
+
 The manifest pins Connect `a3239bbaf1acd5ccae0f2d789006f8704153ad52` and uses the
 same Core development patch graph as that commit's native workspace. It stays
 separate from the pure serde-only GHE crate and the released Forge runtime.

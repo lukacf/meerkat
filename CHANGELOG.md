@@ -168,8 +168,8 @@ them.
   session's grants without loading, registering or waking it. A grant opens a
   tool name or a built-in family the session gates (the server fills in the
   family's names) for exactly one of `duration_ms` and `expires_at_ms`, and
-  reads the gate from the session's persisted metadata, or from its staged
-  build before a deferred first turn. A revoke is idempotent and reports
+  reads the gate from the session's staged build before or during its first
+  turn, and from its persisted metadata after. A revoke is idempotent and reports
   `changed`; a list settles due grants as expired first, lists ended grants
   only with `include_ended` and reports rows the server cannot read; an audit
   read pages by `sequence` (`after_sequence`, `limit` up to 1000,

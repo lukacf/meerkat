@@ -12574,38 +12574,44 @@ impl SessionRuntime {
     }
 
     /// The scoped tool grant gate `session_id` records, read without
-    /// loading, registering or waking it: its persisted metadata's (no
-    /// transcript is read), else its staged build config's when its first
-    /// turn has not materialized it yet. `None` when no persisted or staged
-    /// session has the id; an archived session reads as absent.
+    /// loading, registering or waking it: its staged build's while the
+    /// session waits for or runs its first turn (the staged slot keeps the
+    /// gate until that turn commits), else its persisted metadata's (no
+    /// transcript is read). `None` when no staged or persisted session has
+    /// the id; an archived session reads as absent.
     pub(crate) async fn session_grant_gate(
         &self,
         session_id: &SessionId,
     ) -> Result<Option<meerkat_core::tool_grant::GrantGatedTools>, RpcError> {
-        if let Some(view) = self
+        // The staged slot comes first: it is removed only after the first
+        // turn's commit, so a session is always staged, persisted, or both.
+        if let Some(gate) = self.staged_sessions.grant_gated_tools(session_id).await {
+            return Ok(Some(gate));
+        }
+        let Some(view) = self
             .service
             .load_authoritative_session_metadata(session_id)
             .await
             .map_err(session_error_to_rpc)?
+        else {
+            return Ok(None);
+        };
+        if self
+            .service
+            .session_archived_by_authority_with_terminal(
+                session_id,
+                view.lifecycle_terminal.as_ref(),
+            )
+            .await
+            .map_err(session_error_to_rpc)?
         {
-            if self
-                .service
-                .session_archived_by_authority_with_terminal(
-                    session_id,
-                    view.lifecycle_terminal.as_ref(),
-                )
-                .await
-                .map_err(session_error_to_rpc)?
-            {
-                return Ok(None);
-            }
-            return Ok(Some(
-                view.session_metadata
-                    .map(|metadata| metadata.tooling.grant_gated)
-                    .unwrap_or_default(),
-            ));
+            return Ok(None);
         }
-        Ok(self.staged_sessions.grant_gated_tools(session_id).await)
+        Ok(Some(
+            view.session_metadata
+                .map(|metadata| metadata.tooling.grant_gated)
+                .unwrap_or_default(),
+        ))
     }
 
     /// Whether the RuntimeStore holds an absorbing archive terminal for the

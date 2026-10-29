@@ -2083,9 +2083,9 @@ only: no method loads, registers or wakes the session.
   ...}`; the server fills in `names` with the names the family can provide, so
   omit them). Exactly one of `duration_ms` and `expires_at_ms` (UNIX ms)
   bounds the grant, at most the host's maximum lifetime (24 hours by default).
-  A session still waiting for its deferred first turn is granted from its
-  staged build. A gate no grant could honour fails the session's build, which
-  a deferred create reports at its first `turn/start`.
+  A session before or during its first turn is granted from its staged build.
+  A gate no grant could honour fails the session's build, which a deferred
+  create reports at its first `turn/start`.
 - **`tool_grants/revoke`** ends a grant before its deadline. It is idempotent:
   revoking a grant that already ended answers it as it stands, and `changed`
   says whether this revoke ended it. A revoke at or after the deadline records

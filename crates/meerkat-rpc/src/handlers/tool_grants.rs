@@ -2,9 +2,9 @@
 //!
 //! Every method reads and writes grant rows through the runtime's grant
 //! service only: it never loads, registers or wakes the subject's session.
-//! A grant reads the gate the session records (its persisted metadata, or
-//! its staged build config before its first turn) and refuses a target the
-//! session does not gate.
+//! A grant reads the gate the session records (its staged build before or
+//! during its first turn, its persisted metadata after) and refuses a
+//! target the session does not gate.
 
 use std::sync::Arc;
 use std::time::Duration;

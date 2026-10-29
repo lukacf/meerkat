@@ -7423,6 +7423,79 @@ mod tests {
             assert_eq!(error_code(&misspelled), error::INVALID_PARAMS);
         }
 
+        /// A grant while the session's first turn runs: the session has no
+        /// durable document until that turn commits, and its staged slot is
+        /// promoting, so the grant reads the gate the slot keeps.
+        #[tokio::test]
+        async fn grant_during_the_first_turn_reads_the_staged_gate() {
+            // Bounds a failure only; the passing path never waits for it.
+            const FAILURE_BOUND: Duration = Duration::from_secs(30);
+            let calls = Arc::new(tokio::sync::watch::channel(0usize).0);
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            let (router, _rx) = test_router_with_llm(Arc::new(GatedLlmClient {
+                calls: Arc::clone(&calls),
+                release: Arc::clone(&release),
+                requests: Arc::new(StdMutex::new(Vec::new())),
+            }))
+            .await;
+            let created = call(
+                &router,
+                "session/create",
+                serde_json::json!({
+                    "prompt": "seed",
+                    "initial_turn": "deferred",
+                    "grant_gated_tools": {"families": ["shell"]},
+                }),
+            )
+            .await;
+            let session_id = result_value(&created)["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string();
+            let first_turn = {
+                let router = router.clone();
+                let session_id = session_id.clone();
+                tokio::spawn(async move {
+                    router
+                        .dispatch(make_request(
+                            "turn/start",
+                            serde_json::json!({"session_id": session_id, "prompt": "first"}),
+                        ))
+                        .await
+                        .expect("turn/start response")
+                })
+            };
+            let mut seen = calls.subscribe();
+            tokio::time::timeout(FAILURE_BOUND, seen.wait_for(|calls| *calls >= 1))
+                .await
+                .expect("the first turn reaches the provider")
+                .expect("call counter stays open");
+
+            let granted = call(
+                &router,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": session_subject(&session_id),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": 60_000,
+                }),
+            )
+            .await;
+            assert_eq!(
+                result_value(&granted)["grant"]["status"],
+                "active",
+                "a grant during the first turn is issued against the staged gate"
+            );
+
+            release.add_permits(1);
+            let first = tokio::time::timeout(FAILURE_BOUND, first_turn)
+                .await
+                .expect("the first turn finishes once released")
+                .expect("first turn task");
+            assert!(first.error.is_none(), "first turn: {:?}", first.error);
+            assert_eq!(listed(&router, &session_id, false).await.len(), 1);
+        }
+
         #[tokio::test]
         async fn session_create_refuses_a_gate_no_grant_could_honour_with_typed_data() {
             let (router, _rx) = test_router().await;

@@ -70,6 +70,9 @@ fn decision_state(require_app_auth: bool) -> meerkat_meta::RuntimeDecisionState 
                 // Authenticated + allowlisted but granted nothing by the rules,
                 // for the deny-by-default "outsider sees an empty console" case.
                 "carol@example.test".to_string(),
+                // Signed in, and granted only by a rule on a side chat's own
+                // name, which grants nothing.
+                "erin@example.test".to_string(),
             ],
         },
         trusted_oidc: trusted_oidc(),

@@ -15474,4 +15474,140 @@ comms = true
         );
         Ok(())
     }
+
+    /// The stdio gateway's `meta/retire` of a side chat on an identity-first
+    /// gateway retires it: the identity runtime, whose bridge reads the
+    /// runtime's own mob, holds no identity of the side chat's name, so the
+    /// gateway retires Core's member, which leaves the roster. The answer is
+    /// the live path's `{identity}`, with no `cleanup_warning`.
+    #[tokio::test]
+    async fn the_stdio_retire_of_a_side_chat_retires_it()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = Box::pin(
+            UnifiedRuntime::builder()
+                .mob_spec(rpc_test_store_backed_mob_spec(&temp_dir)?)
+                .module_config(MetaConfig {
+                    modules: Vec::new(),
+                    discovery: DiscoverySpec {
+                        namespace: "rpc-side-chat-retire-test".to_string(),
+                        modules: Vec::new(),
+                    },
+                    pre_spawn: Vec::new(),
+                })
+                .timeout(Duration::from_secs(5))
+                .build(),
+        )
+        .await?;
+        let source = meerkat_mob::AgentIdentity::from("alpha");
+        Box::pin(
+            runtime.mob_handle().spawn_spec(
+                SpawnMemberSpec::new("worker", source.clone())
+                    .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven),
+            ),
+        )
+        .await?;
+        let turn = runtime
+            .mob_handle()
+            .member(&source)
+            .await?
+            .start_turn(
+                meerkat_core::types::ContentInput::Text("The code word is heron.".to_string()),
+                meerkat_core::types::HandlingMode::Queue,
+                meerkat_mob::MemberTurnOptions::new(),
+                None,
+            )
+            .await?;
+        turn.wait().await?;
+        // Fork once the runtime has settled the source's turn.
+        let mut forked = false;
+        for _ in 0..50 {
+            match Box::pin(crate::side_chat::fork_side_chat(
+                runtime.mob_runtime(),
+                None,
+                "alpha",
+                "alpha-side",
+                None,
+            ))
+            .await
+            {
+                Ok(_) => {
+                    forked = true;
+                    break;
+                }
+                Err(crate::side_chat::SideChatError::Fork(crate::fork::ForkMemberError::Mob(
+                    meerkat_mob::MobError::ForkSourceUnavailable {
+                        cause: meerkat_mob::error::ForkSourceUnavailableCause::Running,
+                        ..
+                    },
+                ))) => tokio::time::sleep(Duration::from_millis(100)).await,
+                Err(error) => return Err(error.to_string().into()),
+            }
+        }
+        assert!(forked, "the source settled its turn and was forked");
+        let side_chat = meerkat_mob::AgentIdentity::from("alpha-side");
+
+        let identity_runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: "rpc-side-chat-retire-test".to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(Arc::new(crate::identity_first::MobSessionBridge::new(
+                runtime.mob_handle(),
+            ))),
+            default_timeout: None,
+        }));
+        let identity_ctx = IdentityFirstContext {
+            runtime: crate::identity_first::PublicIdentityRuntime::new(
+                identity_runtime,
+                runtime.mob_runtime().clone(),
+            ),
+            roster_provider: Arc::new(EmptyRosterProvider),
+            topology_provider: None,
+            customizer: None,
+            agent_memory_provider: None,
+            mob_definition: None,
+            transcript_edit_service: None,
+            compaction_floors: None,
+        };
+        // Asked again while Core still settles the side chat's last turn.
+        let mut response = Value::Null;
+        for _ in 0..50 {
+            let raw = handle_unified_rpc_json(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "meta/retire",
+                    "params": { "identity": "alpha-side" },
+                })
+                .to_string(),
+                Duration::from_secs(10),
+                None,
+                Some(&identity_ctx),
+            )
+            .await;
+            response = serde_json::from_str(&raw)?;
+            let settling = response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| {
+                    message.contains("still in progress") || message.contains("work in flight")
+                });
+            if !settling {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            response["result"],
+            json!({ "identity": "alpha-side" }),
+            "{response:#?}"
+        );
+        assert!(
+            runtime.mob_handle().get_member(&side_chat).await?.is_none(),
+            "the retired side chat leaves the roster"
+        );
+        Ok(())
+    }
 }

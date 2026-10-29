@@ -45,14 +45,17 @@ pub(super) fn persistent_console_spec(
     mob_header: &str,
     tail: &str,
 ) -> Result<(tempfile::TempDir, MobBootstrapSpec), Box<dyn std::error::Error + Send + Sync>> {
+    use crate::storage_layout::MetaStorageLayout;
+
     let temp_dir = tempfile::tempdir()?;
     let state = temp_dir.path().join("state");
     std::fs::create_dir_all(&state)?;
+    let layout = MetaStorageLayout::with_injected_roots(state.clone(), None);
     let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(
-        meerkat_store::SqliteSessionStore::open(state.join("sessions.db"))?,
+        meerkat_store::SqliteSessionStore::open(layout.session_db()?.path)?,
     );
     let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
-        meerkat_runtime::store::SqliteRuntimeStore::new(state.join("runtime.sqlite"))?,
+        meerkat_runtime::store::SqliteRuntimeStore::new(layout.runtime_db())?,
     );
     let blob_store: Arc<dyn meerkat_core::BlobStore> =
         Arc::new(meerkat_store::MemoryBlobStore::new());
@@ -118,9 +121,11 @@ async fn persistent_gateway_runtime_in(
     mob_header: &str,
     tail: &str,
 ) -> Result<MobRuntime, Box<dyn std::error::Error + Send + Sync>> {
-    let (storage, provenance) = crate::mob_composition_manifest::persistent_mob_storage(
-        state.join(crate::storage_layout::EVENT_LOG_DB_FILE_NAME),
-    )?;
+    use crate::storage_layout::MetaStorageLayout;
+
+    let layout = MetaStorageLayout::with_injected_roots(state.to_path_buf(), None);
+    let (storage, provenance) =
+        crate::mob_composition_manifest::persistent_mob_storage(layout.event_log_db())?;
     let definition = MobDefinition::from_toml(&format!(
         "[mob]\nid = \"{mob_id}\"\n{mob_header}\n{WORKER_PROFILES}\n{tail}"
     ))?;
@@ -729,8 +734,8 @@ async fn a_dormant_source_forks_without_waking() -> TestResult {
 #[tokio::test]
 async fn a_side_chat_frame_is_decided_along_its_source() -> TestResult {
     use crate::console_aggregator::{
-        ConsoleFrameSource, ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleLogStore as _,
-        MetaConsoleAggregator, NewConsoleFrame,
+        ConsoleFrameSource, ConsoleFrameSourceKind, ConsoleFrameStatus, MetaConsoleAggregator,
+        NewConsoleFrame,
     };
 
     let (_temp_dir, runtime) =
@@ -1489,6 +1494,123 @@ async fn a_side_chat_follows_its_source_after_a_restart() -> TestResult {
     Ok(())
 }
 
+/// Closing a side chat on an identity-first Console retires it, after a
+/// gateway restart and the side chat's wake on a first message too:
+/// `meta/retire` on its name, which the Console's identity runtime holds no
+/// identity of, retires Core's member. The side chat leaves the roster and
+/// Core holds its member retired; it is never only released in place, with
+/// a success answer for a retire that retired nothing.
+#[tokio::test]
+async fn closing_a_restored_side_chat_on_an_identity_first_console_retires_it() -> TestResult {
+    use crate::identity_first::{
+        DurabilityPolicy, IdentityRuntime, IdentityRuntimeConfig, LocalContinuityStore,
+        LocalLeaseProvider, MobSessionBridge,
+    };
+
+    const MOB: &str = "console-side-chat-close-restored";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let forked = fork_when_idle(&runtime, "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+    runtime.handle().shutdown().await?;
+    let _ = runtime
+        .stand_down_child_mobs(std::time::Instant::now() + std::time::Duration::from_secs(90))
+        .await;
+    drop(runtime);
+
+    // The gateway restarts over the same state, and the restored side chat
+    // wakes on its first message.
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    let side_chat = AgentIdentity::from("alpha-side");
+    runtime.handle().ensure_member_live(&side_chat).await?;
+    let turn = runtime
+        .handle()
+        .member(&side_chat)
+        .await?
+        .start_turn(
+            ContentInput::Text("Are you still there?".to_string()),
+            HandlingMode::Queue,
+            meerkat_mob::MemberTurnOptions::new(),
+            None,
+        )
+        .await?;
+    turn.wait().await?;
+
+    // The Console of an identity-first gateway: an identity runtime over the
+    // runtime's own mob, holding no identity of the side chat's name.
+    let identity_runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+        continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+        lease_provider: Arc::new(LocalLeaseProvider::new()),
+        runtime_instance_id: MOB.to_string(),
+        has_runtime_store: true,
+        durability_policy: DurabilityPolicy::SyncWriteThrough,
+        bridge: Some(Arc::new(MobSessionBridge::new(runtime.handle()))),
+        default_timeout: None,
+    }));
+    let closed = close_when_idle(&runtime, &identity_runtime, "alpha-side").await;
+    assert!(closed["error"].is_null(), "closed: {closed:#?}");
+    assert_eq!(
+        closed["result"],
+        json!({ "identity": "alpha-side" }),
+        "the live path answers, with no cleanup_warning: {closed:#?}"
+    );
+    assert!(
+        runtime.handle().get_member(&side_chat).await?.is_none(),
+        "the closed side chat leaves the roster: {closed:#?}"
+    );
+    assert!(
+        runtime
+            .handle()
+            .member_binding_history()
+            .await?
+            .last_binding(&side_chat)
+            .is_some_and(|binding| !binding.is_live()),
+        "Core holds the side chat's member retired"
+    );
+    assert!(
+        bridge_session(&runtime, "alpha").await.is_some(),
+        "the side chat's agent is left as it was"
+    );
+    Ok(())
+}
+
+/// `meta/retire` for `alias` on the Console route of `runtime` with
+/// `identity_runtime`, asked again while Core still settles the member's
+/// last turn (a retryable refusal), as the Console's close waits for an idle
+/// side chat.
+async fn close_when_idle(
+    runtime: &MobRuntime,
+    identity_runtime: &Arc<crate::identity_first::IdentityRuntime>,
+    alias: &str,
+) -> Value {
+    let mut answer = Value::Null;
+    for _ in 0..50 {
+        answer = Box::pin(handle_console_runtime_rpc(
+            runtime,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Arc::clone(identity_runtime)),
+            None,
+            None,
+            request("meta/retire", json!({ "identity": alias })),
+            true,
+        ))
+        .await;
+        let settling = answer["error"]["message"].as_str().is_some_and(|message| {
+            message.contains("still in progress") || message.contains("work in flight")
+        });
+        if !settling {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    answer
+}
+
 /// A Console over several runtimes names a side chat's source in the side
 /// chat's runtime namespace, as it names the side chat itself: in the access
 /// attributes it records, on its member rows and in its identity list calls.
@@ -1728,8 +1850,6 @@ async fn a_side_chat_is_never_respawned_or_reset() -> TestResult {
 /// meerkat's `mob_respawn` for the side chat's agent.
 #[tokio::test]
 async fn an_agent_mob_respawn_tool_never_respawns_a_side_chat() -> TestResult {
-    use meerkat_core::AgentToolDispatcher as _;
-
     /// Stands in for meerkat's mob tools: records the member each call
     /// names and answers it done.
     #[derive(Default)]

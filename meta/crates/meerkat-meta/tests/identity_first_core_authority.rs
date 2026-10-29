@@ -1532,12 +1532,85 @@ async fn a_host_adopted_identity_is_read_only_to_every_meta_verb() {
         }
     }
     boot.compile(&[]).await;
+    // The empty roster unregistered the adopted identity without retiring
+    // it. Meta holds no identity of that name now, and its retire still
+    // refuses the adopted member rather than leaving it to a raw retire.
+    assert_host_adopted("retire", &alice, runtime.retire(&alice).await);
     assert_eq!(
         boot.core_member_generation(&alice).await,
         Some(generation),
         "no Meta verb and no roster compile may move Core's member of an adopted identity"
     );
     boot.assert_continuity_and_leases_unread();
+    boot.stop().await;
+}
+
+/// A roster that drops an adopted identity unregisters it without retiring
+/// it. The stdio gateway's `meta/retire` of that name, which Meta no longer
+/// holds, is still the host-adoption refusal (`-32053`): it never falls back
+/// to a raw retire, and Core's member keeps its generation.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_stdio_retire_refuses_an_adopted_identity_meta_no_longer_holds() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mob_id = unique_mob_id("retire-adopted");
+    let alice = id("personal:alice");
+    let roster = vec![spec("personal:alice")];
+
+    let mut boot = Boot::start(&state, &mob_id, &roster).await;
+    boot.compile(&roster).await;
+    boot.send(&alice, "A turn before the host adopts this identity.")
+        .await;
+    let (_, session, _) = boot.status_session(&alice).await;
+    let session = session.expect("a live identity reports its session");
+    boot.adopt(&alice, &session).await;
+    boot.compile(&[]).await;
+    let generation = boot
+        .core_member_generation(&alice)
+        .await
+        .expect("Core holds the adopted member");
+
+    boot.unified
+        .attach_identity_first_context(Arc::clone(&boot.context));
+    let ctx = meerkat_meta::rpc::IdentityFirstContext {
+        runtime: boot
+            .unified
+            .identity_runtime()
+            .expect("the identity runtime is attached"),
+        roster_provider: Arc::new(StaticRoster(Vec::new())),
+        topology_provider: None,
+        customizer: None,
+        agent_memory_provider: None,
+        mob_definition: Some(definition(&mob_id)),
+        transcript_edit_service: None,
+        compaction_floors: None,
+    };
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "meta/retire",
+        "params": { "identity": alice.as_str() },
+    });
+    let reply = meerkat_meta::rpc::handle_unified_rpc_json(
+        &boot.unified,
+        &request.to_string(),
+        Duration::from_secs(30),
+        None,
+        Some(&ctx),
+    )
+    .await;
+    let reply: serde_json::Value = serde_json::from_str(&reply).expect("a json-rpc reply");
+    assert_eq!(
+        reply["error"]["code"],
+        serde_json::json!(meerkat_meta::rpc::IDENTITY_HOST_ADOPTED_CODE),
+        "{reply}"
+    );
+    assert_eq!(
+        boot.core_member_generation(&alice).await,
+        Some(generation),
+        "the refused retire leaves Core's adopted member as it was"
+    );
+    drop(ctx);
     boot.stop().await;
 }
 

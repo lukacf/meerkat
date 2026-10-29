@@ -58,7 +58,7 @@ use meerkat_core::{
     InstructionActivationExpectation, InstructionActivationId, InstructionActivationIdentity,
     InstructionActivationRequest, InstructionContentDigest,
 };
-use meerkat_mob::{MobSessionService as _, SpawnMemberSpec};
+use meerkat_mob::SpawnMemberSpec;
 use serde::Serialize;
 
 use crate::fork::{ForkChildRetention, ForkMemberError, ForkMemberOutcome};
@@ -289,7 +289,7 @@ impl SideChatLineageCache {
         let (lineages, marked) = read_verified_side_chats(handle).await;
         self.reads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.keep(&handle.mob_id().to_string(), marked);
+        self.keep(handle.mob_id().as_str(), marked);
         lineages
     }
 

@@ -25739,8 +25739,11 @@ mod identity_root_forwarding_tests {
                     .expect("actual gateway runtime store"),
             );
             if self.remove_declaration {
-                // The RED control removes only the declaration from the
-                // actual gateway-built spec. Its factory keeps the root.
+                // Removes only the declaration from the actual gateway-built
+                // spec. Its factory keeps the root, and the mob seats under
+                // the root the gateway's session service reports for it,
+                // through the gateway's wrappers (RED before the report
+                // existed: Core's exact endpoint mismatch at the first wake).
                 spec.session_identity_config_root = None;
             }
             Ok(spec)
@@ -25790,7 +25793,6 @@ mod identity_root_forwarding_tests {
             let closed = self.closed.clone();
             let close_notice = self.close_notice.clone();
             let record = self.record.clone();
-            let remove_declaration = self.remove_declaration;
             let observer = tokio::spawn(async move {
                 let _close = CloseObserver {
                     closed: closed.clone(),
@@ -25801,39 +25803,61 @@ mod identity_root_forwarding_tests {
                     return false;
                 }
                 let observed = std::panic::AssertUnwindSafe(async {
-                    let identity = crate::identity_first::AgentIdentity::parse("gateway-root:member").unwrap();
+                    let identity =
+                        crate::identity_first::AgentIdentity::parse("gateway-root:member").unwrap();
                     let member = crate::member_comms_id::mob_member_id(identity.as_str());
-                    let seated = identities.status(&identity).await.expect("real roster seat");
+                    let seated = identities
+                        .status(&identity)
+                        .await
+                        .expect("real roster seat");
                     let session = seated.session_id.expect("historical session for the seat");
                     let logical = meerkat_runtime::LogicalRuntimeId::for_session(&session);
-                    assert_eq!(handle.member_materialization_for_test(&member),
-                        Some(MemberMaterializationPhase::Dormant));
-                    assert!(machine.current_executor_attachment_witness(&session).await.is_none());
-                    assert!(store.load_input_states_strict(&logical).await.unwrap().is_empty());
+                    assert_eq!(
+                        handle.member_materialization_for_test(&member),
+                        Some(MemberMaterializationPhase::Dormant)
+                    );
+                    assert!(
+                        machine
+                            .current_executor_attachment_witness(&session)
+                            .await
+                            .is_none()
+                    );
+                    assert!(
+                        store
+                            .load_input_states_strict(&logical)
+                            .await
+                            .unwrap()
+                            .is_empty()
+                    );
                     let materialized = identities.materialize_tracked(&identity).await;
-                    if remove_declaration {
-                        assert!(matches!(materialized,
-                            Err(crate::identity_first::IdentityRuntimeError::AdmissionFailed {
-                                identity: refused_identity, detail,
-                            }) if refused_identity == identity
-                                && detail.contains("cannot publish its comms endpoint")
-                                && detail.contains("disagrees with its durable generation endpoint")
-                        ), "the missing-declaration control must retain Core's exact endpoint mismatch");
-                    } else {
-                        let scope = materialized.expect("gateway root forward must materialize")
-                            .expect("actual delivery scope");
-                        assert_eq!(scope.session_id(), &session);
-                        assert_eq!(handle.member_materialization_for_test(&member),
-                            Some(MemberMaterializationPhase::Live));
-                        assert!(machine.current_executor_attachment_witness(&session).await.is_some());
-                    }
-                    assert!(store.load_input_states_strict(&logical).await.unwrap().is_empty());
-                    json!({"session": session, "outcome": if remove_declaration {
-                        "exact_endpoint_mismatch"
-                    } else {
-                        "same_session_materialized"
-                    }, "inputs_before": 0, "inputs_after": 0})
-                }).catch_unwind().await;
+                    // Declared or not, the seat took the root the member's
+                    // factory keeps its key pair under.
+                    let scope = materialized
+                        .expect("gateway root forward must materialize")
+                        .expect("actual delivery scope");
+                    assert_eq!(scope.session_id(), &session);
+                    assert_eq!(
+                        handle.member_materialization_for_test(&member),
+                        Some(MemberMaterializationPhase::Live)
+                    );
+                    assert!(
+                        machine
+                            .current_executor_attachment_witness(&session)
+                            .await
+                            .is_some()
+                    );
+                    assert!(
+                        store
+                            .load_input_states_strict(&logical)
+                            .await
+                            .unwrap()
+                            .is_empty()
+                    );
+                    json!({"session": session, "outcome": "same_session_materialized",
+                        "inputs_before": 0, "inputs_after": 0})
+                })
+                .catch_unwind()
+                .await;
                 let passed = observed.is_ok();
                 let value = observed.unwrap_or_else(|_| json!({"outcome": "assertion_failed"}));
                 let file = std::fs::OpenOptions::new()
@@ -25916,6 +25940,13 @@ mod identity_root_forwarding_tests {
         }
     }
 
+    /// A real gateway launch over a declared comms identity root seats its
+    /// roster member under that root, and its first wake materializes it on
+    /// the seat's endpoint. With the declaration removed from the built
+    /// spec, the member is seated under the root the gateway's session
+    /// service reports through its wrappers (the pre-build wrapper and the
+    /// callback builder over the factory), which is the factory's own, and
+    /// materializes the same way.
     #[test]
     fn actual_gateway_declared_root_materializes_dormant_member() {
         use std::io::{BufRead, BufReader};
@@ -26080,12 +26111,9 @@ mod identity_root_forwarding_tests {
                 serde_json::from_slice(&std::fs::read(record).expect("real lifecycle record"))
                     .unwrap();
             assert_eq!(
-                observed["outcome"],
-                if remove_declaration {
-                    "exact_endpoint_mismatch"
-                } else {
-                    "same_session_materialized"
-                }
+                observed["outcome"], "same_session_materialized",
+                "remove_declaration={remove_declaration}: the member materializes on its seat's \
+                 endpoint, with the declaration or with the root the service reports"
             );
             assert_eq!(observed["inputs_before"], 0);
             assert_eq!(observed["inputs_after"], 0);

@@ -427,6 +427,29 @@ Unset, `MemberRestore::OnDemand` applies. The builder also applies it to a
 supplied `mob_spec(...)`; a spec you build yourself takes
 `MobBootstrapSpec::with_member_restore`.
 
+### Members' comms identity root
+
+A member on in-process comms has a key pair of its own, which its agent
+factory keeps under `<root>/.rkat/session_comms_identity`, where `<root>` is
+the factory's `AgentFactory::user_config_root` (the builder's
+`session_identity_config_root(root)` sets it), or under the platform's
+per-user default when the factory has none. The mob seats each dormant member
+under the root its session service reports for its agent builds
+(`MobSessionService::session_comms_identity_root`), so the member's first
+materialization loads the key its seat recorded. A host that builds its own
+spec over a session service on its own factory declares nothing: the service
+reports the factory's root.
+
+`MobBootstrapSpec::with_session_identity_config_root(root)` overrides that
+report, for a service whose report is not where its builds keep the key
+pairs. A declared root that differs from the reported one wins, and the
+bootstrap logs a warning naming both: a member whose first build loads its
+key pair from elsewhere is refused at its first materialization. A session
+service that reports no durable root has every seat refused until a root is
+declared. A session service or agent builder that wraps another forwards
+`session_comms_identity_root` to it; the method has no default, so a wrapper
+without it does not compile.
+
 ### Fork instruction policy
 
 A fork of a member with activated host instructions does with them what the

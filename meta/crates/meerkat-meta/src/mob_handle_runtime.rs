@@ -6563,9 +6563,9 @@ pub struct MobBootstrapSpec {
     pub(crate) host_pending_members: Vec<meerkat_mob::AgentIdentity>,
     /// The user-global root the member factory keeps the members' session
     /// comms identities under (`<root>/.rkat/session_comms_identity`), when
-    /// the host names one; `None` is the factory's ambient default. The mob
-    /// seats inproc members under the same root
-    /// (`MobBuilder::with_member_comms_identity_root`).
+    /// the host declares one; `None` leaves the mob to the root the session
+    /// service reports for its agent builds. A declared root overrides the
+    /// report (`MobBuilder::with_member_comms_identity_root`).
     pub(crate) session_identity_config_root: Option<PathBuf>,
     /// Process-local registry resolving exact application consequence-policy
     /// identities for member builds, forwarded to
@@ -6739,16 +6739,27 @@ impl MobBootstrapSpec {
     }
 
     /// Declare the user-global config root used by the caller's session
-    /// service factory for session comms identities. Pass the same root as
-    /// `AgentFactory::user_config_root` when composing a service externally.
-    /// Meta seats dormant in-process members under this root, so their first
-    /// materialization uses the endpoint identity the factory will load.
+    /// service factory for session comms identities, overriding the root
+    /// the session service reports for its agent builds
+    /// (`MobSessionService::session_comms_identity_root`; over
+    /// `meerkat::FactoryAgentBuilder`, the root its `AgentFactory` resolves
+    /// from `AgentFactory::user_config_root`). Meta seats dormant in-process
+    /// members under `<root>/.rkat/session_comms_identity`, so their first
+    /// materialization uses the endpoint identity the factory loads.
     ///
-    /// Set this before the first bootstrap and on every cold reopen. The root
-    /// and its per-session identity keys must survive with the durable state;
-    /// changing it for existing members requires preserving those keys. If
-    /// unset, the ambient platform root remains the default. Bootstrap refuses
-    /// an empty or whitespace-only root before preparing the mob.
+    /// Optional: unset, the mob seats under the root the session service
+    /// reports, which a service composed over `FactoryAgentBuilder` reports
+    /// from its factory. Set it only where that report is not where the
+    /// service's builds keep the members' key pairs. A declared root wins
+    /// over the reported one, and one that differs from a durable reported
+    /// root is logged as a warning at bootstrap: a member seated under a root
+    /// its first build does not load from is refused at its first wake.
+    ///
+    /// When set, set it before the first bootstrap and on every cold reopen.
+    /// The root and its per-session identity keys must survive with the
+    /// durable state; changing it for existing members requires preserving
+    /// those keys. Bootstrap refuses an empty or whitespace-only root before
+    /// preparing the mob.
     #[must_use]
     pub fn with_session_identity_config_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.session_identity_config_root = Some(root.into());
@@ -10051,6 +10062,25 @@ async fn stop_after_failed_startup(
     Ok(meerkat_mob::MobStopReport::default())
 }
 
+/// The durable root the mob's session service reports for its agent builds
+/// when it is not `declared`, the members' session comms identity root the
+/// host declared (`MobBootstrapSpec::with_session_identity_config_root`):
+/// the report the declaration overrides. `None` when they agree, or when
+/// the service reports no durable root.
+fn reported_root_overridden<'a>(
+    declared: &std::path::Path,
+    reported: &'a meerkat_core::SessionCommsIdentityRoot,
+) -> Option<&'a std::path::Path> {
+    match reported {
+        meerkat_core::SessionCommsIdentityRoot::Durable(reported)
+            if reported.as_path() != declared =>
+        {
+            Some(reported.as_path())
+        }
+        _ => None,
+    }
+}
+
 impl MobRuntime {
     /// Bootstrap a mob that is `Running` on return.
     ///
@@ -10359,24 +10389,34 @@ impl MobRuntime {
         // How a seated member's endpoint is recorded: a socket transport's
         // member registers its endpoint when it first runs, and an inproc
         // member's comms identity lives where the member factory keeps it.
-        // A root that cannot be resolved leaves the mob without one, and it
-        // refuses every seat typed.
+        // The mob's session service reports that root and Core seats under
+        // it; a root the host declared for its factory
+        // (`MobBootstrapSpec::with_session_identity_config_root`) overrides
+        // the report, and one that differs from the report is logged. A
+        // service that reports no durable root, with no root declared, has
+        // every seat refused typed.
         let network_member_comms = spec.member_model_config.as_ref().is_some_and(|config| {
             !matches!(config.comms.mode, meerkat_core::CommsRuntimeMode::Inproc)
         });
         if network_member_comms {
             builder = builder.with_network_member_comms();
-        } else {
-            match meerkat::canonical_session_comms_identity_root(
-                spec.session_identity_config_root.as_deref(),
-            ) {
-                Ok(root) => builder = builder.with_member_comms_identity_root(root),
-                Err(error) => tracing::error!(
-                    %error,
-                    "the members' session comms identity root cannot be resolved: the mob \
-                     seats no member"
-                ),
+        } else if let Some(declared) = spec.session_identity_config_root.as_deref() {
+            let root = meerkat::canonical_session_comms_identity_root(Some(declared))
+                .map_err(MobRuntimeError::InvalidConfig)?;
+            let reported = session_service.session_comms_identity_root();
+            if let Some(overridden) = reported_root_overridden(&root, &reported) {
+                tracing::warn!(
+                    mob_id = %mob_id,
+                    declared = %root.display(),
+                    reported = %overridden.display(),
+                    "the declared root of the members' session comms identities \
+                     (MobBootstrapSpec::with_session_identity_config_root) differs from the one \
+                     the mob's session service reports for its agent builds: the mob seats \
+                     members under the declared root, and a member whose first build keeps its \
+                     key pair under the reported one is refused at its first wake"
+                );
             }
+            builder = builder.with_member_comms_identity_root(root);
         }
         if let Some(preparer) = spec.member_build_preparer.clone() {
             builder = builder.with_member_build_preparer(preparer);
@@ -18916,6 +18956,31 @@ comms = true
                 vec!["session_comms_identity_root"],
                 "{shape}: the inner service answers, exactly once"
             );
+        }
+    }
+
+    /// A declared root overrides only a durable root the session service
+    /// reports that differs from it: that disagreement is what the bootstrap
+    /// logs before it seats members under the declared root.
+    #[test]
+    fn a_declared_root_overrides_only_a_differing_reported_root() {
+        let declared = std::path::Path::new("/declared/.rkat/session_comms_identity");
+        let differing = meerkat_core::SessionCommsIdentityRoot::Durable(PathBuf::from(
+            "/reported/.rkat/session_comms_identity",
+        ));
+        assert_eq!(
+            reported_root_overridden(declared, &differing),
+            Some(std::path::Path::new(
+                "/reported/.rkat/session_comms_identity"
+            ))
+        );
+        let agreeing = meerkat_core::SessionCommsIdentityRoot::Durable(declared.to_path_buf());
+        assert_eq!(reported_root_overridden(declared, &agreeing), None);
+        for unreported in [
+            meerkat_core::SessionCommsIdentityRoot::NotKept,
+            meerkat_core::SessionCommsIdentityRoot::Unresolved("no home".to_string()),
+        ] {
+            assert_eq!(reported_root_overridden(declared, &unreported), None);
         }
     }
 

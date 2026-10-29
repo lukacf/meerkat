@@ -1436,7 +1436,7 @@ impl UnifiedRuntimeBuilder {
 
         if self.mob_spec.is_some() && self.session_identity_config_root.is_some() {
             return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
-                "session_identity_config_root() requires builder-owned session services; mob_spec() is already erased; declare the factory root on the supplied spec with MobBootstrapSpec::with_session_identity_config_root".into(),
+                "session_identity_config_root() requires builder-owned session services; mob_spec() is already erased; the supplied spec's session service reports its agent factory's root, and MobBootstrapSpec::with_session_identity_config_root overrides it".into(),
             ));
         }
 

@@ -6622,9 +6622,10 @@ async fn a_host_adopts_a_seated_identity_before_its_first_delivery() {
     runtime.shutdown().await;
 }
 
-// Raw host composition: the caller owns the service/factory and declares the
-// factory's root on the spec. No stock constructor or builder root override
-// can supply the declaration these regressions exercise.
+// Raw host composition: the caller owns the service/factory, whose agent
+// factory keeps the members' comms identities under its own root
+// (`identity-home`). The mob seats members under the root the composed
+// service reports; a root the spec declares overrides it.
 fn raw_identity_root_spec(
     state: &std::path::Path,
     mob_id: &str,
@@ -6674,21 +6675,55 @@ fn raw_identity_root_spec(
     (spec, machine, store)
 }
 
+/// What a raw spec declares about the members' comms identity root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RawIdentityRoot {
+    /// Nothing: the mob seats under the root the composed session service
+    /// reports for its agent factory, the factory's own.
+    Derived,
+    /// The factory's own root, with `with_session_identity_config_root`.
+    Declared,
+    /// Another root than the factory's, with
+    /// `with_session_identity_config_root`: the declaration wins anyway.
+    DeclaredElsewhere,
+}
+
+impl RawIdentityRoot {
+    /// The user-global root whose `.rkat/session_comms_identity` the seats
+    /// mint the members' key pairs under.
+    fn seat_home(self, state: &std::path::Path) -> std::path::PathBuf {
+        match self {
+            Self::Derived | Self::Declared => state.join("identity-home"),
+            Self::DeclaredElsewhere => state.join("elsewhere-home"),
+        }
+    }
+}
+
+/// The key directory of `session` under the user-global root `home`.
+fn raw_session_keys(
+    home: &std::path::Path,
+    session: &meerkat_core::SessionId,
+) -> std::path::PathBuf {
+    home.join(".rkat/session_comms_identity")
+        .join(session.to_string())
+}
+
 /// One real boot and wake, with every exported owner dropped before returning.
 /// Catch assertion unwinds so a failing regression still joins shutdown.
 async fn observe_raw_identity_root(
     state: &std::path::Path,
     mob_id: &str,
-    declare_root: bool,
+    root: RawIdentityRoot,
 ) -> (meerkat_core::SessionId, Vec<u8>) {
     use futures::FutureExt;
     use meerkat_mob::machines::mob_machine::MemberMaterializationPhase;
 
     let (spec, machine, store) = raw_identity_root_spec(state, mob_id);
-    let spec = if declare_root {
-        spec.with_session_identity_config_root(state.join("identity-home"))
-    } else {
-        spec
+    let spec = match root {
+        RawIdentityRoot::Derived => spec,
+        RawIdentityRoot::Declared | RawIdentityRoot::DeclaredElsewhere => {
+            spec.with_session_identity_config_root(root.seat_home(state))
+        }
     };
     let identity = AgentIdentity::parse("raw-root:member").expect("fixture identity");
     let runtime = Box::pin(
@@ -6739,11 +6774,39 @@ async fn observe_raw_identity_root(
                 .unwrap()
                 .is_empty()
         );
+        // The seat read (or minted) the member's key pair under the root it
+        // took: the declared one when the spec declares one, else the one
+        // the session service reports.
+        assert!(
+            raw_session_keys(&root.seat_home(state), &session)
+                .join("identity.key")
+                .is_file(),
+            "{root:?}: the seat keeps the member's key pair under its root"
+        );
+        if root == RawIdentityRoot::DeclaredElsewhere {
+            assert!(
+                !raw_session_keys(&state.join("identity-home"), &session).exists(),
+                "the declared root won: nothing was seated under the reported one"
+            );
+        }
 
         let materialized = identities.materialize_tracked(&identity).await;
-        if declare_root {
+        if root == RawIdentityRoot::DeclaredElsewhere {
+            // The member's first build keeps its key pair where its factory
+            // keeps them, not under the declared root: Core's exact endpoint
+            // mismatch, through Meta's typed final wake refusal.
+            assert!(matches!(
+                materialized,
+                Err(meerkat_meta::identity_first::IdentityRuntimeError::AdmissionFailed {
+                    identity: refused_identity,
+                    detail,
+                }) if refused_identity == identity
+                    && detail.contains("cannot publish its comms endpoint")
+                    && detail.contains("disagrees with its durable generation endpoint")
+            ));
+        } else {
             let scope = materialized
-                .expect("declared factory root must preserve the seated endpoint")
+                .expect("the factory's root must preserve the seated endpoint")
                 .expect("native member owns a delivery scope");
             assert_eq!(scope.session_id(), &session);
             assert_eq!(
@@ -6756,18 +6819,6 @@ async fn observe_raw_identity_root(
                     .await
                     .is_some()
             );
-        } else {
-            // RED control: preserve Core's exact endpoint mismatch, through
-            // Meta's typed final wake refusal, rather than accepting any error.
-            assert!(matches!(
-                materialized,
-                Err(meerkat_meta::identity_first::IdentityRuntimeError::AdmissionFailed {
-                    identity: refused_identity,
-                    detail,
-                }) if refused_identity == identity
-                    && detail.contains("cannot publish its comms endpoint")
-                    && detail.contains("disagrees with its durable generation endpoint")
-            ));
         }
         assert!(
             store
@@ -6776,18 +6827,15 @@ async fn observe_raw_identity_root(
                 .unwrap()
                 .is_empty()
         );
-        let public_key = if declare_root {
+        let public_key = if root == RawIdentityRoot::DeclaredElsewhere {
+            Vec::new()
+        } else {
             let key = std::fs::read(
-                state
-                    .join("identity-home/.rkat/session_comms_identity")
-                    .join(session.to_string())
-                    .join("identity.pub"),
+                raw_session_keys(&state.join("identity-home"), &session).join("identity.pub"),
             )
             .expect("factory persisted the session public key");
             assert_eq!(key.len(), 32);
             key
-        } else {
-            Vec::new()
         };
         (session, public_key)
     })
@@ -6810,30 +6858,65 @@ async fn observe_raw_identity_root(
 #[tokio::test]
 async fn raw_spec_declared_identity_root_materializes_dormant_member() {
     let state = tempfile::tempdir().unwrap();
-    observe_raw_identity_root(state.path(), &unique_builder_mob_id(), true).await;
+    observe_raw_identity_root(
+        state.path(),
+        &unique_builder_mob_id(),
+        RawIdentityRoot::Declared,
+    )
+    .await;
 }
 
+/// A host composing its own session service, whose agent factory keeps the
+/// members' comms identities under a root of its own, needs no declaration:
+/// the mob seats members under the root the service reports, and a dormant
+/// member materializes with the endpoint its seat recorded. RED before the
+/// report existed: the mob seated under the platform's default root, and
+/// the member's first wake was refused typed ("disagrees with its durable
+/// generation endpoint").
 #[tokio::test]
-async fn raw_spec_missing_identity_root_refuses_exact_endpoint_mismatch() {
+async fn raw_spec_derived_identity_root_materializes_dormant_member() {
     let state = tempfile::tempdir().unwrap();
-    observe_raw_identity_root(state.path(), &unique_builder_mob_id(), false).await;
+    observe_raw_identity_root(
+        state.path(),
+        &unique_builder_mob_id(),
+        RawIdentityRoot::Derived,
+    )
+    .await;
+}
+
+/// `with_session_identity_config_root` still overrides the root the session
+/// service reports: the seat mints the member's key pair under the declared
+/// root even where the factory keeps it elsewhere, and the member's first
+/// wake is then refused typed, never re-keyed silently.
+#[tokio::test]
+async fn raw_spec_declared_identity_root_wins_over_the_derived_one() {
+    let state = tempfile::tempdir().unwrap();
+    observe_raw_identity_root(
+        state.path(),
+        &unique_builder_mob_id(),
+        RawIdentityRoot::DeclaredElsewhere,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn raw_spec_identity_root_survives_cold_reopen() {
-    let state = tempfile::tempdir().unwrap();
-    let mob_id = unique_builder_mob_id();
-    let (original_session, original_key) =
-        observe_raw_identity_root(state.path(), &mob_id, true).await;
-    // The first observation joined shutdown and dropped every runtime,
-    // identity, service, machine and store owner. Reopen all of them from disk.
-    let (reopened_session, reopened_key) =
-        observe_raw_identity_root(state.path(), &mob_id, true).await;
-    assert_eq!(reopened_session, original_session);
-    assert!(
-        reopened_key == original_key,
-        "the durable endpoint key must not rotate"
-    );
+    for root in [RawIdentityRoot::Declared, RawIdentityRoot::Derived] {
+        let state = tempfile::tempdir().unwrap();
+        let mob_id = unique_builder_mob_id();
+        let (original_session, original_key) =
+            observe_raw_identity_root(state.path(), &mob_id, root).await;
+        // The first observation joined shutdown and dropped every runtime,
+        // identity, service, machine and store owner. Reopen all of them from
+        // disk.
+        let (reopened_session, reopened_key) =
+            observe_raw_identity_root(state.path(), &mob_id, root).await;
+        assert_eq!(reopened_session, original_session, "{root:?}");
+        assert!(
+            reopened_key == original_key,
+            "{root:?}: the durable endpoint key must not rotate"
+        );
+    }
 }
 
 #[tokio::test]

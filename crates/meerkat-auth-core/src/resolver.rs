@@ -161,6 +161,43 @@ pub async fn resolve_simple_secret(
     }
 }
 
+/// Whether resolving `source` through [`resolve_simple_secret`] also
+/// publishes its AuthMachine lifecycle.
+///
+/// Only `managed_store` does: its secret is loaded through the
+/// lifecycle-checked managed-store path, which restores the lease from the
+/// stored row's durable marker and refuses a lease the machine does not
+/// admit. Every other source (environment, inline secret, command, external
+/// resolver) hands back bare material, so a caller that keeps an AuthMachine
+/// lease for that material is the lease's only publisher. (A command source
+/// with `refresh_interval_ms` does not change this: `resolve_simple_secret`
+/// builds a fresh runner per call, so it runs the command without consulting
+/// or publishing the lease.)
+pub fn simple_secret_source_publishes_lifecycle(source: &CredentialSourceSpec) -> bool {
+    matches!(source, CredentialSourceSpec::ManagedStore)
+}
+
+/// Opaque fingerprint of a credential secret: equal secrets give equal
+/// fingerprints, and a fingerprint does not give the secret back. It lets a
+/// caller tell whether a re-read source returned the credential it already
+/// published without keeping a second copy of that credential. In memory
+/// only: it is never serialized, has no `Display`, and its `Debug` is
+/// redacted.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CredentialFingerprint([u8; 32]);
+
+impl std::fmt::Debug for CredentialFingerprint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CredentialFingerprint(<redacted>)")
+    }
+}
+
+/// The SHA-256 [`CredentialFingerprint`] of `secret`.
+pub fn credential_fingerprint(secret: &str) -> CredentialFingerprint {
+    use sha2::{Digest, Sha256};
+    CredentialFingerprint(Sha256::digest(secret.as_bytes()).into())
+}
+
 /// Whether a confined process could change what a credential command runs
 /// as the host: its working directory (`cwd_subtree`: with everything under
 /// it; the host's own when none is given, which refuses the command when it
@@ -2448,6 +2485,81 @@ mod tests {
         AuthBindingRef, AuthProfile, AuthRouteHints, BackendProfile, BindingPolicy, Provider,
     };
     use meerkat_llm_core::provider_runtime::{ProviderRuntimeCatalog, ValidatedBinding};
+
+    /// Only a managed-store source publishes its own AuthMachine lifecycle
+    /// through `resolve_simple_secret`; for every other source, a command
+    /// with a refresh interval included, the caller owns the lease.
+    #[test]
+    fn simple_secret_source_publishes_lifecycle_only_for_managed_store() {
+        let cases = [
+            (CredentialSourceSpec::ManagedStore, true),
+            (
+                CredentialSourceSpec::InlineSecret {
+                    secret: "inline".into(),
+                },
+                false,
+            ),
+            (
+                CredentialSourceSpec::Env {
+                    env: "COPILOT_GITHUB_TOKEN".into(),
+                    fallback: vec!["GH_TOKEN".into(), "GITHUB_TOKEN".into()],
+                },
+                false,
+            ),
+            (
+                CredentialSourceSpec::ExternalResolver {
+                    handle: "copilot-token".into(),
+                },
+                false,
+            ),
+            (
+                CredentialSourceSpec::Command {
+                    program: "/usr/local/bin/mint-token".into(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: std::collections::BTreeMap::new(),
+                    timeout_ms: 5_000,
+                    refresh_interval_ms: Some(3_000_000),
+                },
+                false,
+            ),
+            (CredentialSourceSpec::PlatformDefault, false),
+            (
+                CredentialSourceSpec::FileDescriptor {
+                    fd: 3,
+                    scope_override: None,
+                },
+                false,
+            ),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(
+                simple_secret_source_publishes_lifecycle(&source),
+                expected,
+                "{source:?}"
+            );
+        }
+    }
+
+    /// Equal secrets give equal fingerprints, different secrets different
+    /// ones, and neither the secret nor its prefix is rendered.
+    #[test]
+    fn credential_fingerprint_compares_secrets_without_rendering_them() {
+        let first = credential_fingerprint("github_pat_fingerprint_canary");
+        assert_eq!(
+            first,
+            credential_fingerprint("github_pat_fingerprint_canary")
+        );
+        assert_ne!(
+            first,
+            credential_fingerprint("github_pat_fingerprint_canary_rotated")
+        );
+        let rendered = format!("{first:?} {first:#?}");
+        assert!(
+            !rendered.contains("canary") && !rendered.contains("github_pat"),
+            "{rendered}"
+        );
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn test_provider_auth_persistence(store: Arc<dyn TokenStore>) -> ProviderAuthPersistence {

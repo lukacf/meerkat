@@ -153,6 +153,9 @@ export function normalizeAgents(
             ? { addressable: statusRow.addressability === "addressable" }
             : {}),
         ...(entry.affordances !== undefined && { affordances: entry.affordances }),
+        ...(typeof entry.side_chat_of === "string" && entry.side_chat_of.trim()
+          ? { side_chat_of: entry.side_chat_of.trim() }
+          : {}),
         model_capabilities: modelCapabilities,
         ...watchFields,
         ...((): Pick<ConsoleAgent, "unobserved"> => {

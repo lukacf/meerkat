@@ -12629,6 +12629,7 @@ async fn seed_operator_execution_residency(handle: &MobHandle, member_session_id
             ack_engine_version: Some("operator-race-host".to_string()),
             placed_spawn_id: Some(spawn_id),
             provision_operation_id: Some("operator-race-provision".to_string()),
+            definition_wiring_exempt: false,
         },
     )
     .await;
@@ -76864,6 +76865,7 @@ async fn test_stale_external_peer_trust_obligation_cannot_readd_trust_when_machi
             ack_engine_version: None,
             placed_spawn_id: None,
             provision_operation_id: None,
+            definition_wiring_exempt: false,
         },
     )
     .expect("spawn stale local member");
@@ -90290,15 +90292,18 @@ fn mob_runtime_parity_field_value(
         "member_wake_attempts" => Some(MobRuntimeParityExprValue::Map(
             snapshot.member_wake_attempts.clone(),
         )),
-        // Residency bookkeeping the parity snapshot does not project yet:
-        // the parity probes never read it.
+        // Residency and definition-wiring bookkeeping the parity snapshot
+        // does not project yet: the parity probes never read it.
         "member_wake_bound"
         | "member_host_preparation_pending"
         | "runtime_retire_archive_only"
         | "owed_edge_repairs"
         | "owed_external_edge_repairs"
         | "member_seat_session_unborn"
-        | "unborn_seat_sessions" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
+        | "unborn_seat_sessions"
+        | "member_definition_wiring_exempt" => {
+            Some(MobRuntimeParityExprValue::Set(BTreeSet::new()))
+        }
         "member_materialization_epoch"
         | "member_boot_obligation_owed"
         | "member_rotation_session_ids"
@@ -93645,6 +93650,7 @@ async fn test_ensure_member_retain_converges_before_roster_projection() {
                 ack_engine_version: None,
                 placed_spawn_id: None,
                 provision_operation_id: None,
+                definition_wiring_exempt: false,
             },
         )
         .await

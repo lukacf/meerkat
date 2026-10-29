@@ -1409,6 +1409,26 @@ pub(crate) async fn respawn_carrying_idle_retire_opt_in<T>(
     outcome
 }
 
+/// The spec a respawn's archive-cleanup fallback seats a member again from,
+/// when the respawn retired it and seated nothing: the role, the labels and
+/// the exemption from the mob definition's wiring rules its roster entry
+/// recorded before the respawn. A member exempt from the rules comes back
+/// exempt, so the definition's wiring still never reaches it.
+pub(crate) fn archive_cleanup_respawn_spec(
+    member_id: meerkat_mob::AgentIdentity,
+    role: &meerkat_mob::ProfileName,
+    labels: &BTreeMap<String, String>,
+    definition_wiring: meerkat_mob::DefinitionWiring,
+) -> SpawnMemberSpec {
+    let spec =
+        SpawnMemberSpec::new(role.clone(), member_id).with_definition_wiring(definition_wiring);
+    if labels.is_empty() {
+        spec
+    } else {
+        spec.with_labels(labels.clone())
+    }
+}
+
 /// One incarnation of a mob member: its roster generation and the bridge
 /// session it runs.
 struct MemberIncarnation {
@@ -2118,6 +2138,28 @@ struct AutoWireParentMobToolDispatcher {
     realm_profiles: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
 }
 
+/// Meta's agent mob tool wrapper around `inner` (standing in for meerkat's
+/// mob tools), with `overrides` resolving the mob handles: rows outside this
+/// module drive an agent's mob tool call through Meta's interception with
+/// it.
+#[cfg(test)]
+pub(crate) fn agent_mob_tool_wrapper_for_test(
+    inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
+    overrides: ImplicitDelegateRetirementOverrides,
+) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    Arc::new(AutoWireParentMobToolDispatcher {
+        inner,
+        implicit_delegate_retirement_overrides: overrides,
+        console_spawn_sink: new_console_spawn_sink_slot(),
+        identity_runtime: Arc::new(std::sync::RwLock::new(None)),
+        protected_mob_id: String::new(),
+        spawner_comms_name: None,
+        member_auth_binding: None,
+        member_auth_binding_recorded: None,
+        realm_profiles: None,
+    })
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
@@ -2512,6 +2554,11 @@ impl AutoWireParentMobToolDispatcher {
     /// `mob_respawn` keeps the member (a forker respawning its own child), so
     /// the child keeps its idle-retire opt-in: the respawn goes through the
     /// same carry as every other Meta respawn surface.
+    ///
+    /// A console side chat is never respawned, by an agent either: the tool
+    /// answers a typed policy denial with kind `side_chat_restart_refused`
+    /// ([`crate::side_chat::side_chat_restart_refusal`]) and leaves the side
+    /// chat as it is, since the successor would be no fork of its source.
     async fn dispatch_mob_respawn(
         &self,
         call: meerkat_core::types::ToolCallView<'_>,
@@ -2536,6 +2583,11 @@ impl AutoWireParentMobToolDispatcher {
         match (target, handle) {
             (Some((_, member_id)), Some(handle)) => {
                 let member = meerkat_mob::AgentIdentity::from(member_id.as_str());
+                if let Some(refusal) =
+                    crate::side_chat::side_chat_restart_refusal(&handle, &member, "respawn").await
+                {
+                    return Err(crate::side_chat::side_chat_refusal_tool_error(refusal));
+                }
                 respawn_carrying_idle_retire_opt_in(
                     Some(&self.implicit_delegate_retirement_overrides),
                     &handle,
@@ -9655,6 +9707,10 @@ pub struct MobRuntime {
     /// See [`MobBootstrapSpec::with_member_mcp_custody`].
     #[cfg(not(target_arch = "wasm32"))]
     member_mcp_custody: Option<Arc<crate::member_mcp_custody::MemberMcpCustody>>,
+    /// The verified side chat lineage of each member incarnation the console
+    /// has read, shared by every clone (see
+    /// [`crate::side_chat::SideChatLineageCache`]).
+    side_chat_lineages: Arc<crate::side_chat::SideChatLineageCache>,
 }
 
 /// How long a boot waits for the Stop an earlier process placed, which
@@ -10561,6 +10617,7 @@ impl MobRuntime {
                 ),
                 #[cfg(not(target_arch = "wasm32"))]
                 member_mcp_custody: spec.member_mcp_custody,
+                side_chat_lineages: Arc::default(),
             },
             pending_activation,
         ))
@@ -10613,6 +10670,7 @@ impl MobRuntime {
             child_mob_root: crate::child_mob_storage::ChildMobRootOwnership::default(),
             #[cfg(not(target_arch = "wasm32"))]
             member_mcp_custody: None,
+            side_chat_lineages: Arc::default(),
         }
     }
 
@@ -10620,6 +10678,13 @@ impl MobRuntime {
     /// [`MobBootstrapSpec::with_member_auth_binding`]).
     pub(crate) fn member_auth_binding(&self) -> Option<&meerkat_core::AuthBindingRef> {
         self.member_auth_binding.as_ref()
+    }
+
+    /// The verified side chat lineages of this runtime's member incarnations,
+    /// as the console reads them (see
+    /// [`crate::side_chat::SideChatLineageCache`]).
+    pub(crate) fn side_chat_lineages(&self) -> &crate::side_chat::SideChatLineageCache {
+        &self.side_chat_lineages
     }
 
     /// The typed refusal of `method`'s attach of `session_id` as a member's
@@ -10636,6 +10701,27 @@ impl MobRuntime {
             self.session_service.as_deref(),
             method,
             session_id,
+            binding,
+            self.member_auth_binding_recorded.as_ref(),
+        )
+        .await
+    }
+
+    /// The typed refusal of `method`'s fork of the session
+    /// `source_session_id` into a new member under the launch's member auth
+    /// binding, if the fork may not run (see
+    /// [`crate::native_realm::fork_binding_refusal`]); `None` on a launch
+    /// without one.
+    pub(crate) async fn fork_binding_refusal(
+        &self,
+        method: &str,
+        source_session_id: &meerkat_core::types::SessionId,
+    ) -> Option<crate::native_realm::MemberRouteRefusal> {
+        let binding = self.member_auth_binding.as_ref()?;
+        crate::native_realm::fork_binding_refusal(
+            self.session_service.as_deref(),
+            method,
+            source_session_id,
             binding,
             self.member_auth_binding_recorded.as_ref(),
         )

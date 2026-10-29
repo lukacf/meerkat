@@ -424,6 +424,10 @@ pub(in crate::runtime) struct DormantSeatCandidate {
     pub(in crate::runtime) creation_origin: crate::member_creation::MemberCreationOrigin,
     pub(in crate::runtime) effective_profile_override: Option<crate::profile::Profile>,
     pub(in crate::runtime) effective_model_override: Option<String>,
+    /// Whether the definition's wiring rules apply to the seated member: an
+    /// exempt one is recorded in MobMachine in the seat's (or rotation's)
+    /// own step and journaled with its `MemberSpawned` row.
+    pub(in crate::runtime) definition_wiring: crate::DefinitionWiring,
     /// The generated `AuthorizeSpawnProfile` input and the authorization it
     /// must answer with.
     pub(in crate::runtime) authorize_input: mob_dsl::MobMachineInput,

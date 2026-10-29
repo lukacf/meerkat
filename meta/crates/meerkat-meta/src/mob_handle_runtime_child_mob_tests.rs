@@ -2633,10 +2633,22 @@ async fn bound_lifetime(
     config: Config,
     binding: meerkat_core::AuthBindingRef,
 ) -> MobRuntime {
+    configured_lifetime(dir, mob_id, host, config, Some(binding)).await
+}
+
+/// [`bound_lifetime`], with the launch's member auth binding only when
+/// `binding` names one.
+async fn configured_lifetime(
+    dir: &Path,
+    mob_id: &str,
+    host: &Host,
+    config: Config,
+    binding: Option<meerkat_core::AuthBindingRef>,
+) -> MobRuntime {
     let (storage, provenance) =
         crate::mob_composition_manifest::persistent_mob_storage(dir.join("mob.sqlite3"))
             .expect("root mob storage");
-    let mut spec = MobBootstrapSpec::persistent_inner(
+    let spec = MobBootstrapSpec::persistent_inner(
         root_definition(mob_id),
         storage,
         provenance,
@@ -2653,13 +2665,16 @@ async fn bound_lifetime(
     )
     .await
     .expect("persistent spec")
-    .with_child_mob_storage(durable(dir))
-    .with_member_auth_binding(binding);
+    .with_child_mob_storage(durable(dir));
+    let mut spec = match binding {
+        Some(binding) => spec.with_member_auth_binding(binding),
+        None => spec,
+    };
     let model: Arc<dyn LlmClient> = host.model.clone();
     spec.options.default_llm_client = Some(model);
     Box::pin(MobRuntime::bootstrap(spec))
         .await
-        .expect("bootstrap the bound lifetime")
+        .expect("bootstrap the lifetime")
 }
 
 /// One plain turn of `worker` in `child`, so its session commits a
@@ -3203,4 +3218,144 @@ async fn a_stored_child_mob_whose_destroy_is_pending_is_skipped() {
     crate::native_realm::validate_stored_child_mobs(dir.path(), &binding, None)
         .await
         .expect("a child whose destroy is pending is skipped");
+}
+
+// ---------------------------------------------------------------------------
+// Console side chats under the launch's member auth binding
+// ---------------------------------------------------------------------------
+
+/// Fork `source` into the side chat `alias`, retried while the runtime still
+/// settles the source's last turn.
+async fn fork_side_chat_when_idle(
+    runtime: &MobRuntime,
+    source: &str,
+    alias: &str,
+) -> Result<crate::side_chat::SideChatFork, crate::side_chat::SideChatError> {
+    for _ in 0..50 {
+        match Box::pin(crate::side_chat::fork_side_chat(
+            runtime, None, source, alias, None,
+        ))
+        .await
+        {
+            Err(crate::side_chat::SideChatError::Fork(crate::fork::ForkMemberError::Mob(
+                meerkat_mob::MobError::ForkSourceUnavailable {
+                    cause: meerkat_mob::error::ForkSourceUnavailableCause::Running,
+                    ..
+                },
+            ))) => tokio::time::sleep(Duration::from_millis(100)).await,
+            answer => return answer,
+        }
+    }
+    Box::pin(crate::side_chat::fork_side_chat(
+        runtime, None, source, alias, None,
+    ))
+    .await
+}
+
+/// Under a member auth binding a side chat of a member built on the launch
+/// binding is seated on it: Meerkat seats the side chat from its source's
+/// records, which carry the launch binding, so the side chat's own session
+/// records it and its first turn runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_side_chat_of_a_member_on_the_launch_binding_seats_and_runs_on_it() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let native = tempfile::tempdir().expect("native realm root");
+    let host = Host::new();
+    let binding = native_team_binding("b");
+    let runtime = bound_lifetime(
+        dir.path(),
+        &unique("bound-side-chat"),
+        &host,
+        native_team_config(native.path()).await,
+        binding.clone(),
+    )
+    .await;
+    coordinator_session(&runtime).await;
+    run_plain_turn(&runtime.handle(), "coordinator").await;
+
+    let fork = fork_side_chat_when_idle(&runtime, "coordinator", "coordinator-side")
+        .await
+        .expect("a side chat of a member on the launch binding forks");
+    assert_eq!(fork.outcome.member_alias, "coordinator-side");
+    run_plain_turn(&runtime.handle(), "coordinator-side").await;
+    stand_down_released(runtime, 0).await;
+
+    let recorded = recorded_member_bindings(dir.path()).await;
+    for member in ["coordinator", "coordinator-side"] {
+        assert!(
+            recorded
+                .iter()
+                .any(|(_, recorded_member, recorded_binding)| {
+                    recorded_member == member && recorded_binding.as_ref() == Some(&binding)
+                }),
+            "{member} records the launch binding: {recorded:?}"
+        );
+    }
+}
+
+/// Under a member auth binding a side chat of a member whose session records
+/// another binding or none (built before the launch named one) is refused
+/// typed, `member_auth_binding_uncarried`, before anything is forked:
+/// Meerkat would seat the side chat from the source's records, off the
+/// binding, and the member build guard would refuse its build only after the
+/// fork committed the side chat's session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_side_chat_of_a_member_off_the_launch_binding_is_refused_before_anything_is_forked() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let native = tempfile::tempdir().expect("native realm root");
+    let host = Host::new();
+    let mob_id = unique("unbound-side-chat");
+    let binding = native_team_binding("b");
+    let unbound = configured_lifetime(
+        dir.path(),
+        &mob_id,
+        &host,
+        native_team_config(native.path()).await,
+        None,
+    )
+    .await;
+    coordinator_session(&unbound).await;
+    run_plain_turn(&unbound.handle(), "coordinator").await;
+    stand_down_released(unbound, 0).await;
+    let before = recorded_member_bindings(dir.path()).await;
+    assert!(
+        before.iter().any(|(_, member, recorded_binding)| {
+            member == "coordinator" && recorded_binding.as_ref() != Some(&binding)
+        }),
+        "the source's session records no launch binding: {before:?}"
+    );
+
+    let runtime = bound_lifetime(
+        dir.path(),
+        &mob_id,
+        &host,
+        native_team_config(native.path()).await,
+        binding,
+    )
+    .await;
+    let refused = fork_side_chat_when_idle(&runtime, "coordinator", "coordinator-side")
+        .await
+        .expect_err("a side chat of a member off the launch binding is refused");
+    let error = crate::side_chat::fork_member_error(&refused);
+    assert_eq!(error.code, -32602, "{error:?}");
+    assert_eq!(
+        error.data.as_ref().and_then(|data| data.get("kind")),
+        Some(&json!("member_auth_binding_uncarried")),
+        "{error:?}"
+    );
+    assert!(
+        runtime
+            .handle()
+            .get_member(&AgentIdentity::from("coordinator-side"))
+            .await
+            .expect("read the roster")
+            .is_none(),
+        "nothing was seated"
+    );
+    stand_down_released(runtime, 0).await;
+    assert_eq!(
+        recorded_member_bindings(dir.path()).await.len(),
+        before.len(),
+        "the refusal committed no session"
+    );
 }

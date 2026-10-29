@@ -22,16 +22,19 @@
 \*     another epoch, no epoch), the drift and terminal classifications, the
 \*     peer notice classification, the replayed restore failures, the routed
 \*     binding refusal (current and stale), the spawned-endpoint recovery, the
-\*     member's own profile check (no grant), the release verdict, Stop and
-\*     Resume.
+\*     member's own profile check (no grant), the replay of an exempt row
+\*     (before the seal), the release verdict, Stop and Resume.
 \*   retire (AuditRetireSpec): one identity woken, released and retired: the
 \*     routed and the archive-only retirement starts, the routed retire
 \*     retry, the runtime retire observation, the session ingress detach, the
 \*     plain archives, the replayed retirement starts, a rotation with its
 \*     terminal in Running and Stopped, a host-pending seed and its
 \*     carry-out, the identity seated again on the session its first seat
-\*     named, and the mob's destroy: its admission, its member retirement
-\*     and archive arms and DestroyMob.
+\*     named, its exemption from the definition's wiring rules recorded by
+\*     its reseat's or its rotation's own input or by the replay of its row
+\*     for any of its incarnations in Running and Stopped (the run never
+\*     seals, so the replay applies throughout), and the mob's destroy: its
+\*     admission, its member retirement and archive arms and DestroyMob.
 \*   terminal (AuditTerminalSpec): one identity in the Completed and
 \*     Destroyed phases: Complete, MarkCompleted, the destroy, Shutdown, the
 \*     late feedback, the release, the wake refusal, the notice
@@ -51,7 +54,8 @@
 \*   seat (AuditSeatSpec): two identities from the spawn ladder's Opened
 \*     phase: the dormant seat with an endpoint, with another member's peer id
 \*     or with none (EndpointPending), member 1's over an existing session
-\*     and member 2's over an unborn one, the embodied spawn commit, the
+\*     and member 2's over an unborn one, member 1's exempt from the
+\*     definition's wiring rules or not, the embodied spawn commit, the
 \*     runtime-ready observation and the release that clears the startup
 \*     ladder, the boot plan and seal, the endpoint registration, and the
 \*     rotation (retirement start, intent, terminal over a live or a retired
@@ -94,18 +98,25 @@
 \*     AuditBindingRefusalFenced (a refused binding request applies only to
 \*     the wake it belongs to: its open attempt, or with no attempt only while
 \*     no wake is open) and AuditFreshCreateOnlyUnborn (only an unborn seat's
-\*     session is created afresh);
+\*     session is created afresh) and AuditSealedExemptsOnlyASeat (after the
+\*     seal a member becomes exempt from the definition's wiring rules only
+\*     in a step that seats a new incarnation of it);
 \*   retire: AuditRetireRoutesOnlyRegistered (no runtime retire is routed
 \*     for a member with no registration), AuditRetirementArchivable (a
 \*     retiring member whose ingress detach closed has an enabled archive
 \*     terminal, and under an admitted destroy no rotation and no host
 \*     carry-out holds it), AuditDestroyFencesRotation (no rotation
-\*     begins or commits under an admitted destroy) and
+\*     begins or commits under an admitted destroy),
 \*     AuditReseatUnbornIffNeverBorn (a resume seat is unborn exactly when no
-\*     build created its session);
+\*     build created its session) and AuditRotationDecidesExemptionAnew (a
+\*     rotation's terminal records its next incarnation exempt from the
+\*     definition's wiring rules exactly when its own input says so: the
+\*     retiring incarnation's exemption never carries over);
 \*   seat: AuditSeatLeavesDormant (a dormant seat leaves its identity
 \*     Dormant, with its endpoint or owed EndpointPending, and requests no
-\*     runtime binding).
+\*     runtime binding) and AuditSeatDecidesExemptionFromInput (a dormant
+\*     seat or a spawn commit records its member exempt from the
+\*     definition's wiring rules exactly when its own input says so).
 \* An ASSUME over the generated wake refusal helper's whole input domain:
 \* a present, session-bound member with a phase is never refused as not a
 \* member. A second ASSUME pins the release verdict helper: Release,
@@ -364,6 +375,10 @@ WReleaseEpoch1 == ReleaseArm(Some(Rid1), Some(1), Epoch1)
 WDetach ==
     \/ SessionIngressDetachedForMobDestroyRunning(AuditMob, Rid1)
     \/ SessionIngressDetachedForMobDestroyStopped(AuditMob, Rid1)
+\* The replay of member 1's exempt row (applies only before the seal).
+WExempt ==
+    \/ ExemptMemberFromDefinitionWiringSeatedRunning(Id1, Rid1)
+    \/ ExemptMemberFromDefinitionWiringSeatedStopped(Id1, Rid1)
 
 \* Member 1's phase as an option, before and after a step; likewise member 2.
 Phase1 == IF Id1 \in DOMAIN member_materialization THEN Some(member_materialization[Id1]) ELSE None
@@ -414,6 +429,7 @@ AuditWakeNext ==
     \/ WRegisterPeer
     \/ WRestoreFailure
     \/ WSeatSession
+    \/ WExempt
     \/ WProfileCheck
     \/ WBindingRefusal
     \/ AuditPlanDefault(Id1)
@@ -480,31 +496,43 @@ RRecoverStarted ==
     \/ RecoverRosterMemberRetirementStartedPreservingBinding(Id1, Rid1, 0, None, Some(Sess1), None, FALSE)
 
 \* The rotation onto session 3 (no endpoint), its next incarnation Rid3,
-\* fence 3, generation 1.
+\* fence 3, generation 1, exempt from the definition's wiring rules exactly
+\* when its terminal's input says so (ex).
 RAuthorize ==
     AuthorizeSpawnProfileRunning(Id1, AuditProfile, AuditModel, AuditDigest, AuditDigest, AuditDigest, None, None, FALSE, None)
 RBeginRotation == BeginMemberRotationRunning(Id1, Rid1, 1, 0, Sess3, None, FALSE)
-RCommitRotation ==
-    \/ CommitMemberRotationLiveRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective)
-    \/ CommitMemberRotationRetiredRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective)
-    \/ CommitMemberRotationLiveStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective)
-    \/ CommitMemberRotationRetiredStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective)
+RCommitRotationAs(ex) ==
+    \/ CommitMemberRotationLiveRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective, ex)
+    \/ CommitMemberRotationRetiredRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective, ex)
+    \/ CommitMemberRotationLiveStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective, ex)
+    \/ CommitMemberRotationRetiredStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective, ex)
+RCommitRotation == \E ex \in BOOLEAN : RCommitRotationAs(ex)
 RotationArms == RBeginRotation \/ RCommitRotation
 
 \* Member 1 seated again after its retirement, as a resume seat on the session
 \* its first seat named, at generation 1 with runtime 2 (no endpoint): the
-\* seat is unborn exactly when no build created that session.
+\* seat is unborn exactly when no build created that session, and exempt
+\* from the definition's wiring rules exactly when its input says so.
 RReseatOpen ==
     BeginSpawnExecFresh(Id1, Rid2, 2, 1, AuditDigest, FALSE, AuditMode, Some(Sess1), None, None,
                         FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
                         None, None, None, None, FALSE, FALSE)
 RReseat ==
-    \E unborn \in BOOLEAN :
-        CommitDormantSeatRunning(Id1, Rid2, 2, 1, FALSE, AuditMode, Sess1, None, FALSE, FALSE, unborn, FALSE)
+    \E unborn \in BOOLEAN, ex \in BOOLEAN :
+        CommitDormantSeatRunning(Id1, Rid2, 2, 1, FALSE, AuditMode, Sess1, None, FALSE, FALSE, unborn, FALSE, ex)
 
 \* The host marks member 1's preparation pending at build (a rotation lost in
 \* a crash is re-driven by the host), or not.
 RSeedHostPending == \E hp \in {{}, {Id1}} : SeedMemberResidencyRunning("OnDemand", "Authoritative", hp)
+
+\* The replay of member 1's exempt row, for the incarnation it is seated as:
+\* its first (Rid1), its reseat (Rid2) or its rotation's next (Rid3), in a
+\* running or a stopped mob. The replay applies only before the boot plan
+\* is sealed; this run never seals it.
+RExempt ==
+    \E rid \in {Rid1, Rid2, Rid3} :
+        \/ ExemptMemberFromDefinitionWiringSeatedRunning(Id1, rid)
+        \/ ExemptMemberFromDefinitionWiringSeatedStopped(Id1, rid)
 
 \* The mob's destroy: its member retirement admissions and archives.
 RDestroyMember ==
@@ -536,6 +564,7 @@ AuditRetireNext ==
     \/ RotationArms
     \/ RReseatOpen
     \/ RReseat
+    \/ RExempt
     \/ AuditQuiesceStop
     \/ StopRunning
     \/ ResumeStopped
@@ -709,20 +738,29 @@ SIncarnation(id) ==
 
 SOpenArm == \E id \in {Id1, Id2} : SOpen(id, SIncarnation(id).rid, SIncarnation(id).fence, SIncarnation(id).session)
 
+\* The exemption from the definition's wiring rules a seat's input may name:
+\* either for member 1, none for member 2, which keeps the space near its
+\* size.
+SExemptInputs(id) == IF id = Id1 THEN BOOLEAN ELSE {FALSE}
+
 \* A seat with member 1's endpoint (member 2 then offers a duplicate peer id,
 \* which the peer-id guards refuse), member 2's own endpoint, or none
 \* (EndpointPending). Member 1 is seated over an existing session, member 2
 \* over an unborn one (a fresh launch's seat), which keeps the space near its
-\* size without the fact. A seat owes no kickoff.
+\* size without the fact. A seat owes no kickoff. Its input names the
+\* member's exemption (ex).
+SSeatAs(id, ep, ex) ==
+    CommitDormantSeatRunning(id, SIncarnation(id).rid, SIncarnation(id).fence, 0, FALSE, AuditMode,
+                             SIncarnation(id).session, ep, FALSE, FALSE, id = Id2, TRUE, ex)
 SSeat ==
-    \E id \in {Id1, Id2}, ep \in {Some(E1Inproc), Some(E2Inproc), None} :
-        CommitDormantSeatRunning(id, SIncarnation(id).rid, SIncarnation(id).fence, 0, FALSE, AuditMode,
-                                 SIncarnation(id).session, ep, FALSE, FALSE, id = Id2, TRUE)
+    \E id \in {Id1, Id2}, ep \in {Some(E1Inproc), Some(E2Inproc), None}, ex \in SExemptInputs(id) :
+        SSeatAs(id, ep, ex)
 
-SCommit ==
-    \E id \in {Id1, Id2} :
-        CommitSpawnMembershipFresh(id, SIncarnation(id).rid, SIncarnation(id).fence, 0, AuditDigest, FALSE, AuditMode,
-                                   Some(SIncarnation(id).session), None, None, None, None, None, None)
+\* The embodied spawn commit, its input naming the member's exemption (ex).
+SCommitAs(id, ex) ==
+    CommitSpawnMembershipFresh(id, SIncarnation(id).rid, SIncarnation(id).fence, 0, AuditDigest, FALSE, AuditMode,
+                               Some(SIncarnation(id).session), None, None, None, None, None, None, ex)
+SCommit == \E id \in {Id1, Id2}, ex \in SExemptInputs(id) : SCommitAs(id, ex)
 
 SReady == \E id \in {Id1, Id2} : ObserveRuntimeReady(SIncarnation(id).rid, SIncarnation(id).fence, Epoch1)
 
@@ -746,8 +784,8 @@ SBeginRotation ==
 SRuntimeRetired == ObserveRuntimeRetired(Rid1, 1)
 SDetach == SessionIngressDetachedForMobDestroyRunning(AuditMob, Rid1)
 SCommitRotation ==
-    \/ CommitMemberRotationLiveRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective)
-    \/ CommitMemberRotationRetiredRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective)
+    \/ CommitMemberRotationLiveRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective, FALSE)
+    \/ CommitMemberRotationRetiredRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective, FALSE)
 
 SRecoverArms == SSeat \/ SCommitRotation
 
@@ -774,9 +812,9 @@ AuditSeatSpec == Init /\ [][AuditSeatNext]_vars
 \* EndpointPending, and requests no runtime binding.
 AuditSeatLeavesDormant ==
     [][\A id \in {Id1, Id2}, ep \in {Some(E1Inproc), Some(E2Inproc), None}, unborn \in BOOLEAN,
-          fresh \in BOOLEAN :
+          fresh \in BOOLEAN, ex \in BOOLEAN :
          CommitDormantSeatRunning(id, SIncarnation(id).rid, SIncarnation(id).fence, 0, FALSE, AuditMode,
-                                  SIncarnation(id).session, ep, FALSE, FALSE, unborn, fresh)
+                                  SIncarnation(id).session, ep, FALSE, FALSE, unborn, fresh, ex)
            => /\ id \in DOMAIN member_materialization'
               /\ member_materialization'[id] = "Dormant"
               /\ \/ id \in DOMAIN member_peer_endpoints'
@@ -1058,8 +1096,8 @@ AuditFreshCreateOnlyUnborn ==
 \* exactly when no build created that session: a never-born session is
 \* seated unborn (its first wake creates it), a lost one never is.
 AuditReseatUnbornIffNeverBorn ==
-    [][\A unborn \in BOOLEAN :
-         CommitDormantSeatRunning(Id1, Rid2, 2, 1, FALSE, AuditMode, Sess1, None, FALSE, FALSE, unborn, FALSE)
+    [][\A unborn \in BOOLEAN, ex \in BOOLEAN :
+         CommitDormantSeatRunning(Id1, Rid2, 2, 1, FALSE, AuditMode, Sess1, None, FALSE, FALSE, unborn, FALSE, ex)
            => (Id1 \in member_seat_session_unborn' <=> Sess1 \in unborn_seat_sessions)
       ]_vars
 
@@ -1102,6 +1140,38 @@ AuditRetirementArchivable ==
 
 \* No rotation begins or commits under an admitted destroy.
 AuditDestroyFencesRotation == [][destroy_admitted => ~RotationArms]_vars
+
+\* A rotation's terminal decides member 1's next incarnation's exemption
+\* from the definition's wiring rules anew, in its own step: the next
+\* incarnation is exempt exactly when the terminal's input says so, and the
+\* retiring incarnation's exemption never carries over.
+AuditRotationDecidesExemptionAnew ==
+    [][\A ex \in BOOLEAN :
+         RCommitRotationAs(ex) => (Id1 \in member_definition_wiring_exempt' <=> ex)
+      ]_vars
+
+\* A seat decides member 1's exemption from the definition's wiring rules
+\* from its own input, in its own step: a dormant seat or an embodied spawn
+\* commit records it exempt exactly when the seat's input says so.
+AuditSeatDecidesExemptionFromInput ==
+    [][\A ex \in BOOLEAN :
+         (\/ \E ep \in {Some(E1Inproc), Some(E2Inproc), None} : SSeatAs(Id1, ep, ex)
+          \/ SCommitAs(Id1, ex))
+           => (Id1 \in member_definition_wiring_exempt' <=> ex)
+      ]_vars
+
+\* After the boot plan is sealed, member 1 becomes exempt from the
+\* definition's wiring rules only in a step that seats a new incarnation of
+\* it (whose input records the exemption): the replay of an exempt row
+\* applies only before the seal.
+AuditSealedExemptsOnlyASeat ==
+    [][(/\ boot_plan_sealed
+        /\ Id1 \notin member_definition_wiring_exempt
+        /\ Id1 \in member_definition_wiring_exempt')
+         => /\ Id1 \in DOMAIN identity_to_runtime'
+            /\ \/ Id1 \notin DOMAIN identity_to_runtime
+               \/ identity_to_runtime'[Id1] # identity_to_runtime[Id1]
+      ]_vars
 
 \* Over the wake refusal helper's whole input domain, a present,
 \* session-bound member with a phase is never refused as not a member.
@@ -1195,8 +1265,9 @@ AuditWitnessDestroyBeatsHostPendingStep ==
     /\ PlainArchives
 \* Retire run: a Stop that landed mid-rotation lets the terminal finish it.
 AuditWitnessRotatedStoppedStep ==
-    \/ CommitMemberRotationLiveStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective)
-    \/ CommitMemberRotationRetiredStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective)
+    \E ex \in BOOLEAN :
+        \/ CommitMemberRotationLiveStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective, ex)
+        \/ CommitMemberRotationRetiredStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, FALSE, AuditObjective, ex)
 
 \* Resume run: an explicit resume joins a wake already in flight.
 AuditWitnessResumeJoinsStep == AuthorizeExplicitResumeMemberJoinRunning(AuditResumeAttempt, Id1, AuditResumeBinding)
@@ -1239,6 +1310,18 @@ AuditWitnessRotatedUnbornStep ==
 AuditWitnessRotationGrant ==
     /\ Id1 \in DOMAIN spawn_profile_authority_profile_names
     /\ Id1 \in DOMAIN member_rotation_session_ids
+\* Retire run: an exempt member's archive unseats it, which clears the
+\* exemption.
+AuditWitnessExemptArchivedStep ==
+    /\ Id1 \in member_definition_wiring_exempt
+    /\ Id1 \notin DOMAIN identity_to_runtime'
+    /\ Id1 \notin member_definition_wiring_exempt'
+\* Retire run: the rotation of an exempt member whose input is bound by the
+\* rules re-seats its next incarnation bound by them.
+AuditWitnessExemptRotatedStep ==
+    /\ Id1 \in member_definition_wiring_exempt
+    /\ RCommitRotationAs(FALSE)
+    /\ Id1 \notin member_definition_wiring_exempt'
 \* Edge run: the edge's trust repair is owed (an unrealized realization).
 AuditWitnessEdgeRepairOwed == AuditEdge \in owed_edge_repairs
 \* Edge run: after the seal an edge endpoint is unseated and held by the
@@ -1310,4 +1393,6 @@ NotAuditWitnessRotated == [][~AuditWitnessRotatedStep]_vars
 NotAuditWitnessReleasedSpawn == [][~AuditWitnessReleasedSpawnStep]_vars
 NotAuditWitnessCrossNotice == [][~AuditWitnessCrossNoticeStep]_vars
 NotAuditWitnessRetireBesideWaking == [][~AuditWitnessRetireBesideWakingStep]_vars
+NotAuditWitnessExemptArchived == [][~AuditWitnessExemptArchivedStep]_vars
+NotAuditWitnessExemptRotated == [][~AuditWitnessExemptRotatedStep]_vars
 ====

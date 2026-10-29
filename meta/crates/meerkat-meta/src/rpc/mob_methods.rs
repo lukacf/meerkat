@@ -1477,6 +1477,19 @@ pub(super) async fn handle_respawn_member(
             // `status_identity` returns, and encoding that directly yields a
             // well-formed roster id for a member that does not exist.
             let identity = crate::member_comms_id::roster_member_id_for_supplied_id(&mid);
+            // A side chat is closed and forked again, never respawned: its
+            // successor would be no fork of its agent. Refused as the Console
+            // refuses it.
+            if let Some(refusal) =
+                crate::side_chat::side_chat_restart_refusal(&handle, &identity, "respawn").await
+            {
+                return JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: None,
+                    error: Some(refusal),
+                };
+            }
             // Best-effort repair material: a faulted lookup degrades to None
             // (the respawn itself surfaces real faults).
             let entry_before_respawn = handle.get_member(&identity).await.ok().flatten();
@@ -1530,11 +1543,12 @@ pub(super) async fn handle_respawn_member(
                         if member_after_cleanup.is_none()
                             && let Some(entry) = entry_before_respawn
                         {
-                            let mut spec =
-                                SpawnMemberSpec::new(entry.role.clone(), identity.clone());
-                            if !entry.labels.is_empty() {
-                                spec = spec.with_labels(entry.labels.clone());
-                            }
+                            let spec = crate::mob_handle_runtime::archive_cleanup_respawn_spec(
+                                identity.clone(),
+                                &entry.role,
+                                &entry.labels,
+                                entry.definition_wiring,
+                            );
                             if let Err(ensure_err) = handle.ensure_member(spec).await {
                                 return JsonRpcResponse {
                                     jsonrpc: JSONRPC_VERSION.to_string(),
@@ -6079,6 +6093,19 @@ pub(super) async fn handle_adopt_member_identity_declaration(
         Ok(request) => request,
         Err(error) => return declaration_invalid_params(response_id, error.to_string()),
     };
+    // A console side chat is never adopted as an identity: an adopted
+    // identity is rebuilt from its declaration, which no fork made, so its
+    // next incarnation would be no side chat of its agent.
+    if let Some(refusal) =
+        crate::side_chat::side_chat_adoption_refusal(handle, &request.agent_identity).await
+    {
+        return JsonRpcResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: response_id,
+            result: None,
+            error: Some(refusal),
+        };
+    }
     // Read from the machine state Core published, without a command. A member
     // Core does not hold is left to the adoption's own typed answer.
     if handle.member_unmaterialized(&request.agent_identity) {

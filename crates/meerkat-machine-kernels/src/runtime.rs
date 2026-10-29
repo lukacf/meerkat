@@ -4347,6 +4347,10 @@ mod tests {
                         (field_id("ack_engine_version"), KernelValue::None),
                         (field_id("placed_spawn_id"), KernelValue::None),
                         (field_id("provision_operation_id"), KernelValue::None),
+                        (
+                            field_id("definition_wiring_exempt"),
+                            KernelValue::Bool(false),
+                        ),
                     ]),
                 },
             )

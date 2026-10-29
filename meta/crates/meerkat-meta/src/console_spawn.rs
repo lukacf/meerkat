@@ -134,6 +134,12 @@ impl ConsoleSpawnSink {
             .await;
 
         let mut labels = seed.labels.clone();
+        // A spawn never names a side chat's source: only the console's
+        // projection of Meerkat's fork record writes it
+        // (`crate::side_chat::project_side_chat_lineage`), so the registry
+        // never holds it.
+        labels.remove(crate::side_chat::SIDE_CHAT_OF_LABEL);
+        labels.remove(crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL);
         // Lineage is runtime-derived truth: ABAC inheritance hangs off
         // `spawned_by`, so a caller-supplied label must never spoof (or
         // erase) who actually performed the spawn.
@@ -281,10 +287,73 @@ pub(crate) fn spawned_by_from_comms_name(comms_name: &str) -> Option<String> {
 /// ABAC inheritance hangs off `spawned_by`: an unverified claim could mint
 /// inherited visibility — or hide a member behind a denied parent — so
 /// only the spawn registry may assert these keys.
+///
+/// A side chat's lineage goes too: the console writes a side chat's source
+/// only where Meerkat's roster agrees
+/// ([`crate::side_chat::project_side_chat_lineage`]), never from a label.
 pub(crate) fn sanitize_unverified_lineage_labels(labels: &mut BTreeMap<String, String>) {
     labels.remove(SPAWNED_BY_LABEL);
     labels.remove(SPAWNED_BY_SESSION_LABEL);
     labels.remove(VIA_TOOL_LABEL);
+    labels.remove(crate::side_chat::SIDE_CHAT_OF_LABEL);
+    labels.remove(crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL);
+}
+
+/// The console label keys that name a member's lineage parent, each holding
+/// the parent's console identity (namespaced alike): the agent that spawned
+/// the member, and the source a side chat was forked from.
+pub(crate) const LINEAGE_PARENT_LABELS: [&str; 2] =
+    [SPAWNED_BY_LABEL, crate::side_chat::SIDE_CHAT_OF_LABEL];
+
+/// A member's lineage parent, as its console labels name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LineageParent<'a> {
+    /// The parent's console identity.
+    pub(crate) identity: &'a str,
+    /// The session of the parent incarnation the lineage is bound to, when
+    /// the labels name one.
+    pub(crate) bound_session: Option<&'a str>,
+}
+
+/// The lineage parent a member's console labels name: the agent that spawned
+/// it (`spawned_by`, bound by `spawned_by_session`), else the source a side
+/// chat was forked from (`side_chat_of`, bound by `side_chat_of_session`).
+/// Every lineage walk reads the parent here. Both are runtime-derived: the
+/// projections strip either claim from caller-controlled labels.
+pub(crate) fn lineage_parent(labels: &BTreeMap<String, String>) -> Option<LineageParent<'_>> {
+    let trimmed = |key: &str| {
+        labels
+            .get(key)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    [
+        (SPAWNED_BY_LABEL, SPAWNED_BY_SESSION_LABEL),
+        (
+            crate::side_chat::SIDE_CHAT_OF_LABEL,
+            crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL,
+        ),
+    ]
+    .into_iter()
+    .find_map(|(parent_key, session_key)| {
+        Some(LineageParent {
+            identity: trimmed(parent_key)?,
+            bound_session: trimmed(session_key),
+        })
+    })
+}
+
+/// Whether a member's console labels name the source it was forked from as a
+/// side chat (a non-empty `side_chat_of`). Such a member holds its source's
+/// audience exactly: the console's access decisions decide it as its source,
+/// and a grant that matches the side chat itself grants nothing
+/// ([`crate::access::AccessView::decide_agent`]). Only the console's
+/// projection of Meerkat's fork record writes the label.
+pub(crate) fn names_side_chat_source(labels: &BTreeMap<String, String>) -> bool {
+    labels
+        .get(crate::side_chat::SIDE_CHAT_OF_LABEL)
+        .is_some_and(|source| !source.trim().is_empty())
 }
 
 /// One argument record from a spawn-tool call: top-level args or one entry
@@ -556,7 +625,10 @@ pub(crate) fn merge_registered_labels(
     for (key, value) in registered {
         if key == SPAWNED_BY_LABEL || key == SPAWNED_BY_SESSION_LABEL || key == VIA_TOOL_LABEL {
             labels.insert(key.clone(), value.clone());
-        } else {
+        } else if key != crate::side_chat::SIDE_CHAT_OF_LABEL
+            && key != crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL
+        {
+            // A spawn's own labels never name a side chat's source.
             labels.entry(key.clone()).or_insert_with(|| value.clone());
         }
     }
@@ -1277,5 +1349,104 @@ mod tests {
             labels.get(VIA_TOOL_LABEL).map(String::as_str),
             Some("mob_spawn_member")
         );
+    }
+
+    /// Only the console's projection of Meerkat's fork record writes a side
+    /// chat's lineage: a spawn never registers one, and neither the roster
+    /// nor the spawn registry gives one to a projection.
+    #[tokio::test]
+    async fn no_label_claims_a_side_chat_lineage() {
+        let claim = || {
+            BTreeMap::from([
+                (
+                    crate::side_chat::SIDE_CHAT_OF_LABEL.to_string(),
+                    "victim-agent".to_string(),
+                ),
+                (
+                    crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL.to_string(),
+                    "victim-session".to_string(),
+                ),
+            ])
+        };
+        let store = ConsoleEventStore::new();
+        let sink = ConsoleSpawnSink::new(store.clone());
+        let mut spoofed = seed("worker-5", None);
+        spoofed.labels.extend(claim());
+        sink.project_spawned_member(&spoofed).await;
+        let registered = store
+            .identity_labels("worker-5")
+            .await
+            .expect("identity labels registered");
+        assert!(
+            claim().keys().all(|key| !registered.contains_key(key)),
+            "a spawn registered a side chat lineage: {registered:?}"
+        );
+
+        let mut roster_labels = claim();
+        sanitize_unverified_lineage_labels(&mut roster_labels);
+        assert!(roster_labels.is_empty(), "{roster_labels:?}");
+
+        let mut projected = BTreeMap::new();
+        merge_registered_labels(&mut projected, &claim());
+        assert!(projected.is_empty(), "{projected:?}");
+    }
+
+    /// Every lineage walk reads one parent: the agent that spawned the
+    /// member, else the source a side chat was forked from, each with the
+    /// session that binds it.
+    #[test]
+    fn the_lineage_parent_is_the_spawner_else_the_side_chat_source() {
+        let spawned = BTreeMap::from([
+            (SPAWNED_BY_LABEL.to_string(), " ops-lead ".to_string()),
+            (
+                SPAWNED_BY_SESSION_LABEL.to_string(),
+                "lead-session".to_string(),
+            ),
+        ]);
+        assert_eq!(
+            lineage_parent(&spawned),
+            Some(LineageParent {
+                identity: "ops-lead",
+                bound_session: Some("lead-session"),
+            })
+        );
+        assert!(!names_side_chat_source(&spawned));
+        let side_chat = BTreeMap::from([
+            (
+                crate::side_chat::SIDE_CHAT_OF_LABEL.to_string(),
+                "alpha".to_string(),
+            ),
+            (
+                crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL.to_string(),
+                "alpha-session".to_string(),
+            ),
+        ]);
+        assert_eq!(
+            lineage_parent(&side_chat),
+            Some(LineageParent {
+                identity: "alpha",
+                bound_session: Some("alpha-session"),
+            })
+        );
+        assert!(names_side_chat_source(&side_chat));
+        let unbound = BTreeMap::from([(
+            crate::side_chat::SIDE_CHAT_OF_LABEL.to_string(),
+            "alpha".to_string(),
+        )]);
+        assert_eq!(
+            lineage_parent(&unbound),
+            Some(LineageParent {
+                identity: "alpha",
+                bound_session: None,
+            })
+        );
+        let blank = BTreeMap::from([(SPAWNED_BY_LABEL.to_string(), "  ".to_string())]);
+        assert_eq!(lineage_parent(&blank), None);
+        let blank_side_chat = BTreeMap::from([(
+            crate::side_chat::SIDE_CHAT_OF_LABEL.to_string(),
+            " ".to_string(),
+        )]);
+        assert!(!names_side_chat_source(&blank_side_chat));
+        assert_eq!(lineage_parent(&BTreeMap::new()), None);
     }
 }

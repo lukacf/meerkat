@@ -4226,6 +4226,25 @@ fn seed_mob_authority_sync_from_events(
                     },
                     "recover_member_spawned",
                 )?;
+                // A member exempt from the definition's wiring rules: no seat,
+                // spawn or rotation after the restart wires it by them. The
+                // replay records it before the boot plan is sealed, the one
+                // place MobMachine takes the exemption apart from a seat's
+                // own input.
+                if member_spawned.definition_wiring.is_exempt() {
+                    apply_seeded_mob_signal(
+                        authority,
+                        mob_dsl::MobMachineSignal::ExemptMemberFromDefinitionWiring {
+                            agent_identity: mob_dsl::AgentIdentity::from_domain(
+                                &member_spawned.agent_identity,
+                            ),
+                            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                                &member_spawned.agent_runtime_id,
+                            ),
+                        },
+                        "recover_member_definition_wiring_exempt",
+                    )?;
+                }
                 if member_spawned.placed_spawn_id().is_none()
                     && let Some(member_peer_endpoint) = member_spawned.member_peer_endpoint()
                 {

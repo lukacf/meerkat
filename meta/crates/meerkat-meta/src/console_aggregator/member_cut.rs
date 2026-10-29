@@ -329,10 +329,13 @@ pub(super) async fn capture_member_lineage_in(
     let mut visited = BTreeSet::from([record.identity.clone()]);
     let mut child_labels = record.labels.clone();
     while lineage.len() < CAPTURED_LINEAGE_DEPTH {
-        let Some(parent) = child_labels
-            .get(crate::console_spawn::SPAWNED_BY_LABEL)
-            .map(|parent| parent.trim().to_string())
-            .filter(|parent| !parent.is_empty())
+        let Some((parent, bound_session)) = crate::console_spawn::lineage_parent(&child_labels)
+            .map(|parent| {
+                (
+                    parent.identity.to_string(),
+                    parent.bound_session.map(str::to_string),
+                )
+            })
         else {
             break;
         };
@@ -340,10 +343,6 @@ pub(super) async fn capture_member_lineage_in(
         if !visited.insert(parent_identity.clone()) {
             break;
         }
-        let bound_session = child_labels
-            .get(crate::console_spawn::SPAWNED_BY_SESSION_LABEL)
-            .map(|session| session.trim().to_string())
-            .filter(|session| !session.is_empty());
         let mut confirmed = None;
         if let Some(bound_session) = bound_session.as_deref() {
             for candidate in cut.members().await {

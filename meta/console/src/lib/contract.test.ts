@@ -23,6 +23,7 @@ type ContractError = {
     latest_cursor?: string;
   };
   codes?: number[];
+  note?: string;
 };
 
 type ContractSchema = {
@@ -47,7 +48,8 @@ type ContractSchema = {
       console_rpc_endpoint: { method: string; path: string; errors?: ContractError[] };
       console_multipart_rpc_endpoint: { method: string; path: string; errors?: ContractError[] };
       methods: Record<string, {
-        success?: { mode_values?: string[] };
+        request?: { note?: string };
+        success?: { mode_values?: string[]; note?: string };
         errors?: ContractError[];
       }>;
     };
@@ -185,6 +187,42 @@ test("console contract documents live REST, SSE, and send RPC error shapes", () 
   assertRpcEndpointError(multipartEndpointErrors, 400, -32602);
   assertRpcEndpointError(multipartEndpointErrors, 200, -32600);
   assertRpcEndpointError(multipartEndpointErrors, 200, -32602);
+});
+
+test("console contract documents the side chat refusals", () => {
+  const schema = JSON.parse(
+    readFileSync(resolve(process.cwd(), "../docs/rct/console-rest-sse-contract-v0.5.0.json"), "utf8"),
+  ) as ContractSchema;
+  const forkMember = schema.surfaces.rpc.methods[CONSOLE_RPC_METHODS.forkMember];
+  const forkCodes = forkMember?.errors?.flatMap((entry) => entry.codes || []) || [];
+  assert.deepEqual(
+    [-32055, -32037, -32001, -32004, -32602, -32603].filter((code) => !forkCodes.includes(code)),
+    [],
+  );
+  const forkNotes = [
+    forkMember?.request?.note,
+    forkMember?.success?.note,
+    ...(forkMember?.errors || []).map((entry) => entry.note),
+  ].join(" ");
+  for (const kind of [
+    "fork_source_unavailable",
+    "fork_source_changed",
+    "unwired_seat_unavailable",
+    "lineage_too_deep",
+    "identity_hidden_by_policy",
+    "side_chat_restart_refused",
+    "side_chat_adoption_refused",
+  ]) {
+    assert.equal(forkNotes.includes(kind), true, `expected meta/fork_member to document ${kind}`);
+  }
+  for (const method of [CONSOLE_RPC_METHODS.respawnIdentity, CONSOLE_RPC_METHODS.resetIdentity]) {
+    const errors = schema.surfaces.rpc.methods[method]?.errors || [];
+    assert.equal(
+      errors.some((entry) => entry.codes?.includes(-32602) && entry.note?.includes("side_chat_restart_refused")),
+      true,
+      `expected ${method} to document side_chat_restart_refused under -32602`,
+    );
+  }
 });
 
 test("console contract route and method names stay synchronized with Rust http console source", () => {

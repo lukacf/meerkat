@@ -357,3 +357,31 @@ test("normalizeAgents carries the unobserved marker of a pending sidebar row", (
   assert.equal(agents[0]?.affordances?.can_send_message, false);
   assert.equal(agents[1]?.unobserved, undefined);
 });
+
+test("normalizeAgents carries a side chat's source from the experience row", () => {
+  const agents = normalizeAgents(
+    {
+      agent_sidebar: {
+        live_snapshot: {
+          agents: [
+            { agent_id: "alpha", member_id: "alpha", identity: "alpha", label: "Alpha", kind: "mob_agent" },
+            {
+              agent_id: "alpha-side-ab12",
+              member_id: "alpha-side-ab12",
+              identity: "alpha-side-ab12",
+              label: "Alpha (side chat)",
+              kind: "mob_agent",
+              side_chat_of: " alpha ",
+            },
+            { agent_id: "beta", member_id: "beta", identity: "beta", label: "Beta", kind: "mob_agent", side_chat_of: " " },
+          ],
+        },
+      },
+    },
+    [],
+  );
+
+  assert.equal(agents.find((agent) => agent.member_id === "alpha-side-ab12")?.side_chat_of, "alpha");
+  assert.equal("side_chat_of" in (agents.find((agent) => agent.member_id === "alpha") ?? {}), false);
+  assert.equal("side_chat_of" in (agents.find((agent) => agent.member_id === "beta") ?? {}), false);
+});

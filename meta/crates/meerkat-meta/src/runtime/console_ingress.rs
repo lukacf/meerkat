@@ -539,8 +539,8 @@ fn filter_snapshot_for_access(snapshot: &mut ConsoleLiveSnapshot, view: &AccessV
         return;
     }
     // Each member is judged by the attributes its row carries, then along
-    // its spawn lineage, as every agent-scoped check judges it: a member an
-    // agent spawned follows its spawner.
+    // its lineage, as every agent-scoped check judges it: a member an agent
+    // spawned follows its spawner, and a side chat its source.
     snapshot.members.retain(|member| {
         view.decide_agent_with_attributes(
             crate::access::ACTION_AGENT_VIEW,
@@ -879,6 +879,11 @@ fn build_console_experience_contract(
                         .get("group")
                         .cloned()
                         .unwrap_or_else(|| member.role.clone());
+                    // A side chat names its source as the console projected
+                    // it from Meerkat's durable fork record
+                    // (`crate::side_chat::project_side_chat_lineage`). It is
+                    // closed and forked again, never respawned or reset.
+                    let side_chat_of = member.labels.get(crate::side_chat::SIDE_CHAT_OF_LABEL);
                     let mut record = serde_json::json!({
                         "agent_id": member.agent_identity,
                         "member_id": member.agent_identity,
@@ -902,12 +907,15 @@ fn build_console_experience_contract(
                             "addressable": addressable,
                             "can_send_message": can_send_message,
                             "can_retire": is_active && !is_read_only && !is_aggregate_console && !singleton,
-                            "can_respawn": !is_read_only && !is_aggregate_console,
+                            "can_respawn": !is_read_only && !is_aggregate_console && side_chat_of.is_none(),
                             "runtime_mode": if is_aggregate_console { "console_aggregator" } else { "mob_agent" },
                         },
                     });
                     if let Some(phase) = response_phases.get(console_identity) {
                         record["response_phase"] = serde_json::json!(phase);
+                    }
+                    if let Some(source) = side_chat_of {
+                        record["side_chat_of"] = serde_json::json!(source);
                     }
                     record
                 })

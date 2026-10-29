@@ -35,6 +35,59 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
+  machine records the members exempt from the mob definition's wiring rules
+  (see Added). `MobMachineState` (meerkat-machine-schema and meerkat-mob) and
+  the kernel `generated::mob` `State` gain the public field
+  `member_definition_wiring_exempt`, so code that builds either struct
+  literally must set it. `MobMachineSignal` (meerkat-machine-schema and
+  meerkat-mob), its variant enum `MobMachineSignalVariant`
+  (meerkat-machine-schema), and the kernel `Signal` and `SignalKind` gain the
+  variant `ExemptMemberFromDefinitionWiring { agent_identity,
+  agent_runtime_id }`, appended last. The kernel `generated::mob::TransitionId`
+  gains `ExemptMemberFromDefinitionWiringSeatedRunning` and
+  `ExemptMemberFromDefinitionWiringSeatedStopped`, also appended last, so no
+  existing variant's discriminant moves. Exhaustive matches must add the new
+  variants. The signal records the exemption only when a restore replays an
+  exempt member's row, before the boot plan is sealed.
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the
+  inputs that seat a member carry its exemption from the mob definition's
+  wiring rules, so the transition that seats it records it. The
+  `MobMachineInput` variants `CommitSpawnMembership`, `CommitDormantSeat` and
+  `CommitMemberRotation` (meerkat-machine-schema and meerkat-mob) and the
+  kernel `generated::mob::inputs` structs `CommitSpawnMembership`,
+  `CommitDormantSeat` and `CommitMemberRotation` gain the public field
+  `definition_wiring_exempt: bool`, so code that builds them literally must
+  set it (`false` keeps the previous behaviour), and a serialized kernel input
+  without the field no longer deserializes. A placed member's membership
+  commit refuses `true`.
+
+### Added
+
+- `meerkat-mob`: a spawn can exempt its member from the mob definition's
+  wiring rules. `SpawnMemberSpec::definition_wiring` (builder
+  `SpawnMemberSpec::with_definition_wiring`) takes the new
+  `DefinitionWiring`: `Applies` (the default, today's behaviour) or `Exempt`.
+  `auto_wire_orchestrator` and `role_wiring` wire an exempt member to no
+  member when it is spawned, seated dormant, forked or rotated, and wire no
+  other member to it when that member is spawned, seated or rotated, so an
+  exempt member of the orchestrator's profile is never an auto-wire target.
+  Explicit wiring (`MobHandle::wire`, topology operations, the edges a respawn
+  restores) is unaffected. The exemption is a MobMachine fact of the member's
+  current incarnation, recorded in the same step that seats it; the member's
+  `MemberSpawned` event and its roster entry carry it
+  (`MemberSpawnedEvent::definition_wiring`, `RosterEntry::definition_wiring`,
+  omitted when `applies`, so existing journals and goldens are unchanged),
+  `MobMemberListEntry::definition_wiring()` reports MobMachine's record of it
+  for a listed member (a host reconciling the definition's edges leaves an
+  exempt member out), a restore replays it, a respawn keeps it, and a
+  rotation decides it anew from the spec it seats. A member placed on a
+  member host cannot be exempt: its spawn is refused typed
+  (`MobError::WiringError`). The option is Rust-only; the wire spawn
+  contracts do not carry it.
+
 ## [0.9.7] - 2026-10-28
 
 ### Breaking

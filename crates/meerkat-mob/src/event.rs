@@ -1080,6 +1080,14 @@ pub struct MemberSpawnedEvent {
         skip_serializing_if = "crate::runtime::ForkOverlayOrigin::is_source"
     )]
     pub fork_overlay: crate::runtime::ForkOverlayOrigin,
+    /// Whether the mob definition's wiring rules apply to this member (see
+    /// [`crate::DefinitionWiring`]). Replay records an exempt member in
+    /// MobMachine again, so no later seat is wired to it by those rules, and
+    /// the member's respawn keeps it. The default (`applies`) is omitted when
+    /// serialized, and journals written before this field decode it as
+    /// `applies`.
+    #[serde(default, skip_serializing_if = "crate::DefinitionWiring::is_applies")]
+    pub definition_wiring: crate::DefinitionWiring,
     /// Bridge-internal member reference needed for event replay.
     /// Not part of the public identity-native contract.
     #[serde(skip, default)]
@@ -1161,6 +1169,7 @@ impl MemberSpawnedEvent {
             fork_job: None,
             fork_source: None,
             fork_overlay: crate::runtime::ForkOverlayOrigin::default(),
+            definition_wiring: crate::DefinitionWiring::Applies,
             bridge_member_ref: None,
             identity_intent_authority_digest: None,
             placed_spawn_id: None,
@@ -3093,6 +3102,70 @@ mod tests {
             };
             assert_eq!(decoded.fork_overlay, origin);
         }
+    }
+
+    /// A member the definition's wiring rules apply to keeps the
+    /// pre-existing wire shape (no `definition_wiring` key), so existing
+    /// journals and goldens are unchanged; a journal written before the field
+    /// reads `applies`; an exempt member round-trips, through the public and
+    /// the stored codec.
+    #[test]
+    fn test_member_spawned_definition_wiring_is_durable_and_backward_compatible() {
+        let legacy: MobEvent = serde_json::from_value(json!({
+            "cursor": 1,
+            "timestamp": "2026-02-19T00:00:00Z",
+            "mob_id": "test-mob",
+            "kind": {
+                "type": "member_spawned",
+                "agent_identity": "exempt-member",
+                "generation": 0,
+                "fence_token": 1,
+                "agent_runtime_id": {"identity": "exempt-member", "generation": 0},
+                "role": "lead",
+                "runtime_mode": "turn_driven"
+            },
+        }))
+        .expect("a journal written before definition_wiring must stay readable");
+        let MobEventKind::MemberSpawned(legacy_spawned) = legacy.kind.clone() else {
+            panic!("expected MemberSpawned");
+        };
+        assert_eq!(
+            legacy_spawned.definition_wiring,
+            crate::DefinitionWiring::Applies
+        );
+        let plain = serde_json::to_string(&MobEventKind::MemberSpawned(legacy_spawned.clone()))
+            .expect("serialize");
+        assert!(
+            !plain.contains("definition_wiring"),
+            "a member the rules apply to keeps the pre-existing wire shape: {plain}"
+        );
+
+        let mut exempt = legacy_spawned;
+        exempt.definition_wiring = crate::DefinitionWiring::Exempt;
+        let encoded =
+            serde_json::to_value(MobEventKind::MemberSpawned(exempt.clone())).expect("serialize");
+        assert_eq!(encoded["definition_wiring"], json!("exempt"));
+        let MobEventKind::MemberSpawned(decoded) =
+            serde_json::from_value::<MobEventKind>(encoded).expect("roundtrip")
+        else {
+            panic!("expected MemberSpawned");
+        };
+        assert_eq!(decoded.definition_wiring, crate::DefinitionWiring::Exempt);
+
+        let stored = MobEvent {
+            kind: MobEventKind::MemberSpawned(exempt),
+            ..legacy
+        };
+        let bytes = encode_stored_mob_event(&stored).expect("encode the stored row");
+        let replayed = decode_stored_mob_event(&bytes).expect("decode the stored row");
+        let MobEventKind::MemberSpawned(replayed) = replayed.kind else {
+            panic!("expected MemberSpawned");
+        };
+        assert_eq!(
+            replayed.definition_wiring,
+            crate::DefinitionWiring::Exempt,
+            "the stored codec keeps the exemption"
+        );
     }
 
     #[test]

@@ -2043,6 +2043,7 @@ async fn console_send_handler(
     if let Err(refusal) = console_send_gate(
         &state.decisions,
         state.runtime.as_ref(),
+        state.console_aggregator.as_ref(),
         state.access.as_ref(),
         auth_context.access_view.as_ref(),
         request.identity.as_str(),
@@ -2145,6 +2146,7 @@ async fn console_send_recover_handler(
     if let Err(refusal) = console_send_gate(
         &state.decisions,
         state.runtime.as_ref(),
+        state.console_aggregator.as_ref(),
         state.access.as_ref(),
         auth_context.access_view.as_ref(),
         identity.as_str(),
@@ -2361,10 +2363,18 @@ impl ConsoleSendGateRefusal {
 /// [`ConsoleSendPrecheck`] run: the Console is writable, the target is a
 /// valid public member alias, and the caller's access view allows
 /// `agent.send` to it, decided after the attribute cache is primed from the
-/// live roster.
+/// live roster: the local runtime's, else the runtimes of the Console's
+/// aggregator, each in its identity namespace.
+///
+/// A Console with no local runtime refuses, under enforced access, a target
+/// the primed cache still does not know while the aggregator's record of it
+/// names a lineage (a side chat's source or an agent spawner), or cannot be
+/// read: deciding it by its bare name would let a grant on that name stand in
+/// for its lineage's, and a deny on its lineage would not apply.
 async fn console_send_gate(
     decisions: &RuntimeDecisionState,
     runtime: Option<&MobRuntime>,
+    aggregator: Option<&MetaConsoleAggregator>,
     access: Option<&AccessController>,
     access_view: Option<&AccessView>,
     identity: &str,
@@ -2381,18 +2391,77 @@ async fn console_send_gate(
     // caller hitting `/console/send` as its first request could reach a
     // member the rule was meant to exclude (fail-closed requires the
     // attributes to be present when the rule is evaluated).
-    if let Some(runtime) = runtime
-        && let Some(controller) = access.filter(|c| c.enabled())
-    {
-        prime_access_cache_from_runtime(runtime, controller).await;
+    if let Some(controller) = access.filter(|c| c.enabled()) {
+        match (runtime, aggregator) {
+            (Some(runtime), _) => prime_access_cache_from_runtime(runtime, controller).await,
+            (None, Some(aggregator)) => {
+                prime_access_cache_from_aggregator(aggregator, controller).await;
+            }
+            (None, None) => {}
+        }
     }
-    if let Some(view) = access_view
-        && view.enforced()
-        && !view.allows_agent(ACTION_AGENT_SEND, identity)
-    {
-        return Err(ConsoleSendGateRefusal::AccessDenied);
+    if let Some(view) = access_view.filter(|view| view.enforced()) {
+        if runtime.is_none()
+            && let Some(aggregator) = aggregator
+            && !view.knows_agent(identity)
+            && aggregate_record_names_lineage(aggregator, identity).await
+        {
+            return Err(ConsoleSendGateRefusal::AccessDenied);
+        }
+        if !view.allows_agent(ACTION_AGENT_SEND, identity) {
+            return Err(ConsoleSendGateRefusal::AccessDenied);
+        }
     }
     Ok(())
+}
+
+/// Record the access attributes of every runtime `aggregator` serves, each
+/// in its identity namespace, as every route that holds those runtimes
+/// records them ([`prime_access_cache_from_runtime_in_namespace`]): the
+/// priming of a Console route with no local runtime.
+async fn prime_access_cache_from_aggregator(
+    aggregator: &MetaConsoleAggregator,
+    access: &AccessController,
+) {
+    let runtimes = match aggregator.panel_runtimes() {
+        Ok(runtimes) => runtimes,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "access priming: the Console's runtimes could not be listed"
+            );
+            return;
+        }
+    };
+    for runtime in runtimes {
+        prime_access_cache_from_runtime_in_namespace(&runtime.runtime, access, &runtime.namespace)
+            .await;
+    }
+}
+
+/// Whether the aggregator's identity record of `identity` (by identity or
+/// runtime member id) names a lineage parent, or the records cannot be read,
+/// in which case it may. The records are read fresh
+/// ([`MetaConsoleAggregator::identity_records_now`]): the read model's last
+/// snapshot, which a refresh in flight leaves in place, may predate the
+/// member.
+async fn aggregate_record_names_lineage(
+    aggregator: &MetaConsoleAggregator,
+    identity: &str,
+) -> bool {
+    match Box::pin(aggregator.identity_records_now()).await {
+        Ok(records) => records.iter().any(|record| {
+            (record.identity == identity || record.runtime_member_id == identity)
+                && crate::console_spawn::lineage_parent(&record.labels).is_some()
+        }),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "console send gate: the Console's identity records could not be read"
+            );
+            true
+        }
+    }
 }
 
 /// The Console's stock send gate for a host that prepares a Console send
@@ -2444,6 +2513,7 @@ impl ConsoleSendPrecheck {
         console_send_gate(
             &self.decisions,
             self.runtime.as_ref(),
+            None,
             self.access.as_ref(),
             viewer.access_view.as_ref(),
             identity,
@@ -2695,6 +2765,10 @@ mod console_human_governed_bind_tests;
 #[cfg(test)]
 #[path = "console_experience_binding_tests.rs"]
 mod console_experience_binding_tests;
+
+#[cfg(test)]
+#[path = "console_side_chat_tests.rs"]
+mod console_side_chat_tests;
 
 #[cfg(test)]
 async fn console_send_identity_first(
@@ -3671,6 +3745,7 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
             | "meta/run_flow"
             | "meta/spawn_helper"
             | "meta/fork_helper"
+            | "meta/fork_member"
             | "meta/attach_existing_session"
             | "meta/reconcile_edges"
             | "meta/cross_mob/wire_local"
@@ -3961,19 +4036,26 @@ fn timeline_event_visible_to(view: &AccessView, event: &ConsoleTimelineEvent) ->
 /// `agent.view` on one member row of a list call (`meta/list_members`,
 /// `meta/find_members`, `meta/console/list_identities` and
 /// `GET /console/identities`), decided as `/console/experience` decides its
-/// member rows: the row's own attributes, then its spawn ancestors, in one
-/// decision, so a deny on any ancestor wins. A row with no registered
-/// spawner is decided by its own attributes alone.
+/// member rows: the row's own attributes, then its lineage (its spawn
+/// ancestors, or a side chat's source), in one decision, so a deny on any
+/// ancestor wins. A row with neither is decided by its own attributes alone.
 ///
-/// Only the spawn registry asserts lineage: `registered` is the registry's
-/// labels for the row's identity, and the lineage labels the row carries
-/// itself (`spawned_by`, `spawned_by_session`, `via_tool`) give way to the
-/// registry's. List rows carry labels a caller can set, and a lineage claim
-/// no spawn made must neither list a member nor hide it.
+/// Only the spawn registry and Meerkat's fork record assert lineage:
+/// `registered` is the registry's labels for the row's identity,
+/// `side_chat` the row's side chat lineage as the roster's fork facts
+/// verify it, and the lineage labels the row carries itself (`spawned_by`,
+/// `spawned_by_session`, `via_tool`, `side_chat_of`, `side_chat_of_session`)
+/// give way to theirs. List rows carry labels a caller can set, and a
+/// lineage claim no spawn or fork made must neither list a member nor hide
+/// it. The lineage names each parent in `namespace`, the row's runtime
+/// namespace, as the row's own identity and the access attribute cache name
+/// it.
 fn listed_member_visible(
     view: &AccessView,
     resource: &AccessResource<'_>,
     registered: Option<&BTreeMap<String, String>>,
+    side_chat: Option<&crate::side_chat::SideChatLineage>,
+    namespace: &str,
 ) -> bool {
     let Some(identity) = resource.identity else {
         // A row that names no agent has no lineage to follow.
@@ -3983,6 +4065,12 @@ fn listed_member_visible(
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
     if let Some(registered) = registered {
         crate::console_spawn::merge_registered_lineage_labels(&mut labels, registered);
+    }
+    crate::side_chat::project_side_chat_lineage(&mut labels, side_chat);
+    for key in crate::console_spawn::LINEAGE_PARENT_LABELS {
+        if let Some(parent) = labels.get_mut(key) {
+            *parent = namespace_console_identity(parent, namespace);
+        }
     }
     view.decide_agent_with_attributes(
         ACTION_AGENT_VIEW,
@@ -3996,13 +4084,61 @@ fn listed_member_visible(
     .is_allow()
 }
 
+/// The verified side chat lineage of each of `entries`, members of
+/// `runtime`'s mob, that is a side chat, keyed by its public alias: from the
+/// runtime's per-incarnation cache, which the route's access priming fills,
+/// so the roster's fork facts are read at most once, and not at all for an
+/// incarnation read before.
+async fn listed_side_chat_lineages(
+    runtime: &MobRuntime,
+    entries: &[meerkat_mob::runtime::MobMemberListEntry],
+) -> BTreeMap<String, crate::side_chat::SideChatLineage> {
+    let handle = runtime.handle();
+    let cache = runtime.side_chat_lineages();
+    let mut lineages = BTreeMap::new();
+    let mut unbound = false;
+    for entry in entries {
+        if !entry
+            .labels
+            .contains_key(crate::side_chat::SIDE_CHAT_OF_LABEL)
+        {
+            continue;
+        }
+        let Some((runtime_id, fence_token)) = entry.binding_atoms() else {
+            unbound = true;
+            continue;
+        };
+        if let Some(lineage) = cache
+            .lineage(&handle, &runtime_id, fence_token, &entry.labels)
+            .await
+        {
+            lineages.insert(
+                crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str())
+                    .into_owned(),
+                lineage,
+            );
+        }
+    }
+    if unbound {
+        // A marked member with no runtime binding to key it by: one read,
+        // by alias.
+        for (alias, lineage) in cache.verified(&handle).await {
+            lineages.entry(alias).or_insert(lineage);
+        }
+    }
+    lineages
+}
+
 /// Filter serialized member rows (`meta/list_members`, `find_members`)
 /// down to the agents the caller may view, each by [`listed_member_visible`]
-/// with `runtime`'s spawn registry. Field names cover both the meerkat
+/// with `runtime`'s spawn registry and the side chat lineages of `entries`,
+/// the roster rows the rows were serialized from
+/// ([`listed_side_chat_lineages`]). Field names cover both the meerkat
 /// roster entry shape and the console projection shape.
 async fn retain_visible_member_rows(
     rows: &mut Vec<Value>,
     runtime: &MobRuntime,
+    entries: &[meerkat_mob::runtime::MobMemberListEntry],
     view: Option<&AccessView>,
 ) {
     let Some(view) = view.filter(|view| view.enforced()) else {
@@ -4010,6 +4146,8 @@ async fn retain_visible_member_rows(
     };
     // Keyed by console identity, as the console's member projection reads it.
     let registered = runtime.console_identity_labels().await;
+    // Keyed by the side chat's public alias.
+    let side_chats = listed_side_chat_lineages(runtime, entries).await;
     rows.retain(|row| {
         let labels: Option<std::collections::BTreeMap<String, String>> = row
             .get("labels")
@@ -4028,6 +4166,10 @@ async fn retain_visible_member_rows(
             .get("role")
             .or_else(|| row.get("profile"))
             .and_then(Value::as_str);
+        let side_chat = agent_id.and_then(|agent_id| {
+            let alias = crate::member_comms_id::runtime_alias_str(agent_id);
+            side_chats.get(&*alias)
+        });
         listed_member_visible(
             view,
             &AccessResource {
@@ -4037,6 +4179,8 @@ async fn retain_visible_member_rows(
                 labels: labels.as_ref(),
             },
             identity.and_then(|identity| registered.get(identity)),
+            side_chat,
+            "",
         )
     });
 }
@@ -4052,8 +4196,9 @@ fn console_identity_record_role(labels: &BTreeMap<String, String>) -> &str {
 
 /// The console aggregator's identity records (`GET /console/identities`,
 /// `meta/console/list_identities`) the caller may view, each by
-/// [`listed_member_visible`] with the record's role and the spawn registry
-/// of the record's own runtime.
+/// [`listed_member_visible`] with the record's role, the spawn registry of
+/// the record's own runtime and the side chat lineage its roster's fork
+/// facts verify.
 async fn visible_identity_records(
     aggregator: &MetaConsoleAggregator,
     view: Option<&AccessView>,
@@ -4065,10 +4210,16 @@ async fn visible_identity_records(
     let registered = aggregator
         .spawn_registry_labels_for_identities(&identities)
         .await?;
+    let side_chats = aggregator
+        .side_chat_lineages_for_identities(&identities)
+        .await?;
+    let namespaces = aggregator.identity_namespaces()?;
     // In record order: `retain` visits each record once, in order.
     let mut registered = registered.into_iter();
+    let mut side_chats = side_chats.into_iter();
     identities.retain(|record| {
         let registry_labels = registered.next().flatten();
+        let side_chat = side_chats.next().flatten();
         listed_member_visible(
             view,
             &AccessResource {
@@ -4078,6 +4229,10 @@ async fn visible_identity_records(
                 labels: Some(&record.labels),
             },
             registry_labels.as_ref(),
+            side_chat.as_ref(),
+            namespaces
+                .get(&record.runtime_key)
+                .map_or("", String::as_str),
         )
     });
     Ok(identities)
@@ -4197,10 +4352,12 @@ fn console_rpc_access_requirements(
         "meta/reset" | "meta/reset_all" => one(ACTION_AGENT_RESET, target),
         // A fork's source member, and the session `meta/attach_existing_session`
         // (or `meta/ensure_member` with `resume_session_id`) attaches, are
-        // judged in their handlers.
+        // judged in their handlers. The spawn check targets the new member:
+        // `meta/fork_member`'s side chat is its `agent_identity`.
         "meta/ensure_member"
         | "meta/spawn_helper"
         | "meta/fork_helper"
+        | "meta/fork_member"
         | "meta/attach_existing_session"
         | "meta/cancel_flow"
         | "meta/collect_completed" => one(ACTION_AGENT_SPAWN, target),
@@ -7179,6 +7336,64 @@ fn fork_source_access_violation(view: Option<&AccessView>, source: &str) -> Opti
         .then(|| member_access_denied(ACTION_AGENT_VIEW, Some(source.to_string())))
 }
 
+/// A side chat carries its source's conversation, runs with the source's
+/// tools, and every access decision on it is its source's, so under enforced
+/// access rules forking one needs `agent.view` and `agent.send` on the
+/// source: a caller who may only read the source can neither fork it nor
+/// drive its tools through a side chat. Judged here rather than in the
+/// requirements map, which judges `agent.spawn` on the side chat's own name.
+///
+/// A side chat's lineage is its source's and one link more, so a source whose
+/// lineage already fills the access rules' walk (the agent and seven
+/// ancestors) is refused too: its side chat's lineage would go past the walk,
+/// and no one but an admin could open it. The bound is one for every caller,
+/// an admin included: no fork makes a side chat past the walk.
+fn side_chat_source_access_violation(
+    view: Option<&AccessView>,
+    source: &str,
+) -> Option<JsonRpcError> {
+    let view = view.filter(|view| view.enforced())?;
+    if let Some(action) = [ACTION_AGENT_VIEW, ACTION_AGENT_SEND]
+        .into_iter()
+        .find(|action| !view.allows_agent(action, source))
+    {
+        return Some(member_access_denied(action, Some(source.to_string())));
+    }
+    (view.lineage_links(source) >= crate::access::MAX_LINEAGE_DEPTH).then(|| JsonRpcError {
+        code: ACCESS_DENIED_RPC_CODE,
+        message: format!(
+            "access denied: {ACTION_AGENT_SPAWN}: the lineage of {source} fills the access \
+             rules' walk ({} links), so a side chat of it could not be decided",
+            crate::access::MAX_LINEAGE_DEPTH
+        ),
+        data: Some(json!({
+            "kind": "access_denied",
+            "action": ACTION_AGENT_SPAWN,
+            "resource": source,
+            "reason": "lineage_too_deep",
+        })),
+    })
+}
+
+/// The refusal of a fork (`meta/fork_member`, `meta/fork_helper`) whose
+/// source the console's visibility policy hides: it is answered as an
+/// identity the console does not show, as `meta/reset` and `meta/respawn`
+/// answer one, before its conversation is read. `None` for a source the
+/// console shows, and for one the roster does not hold, which the fork
+/// answers itself.
+async fn fork_source_hidden_by_policy(
+    handle: &MobHandle,
+    visibility_policy: &dyn ConsoleVisibilityPolicy,
+    source: &str,
+) -> Option<JsonRpcError> {
+    match lookup_member_alias_with_session(handle, visibility_policy, source).await {
+        Ok(Some(alias)) => (!runtime_alias_visible_to_console(handle, visibility_policy, &alias))
+            .then(|| identity_hidden_by_policy_error(source)),
+        Ok(None) => None,
+        Err(error) => Some(error),
+    }
+}
+
 /// The members a session belongs to, by console identity: the identity
 /// Core's member history binds it to and every roster member bound to it.
 /// `None` when Core's member history cannot answer.
@@ -7415,7 +7630,8 @@ pub(crate) async fn sse_member_authorization_projection(
 
     let mut labels = alias.member.labels.clone();
     // Roster labels are untrusted for lineage. Only the spawn registry may
-    // restore `spawned_by` and related inheritance metadata.
+    // restore `spawned_by` and related inheritance metadata, and only
+    // Meerkat's fork record a side chat's source.
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
     if let Some(runtime) = runtime {
         let registered = runtime.console_identity_labels().await;
@@ -7423,6 +7639,30 @@ pub(crate) async fn sse_member_authorization_projection(
             crate::console_spawn::merge_registered_labels(&mut labels, spawn_labels);
         }
     }
+    // A side chat's source, as the roster's fork facts verify it: kept per
+    // incarnation, so a stream reads them once, not once per event.
+    let side_chat = match runtime {
+        Some(runtime) => {
+            runtime
+                .side_chat_lineages()
+                .lineage(
+                    handle,
+                    expected_runtime_id,
+                    expected_fence_token,
+                    &alias.member.labels,
+                )
+                .await
+        }
+        None => {
+            crate::side_chat::verified_side_chat_lineage(
+                handle,
+                &alias.member.agent_identity,
+                &alias.member.labels,
+            )
+            .await
+        }
+    };
+    crate::side_chat::project_side_chat_lineage(&mut labels, side_chat.as_ref());
     let visible = runtime_alias_visible_to_console(handle, visibility_policy, &alias);
     Some(SseMemberAuthorizationProjection {
         identity: alias.identity.clone(),
@@ -8112,13 +8352,13 @@ async fn respawn_console_member(
                     .is_none()
                     && let Some(entry) = entry_before_respawn
                 {
-                    let mut spec =
-                        SpawnMemberSpec::new(entry.role.clone(), runtime_member_id.clone());
-                    if !entry.labels.is_empty() {
-                        spec = spec.with_labels(entry.labels.clone());
-                    }
                     handle
-                        .ensure_member(spec)
+                        .ensure_member(crate::mob_handle_runtime::archive_cleanup_respawn_spec(
+                            runtime_member_id.clone(),
+                            &entry.role,
+                            &entry.labels,
+                            entry.definition_wiring,
+                        ))
                         .await
                         .map_err(|ensure_err| ensure_err.to_string())?;
                 }
@@ -8143,6 +8383,11 @@ async fn respawn_live_console_member_response(
     response_id: Value,
 ) -> Value {
     let mid = crate::member_comms_id::mob_member_id(alias.runtime_member_id.as_str());
+    // A side chat is closed and forked again, never respawned or reset: its
+    // successor would be no fork of its agent.
+    if let Some(refusal) = crate::side_chat::side_chat_restart_refusal(handle, &mid, action).await {
+        return response_value(response_id, None, Some(refusal));
+    }
     match Box::pin(respawn_console_member(handle, carry_idle_retire, &mid)).await {
         Ok(topology_restore_warning) => {
             if let Some(store) = console_events {
@@ -8835,6 +9080,11 @@ async fn handle_console_runtime_rpc_with_visibility(
                     "meta/cross_mob/wire_local",
                     "meta/cross_mob/unwire_local",
                 ]);
+                // A side chat is a durable fork, which needs persistent
+                // sessions: a runtime known to persist none never offers it.
+                if crate::side_chat::runtime_may_fork_durably(runtime) {
+                    methods.push("meta/fork_member");
+                }
             }
             if metadata_table.is_some() {
                 methods.extend_from_slice(&["meta/mob_labels/get", "meta/run_labels/get"]);
@@ -9659,7 +9909,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     member_entry_to_console_json(runtime, model_registry.as_ref(), entry).await,
                 );
             }
-            retain_visible_member_rows(&mut members, runtime, access_view).await;
+            retain_visible_member_rows(&mut members, runtime, &entries, access_view).await;
             response_value(response_id, Some(Value::Array(members)), None)
         })
         .await,
@@ -9740,7 +9990,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     member_entry_to_console_json(runtime, model_registry.as_ref(), entry).await,
                 );
             }
-            retain_visible_member_rows(&mut matches, runtime, access_view).await;
+            retain_visible_member_rows(&mut matches, runtime, &entries, access_view).await;
             response_value(response_id, Some(Value::Array(matches)), None)
         })
         .await,
@@ -11536,12 +11786,24 @@ async fn handle_console_runtime_rpc_with_visibility(
                     ),
                 );
             }
+            let mob_member_id = crate::member_comms_id::mob_member_id(&member_id);
+            // A side chat is closed and forked again, never respawned: its
+            // successor would be no fork of its agent.
+            if let Some(refusal) = crate::side_chat::side_chat_restart_refusal(
+                &runtime.handle(),
+                &mob_member_id,
+                "respawn",
+            )
+            .await
+            {
+                return response_value(response_id, None, Some(refusal));
+            }
             // Parity with respawn_console_member's tolerance set: topology
             // warnings degrade, completed-disposal cleanup misses repair.
             match Box::pin(respawn_console_member(
                 &runtime.handle(),
                 runtime.implicit_delegate_retirement_overrides().as_ref(),
-                &crate::member_comms_id::mob_member_id(&member_id),
+                &mob_member_id,
             ))
             .await
             {
@@ -12521,6 +12783,11 @@ async fn handle_console_runtime_rpc_with_visibility(
             if let Some(error) = fork_source_access_violation(access_view, &source) {
                 return response_value(response_id, None, Some(error));
             }
+            if let Some(error) =
+                fork_source_hidden_by_policy(&runtime.handle(), visibility_policy, &source).await
+            {
+                return response_value(response_id, None, Some(error));
+            }
             let Some(agent_identity) = request.params.get("agent_identity").and_then(Value::as_str)
             else {
                 return invalid_params(response_id, "agent_identity required");
@@ -12673,6 +12940,68 @@ async fn handle_console_runtime_rpc_with_visibility(
                     )
                 }
                 Err(err) => internal_error(response_id, format!("fork_helper failed: {err}")),
+            }
+        })
+        .await,
+        "meta/fork_member" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            // A console side chat: the source's durable transcript forked
+            // into a new unwired member the human continues in, kept until it
+            // is retired (`crate::side_chat`).
+            let params = match crate::side_chat::parse_fork_member_params(&request.params) {
+                Ok(params) => params,
+                Err(message) => return invalid_params(response_id, message),
+            };
+            let source =
+                crate::member_comms_id::runtime_alias_str(&params.source_member_id).into_owned();
+            if let Some(error) = side_chat_source_access_violation(access_view, &source) {
+                return response_value(response_id, None, Some(error));
+            }
+            if let Some(error) =
+                fork_source_hidden_by_policy(&runtime.handle(), visibility_policy, &source).await
+            {
+                return response_value(response_id, None, Some(error));
+            }
+            match Box::pin(crate::side_chat::fork_side_chat(
+                runtime,
+                identity_runtime.as_ref(),
+                &params.source_member_id,
+                &params.agent_identity,
+                params.display_name.as_deref(),
+            ))
+            .await
+            {
+                Ok(fork) => response_value(
+                    response_id,
+                    Some(crate::side_chat::fork_member_result(&fork)),
+                    None,
+                ),
+                Err(error) => {
+                    let mut rpc_error = crate::side_chat::fork_member_error(&error);
+                    // A side chat seated with peer edges, or forked from
+                    // another session of the agent than the fork's checks
+                    // read, is never kept: it would be a member of the
+                    // society, or one no check covered. The answer says
+                    // whether it is gone.
+                    if let Some(member_id) = error.seated_child_to_retire() {
+                        let retired = match retire_console_member(&runtime.handle(), member_id).await
+                        {
+                            Ok(()) => true,
+                            Err(retire_error) => {
+                                tracing::error!(
+                                    target: "meta::console",
+                                    member_id = %member_id,
+                                    error = %retire_error,
+                                    "a side chat the fork does not keep could not be retired"
+                                );
+                                false
+                            }
+                        };
+                        if let Some(data) = rpc_error.data.as_mut() {
+                            data["retired"] = json!(retired);
+                        }
+                    }
+                    response_value(response_id, None, Some(rpc_error))
+                }
             }
         })
         .await,
@@ -14298,15 +14627,23 @@ async fn reset_all_live_console_agents(
             continue;
         }
         if baseline_identities.contains(&identity) {
+            let member_id = crate::member_comms_id::mob_member_id(runtime_member_id);
+            // A side chat is never reset, under a baseline name either: a
+            // successor would be no fork of its agent. It is reported as a
+            // member reset_all could not reset, and the others still reset.
+            if let Some(refusal) =
+                crate::side_chat::side_chat_restart_refusal(&handle, &member_id, "reset").await
+            {
+                let mut failure = json!({ "identity": identity, "error": refusal.message });
+                if let Some(kind) = refusal.data.as_ref().and_then(|data| data.get("kind")) {
+                    failure["kind"] = kind.clone();
+                }
+                failures.push(failure);
+                continue;
+            }
             // A baseline member on a non-identity-first runtime: reset means a
             // fresh session under the same configuration.
-            match Box::pin(respawn_console_member(
-                &handle,
-                None,
-                &crate::member_comms_id::mob_member_id(runtime_member_id),
-            ))
-            .await
-            {
+            match Box::pin(respawn_console_member(&handle, None, &member_id)).await {
                 Ok(topology_restore_warning) => {
                     if let Some(store) = console_events {
                         store
@@ -14617,9 +14954,15 @@ pub(crate) async fn prime_access_cache_from_handle(handle: &MobHandle, access: &
     }
     let registered = BTreeMap::new();
     let mut roster_identities = BTreeSet::new();
-    let members =
-        live_member_access_attributes(handle, None, None, &registered, &mut roster_identities)
-            .await;
+    let members = live_member_access_attributes(
+        handle,
+        None,
+        None,
+        &registered,
+        &mut roster_identities,
+        None,
+    )
+    .await;
     record_live_and_registered_attributes(access, members, &registered, &roster_identities, "");
 }
 
@@ -14640,8 +14983,10 @@ fn namespace_console_attributes(
     attributes.agent_id = attributes
         .agent_id
         .map(|id| namespace_console_identity(&id, namespace));
-    if let Some(parent) = attributes.labels.get_mut("spawned_by") {
-        *parent = namespace_console_identity(parent, namespace);
+    for key in crate::console_spawn::LINEAGE_PARENT_LABELS {
+        if let Some(parent) = attributes.labels.get_mut(key) {
+            *parent = namespace_console_identity(parent, namespace);
+        }
     }
     attributes
 }
@@ -14665,6 +15010,7 @@ async fn prime_access_cache_from_runtime_in_namespace(
         None,
         &registered,
         &mut roster_identities,
+        Some(runtime.side_chat_lineages()),
     )
     .await;
     for (mob_id, delegate_handle, host_identity) in delegate_mobs_with_hosts(runtime).await {
@@ -14675,6 +15021,7 @@ async fn prime_access_cache_from_runtime_in_namespace(
                 Some(mob_id.as_str()),
                 &registered,
                 &mut roster_identities,
+                Some(runtime.side_chat_lineages()),
             )
             .await,
         );
@@ -14694,13 +15041,16 @@ async fn prime_access_cache_from_runtime_in_namespace(
 /// [`crate::runtime::console_member_access_attributes`]). Recording every row
 /// keeps cached attributes for an identity whose only rows have ended, also
 /// after a restart. Adds each row's console identity to `roster_identities`,
-/// which keeps the spawn registry's value off it.
+/// which keeps the spawn registry's value off it. The side chat lineages
+/// this listing verifies are kept in `lineage_cache` (the runtime's
+/// per-incarnation cache), so the route's later reads take them from there.
 async fn live_member_access_attributes(
     handle: &MobHandle,
     host_identity: Option<&str>,
     source_mob_id: Option<&str>,
     registered: &BTreeMap<String, BTreeMap<String, String>>,
     roster_identities: &mut BTreeSet<String>,
+    lineage_cache: Option<&crate::side_chat::SideChatLineageCache>,
 ) -> Vec<AgentResourceAttributes> {
     let entries = handle.list_all_members().await;
     for entry in &entries {
@@ -14709,6 +15059,48 @@ async fn live_member_access_attributes(
             crate::member_comms_id::durable_identity_label(&entry.labels)
                 .unwrap_or(alias.as_ref())
                 .to_string(),
+        );
+    }
+    // A side chat names its source as this roster records its fork; the
+    // fork facts are read only when a row carries the side chat marker.
+    let side_chats =
+        if crate::side_chat::any_side_chat_marker(entries.iter().map(|entry| &entry.labels)) {
+            crate::side_chat::side_chat_lineages(
+                &entries
+                    .iter()
+                    .map(|entry| crate::side_chat::SideChatRosterRow {
+                        alias: crate::member_comms_id::runtime_alias_str(
+                            entry.agent_identity.as_str(),
+                        )
+                        .into_owned(),
+                        labels: &entry.labels,
+                        spawned_by: entry.spawned_by.as_ref(),
+                        fork_source: entry.fork_source.as_ref(),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            BTreeMap::new()
+        };
+    if let Some(cache) = lineage_cache {
+        cache.keep_listed(
+            handle.mob_id().as_str(),
+            entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .labels
+                        .contains_key(crate::side_chat::SIDE_CHAT_OF_LABEL)
+                })
+                .map(|entry| {
+                    let alias =
+                        crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str());
+                    (
+                        entry.agent_runtime_id.clone(),
+                        entry.fence_token,
+                        side_chats.get(&*alias).cloned(),
+                    )
+                }),
         );
     }
     entries
@@ -14724,6 +15116,7 @@ async fn live_member_access_attributes(
                 host_identity,
                 source_mob_id,
                 registered,
+                side_chats.get(&alias),
             );
             crate::runtime::console_member_access_attributes(&alias, entry.role.as_str(), &labels)
         })
@@ -14811,17 +15204,21 @@ async fn delegate_mobs_with_hosts(runtime: &MobRuntime) -> Vec<(String, MobHandl
 
 /// The console labels of one roster member, as the console projects them:
 /// the roster labels without unverified lineage, gaps filled from the spawn
-/// registry (looked up under the member's console identity), and, for a
-/// member of an agent-created sub-mob, its delegate host and source mob.
-/// Roster labels win, except lineage, which only the spawn registry may
-/// assert. The console's member rows and every route's access priming use
-/// this projection, so all of them record one value per identity.
+/// registry (looked up under the member's console identity), a side chat's
+/// verified source (`side_chat`, from the roster's fork record:
+/// [`crate::side_chat::project_side_chat_lineage`]), and, for a member of an
+/// agent-created sub-mob, its delegate host and source mob. Roster labels
+/// win, except lineage, which only the spawn registry and Meerkat's fork
+/// record may assert. The console's member rows and every route's access
+/// priming use this projection, so all of them record one value per
+/// identity.
 fn projected_console_member_labels(
     roster_labels: &BTreeMap<String, String>,
     alias: &str,
     host_identity: Option<&str>,
     source_mob_id: Option<&str>,
     registered_labels: &BTreeMap<String, BTreeMap<String, String>>,
+    side_chat: Option<&crate::side_chat::SideChatLineage>,
 ) -> BTreeMap<String, String> {
     let mut labels = roster_labels.clone();
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
@@ -14830,6 +15227,7 @@ fn projected_console_member_labels(
     if let Some(spawn_labels) = registered_labels.get(console_identity_key) {
         crate::console_spawn::merge_registered_labels(&mut labels, spawn_labels);
     }
+    crate::side_chat::project_side_chat_lineage(&mut labels, side_chat);
     if let Some(host_identity) = host_identity {
         labels
             .entry("delegate_host_identity".to_string())
@@ -14859,6 +15257,14 @@ async fn project_console_members_from_handle(
     // `MobMemberListEntry`; the structural `list_all_members` roster no longer
     // carries it, so the console projection reads the operational list.
     let entries = handle.list_members_including_retiring().await;
+    // A side chat names its source as the roster records its fork; the
+    // fork facts are read only when a row carries the side chat marker.
+    let side_chats =
+        if crate::side_chat::any_side_chat_marker(entries.iter().map(|entry| &entry.labels)) {
+            crate::side_chat::verified_side_chats(handle).await
+        } else {
+            BTreeMap::new()
+        };
     // A delegate mob's members are built by the same member builder, against
     // its own definition's `[models.<id>]` entries.
     let model_registry = member_model_registry(member_model_config, handle.definition());
@@ -14880,14 +15286,16 @@ async fn project_console_members_from_handle(
         );
         // Spawn-time console metadata (group/display labels, spawned_by
         // lineage) fills gaps the roster does not carry; roster labels win —
-        // except lineage, which only the spawn registry may assert (this
-        // projection feeds the experience-path ABAC attribute rebuild).
+        // except lineage, which only the spawn registry (and, for a side
+        // chat, Meerkat's fork record) may assert (this projection feeds the
+        // experience-path ABAC attribute rebuild).
         let labels = projected_console_member_labels(
             &entry.labels,
             &identity,
             host_identity,
             source_mob_id,
             registered_labels,
+            side_chats.get(&identity),
         );
         let mut wired_to: Vec<String> = entry
             .wired_to
@@ -15198,9 +15606,22 @@ async fn build_aggregator_live_snapshot(
     let response_phases = aggregator
         .response_phases_for_identities(&identities)
         .await?;
+    let namespaces = aggregator.identity_namespaces()?;
     let mut members = Vec::with_capacity(identities.len());
     for identity in &identities {
         let mut labels = identity.labels.clone();
+        // A row names its lineage parents (its spawner, a side chat's
+        // source) in its runtime's namespace, as it names itself: the
+        // access rules' lineage walk and the sidebar find a parent among
+        // the namespaced rows, and a rule on a prefixed parent reaches the
+        // rows below it.
+        if let Some(namespace) = namespaces.get(&identity.runtime_key) {
+            for key in crate::console_spawn::LINEAGE_PARENT_LABELS {
+                if let Some(parent) = labels.get_mut(key) {
+                    *parent = namespace_console_identity(parent, namespace);
+                }
+            }
+        }
         // The authorized aggregate row already includes its runtime namespace.
         // Preserve that identity when the experience roster reads this label.
         labels.insert("agent_identity".to_string(), identity.identity.clone());
@@ -30881,6 +31302,8 @@ mod console_list_lineage_access_tests {
         /// runtime: it answers `meta/console/list_identities` on its own
         /// route.
         aggregator: MetaConsoleAggregator,
+        /// A persistent runtime's state directory, kept while it runs.
+        _state: Option<tempfile::TempDir>,
     }
 
     /// A runtime whose roster holds `ops-lead`, `ops-worker`, `secret-lead`,
@@ -30985,6 +31408,7 @@ comms = true
             controller,
             app,
             aggregator,
+            _state: None,
         }
     }
 
@@ -31326,6 +31750,142 @@ comms = true
                     "{surface:?}: {what}"
                 );
             }
+        }
+        fixture.stop().await;
+    }
+
+    /// A persistent runtime (a durable fork needs one) whose roster holds
+    /// `alpha`, its side chat `alpha-side` (forked through
+    /// `meta/fork_member`), `gamma`, and `forger`, which carries
+    /// `side_chat_of` and `side_chat_of_session` labels naming `alpha` that
+    /// no fork made. Every member carries [`TEAM`].
+    async fn side_chat_fixture(mob_id: &str) -> Fixture {
+        let (state, spec) = super::console_side_chat_tests::persistent_console_spec(mob_id, "", "")
+            .expect("a persistent console composition");
+        let mut runtime = Box::pin(crate::UnifiedRuntime::bootstrap(
+            spec,
+            crate::MetaConfig {
+                modules: vec![],
+                discovery: crate::DiscoverySpec {
+                    namespace: mob_id.to_string(),
+                    modules: vec![],
+                },
+                pre_spawn: vec![],
+            },
+            std::time::Duration::from_secs(2),
+        ))
+        .await
+        .expect("the persistent runtime bootstraps");
+        let mob_runtime = runtime.mob_runtime().clone();
+        Box::pin(super::console_side_chat_tests::seeded_member(
+            &mob_runtime,
+            "worker",
+            "alpha",
+            &[TEAM],
+        ))
+        .await
+        .expect("the source runs a turn");
+        for (member, labels) in [
+            ("gamma", vec![TEAM]),
+            (
+                "forger",
+                vec![
+                    TEAM,
+                    (crate::side_chat::SIDE_CHAT_OF_LABEL, "alpha"),
+                    (
+                        crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL,
+                        "forged-session",
+                    ),
+                ],
+            ),
+        ] {
+            let labels = labels
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect::<BTreeMap<_, _>>();
+            Box::pin(mob_runtime.handle().spawn_spec(
+                SpawnMemberSpec::new("worker", AgentIdentity::from(member)).with_labels(labels),
+            ))
+            .await
+            .expect("the member spawns");
+        }
+        let forked =
+            super::console_side_chat_tests::fork_when_idle(&mob_runtime, "alpha", "alpha-side")
+                .await;
+        assert!(
+            forked["error"].is_null(),
+            "the side chat forks: {forked:#?}"
+        );
+        let controller = AccessController::new(only_the_source()).expect("access controller");
+        runtime.set_access_controller(controller.clone());
+        // Both consoles are built over the complete roster, so their
+        // identity read models list every member.
+        let app = runtime.build_reference_app_router(RuntimeDecisionState::local_console(
+            crate::ConsolePolicy {
+                require_app_auth: false,
+                ..Default::default()
+            },
+            None,
+        ));
+        let aggregator = MetaConsoleAggregator::in_memory();
+        aggregator.register_runtime_handles_with_policy(
+            "list-side-chats",
+            "",
+            runtime.mob_runtime().clone(),
+            None,
+            runtime.console_events(),
+            Arc::new(AllowAllConsoleVisibilityPolicy),
+        );
+        Fixture {
+            runtime,
+            controller,
+            app,
+            aggregator,
+            _state: Some(state),
+        }
+    }
+
+    /// The viewer is granted the side chat's source `alpha` alone.
+    fn only_the_source() -> AccessControlConfig {
+        enforced_policy(vec![view_rule("view-the-source", "alpha")])
+    }
+
+    /// The viewer is granted every agent, and the source `alpha` is denied.
+    fn all_but_a_denied_source() -> AccessControlConfig {
+        enforced_policy(vec![
+            view_rule("view-every-agent", "*"),
+            AccessRule {
+                id: "hide-the-source".to_string(),
+                effect: AccessEffect::Deny,
+                actions: vec!["agent.*".to_string()],
+                agents: vec!["alpha".to_string()],
+                ..AccessRule::default()
+            },
+        ])
+    }
+
+    /// Every list surface decides a side chat along its source, as Meerkat's
+    /// fork record names it: a grant on the source alone lists its side
+    /// chat, and a deny on the source hides it under a grant on every agent.
+    /// A `side_chat_of` label on a member no fork made neither lists it nor
+    /// hides it: `forger` is decided by its own attributes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn side_chat_list_rows_follow_their_source() {
+        let fixture = Box::pin(side_chat_fixture("list-side-chats")).await;
+        for surface in SURFACES {
+            fixture.commit(only_the_source());
+            assert_eq!(
+                fixture.listed(surface).await,
+                ["alpha", "alpha-side"],
+                "{surface:?}: a grant on the source lists its side chat"
+            );
+            fixture.commit(all_but_a_denied_source());
+            assert_eq!(
+                fixture.listed(surface).await,
+                ["forger", "gamma"],
+                "{surface:?}: a deny on the source hides its side chat under a broad grant, \
+                 and a forged side chat label hides nothing"
+            );
         }
         fixture.stop().await;
     }

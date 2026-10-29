@@ -392,6 +392,7 @@ impl MobActor {
             creation_origin: spec.creation_origin.clone(),
             effective_profile_override,
             effective_model_override,
+            definition_wiring: spec.definition_wiring,
             authorize_input,
             authorized,
             observations,
@@ -750,6 +751,10 @@ impl MobActor {
             session_unborn: candidate.session_unborn,
             // A resume seat is unborn only on a session no build created.
             fresh_launch: candidate.launch == DormantSeatLaunch::Fresh,
+            // The seat is recorded exempt from the definition's wiring rules
+            // exactly when its spec says so, in this same step, before the
+            // chunk's declared edges read it.
+            definition_wiring_exempt: candidate.definition_wiring.is_exempt(),
         };
         Ok(StagedSeat {
             inputs: [candidate.authorize_input.clone(), begin, seat],
@@ -1047,6 +1052,10 @@ impl MobActor {
             // incarnation in the same step.
             kickoff_owed: candidate.kickoff_owed,
             kickoff_objective_id: candidate.kickoff_objective_id.to_string(),
+            // The next incarnation is recorded exempt from the definition's
+            // wiring rules exactly when its spec says so, in this same step,
+            // before its declared edges are read below.
+            definition_wiring_exempt: candidate.definition_wiring.is_exempt(),
         };
         let mut authority = self.dsl_authority.prepare_authority();
         let mut transitions = authority.apply_batch([rotation_input]).map_err(|error| {
@@ -1199,6 +1208,7 @@ impl MobActor {
         spawned.continuity_intent = candidate.continuity_intent.clone();
         spawned.effective_profile_override = candidate.effective_profile_override.clone();
         spawned.effective_model_override = candidate.effective_model_override.clone();
+        spawned.definition_wiring = candidate.definition_wiring;
         let mut batch = vec![
             NewMobEvent {
                 mob_id: self.definition.id.clone(),
@@ -1371,6 +1381,7 @@ impl StagedSeat {
         event.continuity_intent = candidate.continuity_intent.clone();
         event.effective_profile_override = candidate.effective_profile_override.clone();
         event.effective_model_override = candidate.effective_model_override.clone();
+        event.definition_wiring = candidate.definition_wiring;
         Ok(event)
     }
 }

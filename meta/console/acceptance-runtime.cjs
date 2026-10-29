@@ -36,7 +36,7 @@ async function stop(child) {
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
 }
 
-async function startFixture({ mode = "member", stateDir, liveImages = false, liveModel = false, routineTools = false, diagnoseStreams = false, sharedAssets = path.join(__dirname, ".tmp/acceptance") } = {}) {
+async function startFixture({ mode = "member", stateDir, liveImages = false, liveModel = false, routineTools = false, diagnoseStreams = false, sharedAssets = path.join(__dirname, ".tmp/acceptance"), allowExtraMembers = false } = {}) {
   // Freeze the built production UI for this fixture lifetime. UI-only iterations
   // reuse the real Rust backend without recompiling its embedded asset bytes.
   const consoleAssets = new Map(await Promise.all([
@@ -69,9 +69,14 @@ async function startFixture({ mode = "member", stateDir, liveImages = false, liv
       const { status, body } = await rpc(backendUrl, "meta/wait_ready", { timeout_ms: 1000 });
       assert.equal(status, 200);
       if (body.error) throw new Error(JSON.stringify(body.error));
-      return body.result?.timeout === false && body.result.ready?.length === 2 ? body.result : null;
+      // A restart over a state directory that holds members a scenario
+      // created (side chats) restores them beside the two fixture members.
+      const count = body.result?.ready?.length ?? 0;
+      return body.result?.timeout === false && (allowExtraMembers ? count >= 2 : count === 2) ? body.result : null;
     }, "both fixture members finish startup", 30_000);
-    assert.equal(new Set(ready.ready.map(member => member.agent_identity)).size, 2);
+    const readyIdentities = new Set(ready.ready.map(member => member.agent_identity)).size;
+    if (allowExtraMembers) assert(readyIdentities >= 2, `fixture members ready: ${readyIdentities}`);
+    else assert.equal(readyIdentities, 2);
   } catch (error) { await stop(child); throw new Error(`${error.message}\n${logs}`); }
 
   const observations = [];

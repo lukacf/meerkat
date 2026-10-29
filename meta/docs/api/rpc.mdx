@@ -274,6 +274,7 @@ errors. SDKs surface it on `RpcError.data`.
 | `-32051` | Core cannot resume the identity's last session while Meta seats the identity on it (its first seat on a session, a seat on its last session after Core retired it, or the one-time revival of an archived session): the session is archived and its lifecycle refuses revival, or Core holds durable authority or lifecycle rows for it without a session body it can load. Final: nothing was seated, the identity reads `broken` unless Core still holds it as a member, and `meta/delete_identity` starts it over. A member Core already holds and cannot restore is Core's to settle: Core holds it Broken (the identity reads `broken` with no `wake_refusal`), and a delivery to it is refused by Core's wake. A session Core holds no copy of is never replaced by a fresh one: Meta starts no fresh session in its place (a delivery answers `-32052` `identity_session_absent`, and a first-boot `Resume` row `-32014` `first_boot_row_refused`). `IdentityUnresumableError` in both SDKs. | `{kind: "identity_unresumable", identity, session_id, reason, remedy: "delete_identity", retryable: false}`; `reason` is `archived_not_revivable` or `contradictory_durable_authority` |
 | `-32052` | Core's history for the identity cannot be read now, or the wake failed in a way a retry can clear: nothing was spawned. This includes a send or dispatch to an identity a host adopted whose intent declares a live member that Core has not brought live yet (after a restart, until the previous process's identity lease expires): Meta never wakes it and queues nothing, and the same request, sent again, is delivered once Core holds the member. Or a delivery reached a member whose session Core holds no durable copy of: nothing was delivered, Core settles the member, and Meta starts no fresh session in its place; deliver again. Or a send, dispatch or peer message reached a member of a stopped mob, a live member included (a peer sender sees `peer_wake_refused` with the reason `mob_not_running`). Or `meta/retire` reached a member that is being woken or has work in flight: Core does not release it now, nothing was interrupted, and the retire succeeds once the member is quiescent. Or Core refused a `meta/reset` or `meta/delete_identity` before any of it started (the mob is not running, or another lifecycle operation of the member is in progress): nothing was retired, the rotation is not recorded, and no later start carries it out; ask again. `IdentityHistoryUnavailableError` in both SDKs. | `{kind: "identity_history_unavailable", identity?, retryable: true}` (`identity` when the refusal names one), `{kind: "identity_wake_retryable", identity, session_id, retryable: true}` (`session_id` may be `null`) or `{kind: "identity_session_absent", identity, session_id, retryable: true}` |
 | `-32053` | A host adopted the identity (Core holds an identity intent row for it), so Meta's lifecycle verbs leave it alone. A send or dispatch to it answers `-32053` only when its intent declares no live member, when Core reports its convergence blocked (`repair_blocked`, `quarantined`, `tombstoned`, `drain_blocked`), or when Meta cannot read one of them; otherwise it answers `-32052`. `IdentityHostAdoptedError` in both SDKs. | `{kind: "identity_host_adopted", identity, retryable: false}` |
+| `-32055` | `meta/fork_member` (Console) refused a side chat. `kind: "fork_source_unavailable"` when the agent cannot be forked now, and nothing was forked: `cause` is `running` (it is working or owes queued work; fork again when it is idle), `no_session` (it has no conversation: it is a seat that was never woken, and it is not woken for the fork), `remote_read_unavailable` or `authority_unavailable` (its alias could not be pinned to a current identity; `detail` carries the identity authority's refusal). `kind: "fork_source_changed"` when the agent moved to another session between the fork's checks and the fork (it was reset or respawned in between), and `kind: "unwired_seat_unavailable"` (`wiring.rule` `seated_with_peers` with `peers`) when a seated side chat had peer edges after all: either side chat is retired again, and `retired` says whether that succeeded. | `{kind, source_member_id?, cause?, detail?, wiring?, agent_identity?, retired?}` |
 | `-32015` | `meta/bound_member_transcript` target session is live/running (transcript surgery only supports reject-while-active); quiesce the member first (retire or park it), then retry. Also `meta/member_activate_instruction` refused at its safe boundary (runtime work still queued at the turn boundary, open live channel, no materialized session, fenced-store backoff); retry at your own next boundary | `meta/member_activate_instruction`: `{class: "admission", instruction_activation_code}` |
 | `-32016` | operator verb exists but its gateway wiring is absent (no compaction-floor registry / no concrete transcript-edit service threaded into the RPC context) | none |
 | `-32017` | a covered unified/stdin read arm exhausted its deadline. The member's meerkat session task and the mob actor loop are strict sequential command loops, so a read issued while the member is mid-turn queues behind that turn instead of degrading; the wrapped arms (`identity/resolved_tools`, `identity/routing_status`, `member_status`, `list_members`, `get_member`, `find_members`, `flow_status`, `list_runs`) give up after the read budget and say so. The read is abandoned, never half-applied. Budget defaults to 30s, overridable with `META_CONSOLE_READ_TIMEOUT_SECS` (clamped to 1..3600). The independent HTTP console dispatcher does not apply this wrapper. | `{kind: "console_read_timeout", arm, awaiting, timeout_secs}` |
@@ -283,7 +284,7 @@ errors. SDKs surface it on `RpcError.data`.
 | `-32044` | A mob announcement method on a gateway that did not enable mob announcements (see [Mob announcements](#mob-announcements-optional)). `MobAnnouncementsUnavailableError` in both SDKs. | `{kind: "mob_announcements_unavailable"}` |
 | `-32045` | Mob announcement conflict: a source key already bound to other content, a stale subscription or source revision, a collector step from a cursor version another step already moved, a reused operation id, a batch that moved. `AnnouncementConflictError` in both SDKs; a source's stale revision is `SourceStaleRevisionError` and a moved cursor `SourceVersionConflictError`, both carrying the source's current position. | `{kind: "announcement_conflict", existing}`, `{kind: "stale_revision", current_revision}` (a subscription), `{kind: "stale_revision", current_revision, current_version, generation, cursor}` (a source), `{kind: "source_version_conflict", current_version, cursor, state, revision}`, `{kind: "operation_reused"}` or `{kind: "batch_moved", current}` |
 | `-32046` | `meta/mob_announcements/subscriptions/put` start frontier outside a mob's announcements: older than what is retained, or beyond its head (a mob that has announced nothing yet is at head 0). `AnnouncementFrontierError` in both SDKs. | `{kind: "gap", mob_id, earliest_retained}` or `{kind: "frontier_beyond_head", mob_id, head}` |
-| `-32047` | Mob announcement typed refusal. `AnnouncementRefusedError` in both SDKs. | `{kind}`: `governed_runtime`, `unknown_member` (with `member`), `unusable_member`, `unusable_peer`, `subscription_cancelled`, `subscription_ended` (with `end`), `member_mismatch`, `unrelated_mob` (with `mob_id`; member tools only), `ambiguous_mob` (with `mob_id`, or `kept_route`), `child_member_limit` (with `limit`, and `mob_id` for the bound per mob), `native_unavailable`, `not_held` (with `batch_id`; see [Delivery handling](#delivery-handling)) or `candidate_launch` (a change on a candidate launch; see [Mob announcements](#mob-announcements-optional)). A candidate launch also answers `candidate_launch` for `meta/retire`, `meta/retire_member`, `meta/respawn`, `meta/respawn_member`, `meta/reset`, `meta/reset_all`, `meta/delete_identity`, `meta/reconcile_identity`, `meta/rediscover`, `meta/cross_mob/wire`, `meta/cross_mob/unwire`, `meta/cross_mob/wire_local`, `meta/cross_mob/unwire_local` and `meta/topology/apply`, whose stored roster and wiring are the authoritative launch's to change (`meta/reconcile_edges` answers a dry run instead), for `meta/gating/decide`, whose decision resumes the authoritative launch's work, for the methods that create a session (`meta/spawn_member`, `meta/ensure_member`, `meta/spawn_helper`, `meta/fork_helper` and `meta/attach_existing_session`), and for member input and member run control: `meta/send`, `meta/send_message`, `meta/interact`, `meta/dispatch`, `meta/delivery/send`, `meta/cross_mob/send`, `meta/run_flow`, `meta/reload_member`, `meta/identity/warm`, `meta/stop_member_run`, `meta/force_cancel_member`, `meta/compact_member`, `meta/member_activate_instruction` and `meta/live/open`, and on the Console `meta/console/send`, `meta/console/voice/open` and `meta/console/recover_send`; for the member declaration mutations `mob/adopt_member_identity_declaration` and `mob/apply_member_tool_declaration`; and for the operator changes, each of which writes state the authoritative launch reads, runs a tool or a host process, or sends: the WorkGraph writes (every `meta/workgraph/*` method that changes the graph), `meta/call_tool`, `meta/routing/routes/add`, `meta/routing/routes/delete`, `meta/memory/index`, `meta/memory/quarantine/decide`, `meta/agent_memory/remember`, `meta/agent_memory/update`, `meta/agent_memory/forget`, `meta/mob_labels/set`, `meta/mob_labels/delete`, `meta/run_labels/set`, `meta/run_labels/delete`, `meta/access/set`, `meta/access/enable`, `meta/access/rules/upsert`, `meta/access/rules/delete`, `meta/access/groups/set`, `meta/access/groups/delete`, `meta/console/revoke_sessions`, `meta/blob/upload`, `meta/cancel_flow`, `jobs/cancel`, `jobs/retry`, `monitors/start`, the live channel verbs (`meta/live/close`, `meta/live/refresh`, `meta/live/send_input`, `meta/live/commit_input`, `meta/live/interrupt`, `meta/live/truncate`, `meta/live/playback_complete`, `meta/live/replacement_required`, `meta/live/playback_owner/register`, `meta/live/playback_owner/revoke` and `live/webrtc/answer`), a `meta/mobpacks/deploy` with `execute`, a `meta/mobpacks/validate` with `rkat_validate`, a Flow Editor draft write (`meta/mobpacks/create`, `meta/mobpacks/save`, `meta/mobpacks/delete`, `meta/mobpacks/undo` and `meta/mobpacks/redo`) except to a `store_path` the caller names outside the state directory and the gateway home that is not the store `META_FLOW_EDITOR_DRAFT_STORE` names, a `meta/session_store/bigquery` row insert, a `meta/gating/evaluate` of an R3 action that names an approval route (`approval_recipient` and `approval_channel`), every call passed through to a loaded module, and `meta/reconcile`. It answers on the stdio gateway and on `POST /console/rpc`, before anything is read or written; `POST /console/send`, `POST /console/send/recover` and `POST /console/mcp-apps/call-tool` answer HTTP `409` `candidate_launch` (see `mob_composition` in [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)); for sources (see [Mob announcement sources](#mob-announcement-sources)) `source_paused`, `source_ended`, `principal_changed` (with `pinned_digest`, `offered_digest`), `baseline_required`, `stream_not_baselined` (with `streams`), `backfill_bound_exceeded` (with `remaining`, and `stream` for a stream's bound), `deletions_unobservable`, `topic_owned` and `topic_owned_by_source` (with `topic`, `source_id`), `source_identity_taken` (with `source_id`), `identity_immutable`, `principal_not_allowed` (with `principal_kind`), `audience_not_covered` and `no_direct_route` (with `source_id`, `topic`), `route_overlap` (with `source_id`, `member`), `route_conflict` (with `conflict: "conversation"`, `source_id`), `route_selector_unsupported` (with `selector`) or `source_limit` (with `limit`, and `mob_id`, `null` for the gateway's bound); for declarations (see [Mob announcement declarations](#mob-announcement-declarations)) `declaration_rollback` (with `applied`), `declaration_digest_conflict` (with `revision`), `role_template_limit` (with `limit`) or `subscription_id_taken` (with `subscription_id`) |
+| `-32047` | Mob announcement typed refusal. `AnnouncementRefusedError` in both SDKs. | `{kind}`: `governed_runtime`, `unknown_member` (with `member`), `unusable_member`, `unusable_peer`, `subscription_cancelled`, `subscription_ended` (with `end`), `member_mismatch`, `unrelated_mob` (with `mob_id`; member tools only), `ambiguous_mob` (with `mob_id`, or `kept_route`), `child_member_limit` (with `limit`, and `mob_id` for the bound per mob), `native_unavailable`, `not_held` (with `batch_id`; see [Delivery handling](#delivery-handling)) or `candidate_launch` (a change on a candidate launch; see [Mob announcements](#mob-announcements-optional)). A candidate launch also answers `candidate_launch` for `meta/retire`, `meta/retire_member`, `meta/respawn`, `meta/respawn_member`, `meta/reset`, `meta/reset_all`, `meta/delete_identity`, `meta/reconcile_identity`, `meta/rediscover`, `meta/cross_mob/wire`, `meta/cross_mob/unwire`, `meta/cross_mob/wire_local`, `meta/cross_mob/unwire_local` and `meta/topology/apply`, whose stored roster and wiring are the authoritative launch's to change (`meta/reconcile_edges` answers a dry run instead), for `meta/gating/decide`, whose decision resumes the authoritative launch's work, for the methods that create a session (`meta/spawn_member`, `meta/ensure_member`, `meta/spawn_helper`, `meta/fork_helper`, `meta/attach_existing_session` and, on the Console, `meta/fork_member`), and for member input and member run control: `meta/send`, `meta/send_message`, `meta/interact`, `meta/dispatch`, `meta/delivery/send`, `meta/cross_mob/send`, `meta/run_flow`, `meta/reload_member`, `meta/identity/warm`, `meta/stop_member_run`, `meta/force_cancel_member`, `meta/compact_member`, `meta/member_activate_instruction` and `meta/live/open`, and on the Console `meta/console/send`, `meta/console/voice/open` and `meta/console/recover_send`; for the member declaration mutations `mob/adopt_member_identity_declaration` and `mob/apply_member_tool_declaration`; and for the operator changes, each of which writes state the authoritative launch reads, runs a tool or a host process, or sends: the WorkGraph writes (every `meta/workgraph/*` method that changes the graph), `meta/call_tool`, `meta/routing/routes/add`, `meta/routing/routes/delete`, `meta/memory/index`, `meta/memory/quarantine/decide`, `meta/agent_memory/remember`, `meta/agent_memory/update`, `meta/agent_memory/forget`, `meta/mob_labels/set`, `meta/mob_labels/delete`, `meta/run_labels/set`, `meta/run_labels/delete`, `meta/access/set`, `meta/access/enable`, `meta/access/rules/upsert`, `meta/access/rules/delete`, `meta/access/groups/set`, `meta/access/groups/delete`, `meta/console/revoke_sessions`, `meta/blob/upload`, `meta/cancel_flow`, `jobs/cancel`, `jobs/retry`, `monitors/start`, the live channel verbs (`meta/live/close`, `meta/live/refresh`, `meta/live/send_input`, `meta/live/commit_input`, `meta/live/interrupt`, `meta/live/truncate`, `meta/live/playback_complete`, `meta/live/replacement_required`, `meta/live/playback_owner/register`, `meta/live/playback_owner/revoke` and `live/webrtc/answer`), a `meta/mobpacks/deploy` with `execute`, a `meta/mobpacks/validate` with `rkat_validate`, a Flow Editor draft write (`meta/mobpacks/create`, `meta/mobpacks/save`, `meta/mobpacks/delete`, `meta/mobpacks/undo` and `meta/mobpacks/redo`) except to a `store_path` the caller names outside the state directory and the gateway home that is not the store `META_FLOW_EDITOR_DRAFT_STORE` names, a `meta/session_store/bigquery` row insert, a `meta/gating/evaluate` of an R3 action that names an approval route (`approval_recipient` and `approval_channel`), every call passed through to a loaded module, and `meta/reconcile`. It answers on the stdio gateway and on `POST /console/rpc`, before anything is read or written; `POST /console/send`, `POST /console/send/recover` and `POST /console/mcp-apps/call-tool` answer HTTP `409` `candidate_launch` (see `mob_composition` in [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)); for sources (see [Mob announcement sources](#mob-announcement-sources)) `source_paused`, `source_ended`, `principal_changed` (with `pinned_digest`, `offered_digest`), `baseline_required`, `stream_not_baselined` (with `streams`), `backfill_bound_exceeded` (with `remaining`, and `stream` for a stream's bound), `deletions_unobservable`, `topic_owned` and `topic_owned_by_source` (with `topic`, `source_id`), `source_identity_taken` (with `source_id`), `identity_immutable`, `principal_not_allowed` (with `principal_kind`), `audience_not_covered` and `no_direct_route` (with `source_id`, `topic`), `route_overlap` (with `source_id`, `member`), `route_conflict` (with `conflict: "conversation"`, `source_id`), `route_selector_unsupported` (with `selector`) or `source_limit` (with `limit`, and `mob_id`, `null` for the gateway's bound); for declarations (see [Mob announcement declarations](#mob-announcement-declarations)) `declaration_rollback` (with `applied`), `declaration_digest_conflict` (with `revision`), `role_template_limit` (with `limit`) or `subscription_id_taken` (with `subscription_id`) |
 | `-32048` | A mob announcement method names a subscription, delivery, source or mob that does not exist here. `AnnouncementNotFoundError` in both SDKs. | `{kind: "unknown_subscription"}`, `{kind: "unknown_delivery"}`, `{kind: "unknown_source"}` or `{kind: "unknown_mob", mobs}` |
 
 `meta/init` refuses the members' native realm and auth binding
@@ -574,10 +575,10 @@ not establish that no identities are registered.
 | `meta/member_status` | `{member_id}` | `MobMemberSnapshot` (deep inspection) |
 | `meta/ensure_member` | see below | worker plane: `MobMemberListEntry` or `null`; identity plane: identity receipt |
 | `meta/retire_member` | `{member_id}` | acceptance acknowledgement; an identity member is released, as by `meta/retire`, and keeps its incarnation |
-| `meta/respawn_member` | `{member_id}` | acceptance acknowledgement; identity-first: resets the identity like `meta/reset` (a fresh session at a new generation) |
+| `meta/respawn_member` | `{member_id}` | acceptance acknowledgement; identity-first: resets the identity like `meta/reset` (a fresh session at a new generation); a side chat is refused (`-32602`, `side_chat_restart_refused`; see `meta/fork_member` below) |
 | `meta/reload_member` | `{member_id}` | `{reloaded, disposition, session_id?, generation?, identity, identity_first}`; non-destructive cold reload, same bound session and generation (identity-first only) |
 | `meta/member_health` | `{member_id}` | `MemberHealthReport`: lifecycle state, materialization in flight, last delivery error class, actor-loop verdict and open `stall_id`; in-process reads only, so it answers during an actor stall |
-| `meta/reconcile_edges` | none | `UnifiedRuntimeReconcileEdgesReport` |
+| `meta/reconcile_edges` | none | `UnifiedRuntimeReconcileEdgesReport`; the definition's wiring leaves out every member exempt from it, a Console side chat among them, and a host's own edge discovery policy is never handed one |
 | `meta/rediscover` (SDK/stdin only) | none | `RediscoverReport`, or `{status: "no_discovery_configured"}` |
 | `meta/reconcile_identity` (SDK/stdin only) | none | `{outcomes: {identity: {outcome, ...}}, managed_edges}` (identity-first runtimes only). `outcome` is `created` (with `agent_runtime_id` and `session_id`: the identity was seated, or created by a held pass, on a fresh session; `replaced_session_id` is always `null`), `resumed` (with `agent_runtime_id` and `session_id`: the identity is bound to its own committed session), `dormant`, or `refused` with an `error` object: the `code`, `message` and `data` the same refusal answers as a JSON-RPC error |
 | `meta/reconcile` (SDK/stdin only) | `{modules: string[]}` | module reconcile report; this reconciles modules, not the roster |
@@ -585,7 +586,153 @@ not establish that no identities are registered.
 `meta/spawn_helper` and `meta/fork_helper` reply only after the helper's turn
 has finished and its retirement has been attempted, and the gateway applies no
 deadline to that, so a client should give these requests a reply timeout that
-covers the whole helper run.
+covers the whole helper run. A fork helper is retired when its one turn ends,
+so it cannot be continued; a conversation a human continues is a side chat
+(`meta/fork_member`, below). On the Console, `meta/fork_helper` answers a
+source the console's visibility policy hides as unknown (`-32001`,
+`data.kind` `identity_hidden_by_policy`) before its conversation is read, as
+`meta/fork_member` does.
+
+### `meta/fork_member` (Console)
+
+Forks an agent's conversation into a **side chat**: a durable fork of the
+agent's committed transcript into a new member that a human continues in,
+beside the agent. Served on `POST /console/rpc` only, and listed in the
+Console's `meta/capabilities` where the gateway's sessions persist (a durable
+fork needs them) or its composition did not record whether they do (the fork
+then refuses typed where they do not). The agent's session, transcript and
+queued work are not touched.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `source_member_id` | `string` | yes | The agent to fork: its identity or member alias |
+| `agent_identity` | `string` | yes | The side chat's member alias: new, outside the reserved `rt:` and `mk--` namespaces, and not a registered identity |
+| `display_name` | `string` | no | At most 80 characters; defaults to the agent's display name with ` (side chat)` |
+</Accordion>
+
+The fork takes the agent's transcript as it is now; a `message_count` prefix is
+refused with `-32602`. It needs `agent.spawn` for `agent_identity`, and
+`agent.view` and `agent.send` for the agent: a side chat runs with the
+agent's tools, so a caller who may only read the agent cannot fork it. A
+refused check answers `-32030` naming the action, as does an agent whose
+lineage already fills the access rules' walk (the agent and seven
+ancestors; `reason: "lineage_too_deep"`), since no one but an admin could
+open its side chat. That bound is one for every caller, an admin included. An agent the console's visibility policy hides is
+answered as unknown (`-32001`, `identity_hidden_by_policy`), as
+`meta/fork_helper` answers it. The fork is refused on a read-only console
+(`-32010`) and on a candidate launch (`-32047`). An agent seated and never
+woken has no conversation to fork and is refused (`-32055`, cause
+`no_session`) without being woken; a dormant agent that has run forks from
+its stored session and stays dormant. The fork is bound to the agent
+session its checks read: if the agent moves to another session before the
+fork (a reset or a respawn ran in between), the side chat is retired again
+and the fork answers `-32055` `fork_source_changed`.
+
+The side chat:
+
+- takes the agent's role, profile and model overrides and runtime mode, and
+  through the fork its application labels, context and tool overlay: it runs
+  with the agent's tools;
+- has exactly the agent's audience: every agent check on a side chat is the
+  agent's (see
+  [Side chats](/concepts/access-control#side-chats)). A rule that matches
+  the agent, by identity, role or labels, or the agent's own lineage, covers
+  its side chats for every action (`agent.view`, `agent.send`,
+  `agent.retire`, ...), a deny on any of them hides them, and a rule that
+  matches only the side chat (its name, its role or a label only it carries)
+  grants nothing;
+- is never wired to a peer, whatever the agent's role: the runtime seats it
+  exempt from the mob definition's wiring rules (`auto_wire_orchestrator`,
+  `role_wiring`), so it gets no edge they declare and no member seated,
+  spawned or rotated after it is wired to it; the definition-wiring
+  reconcile and the topology's declared edges leave out every member exempt
+  from those rules, side chats among them, and a host's own edge discovery
+  policy (`EdgeDiscovery`) is never handed one;
+- is kept until it is retired (`meta/retire` or `meta/retire_member`, which
+  need `agent.retire` on the agent): the fork sets an explicit
+  keep-until-retired idle-retire override, so a side chat never
+  idle-retires. It survives a gateway restart; the runtime may unload it
+  while it is idle. `meta/reset_all` retires it with the other members that
+  have no registered identity;
+- is never respawned or reset: `meta/respawn`, `meta/respawn_member` and
+  `meta/reset` refuse it, on the Console and on the stdio gateway, with
+  `-32602`, `data.kind` `side_chat_restart_refused` (`operation`,
+  `agent_identity`, `source_member_id`), since its successor would be no
+  fork of the agent. An agent's `mob_respawn` tool answers a policy denial
+  with that kind, and `meta/reset_all`, where a host declares a baseline
+  member under the side chat's name (without identity-first authority),
+  lists it under `failed` with `kind` `side_chat_restart_refused` and leaves
+  it as it is. Close it and fork the agent again;
+- is never adopted as an identity: `mob/adopt_member_identity_declaration`
+  refuses it, on the Console and on the stdio gateway, with `-32602`,
+  `data.kind` `side_chat_adoption_refused` (`agent_identity`,
+  `source_member_id`), before anything is written: an adopted identity is
+  rebuilt from its declaration, which no fork made;
+- names the agent in its console labels, `side_chat_of` (the agent's
+  identity) and `side_chat_of_session` (the session it was forked from), and
+  in its experience sidebar row's `side_chat_of`. They are read from
+  Meerkat's durable roster (the member's fork source), on the experience, on
+  the list calls (`meta/list_members`, `meta/find_members`,
+  `meta/console/list_identities`, `GET /console/identities`) and on event
+  streams; either label supplied any other way, in spawn or roster labels or
+  an identity's declaration, is dropped. A multi-runtime Console names the
+  agent with its runtime's prefix, as it names the side chat;
+- does not take the agent's own console flags: where the agent carries them,
+  `addressable`, `singleton`, `console_watched`, `console_degraded`,
+  `console_degraded_reason`, `console_alert_level`, `console_inbox_count`
+  and `implicit_delegate_idle_retire_secs` get side chat values.
+
+Instructions: the agent's activated instructions arrive in the side chat as
+history only. For each one the agent activated itself and had in effect at
+the fork, the fork activates the same revision and body in the side chat as
+the host. Any other stays inactive, and the side chat refuses its first turn
+naming it until a host activates it (`meta/member_activate_instruction`). The
+result lists each with `state` `inherited` or `inactive` and a `reason`
+(`not_effective_in_source`, `body_unreadable` or `activation_refused`). Under
+the `refuse` fork instruction policy a fork of an activated agent answers
+Meerkat's `-32037` `fork_instruction_refused`.
+
+Result:
+
+```json
+{
+  "agent_identity": "router:main-side-3f9a2c1d",
+  "session_id": "0199b1c2-...",
+  "display_name": "router:main (side chat)",
+  "side_chat_of": "router:main",
+  "source_member_id": "router:main",
+  "source_session_id": "0199a7e0-...",
+  "retention": "until_closed",
+  "instructions": [],
+  "cache_inheritance": { "...": "Meerkat's fork cache inheritance" }
+}
+```
+
+Errors: `-32055` (typed refusal, see the error codes above), `-32030`
+(`agent.view` or `agent.send` refused on the agent, `agent.spawn` refused on
+the side chat's name, or the agent's lineage fills the walk), `-32001` (an
+agent the console's visibility policy hides), `-32037`, `-32602` (a
+missing or invalid param, an unknown agent, a prefix, or, under
+`runtime_options.member_auth_binding`, an agent whose session records
+another binding or none: `member_auth_binding_uncarried`, since the runtime
+seats a side chat from its agent's records, nothing forked), `-32004` and
+`-32603`. A fork that committed its session but could not seat the side chat
+keeps Meerkat's `fork_member_provision_failed` data with the
+`fork_session_id`.
+
+Known limitations:
+
+- A side chat is in no declared roster. A host that reconciles the whole mob
+  against a declared roster (`UnifiedRuntime::reconcile` on a runtime
+  without identity-first authority) retires its side chats there, as it
+  retires every member the roster does not name. The stock gateway is
+  identity-first, does not reconcile that way, and keeps them.
+- A side chat forked before a launch named
+  `runtime_options.member_auth_binding` is refused at its rebuild under that
+  launch (`member_auth_binding_uncarried`), as is every fork seated before
+  the launch named the binding: the runtime rebuilds it from its own
+  records, which carry no binding or another one. Close it and fork again.
 
 ### `meta/ensure_member`
 
@@ -821,8 +968,8 @@ manifest cannot be read.
 | `meta/status_identity` | `{identity}` | `IdentityStatus`: `identity`, `state`, `agent_runtime_id` (`null` when not live), `session_id` and `generation` (Core's last binding; `null` when it holds none), `member_id` (Core's mob member id of that binding, live or retired: the identity's roster member id, which is the identity itself when it is already a valid comms name and its `mk--...` encoding otherwise, as for an identity with a `:`; absent when Core holds no binding), `profile`, `runtime_mode` (the roster's `runtime_mode_override` for the identity; `null` when its profile's mode applies), `addressability`, `display_name`, `labels`, `intent_managed`, `customizer_tools_pending` (`null` once the identity's customizer tools are published) and `delivery_scope` (see [Scope-bound dispatch](#scope-bound-dispatch)); `convergence` (host-adopted identities), `wake_refusal` and `replaced_session` only when set |
 | `meta/inspect_identity` | `{identity}` | The execution view: `identity`, `state`, `profile`, `addressability`, `display_name`, `labels`, `generation`, `agent_runtime_id`, `session_id`, `intent_managed`, `output_preview`, `preview_unavailable`, `is_final`, `peer_reachable_count`, `completion_cursor`, and the optional keys of the status |
 | `meta/retire` | `{identity}` | `{identity, cleanup_warning}`. Releases the member's live materialization: the identity stays a member of Core's mob, on the same session at the same generation, and still reads `active`; its next delivery materializes it again, and a delivery scope captured before stays valid. A member that is not materialized is left as it is. No `spawned_by` descendant of the member is retired (earlier releases retired them), and a completion wait on the identity goes on to its next completion. A member that is being woken or has work in flight is refused with `-32052`: nothing is interrupted (earlier releases interrupted its run), and the retire succeeds once it is quiescent. An identity Core holds no member for is refused as invalid state. A retire ends no incarnation: a reset or a delete ends it, with Core's rotation onto a fresh session, and so does a respawn, which wakes the member on its session at a new generation |
-| `meta/respawn` | `{identity}` | `{identity, agent_runtime_id, session_id, generation, live_respawn_warning, cleanup_warning}`. Retires the live member and wakes it on the same session at a new generation, so a delivery scope captured before is refused as stale. The atoms are `null` for a peer-only member |
-| `meta/reset` | `{identity}` | `{identity, agent_runtime_id, session_id, generation, cleanup_warning}`. Starts the identity on a fresh session at a new generation, in one Core rotation: Core retires the current incarnation and seats the identity on the fresh empty session in the same step, so it is never without a member. Meta materializes nothing: the fresh life starts on the identity's next delivery or, when its spec owes a kickoff (an autonomous identity's kickoff turn, or an initial message), on that kickoff, which Core runs exactly once on the new session. Core's rotation ends the identity's wiring with its incarnation, so Meta wires its managed edges (the roster's and the topology controller's) again at once, bounded; a re-wire that fails is logged and the next reconcile retries it. A cross-mob edge (`wire_cross_mob_by_identity`) ends with the incarnation it named: wire it again for the new one. A reset Core refuses before any of it starts (the mob is not running, or another lifecycle operation of the member is in progress) answers `-32052` and is not carried out later. If Core committed the fresh session but its binding cannot be read back, the reset answers an internal error (`-32603`) that says so: read the identity's status, and do not repeat the reset |
+| `meta/respawn` | `{identity}` | `{identity, agent_runtime_id, session_id, generation, live_respawn_warning, cleanup_warning}`. Retires the live member and wakes it on the same session at a new generation, so a delivery scope captured before is refused as stale. The atoms are `null` for a peer-only member. A side chat is refused (`-32602`, `side_chat_restart_refused`; see `meta/fork_member` above) |
+| `meta/reset` | `{identity}` | `{identity, agent_runtime_id, session_id, generation, cleanup_warning}`. Starts the identity on a fresh session at a new generation, in one Core rotation: Core retires the current incarnation and seats the identity on the fresh empty session in the same step, so it is never without a member. Meta materializes nothing: the fresh life starts on the identity's next delivery or, when its spec owes a kickoff (an autonomous identity's kickoff turn, or an initial message), on that kickoff, which Core runs exactly once on the new session. Core's rotation ends the identity's wiring with its incarnation, so Meta wires its managed edges (the roster's and the topology controller's) again at once, bounded; a re-wire that fails is logged and the next reconcile retries it. A cross-mob edge (`wire_cross_mob_by_identity`) ends with the incarnation it named: wire it again for the new one. A reset Core refuses before any of it starts (the mob is not running, or another lifecycle operation of the member is in progress) answers `-32052` and is not carried out later. If Core committed the fresh session but its binding cannot be read back, the reset answers an internal error (`-32603`) that says so: read the identity's status, and do not repeat the reset. A side chat is refused (`-32602`, `side_chat_restart_refused`; see `meta/fork_member` above) |
 | `meta/delete_identity` | `{identity}` | `{identity, cleanup_warning}`; see below |
 
 `wake_refusal` is `{code, session_id, remedy}`: `code` is `-32051` for a

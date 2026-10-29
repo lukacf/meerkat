@@ -657,9 +657,10 @@ fn persist_config(path: &Path, config: &AccessControlConfig) -> Result<(), Acces
     std::fs::rename(&tmp, path).map_err(|err| AccessConfigError::Io(err.to_string()))
 }
 
-/// One link in an agent's spawn lineage: the agent itself first, then its
-/// spawn ancestors. Ancestors may be uncached (identity known only from a
-/// child's `spawned_by` label).
+/// One link in an agent's lineage: the agent itself first, then its
+/// ancestors (see [`crate::console_spawn::lineage_parent`]). Ancestors may be
+/// uncached (identity known only from a child's `spawned_by` or
+/// `side_chat_of` label).
 struct LineageLink {
     identity: String,
     attributes: Option<Arc<AgentResourceAttributes>>,
@@ -734,6 +735,38 @@ impl AccessDecisionFence<'_> {
             .decide_agent_lineage(ACTION_AGENT_VIEW, identity, &lineage)
             .is_allow()
     }
+}
+
+/// The most links an access decision walks along an agent's lineage: the
+/// agent and seven ancestors. A lineage deeper than that is refused for
+/// everyone but an admin, so no ancestor's deny is out of the walk's reach.
+/// The console owner captures a frame's lineage to the same depth.
+pub(crate) const MAX_LINEAGE_DEPTH: usize = 8;
+
+/// Whether an allow rule that matches `resource`, one link of an agent's
+/// console lineage, allows the check: every link but a console side chat's
+/// (its labels name the source it was forked from,
+/// [`crate::console_spawn::names_side_chat_source`]). A side chat holds its
+/// source's audience exactly, so a grant that matches only the side chat
+/// grants nothing; a deny that matches it still refuses. The labels are the
+/// console's projection, where only Meerkat's fork record writes the side
+/// chat label.
+fn console_link_grants(resource: &AccessResource<'_>) -> bool {
+    !resource
+        .labels
+        .is_some_and(crate::console_spawn::names_side_chat_source)
+}
+
+/// Whether a lineage walk stopped at [`MAX_LINEAGE_DEPTH`] with an ancestor
+/// left: its last link, at the bound, still names a parent
+/// ([`crate::console_spawn::lineage_parent`]).
+fn lineage_exceeds_walk(
+    lineage_len: usize,
+    last_link_labels: Option<&BTreeMap<String, String>>,
+) -> bool {
+    lineage_len >= MAX_LINEAGE_DEPTH
+        && last_link_labels
+            .is_some_and(|labels| crate::console_spawn::lineage_parent(labels).is_some())
 }
 
 /// How an agent spelling relates to the runtime alias namespace.
@@ -829,6 +862,14 @@ impl AccessView {
     /// the agent-tool spawn path). A spawned member inherits its spawning
     /// parent's permissions: rules that match the parent — or any ancestor —
     /// also match the member, with deny-overrides preserved across the chain.
+    /// A console side chat carries its source as a `side_chat_of` label
+    /// (projected from Meerkat's durable fork record) and is decided as its
+    /// source: an allow must match the source or the source's own lineage
+    /// (a grant that matches only the side chat, its name, role or labels,
+    /// grants nothing), and a deny that matches the side chat or any link of
+    /// that chain refuses. A lineage deeper than the walk's bound (the agent
+    /// and seven ancestors) is refused: a deny on an ancestor past the bound
+    /// would not be seen.
     pub fn decide_agent(&self, action: &str, identity: &str) -> AccessDecision {
         if !self.config.enabled {
             return AccessDecision::Allow;
@@ -899,6 +940,22 @@ impl AccessView {
         fallback_identity: &str,
         lineage: &[LineageLink],
     ) -> AccessDecision {
+        if !self.is_admin
+            && lineage_exceeds_walk(
+                lineage.len(),
+                lineage
+                    .last()
+                    .and_then(|link| link.attributes.as_deref())
+                    .map(|attributes| &attributes.labels),
+            )
+        {
+            return AccessDecision::Deny {
+                reason: format!(
+                    "the lineage of {fallback_identity} is deeper than the access rules walk \
+                     ({MAX_LINEAGE_DEPTH} links)"
+                ),
+            };
+        }
         let resources = lineage
             .iter()
             .enumerate()
@@ -915,13 +972,15 @@ impl AccessView {
                 None => AccessResource::for_identity(link.identity.as_str()),
             })
             .collect::<Vec<_>>();
-        super::engine::evaluate_access_lineage(&self.config, &self.principal, action, &resources)
+        super::engine::evaluate_access_lineage(
+            &self.config,
+            &self.principal,
+            action,
+            &resources,
+            &console_link_grants,
+        )
     }
 
-    /// Resolve the agent's cached attributes followed by its spawn ancestors
-    /// (`spawned_by` chain). Bounded and cycle-safe. An ancestor without
-    /// cached attributes still contributes an identity-only resource so
-    /// identity-selector rules naming the parent apply to its descendants.
     /// Classify an agent spelling: not a runtime alias, the current alias of
     /// a known identity (with that member's cache key), or a runtime alias
     /// that is stale, unknown, or malformed.
@@ -959,6 +1018,25 @@ impl AccessView {
         }
     }
 
+    /// How many links an access decision on `identity` walks: the agent and
+    /// the ancestors the cached attributes name, at most
+    /// [`MAX_LINEAGE_DEPTH`]; 0 for an identity the cache does not know. A
+    /// runtime alias counts as the member it names while it is that
+    /// identity's current incarnation, as [`Self::decide_agent`] judges it,
+    /// and as unknown otherwise.
+    pub(crate) fn lineage_links(&self, identity: &str) -> usize {
+        match self.runtime_alias_member(identity) {
+            RuntimeAliasMember::NotAnAlias => self.lineage_for(identity).len(),
+            RuntimeAliasMember::Current(member_key) => self.lineage_for(&member_key).len(),
+            RuntimeAliasMember::NotCurrent => 0,
+        }
+    }
+
+    /// Resolve the agent's cached attributes followed by its ancestors (the
+    /// `spawned_by` chain, through a side chat's `side_chat_of` source).
+    /// Bounded ([`MAX_LINEAGE_DEPTH`] links) and cycle-safe. An ancestor
+    /// without cached attributes still contributes an identity-only resource
+    /// so identity-selector rules naming the parent apply to its descendants.
     fn lineage_for(&self, identity: &str) -> Vec<LineageLink> {
         let cache = self
             .inner
@@ -1010,19 +1088,18 @@ impl AccessView {
         own: Arc<AgentResourceAttributes>,
         resolve: &impl Fn(&str) -> Option<Arc<AgentResourceAttributes>>,
     ) -> Vec<LineageLink> {
-        const MAX_LINEAGE_DEPTH: usize = 8;
         let mut visited = BTreeSet::from([own.identity.clone()]);
         let mut lineage = vec![LineageLink {
             identity: own.identity.clone(),
             attributes: Some(own),
         }];
         while lineage.len() < MAX_LINEAGE_DEPTH {
+            // The spawner, else a side chat's source.
             let Some(parent) = lineage
                 .last()
                 .and_then(|link| link.attributes.as_deref())
-                .and_then(|attributes| attributes.labels.get("spawned_by"))
-                .map(|parent| parent.trim().to_string())
-                .filter(|parent| !parent.is_empty())
+                .and_then(|attributes| crate::console_spawn::lineage_parent(&attributes.labels))
+                .map(|parent| parent.identity.to_string())
             else {
                 break;
             };
@@ -1061,7 +1138,9 @@ impl AccessView {
     ///   left, or nothing has read the roster since a restart) is decided by
     ///   the captured attributes only;
     /// - an ancestor the shared cache knows now may only add a deny: its
-    ///   current entry can be a later incarnation under the same identity.
+    ///   current entry can be a later incarnation under the same identity;
+    /// - a captured lineage that reached the walk's bound
+    ///   ([`MAX_LINEAGE_DEPTH`] links) with an ancestor left refuses it.
     ///
     /// So a relabel never reveals a record its captured attributes hide, and
     /// a member relabelled into a denied class hides its earlier records.
@@ -1072,6 +1151,17 @@ impl AccessView {
         let Some(own) = lineage.first() else {
             return self.is_admin;
         };
+        // A captured lineage that reached the bound with an ancestor left:
+        // a deny past the bound would not be seen.
+        if lineage_exceeds_walk(
+            lineage.len(),
+            lineage
+                .last()
+                .and_then(|link| link.attributes.as_ref())
+                .map(|attributes| &attributes.labels),
+        ) {
+            return self.is_admin;
+        }
         let resources = lineage
             .iter()
             .enumerate()
@@ -1093,6 +1183,7 @@ impl AccessView {
             &self.principal,
             ACTION_AGENT_VIEW,
             &resources,
+            &console_link_grants,
         )
         .is_allow()
         {
@@ -1873,6 +1964,239 @@ mod tests {
             !bob.can_view_agent("covert-worker"),
             "a deny on the spawning parent must propagate to its descendants"
         );
+    }
+
+    /// A console side chat follows its source (`side_chat_of`) like a
+    /// spawned member follows its spawner: a grant that names the source's
+    /// identity covers its side chats for view, send and retire, a grant on
+    /// another identity does not, and a deny on the source hides them.
+    #[test]
+    fn a_side_chat_follows_its_source_in_the_lineage() {
+        let actions = [
+            crate::access::ACTION_AGENT_VIEW,
+            crate::access::ACTION_AGENT_SEND,
+            crate::access::ACTION_AGENT_RETIRE,
+        ];
+        let grant = |id: &str, subject: &str, agent: &str| AccessRule {
+            id: id.to_string(),
+            subjects: vec![subject.to_string()],
+            actions: Vec::from(actions.map(String::from)),
+            agents: vec![agent.to_string()],
+            ..AccessRule::default()
+        };
+        let mut config = enabled_config();
+        config
+            .rules
+            .push(grant("bob-on-the-source", "bob@example.test", "ops-lead"));
+        config
+            .rules
+            .push(grant("carol-on-a-scout", "carol@example.test", "scout-1"));
+        config.rules.push(AccessRule {
+            id: "hide-secret-lead".to_string(),
+            effect: AccessEffect::Deny,
+            actions: vec!["agent.*".to_string()],
+            agents: vec!["secret-lead".to_string()],
+            ..AccessRule::default()
+        });
+        config
+            .rules
+            .push(grant("dave-on-everything", "dave@example.test", "*"));
+        // Grants that match only the side chat itself: its own name, and a
+        // label only the side chat carries (its console flags override the
+        // source's).
+        config.rules.push(grant(
+            "erin-on-the-side-chat",
+            "erin@example.test",
+            "ops-lead-side",
+        ));
+        config.rules.push(AccessRule {
+            id: "frank-on-addressable-agents".to_string(),
+            subjects: vec!["frank@example.test".to_string()],
+            actions: Vec::from(actions.map(String::from)),
+            match_labels: BTreeMap::from([("addressable".to_string(), "true".to_string())]),
+            ..AccessRule::default()
+        });
+        let controller = AccessController::new(config).expect("controller");
+        let side_chat_of = |source: &str| {
+            BTreeMap::from([
+                (
+                    crate::side_chat::SIDE_CHAT_OF_LABEL.to_string(),
+                    source.to_string(),
+                ),
+                (
+                    crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL.to_string(),
+                    format!("{source}-session"),
+                ),
+                ("addressable".to_string(), "true".to_string()),
+            ])
+        };
+        for (identity, labels) in [
+            ("ops-lead", BTreeMap::new()),
+            ("ops-lead-side", side_chat_of("ops-lead")),
+            ("scout-1", BTreeMap::new()),
+            ("secret-lead", BTreeMap::new()),
+            ("secret-lead-side", side_chat_of("secret-lead")),
+        ] {
+            controller.record_agent_attributes(AgentResourceAttributes {
+                identity: identity.to_string(),
+                agent_id: Some(identity.to_string()),
+                role: Some("worker".to_string()),
+                labels,
+            });
+        }
+
+        let bob = controller.view_for_subject(Some("bob@example.test"));
+        let carol = controller.view_for_subject(Some("carol@example.test"));
+        let dave = controller.view_for_subject(Some("dave@example.test"));
+        let erin = controller.view_for_subject(Some("erin@example.test"));
+        let frank = controller.view_for_subject(Some("frank@example.test"));
+        for action in actions {
+            assert!(
+                bob.allows_agent(action, "ops-lead-side"),
+                "a grant naming the source covers its side chat: {action}"
+            );
+            assert!(
+                !carol.allows_agent(action, "ops-lead-side"),
+                "a grant on another identity does not cover the side chat: {action}"
+            );
+            assert!(carol.allows_agent(action, "scout-1"));
+            assert!(
+                !dave.allows_agent(action, "secret-lead-side"),
+                "a deny on the source hides its side chat: {action}"
+            );
+            assert!(dave.allows_agent(action, "ops-lead-side"));
+            assert!(
+                !erin.allows_agent(action, "ops-lead-side"),
+                "a grant on the side chat's own name grants nothing: {action}"
+            );
+            assert!(
+                !frank.allows_agent(action, "ops-lead-side"),
+                "a grant on a label only the side chat carries grants nothing: {action}"
+            );
+        }
+    }
+
+    /// The access rules walk an agent's lineage to a bound: the agent and
+    /// seven ancestors. A lineage that goes past it is refused for everyone
+    /// but an admin, a chain of side chats and spawns alike, since a deny on
+    /// an ancestor past the bound would not be seen; a lineage within the
+    /// bound is decided along its whole chain.
+    #[test]
+    fn a_lineage_past_the_walk_bound_is_refused() {
+        let mut config = enabled_config();
+        config.rules.push(AccessRule {
+            id: "bob-on-everything".to_string(),
+            subjects: vec!["bob@example.test".to_string()],
+            actions: vec![crate::access::ACTION_AGENT_VIEW.to_string()],
+            agents: vec!["*".to_string()],
+            ..AccessRule::default()
+        });
+        config.rules.push(AccessRule {
+            id: "carol-on-the-root".to_string(),
+            subjects: vec!["carol@example.test".to_string()],
+            actions: vec![crate::access::ACTION_AGENT_VIEW.to_string()],
+            agents: vec!["root".to_string()],
+            ..AccessRule::default()
+        });
+        config.admins.push("admin@example.test".to_string());
+        let controller = AccessController::new(config).expect("controller");
+        // `root`, then `link-1` to `link-8`, each the child of the one
+        // before: side chats at odd depths, spawns at even ones.
+        controller.record_agent_attributes(AgentResourceAttributes {
+            identity: "root".to_string(),
+            agent_id: Some("root".to_string()),
+            role: Some("worker".to_string()),
+            labels: BTreeMap::new(),
+        });
+        for depth in 1..=8 {
+            let parent = if depth == 1 {
+                "root".to_string()
+            } else {
+                format!("link-{}", depth - 1)
+            };
+            let (parent_key, session_key) = if depth % 2 == 1 {
+                (
+                    crate::side_chat::SIDE_CHAT_OF_LABEL,
+                    crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL,
+                )
+            } else {
+                (
+                    crate::console_spawn::SPAWNED_BY_LABEL,
+                    crate::console_spawn::SPAWNED_BY_SESSION_LABEL,
+                )
+            };
+            controller.record_agent_attributes(AgentResourceAttributes {
+                identity: format!("link-{depth}"),
+                agent_id: Some(format!("link-{depth}")),
+                role: Some("worker".to_string()),
+                labels: BTreeMap::from([
+                    (parent_key.to_string(), parent.clone()),
+                    (session_key.to_string(), format!("{parent}-session")),
+                ]),
+            });
+        }
+        let bob = controller.view_for_subject(Some("bob@example.test"));
+        let carol = controller.view_for_subject(Some("carol@example.test"));
+        let admin = controller.view_for_subject(Some("admin@example.test"));
+        assert!(
+            bob.can_view_agent("link-7"),
+            "the agent and seven ancestors are within the bound"
+        );
+        assert!(
+            carol.can_view_agent("link-7"),
+            "a grant on the root reaches the deepest agent within the bound"
+        );
+        assert!(
+            !bob.can_view_agent("link-8"),
+            "a lineage past the bound is refused, even under a grant on every agent"
+        );
+        assert!(!carol.can_view_agent("link-8"));
+        assert!(admin.can_view_agent("link-8"), "an admin passes");
+
+        let captured = |depth: usize| -> Vec<CapturedLineageLink> {
+            (0..=depth)
+                .rev()
+                .take(MAX_LINEAGE_DEPTH)
+                .map(|level| {
+                    let identity = if level == 0 {
+                        "root".to_string()
+                    } else {
+                        format!("link-{level}")
+                    };
+                    let labels = if level == 0 {
+                        BTreeMap::new()
+                    } else {
+                        let parent = if level == 1 {
+                            "root".to_string()
+                        } else {
+                            format!("link-{}", level - 1)
+                        };
+                        BTreeMap::from([(
+                            crate::console_spawn::SPAWNED_BY_LABEL.to_string(),
+                            parent,
+                        )])
+                    };
+                    CapturedLineageLink {
+                        identity: identity.clone(),
+                        attributes: Some(AgentResourceAttributes {
+                            identity,
+                            agent_id: None,
+                            role: Some("worker".to_string()),
+                            labels,
+                        }),
+                    }
+                })
+                .collect()
+        };
+        assert!(
+            bob.can_view_captured_member(&captured(7)),
+            "a frame captured within the bound is decided along its lineage"
+        );
+        assert!(
+            !bob.can_view_captured_member(&captured(8)),
+            "a frame captured at the bound with an ancestor left is refused"
+        );
+        assert!(admin.can_view_captured_member(&captured(8)));
     }
 
     /// Broad `agent.view` for bob plus a deny on `tier=secret` members.

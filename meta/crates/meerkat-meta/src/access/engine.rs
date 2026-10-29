@@ -160,21 +160,32 @@ pub fn evaluate_access(
     action: &str,
     resource: &AccessResource<'_>,
 ) -> AccessDecision {
-    evaluate_access_lineage(config, principal, action, std::slice::from_ref(resource))
+    evaluate_access_lineage(
+        config,
+        principal,
+        action,
+        std::slice::from_ref(resource),
+        &|_| true,
+    )
 }
 
-/// Evaluate one access check against an agent and its spawn lineage.
+/// Evaluate one access check against an agent and its lineage.
 ///
-/// `resources` is the agent followed by its spawn ancestors (parent,
-/// grandparent, ...). A rule applies when it matches *any* resource in the
-/// chain, so permissions granted on a spawning agent extend to the members
-/// it spawned — and a deny anywhere in the lineage denies the descendant
-/// (deny-overrides is preserved across the chain).
+/// `resources` is the agent followed by its lineage ancestors (parent,
+/// grandparent, ...). A deny rule applies when it matches *any* resource in
+/// the chain, so a deny anywhere in the lineage denies the descendant
+/// (deny-overrides is preserved across the chain). An allow rule applies
+/// when it matches a resource in the chain that `grants` lets grant, so
+/// permissions granted on a spawning agent extend to the members it spawned.
+/// A caller passes `&|_| true` unless a link of its chain takes no grant of
+/// its own (the console's side chats,
+/// `AccessView::decide_agent`).
 pub(crate) fn evaluate_access_lineage(
     config: &AccessControlConfig,
     principal: &AccessPrincipal,
     action: &str,
     resources: &[AccessResource<'_>],
+    grants: &dyn Fn(&AccessResource<'_>) -> bool,
 ) -> AccessDecision {
     if !config.enabled {
         return AccessDecision::Allow;
@@ -187,24 +198,33 @@ pub(crate) fn evaluate_access_lineage(
 
     let mut allowed = false;
     for rule in &config.rules {
-        let matches = rule
+        let applies = rule
             .actions
             .iter()
             .any(|pattern| action_matches(pattern, action))
-            && subject_matches(rule, principal)
-            && resources
-                .iter()
-                .any(|resource| resource_matches(rule, resource));
-        if !matches {
+            && subject_matches(rule, principal);
+        if !applies {
             continue;
         }
         match rule.effect {
             AccessEffect::Deny => {
-                return AccessDecision::Deny {
-                    reason: format!("denied by rule {}", rule.id),
-                };
+                if resources
+                    .iter()
+                    .any(|resource| resource_matches(rule, resource))
+                {
+                    return AccessDecision::Deny {
+                        reason: format!("denied by rule {}", rule.id),
+                    };
+                }
             }
-            AccessEffect::Allow => allowed = true,
+            AccessEffect::Allow => {
+                if resources
+                    .iter()
+                    .any(|resource| grants(resource) && resource_matches(rule, resource))
+                {
+                    allowed = true;
+                }
+            }
         }
     }
     if allowed {
@@ -379,6 +399,36 @@ mod tests {
             id: id.to_string(),
             ..AccessRule::default()
         }
+    }
+
+    /// The engine knows no side chats: a single resource that carries a
+    /// `side_chat_of` label is decided by the rules that match it, as any
+    /// resource is (extension state and announcement audiences decide that
+    /// way). Only the console's lineage decisions take no grant from a side
+    /// chat's own link (`AccessView::decide_agent`).
+    #[test]
+    fn a_side_chat_label_changes_nothing_in_a_single_resource_decision() {
+        let config = config_with_rules(vec![AccessRule {
+            agents: vec!["alpha-side".to_string()],
+            actions: vec!["extension.read".to_string()],
+            ..allow_rule("read-the-side-chat")
+        }]);
+        let labels = BTreeMap::from([("side_chat_of".to_string(), "alpha".to_string())]);
+        let resource = AccessResource {
+            identity: Some("alpha-side"),
+            agent_id: None,
+            role: None,
+            labels: Some(&labels),
+        };
+        assert!(
+            evaluate_access(
+                &config,
+                &principal("bob@example.test", &[]),
+                "extension.read",
+                &resource,
+            )
+            .is_allow()
+        );
     }
 
     #[test]

@@ -7,6 +7,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The Console offers side chats. **Fork to side chat** in a conversation's
+  header forks the agent's durable transcript into a new member that opens in
+  a pane beside the agent (`meta/fork_member` on `/console/rpc`); the agent's
+  session, transcript and queued work stay as they were. A side chat runs with
+  the agent's role, profile and model overrides and tools and inherits its
+  labels; it is never wired to a peer, whatever the agent's role: Meerkat
+  seats it exempt from the mob definition's wiring rules, so no member seated
+  after it is wired to it either, and the definition-wiring reconcile and the
+  topology's declared edges leave it out, as they leave out every member
+  exempt from those rules (a host's own edge discovery policy is never handed
+  one either, and a respawn whose archive cleanup leaves an exempt member to
+  be seated again seats it exempt); it is kept until **Close side chat**
+  retires it (which needs `agent.retire` on the agent), across a console
+  reload and a gateway restart, and never idle-retires; it is never respawned
+  or reset (its pane offers neither, and `meta/respawn`,
+  `meta/respawn_member` and `meta/reset` refuse it on the Console and on the
+  stdio gateway, `-32602` `side_chat_restart_refused`: close it and fork the
+  agent again; an agent's `mob_respawn` tool answers a policy denial of that
+  kind, and `meta/reset_all` lists a side chat under a declared baseline
+  member's name among the members it could not reset); it is never adopted
+  as an identity (`mob/adopt_member_identity_declaration` answers `-32602`
+  `side_chat_adoption_refused`); and the sidebar lists it under the agent.
+  Its console labels name the agent (`side_chat_of`, and the forked session
+  in `side_chat_of_session`), as does `side_chat_of` on its experience
+  sidebar row, read from Meerkat's durable roster fork source and never from
+  a supplied label; the member and identity list calls, event streams and
+  frame lineage read it the same way. Every
+  agent check on a side chat is the agent's: a rule that matches the agent (or
+  the agent's own lineage) covers its side chats for every action, a deny on
+  the agent hides them, and a rule that matches only the side chat (its name,
+  its role or a label only it carries) grants nothing. The fork needs
+  `agent.view` and `agent.send` for the agent and `agent.spawn` for the side
+  chat's name, is offered where sessions persist (or the composition did not
+  record whether they do) and the viewer may send to the agent, and is refused
+  typed (`-32055`, `fork_source_unavailable`) while the agent works (the
+  Console disables the action until it is idle) and for a seat that was never
+  woken (cause `no_session`; the agent is not woken for it). It is refused for
+  an agent the console's visibility policy hides (`-32001`, as
+  `meta/fork_helper` now refuses one too) and for an agent whose lineage
+  already fills the access rules' walk (`-32030`, `lineage_too_deep`, for
+  every caller, an admin included). Under
+  `runtime_options.member_auth_binding`, an agent whose session records
+  another binding or none is refused before anything is forked
+  (`member_auth_binding_uncarried`). A side chat forked from another session
+  of the agent than the fork's checks read (the agent was reset or respawned
+  in between) is retired again (`fork_source_changed`). Instructions the agent
+  activated and had in effect at the fork are activated in the side chat; any
+  other stays inactive and the side chat names it.
+
+### Changed
+
+- `meta/fork_helper` on the Console answers a source agent the console's
+  visibility policy hides as unknown (`-32001`, `data.kind`
+  `identity_hidden_by_policy`) before its conversation is read, as
+  `meta/reset` and `meta/respawn` answer one. Before, it forked the hidden
+  agent.
+- An access check walks a member's lineage (its spawner and theirs, or a
+  side chat's agent) to the member and seven ancestors, and now refuses a
+  member whose lineage goes past that bound, for everyone but an admin: a
+  deny on an ancestor past the bound would not be seen. This holds for every
+  agent check and for the timeline frames the member wrote. Before, the walk
+  stopped at the bound and decided by the links it reached.
+
+### Fixed
+
+- `POST /console/send` on a Console with no local runtime records the
+  members of its aggregator's runtimes before it decides the send, as every
+  route with a runtime does: a send to a spawned member or a side chat is
+  decided along its lineage, also on the cold access cache of a restart, and
+  a member whose record names a lineage the cache still does not know is
+  refused rather than decided by its bare name. The records are read as they
+  are at the send, never from a list a refresh in flight left behind.
+- The record of an identity with no live member (for example a dormant one)
+  no longer takes lineage from labels in the identity's roster declaration:
+  a declared `spawned_by` (or `side_chat_of`) no longer counts as a parent in
+  a multi-runtime Console's sidebar, nor in its access decisions.
+- In a multi-runtime Console, member rows and the identity list calls
+  (`GET /console/identities`, `meta/console/list_identities`) name each
+  member's spawner with its runtime's prefix, as they name the member: a rule
+  on the prefixed spawner (`b/ops-lead`) reaches the rows of the members it
+  spawned, and a rule on the bare name (`ops-lead`) no longer reaches the
+  members another runtime's agent of that name spawned.
+
+### Known limitations
+
+- A Console side chat is in no declared roster: a host that reconciles the
+  whole mob against one (`UnifiedRuntime::reconcile`, on a runtime without
+  identity-first authority) retires its side chats there, as it retires
+  every member the roster does not name. The stock gateway is identity-first
+  and keeps them.
+- A Console side chat forked before a launch named
+  `runtime_options.member_auth_binding` is refused at its rebuild under that
+  launch (`member_auth_binding_uncarried`), as is every fork seated before
+  the launch named the binding. Close it and fork the agent again.
+
 ## [0.9.6] - 2026-10-27
 
 ### Breaking

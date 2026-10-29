@@ -83,6 +83,7 @@ pub mod runtime;
 mod runtime_store_forwarding_probe;
 pub mod schedule_wiring;
 pub mod shutdown_signal;
+pub(crate) mod side_chat;
 pub mod spec_update_ceremony;
 #[cfg(test)]
 mod sqlite_lock_profile_tests;

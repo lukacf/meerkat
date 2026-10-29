@@ -245,6 +245,16 @@ function explicitHostId(a: ConsoleAgent): string | null {
 }
 
 function findSpawnHost(a: ConsoleAgent, agents: ConsoleAgent[], commander: ConsoleAgent | null): ConsoleAgent | null {
+  // A side chat lists under the agent it branched from, as the runtime's
+  // roster records the fork.
+  const sideChatOf = a.side_chat_of;
+  if (sideChatOf) {
+    const match = agents.find((candidate) =>
+      candidate.member_id !== a.member_id
+        && agentKeys(candidate).some((key) => referenceMatchesAgentKey(sideChatOf, key)),
+    );
+    if (match) return match;
+  }
   const spawnedBy = a.labels?.spawned_by;
   if (spawnedBy) {
     const match = agents.find((candidate) =>
@@ -1178,6 +1188,7 @@ function renderAgentRow(
       className={`agent ${childOfHost ? "agent--child" : ""} ${agent.member_id === selectedMemberId ? "is-active" : ""}`}
       data-state={stateAttr}
       data-child-of-host={childOfHost ? "true" : undefined}
+      data-side-chat={agent.side_chat_of ? "true" : undefined}
       data-depth={childOfHost ? String(Math.min(depth, 3)) : undefined}
       data-testid={`sidebar-agent:${agent.member_id}`}
       onClick={() => onSelect(agent)}
@@ -1194,8 +1205,18 @@ function renderAgentRow(
       <span className="agent__body">
         <span className="agent__name">{agent.label}</span>
         <span className="agent__id">{agent.identity || agent.member_id}</span>
-        {badges.length > 0 ? (
+        {badges.length > 0 || agent.side_chat_of ? (
           <span className="agent__badges">
+            {agent.side_chat_of ? (
+              <span
+                className="agent__badge"
+                data-tone="neutral"
+                data-testid={`sidebar-side-chat:${agent.member_id}`}
+                title={`Side chat of ${agent.side_chat_of}`}
+              >
+                <span>Side chat</span>
+              </span>
+            ) : null}
             {badges.map((badge) => (
               <span
                 className="agent__badge"

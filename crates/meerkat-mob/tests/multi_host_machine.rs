@@ -359,6 +359,7 @@ fn commit_membership_local(
         ack_engine_version: None,
         placed_spawn_id: None,
         provision_operation_id: None,
+        definition_wiring_exempt: false,
     }
 }
 
@@ -384,6 +385,7 @@ fn commit_membership_remote(
         ack_engine_version: Some(ack_engine_version.to_string()),
         placed_spawn_id: Some(placed_spawn_id(identity_name, generation)),
         provision_operation_id: Some(provision_operation_id(identity_name, generation)),
+        definition_wiring_exempt: false,
     }
 }
 
@@ -460,6 +462,7 @@ fn seed_remote_member(
             ack_engine_version: Some("0.7.22-test".to_string()),
             placed_spawn_id: Some(placed_spawn_id(identity_name, generation)),
             provision_operation_id: Some(provision_operation_id(identity_name, generation)),
+            definition_wiring_exempt: false,
         },
     )
     .expect("remote CommitSpawnMembership must commit from the ack");
@@ -1849,6 +1852,58 @@ fn remote_spawn_ladder_enters_materialize_pending_and_commits_from_ack() {
         }
     )));
     check_multi_host_invariants(state);
+}
+
+/// A placed member is never exempt from the definition's wiring rules: its
+/// membership commit refuses an exempt spec (`placed_not_exempt`), and the
+/// same ack commits once the spec is bound by the rules.
+#[test]
+fn a_placed_membership_commit_refuses_a_definition_wiring_exemption() {
+    let mut authority = MobMachineAuthority::new();
+    let host = host_id("host-exempt");
+    bind_owner_bridge(&mut authority);
+    bind_host(&mut authority, &host, 1, HostCaps::FULL);
+    let resolved = resolved_spec_digest("alpha", 0);
+    authorize_spawn_profile(&mut authority, "alpha", 0, Some(resolved.clone()));
+    MobMachineMutator::apply(
+        &mut authority,
+        begin_spawn_remote("alpha", 0, &host, SpawnPolicyRuntimeMode::TurnDriven),
+    )
+    .expect("all-clean remote spawn must open MaterializePending");
+    let ack_session = session_id("member-host-session-alpha");
+    let mut exempt_commit = commit_membership_remote(
+        "alpha",
+        0,
+        &ack_session,
+        Some(resolved.clone()),
+        "0.7.22-test",
+    );
+    if let MobMachineInput::CommitSpawnMembership {
+        definition_wiring_exempt,
+        ..
+    } = &mut exempt_commit
+    {
+        *definition_wiring_exempt = true;
+    }
+    assert!(
+        MobMachineMutator::apply(&mut authority, exempt_commit).is_err(),
+        "a placed membership commit refuses an exempt spec",
+    );
+    assert_eq!(
+        authority.state().spawn_exec_phase.get(&identity("alpha")),
+        Some(&SpawnExecPhase::MaterializePending),
+        "the refused commit leaves the ladder where it was",
+    );
+    MobMachineMutator::apply(
+        &mut authority,
+        commit_membership_remote("alpha", 0, &ack_session, Some(resolved), "0.7.22-test"),
+    )
+    .expect("the bound spec's ack commits the placed membership");
+    assert!(
+        authority.state().member_definition_wiring_exempt.is_empty(),
+        "the placed member is bound by the definition's wiring rules",
+    );
+    check_multi_host_invariants(authority.state());
 }
 
 #[test]

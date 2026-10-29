@@ -633,6 +633,7 @@ Spawn defaults matter:
 | `launch_mode` | fresh member |
 | `tool_access_policy` | inherit |
 | `auto_wire_parent` | `false`; when `true`, a spawn made from a member's own turn into its own mob (the agent tool `mob_spawn_member`, or the member tools `spawn_member` and `spawn_many_members`) wires the new member to that member, and any other spawn wires nothing |
+| `definition_wiring` (Rust `SpawnMemberSpec` only) | `Applies`: the definition's wiring rules (`auto_wire_orchestrator`, `role_wiring`) wire the member. `DefinitionWiring::Exempt` seats it with no edge those rules declare, and no member spawned, seated or rotated later is wired to it by them (see [Wire Peers](#wire-peers)) |
 
 Autonomous members run as long-lived peers. `turn_driven` members are useful
 when a host wants explicit dispatch control.
@@ -803,6 +804,19 @@ Wiring controls which members can see and message each other.
 
 Topology rules can reject wiring or dispatch that violates the definition. Use
 strict topology when roles must not communicate outside an approved graph.
+
+The definition's `wiring` rules wire members as they are seated:
+`auto_wire_orchestrator` joins each member to the orchestrator's members, and
+each `role_wiring` rule joins the members of its two profiles. A Rust host can
+take one member out of those rules in both directions with
+`SpawnMemberSpec::with_definition_wiring(DefinitionWiring::Exempt)`: the
+member is seated with no edge the rules declare, whatever its profile, and no
+member spawned, seated dormant or rotated after it is wired to it by them.
+Explicit wiring (`mob/wire`, topology operations) still applies to it, and a
+respawn restores the explicit edges it held. The exemption is recorded with
+the member, so a restart and a respawn keep it; a rotation
+(`MobHandle::rotate_member`) takes the exemption of the spec it seats. A
+member placed on a member host cannot be exempt.
 
 ## Send Work
 

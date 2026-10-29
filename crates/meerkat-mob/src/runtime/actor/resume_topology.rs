@@ -3371,6 +3371,7 @@ mod tests {
             fork_job: None,
             fork_source: None,
             fork_overlay: Default::default(),
+            definition_wiring: crate::DefinitionWiring::Applies,
         });
         roster
     }
@@ -3607,6 +3608,7 @@ mod tests {
                 ack_engine_version: None,
                 placed_spawn_id: None,
                 provision_operation_id: None,
+                definition_wiring_exempt: false,
             },
         )
         .expect("commit spawn membership");
@@ -3855,6 +3857,7 @@ mod tests {
             fork_job: None,
             fork_source: None,
             fork_overlay: Default::default(),
+            definition_wiring: crate::DefinitionWiring::Applies,
         }
     }
 

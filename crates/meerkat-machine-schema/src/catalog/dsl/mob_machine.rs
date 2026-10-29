@@ -594,6 +594,23 @@ macro_rules! mob_catalog_machine_dsl {
             // gone is lost. The session-created step and the born replay row
             // drop it, as do the mob's reset and destroy.
             unborn_seat_sessions: Set<SessionId>,
+            // The seated members the mob definition's wiring rules
+            // (auto_wire_orchestrator, role_wiring) never touch
+            // (DefinitionWiring::Exempt): no declared edge is staged for one
+            // when it is seated, and none to it when another member is
+            // seated or rotated. Explicit wiring is unaffected. The
+            // transition that seats an incarnation from its spec (a spawn's
+            // membership commit, a dormant seat, a rotation's terminal)
+            // records the incarnation exempt or not from its input
+            // (definition_wiring_exempt), and the replay of an exempt row
+            // records it with ExemptMemberFromDefinitionWiring before the
+            // boot plan is sealed. Every unseat and the destroy clear it, as
+            // do the recovered seats of a placed member and of a roster row.
+            // One replay seat keeps it: RecoverRosterMemberResetRunning, the
+            // replay of a legacy MemberReset row that no live path writes,
+            // keeps the incarnation's facts as the roster's fold keeps its
+            // definition_wiring. Only local members are exempt.
+            member_definition_wiring_exempt: Set<AgentIdentity>,
         }
 
         init(Running) {
@@ -897,6 +914,7 @@ macro_rules! mob_catalog_machine_dsl {
             owed_external_edge_repairs = EmptySet,
             member_seat_session_unborn = EmptySet,
             unborn_seat_sessions = EmptySet,
+            member_definition_wiring_exempt = EmptySet,
         }
 
         terminal [Destroyed]
@@ -1085,7 +1103,10 @@ macro_rules! mob_catalog_machine_dsl {
             // the local/remote arms are discriminated by the spawn_exec_phase
             // rung (Opened vs MaterializePending), so roster truth is never
             // published before the owning host confirmed.
-            CommitSpawnMembership { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: bool, runtime_mode: Enum<SpawnPolicyRuntimeMode>, bridge_session_id: Option<SessionId>, replacing: Option<SessionId>, member_peer_endpoint: Option<MemberPeerEndpoint>, spec_digest_echo: Option<String>, ack_engine_version: Option<String>, placed_spawn_id: Option<PlacedSpawnId>, provision_operation_id: Option<String> },
+            // definition_wiring_exempt: the spawn's spec takes the member out
+            // of the definition's wiring rules (DefinitionWiring::Exempt); a
+            // placed member never is.
+            CommitSpawnMembership { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: bool, runtime_mode: Enum<SpawnPolicyRuntimeMode>, bridge_session_id: Option<SessionId>, replacing: Option<SessionId>, member_peer_endpoint: Option<MemberPeerEndpoint>, spec_digest_echo: Option<String>, ack_engine_version: Option<String>, placed_spawn_id: Option<PlacedSpawnId>, provision_operation_id: Option<String>, definition_wiring_exempt: bool },
             CommitSpawnActivation { agent_identity: AgentIdentity },
             AbortSpawnExec { agent_identity: AgentIdentity },
             AuthorizePlacedCarrierCleanup { obligation: PlacedCarrierCleanupObligation },
@@ -1817,7 +1838,9 @@ macro_rules! mob_catalog_machine_dsl {
             // A seat: membership without materialization (import and new
             // roster identities). Walks the spawn admission ladder
             // (BeginSpawnExec + AuthorizeSpawnProfile) and commits Dormant.
-            CommitDormantSeat { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, runtime_mode: Enum<SpawnPolicyRuntimeMode>, bridge_session_id: SessionId, member_peer_endpoint: Option<MemberPeerEndpoint>, session_archived: bool, kickoff_owed: bool, session_unborn: bool, fresh_launch: bool },
+            // definition_wiring_exempt: the seat's spec takes the member out
+            // of the definition's wiring rules (DefinitionWiring::Exempt).
+            CommitDormantSeat { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, runtime_mode: Enum<SpawnPolicyRuntimeMode>, bridge_session_id: SessionId, member_peer_endpoint: Option<MemberPeerEndpoint>, session_archived: bool, kickoff_owed: bool, session_unborn: bool, fresh_launch: bool, definition_wiring_exempt: bool },
             // The host carried out an identity's pending preparation on an
             // identity already seated on that session.
             ResolveMemberHostPreparation { agent_identity: AgentIdentity },
@@ -1829,8 +1852,9 @@ macro_rules! mob_catalog_machine_dsl {
             // The rotation's archive terminal: retires the old incarnation and
             // seats the next one Dormant in one transition (no non-member
             // window). Its two journal rows are appended in one batch before
-            // the commit.
-            CommitMemberRotation { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>, disposal: Enum<MemberSessionDisposal>, next_agent_runtime_id: AgentRuntimeId, next_fence_token: FenceToken, next_generation: Generation, runtime_mode: Enum<SpawnPolicyRuntimeMode>, external_addressable: bool, kickoff_owed: bool, kickoff_objective_id: String },
+            // the commit. definition_wiring_exempt: the rotation's spec takes
+            // the next incarnation out of the definition's wiring rules.
+            CommitMemberRotation { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>, disposal: Enum<MemberSessionDisposal>, next_agent_runtime_id: AgentRuntimeId, next_fence_token: FenceToken, next_generation: Generation, runtime_mode: Enum<SpawnPolicyRuntimeMode>, external_addressable: bool, kickoff_owed: bool, kickoff_objective_id: String, definition_wiring_exempt: bool },
             // The release verdict for one member: the shell's release_member
             // answers through it, never from a shell phase read. A pure
             // verdict in every lifecycle phase.
@@ -1969,6 +1993,11 @@ macro_rules! mob_catalog_machine_dsl {
             // Replay of a seat's session from its journal rows: unborn from
             // the seat's row, born from the row of its session's creation.
             RecoverMemberSeatSession { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, unborn: bool },
+            // Replay: the incarnation the replay of its row recovered is
+            // exempt from the definition's wiring rules (its MemberSpawned
+            // row records DefinitionWiring::Exempt). The live seats carry the
+            // fact on their own input (definition_wiring_exempt).
+            ExemptMemberFromDefinitionWiring { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
         }
 
         effect MobMachineEffect {
@@ -4263,6 +4292,16 @@ macro_rules! mob_catalog_machine_dsl {
             for_all(id in self.spawn_profile_authority_profile_names.keys(),
                 self.identity_to_runtime.contains_key(id) == false
                 || self.member_rotation_session_ids.contains_key(id) == true)
+        }
+
+        // A member exempt from the definition's wiring rules is seated, and
+        // seated locally: the seating transitions record the fact (a placed
+        // membership commit refuses an exempt input), and every unseat clears
+        // it, as it clears the incarnation's other facts.
+        invariant definition_wiring_exempt_member_is_seated {
+            for_all(id in self.member_definition_wiring_exempt,
+                self.identity_to_runtime.contains_key(id)
+                && self.member_placement.contains_key(id) == false)
         }
 
         // An owed edge repair is a wired edge between seated members, and an
@@ -6803,7 +6842,7 @@ macro_rules! mob_catalog_machine_dsl {
         // membership facts still mutate atomically and the update advances the
         // phase to MembershipCommitted.
         transition CommitSpawnMembershipFresh {
-            on input CommitSpawnMembership { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, member_peer_endpoint, spec_digest_echo, ack_engine_version, placed_spawn_id, provision_operation_id }
+            on input CommitSpawnMembership { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, member_peer_endpoint, spec_digest_echo, ack_engine_version, placed_spawn_id, provision_operation_id, definition_wiring_exempt }
             guard { self.lifecycle_phase == Phase::Running }
             guard "spawn_exec_opened" { self.spawn_exec_phase.get_cloned(agent_identity) == Some(SpawnExecPhase::Opened) }
             guard "ack_fields_absent" {
@@ -6842,6 +6881,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_generations.insert(agent_identity, generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
+                // The incarnation this step seats is exempt from the
+                // definition's wiring rules exactly when its spec says so,
+                // recorded in this same transition; a previous incarnation's
+                // exemption never carries over.
+                if definition_wiring_exempt {
+                    self.member_definition_wiring_exempt.insert(agent_identity);
+                } else {
+                    self.member_definition_wiring_exempt.remove(agent_identity);
+                }
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_startup_binding_requested.insert(agent_runtime_id);
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
@@ -6914,7 +6962,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition CommitSpawnMembershipFreshPeerOnly {
-            on input CommitSpawnMembership { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, member_peer_endpoint, spec_digest_echo, ack_engine_version, placed_spawn_id, provision_operation_id }
+            on input CommitSpawnMembership { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, member_peer_endpoint, spec_digest_echo, ack_engine_version, placed_spawn_id, provision_operation_id, definition_wiring_exempt }
             guard { self.lifecycle_phase == Phase::Running }
             guard "spawn_exec_opened" { self.spawn_exec_phase.get_cloned(agent_identity) == Some(SpawnExecPhase::Opened) }
             guard "ack_fields_absent" {
@@ -6943,6 +6991,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_generations.insert(agent_identity, generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
+                // The incarnation this step seats is exempt from the
+                // definition's wiring rules exactly when its spec says so,
+                // recorded in this same transition; a previous incarnation's
+                // exemption never carries over.
+                if definition_wiring_exempt {
+                    self.member_definition_wiring_exempt.insert(agent_identity);
+                } else {
+                    self.member_definition_wiring_exempt.remove(agent_identity);
+                }
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_startup_binding_requested.remove(agent_runtime_id);
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
@@ -7015,10 +7072,11 @@ macro_rules! mob_catalog_machine_dsl {
         // version is the HostEngineVersionChanged failure fed through
         // RecordMemberMaterializationFailure instead).
         transition CommitSpawnMembershipRemote {
-            on input CommitSpawnMembership { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, member_peer_endpoint, spec_digest_echo, ack_engine_version, placed_spawn_id, provision_operation_id }
+            on input CommitSpawnMembership { agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, member_peer_endpoint, spec_digest_echo, ack_engine_version, placed_spawn_id, provision_operation_id, definition_wiring_exempt }
             guard { self.lifecycle_phase == Phase::Running }
             guard "spawn_exec_materialize_pending" { self.spawn_exec_phase.get_cloned(agent_identity) == Some(SpawnExecPhase::MaterializePending) }
             guard "placement_present" { self.member_placement.contains_key(agent_identity) == true }
+            guard "placed_not_exempt" { definition_wiring_exempt == false }
             guard "no_prior_session_binding" { self.member_session_bindings.contains_key(agent_identity) == false }
             guard "current_binding_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
             guard "generation_is_next" { Some(generation) == mob_machine_next_minted_generation(self.identity_runtime_generations, self.identity_generation_highwater, agent_identity) }
@@ -7083,6 +7141,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
+                // A placed incarnation is bound by the definition's wiring
+                // rules: a member exempt from them is local
+                // (placed_not_exempt).
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 // The member host owns the runtime binding, so no local
                 // startup-binding obligation is opened (PeerOnly shape).
@@ -8289,6 +8351,9 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_generations.insert(agent_identity, generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
                 self.member_profile_names.insert(agent_identity, profile_name);
+                // A placed incarnation is bound by the definition's wiring
+                // rules: a member exempt from them is local.
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_session_bindings.insert(agent_identity, member_session_id);
                 self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(member_peer_endpoint));
@@ -8428,6 +8493,9 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_generations.insert(agent_identity, generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
                 self.member_profile_names.insert(agent_identity, profile_name);
+                // A replayed incarnation is bound by the definition's wiring
+                // rules until the replay of its row records it exempt.
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
@@ -9291,6 +9359,7 @@ macro_rules! mob_catalog_machine_dsl {
                 // side effect again after terminal completion.
                 self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
@@ -9399,6 +9468,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
@@ -12390,6 +12460,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.member_materialization.remove(agent_identity);
                 self.member_wake_attempts.remove(agent_identity);
@@ -12493,6 +12564,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
@@ -12583,6 +12655,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
                 // graph is re-realized by a successor or dropped by the destroy).
@@ -12673,6 +12746,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
@@ -12756,6 +12830,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
@@ -12839,6 +12914,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
                 // graph is re-realized by a successor or dropped by the destroy).
@@ -12922,6 +12998,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
@@ -13003,6 +13080,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
@@ -13102,6 +13180,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
@@ -13302,6 +13381,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
                 // graph is re-realized by a successor or dropped by the destroy).
@@ -13379,6 +13459,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
                 // graph is re-realized by a successor or dropped by the destroy).
@@ -13450,6 +13531,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
                 // graph is re-realized by a successor or dropped by the destroy).
@@ -13520,6 +13602,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
                 // graph is re-realized by a successor or dropped by the destroy).
@@ -13606,6 +13689,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
                 // graph is re-realized by a successor or dropped by the destroy).
@@ -13696,6 +13780,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
                 // graph is re-realized by a successor or dropped by the destroy).
@@ -14202,6 +14287,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.unborn_seat_sessions = EmptySet;
                 self.external_peer_edges_by_key = EmptyMap;
                 self.identity_to_runtime = EmptyMap;
+                self.member_definition_wiring_exempt = EmptySet;
                 self.identity_runtime_generations = EmptyMap;
                 self.identity_generation_highwater = EmptyMap;
                 self.identity_runtime_fence_tokens = EmptyMap;
@@ -21580,6 +21666,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.unborn_seat_sessions = EmptySet;
                 self.external_peer_edges_by_key = EmptyMap;
                 self.identity_to_runtime = EmptyMap;
+                self.member_definition_wiring_exempt = EmptySet;
                 self.identity_runtime_generations = EmptyMap;
                 self.identity_generation_highwater = EmptyMap;
                 self.identity_runtime_fence_tokens = EmptyMap;
@@ -25178,7 +25265,7 @@ macro_rules! mob_catalog_machine_dsl {
         // it is seated owed EndpointPending (the seal's typed exception), its boot
         // verdict wakes it, and the wake registers the real endpoint.
         transition CommitDormantSeatRunning {
-            on input CommitDormantSeat { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, runtime_mode, bridge_session_id, member_peer_endpoint, session_archived, kickoff_owed, session_unborn, fresh_launch }
+            on input CommitDormantSeat { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, runtime_mode, bridge_session_id, member_peer_endpoint, session_archived, kickoff_owed, session_unborn, fresh_launch, definition_wiring_exempt }
             guard { self.lifecycle_phase == Phase::Running }
             guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
@@ -25237,6 +25324,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_generations.insert(agent_identity, generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
+                // The incarnation this step seats is exempt from the
+                // definition's wiring rules exactly when its spec says so,
+                // recorded in this same transition; a previous incarnation's
+                // exemption never carries over.
+                if definition_wiring_exempt {
+                    self.member_definition_wiring_exempt.insert(agent_identity);
+                } else {
+                    self.member_definition_wiring_exempt.remove(agent_identity);
+                }
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 // A seat requests no runtime binding: only a wake's Bound
                 // step opens the binding ladder.
@@ -25396,7 +25492,7 @@ macro_rules! mob_catalog_machine_dsl {
         // already observed.
         transition CommitMemberRotationLive {
             per_phase [Running, Stopped]
-            on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id }
+            on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt }
             guard "rotation_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == true }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             // The re-seat owes no kickoff here; a rotation whose spec owes
@@ -25497,6 +25593,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
+                // The incarnation this step seats is exempt from the
+                // definition's wiring rules exactly when its spec says so,
+                // recorded in this same transition; a previous incarnation's
+                // exemption never carries over.
+                if definition_wiring_exempt {
+                    self.member_definition_wiring_exempt.insert(agent_identity);
+                } else {
+                    self.member_definition_wiring_exempt.remove(agent_identity);
+                }
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_startup_binding_requested.remove(next_agent_runtime_id);
                 self.member_startup_runtime_ready.remove(next_agent_runtime_id);
@@ -25569,7 +25674,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition CommitMemberRotationRetired {
             per_phase [Running, Stopped]
-            on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id }
+            on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt }
             guard "rotation_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == true }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             // The re-seat owes no kickoff here; a rotation whose spec owes
@@ -25670,6 +25775,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
+                // The incarnation this step seats is exempt from the
+                // definition's wiring rules exactly when its spec says so,
+                // recorded in this same transition; a previous incarnation's
+                // exemption never carries over.
+                if definition_wiring_exempt {
+                    self.member_definition_wiring_exempt.insert(agent_identity);
+                } else {
+                    self.member_definition_wiring_exempt.remove(agent_identity);
+                }
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_startup_binding_requested.remove(next_agent_runtime_id);
                 self.member_startup_runtime_ready.remove(next_agent_runtime_id);
@@ -26135,7 +26249,7 @@ macro_rules! mob_catalog_machine_dsl {
         // kickoff recorded pending.
         transition CommitMemberRotationLiveKickoff {
             per_phase [Running, Stopped]
-            on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id }
+            on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt }
             guard "rotation_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == true }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             // A rotation whose spec owes a kickoff re-seats the
@@ -26237,6 +26351,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
+                // The incarnation this step seats is exempt from the
+                // definition's wiring rules exactly when its spec says so,
+                // recorded in this same transition; a previous incarnation's
+                // exemption never carries over.
+                if definition_wiring_exempt {
+                    self.member_definition_wiring_exempt.insert(agent_identity);
+                } else {
+                    self.member_definition_wiring_exempt.remove(agent_identity);
+                }
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_startup_binding_requested.remove(next_agent_runtime_id);
                 self.member_startup_runtime_ready.remove(next_agent_runtime_id);
@@ -26319,7 +26442,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition CommitMemberRotationRetiredKickoff {
             per_phase [Running, Stopped]
-            on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id }
+            on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt }
             guard "rotation_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == true }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             // A rotation whose spec owes a kickoff re-seats the
@@ -26421,6 +26544,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
+                // The incarnation this step seats is exempt from the
+                // definition's wiring rules exactly when its spec says so,
+                // recorded in this same transition; a previous incarnation's
+                // exemption never carries over.
+                if definition_wiring_exempt {
+                    self.member_definition_wiring_exempt.insert(agent_identity);
+                } else {
+                    self.member_definition_wiring_exempt.remove(agent_identity);
+                }
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_startup_binding_requested.remove(next_agent_runtime_id);
                 self.member_startup_runtime_ready.remove(next_agent_runtime_id);
@@ -27033,6 +27165,25 @@ macro_rules! mob_catalog_machine_dsl {
                 external_addressable: external_addressable,
                 resolved_spec_digest: resolved_spec_digest
             }
+        }
+
+        // The replay of an exempt incarnation's row
+        // (DefinitionWiring::Exempt): replay only (the boot plan is not
+        // sealed yet), after the row's seat, in a running mob or a stopped
+        // one (a rotation's terminal can land in a stopped mob). The live
+        // seats record the exemption in their own transition. Only the
+        // current incarnation of a seated identity is exempted, and only a
+        // local one: a member placed on a member host is not.
+        transition ExemptMemberFromDefinitionWiringSeated {
+            per_phase [Running, Stopped]
+            on signal ExemptMemberFromDefinitionWiring { agent_identity, agent_runtime_id }
+            guard "replay_not_sealed" { self.boot_plan_sealed == false }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "member_local" { self.member_placement.contains_key(agent_identity) == false }
+            update {
+                self.member_definition_wiring_exempt.insert(agent_identity);
+            }
+            to Running
         }
     }
         }

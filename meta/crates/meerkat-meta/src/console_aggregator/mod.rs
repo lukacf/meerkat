@@ -516,16 +516,21 @@ async fn capture_member_provenance(
 }
 
 /// The most links a captured lineage holds: the member and seven ancestors,
-/// the bound the access rules walk.
-const CAPTURED_LINEAGE_DEPTH: usize = 8;
+/// the bound the access rules walk. A capture that reaches it with an
+/// ancestor left is refused when it decides a frame
+/// ([`crate::access::AccessView::can_view_captured_member`]).
+const CAPTURED_LINEAGE_DEPTH: usize = crate::access::MAX_LINEAGE_DEPTH;
 
-/// The member's spawn lineage as the console owner captures it with a
-/// frame: the member first, then each ancestor its registry-verified
-/// `spawned_by` label names, parent first.
+/// The member's lineage as the console owner captures it with a frame: the
+/// member first, then each ancestor its runtime-derived lineage label names
+/// ([`crate::console_spawn::lineage_parent`]: the registry-verified
+/// `spawned_by`, or a side chat's `side_chat_of` from Meerkat's fork record),
+/// parent first.
 ///
-/// An ancestor is captured only from the incarnation the spawn registry
-/// bound to the lineage (`spawned_by_session`: the session that performed
-/// the spawn), read from the same roster the member was resolved from. An
+/// An ancestor is captured only from the incarnation bound to the lineage
+/// (`spawned_by_session`: the session that performed the spawn;
+/// `side_chat_of_session`: the source session a side chat was forked from),
+/// read from the same roster the member was resolved from. An
 /// ancestor that is not live under that incarnation, or a lineage with no
 /// bound incarnation, is recorded without attributes and the walk stops
 /// there: the access decision then fails closed under any deny its bare
@@ -547,16 +552,18 @@ async fn capture_member_lineage(
 }
 
 /// One captured lineage link, in the namespace the access attribute cache
-/// uses for the same member (identity, runtime member id and the
-/// `spawned_by` label are namespaced alike).
+/// uses for the same member (identity, runtime member id and the lineage
+/// parent labels, `spawned_by` and `side_chat_of`, are namespaced alike).
 fn lineage_link_for_record(
     record: &ConsoleIdentityRecord,
     namespace: &str,
     role: &str,
 ) -> ConsoleFrameLineageLink {
     let mut labels = record.labels.clone();
-    if let Some(parent) = labels.get_mut(crate::console_spawn::SPAWNED_BY_LABEL) {
-        *parent = apply_namespace(parent, namespace);
+    for key in crate::console_spawn::LINEAGE_PARENT_LABELS {
+        if let Some(parent) = labels.get_mut(key) {
+            *parent = apply_namespace(parent, namespace);
+        }
     }
     ConsoleFrameLineageLink {
         identity: record.identity.clone(),
@@ -580,14 +587,9 @@ fn retain_member_provenance(
         namespace,
         resolved.member.role.as_str(),
     )];
-    if let Some(parent) = record
-        .labels
-        .get(crate::console_spawn::SPAWNED_BY_LABEL)
-        .map(|parent| parent.trim().to_string())
-        .filter(|parent| !parent.is_empty())
-    {
+    if let Some(parent) = crate::console_spawn::lineage_parent(&record.labels) {
         lineage.push(ConsoleFrameLineageLink {
-            identity: apply_namespace(&parent, namespace),
+            identity: apply_namespace(parent.identity, namespace),
             agent_id: None,
             role: None,
             labels: None,
@@ -1547,6 +1549,35 @@ impl MetaConsoleAggregator {
         Ok(identities)
     }
 
+    /// The identity records the registered runtimes hold now, live members
+    /// included, collected fresh: never the read model's last snapshot,
+    /// which [`Self::list_identities`] answers while a refresh is in flight
+    /// and which may predate a member. For a decision that must not rest on
+    /// a stale list; it neither waits for a refresh nor replaces the read
+    /// model.
+    pub(crate) async fn identity_records_now(
+        &self,
+    ) -> ConsoleLogResult<Vec<ConsoleIdentityRecord>> {
+        Box::pin(collect_identity_records(
+            &self.inner,
+            IdentityCollectionMode::IncludeLiveMembers,
+        ))
+        .await
+    }
+
+    /// Test seam: holds the identity read model's refresh lock until the
+    /// guard drops, as a refresh in flight does, so that
+    /// [`Self::list_identities`] answers the read model's last snapshot.
+    #[cfg(test)]
+    pub(crate) async fn hold_identity_refresh_for_test(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.inner
+            .identity_read_model
+            .refresh_lock
+            .clone()
+            .lock_owned()
+            .await
+    }
+
     /// Forward recorded activity for already-authorized identity rows without
     /// entering the member actor or inventing activity for unavailable sources.
     pub(crate) async fn response_phases_for_identities(
@@ -1615,6 +1646,88 @@ impl MetaConsoleAggregator {
             }
         }
         Ok(registered)
+    }
+
+    /// Each registered runtime's identity namespace, by runtime key: the
+    /// prefix its records' identities carry.
+    pub(crate) fn identity_namespaces(&self) -> ConsoleLogResult<BTreeMap<String, String>> {
+        Ok(self
+            .inner
+            .runtimes
+            .read()
+            .map_err(|_| runtime_registry_lock_error())?
+            .values()
+            .map(|entry| (entry.runtime_key.clone(), entry.identity_namespace.clone()))
+            .collect())
+    }
+
+    /// Each record's side chat lineage, in record order: the source a
+    /// record's side chat was forked from, as its runtime's roster records
+    /// the fork. `None` for every record that is not a verified side chat.
+    /// The fork facts of a runtime are read once per call, and only when one
+    /// of its records carries the side chat label. Access decisions read a
+    /// record's side chat lineage here, never from its labels.
+    pub(crate) async fn side_chat_lineages_for_identities(
+        &self,
+        identities: &[ConsoleIdentityRecord],
+    ) -> ConsoleLogResult<Vec<Option<crate::side_chat::SideChatLineage>>> {
+        let entries = self
+            .inner
+            .runtimes
+            .read()
+            .map_err(|_| runtime_registry_lock_error())?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut lineages = vec![None; identities.len()];
+        for entry in entries {
+            let marked = identities
+                .iter()
+                .enumerate()
+                .filter(|(_, record)| {
+                    record.runtime_key == entry.runtime_key
+                        && record
+                            .labels
+                            .contains_key(crate::side_chat::SIDE_CHAT_OF_LABEL)
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            if marked.is_empty() {
+                continue;
+            }
+            let side_chats = entry
+                .runtime
+                .side_chat_lineages()
+                .verified(&entry.runtime.handle())
+                .await;
+            for index in marked {
+                lineages[index] = side_chats
+                    .get(identities[index].runtime_member_id.as_str())
+                    .cloned();
+            }
+        }
+        Ok(lineages)
+    }
+
+    /// Test seam: the member provenance the console owner captures for a
+    /// frame `identity` writes in `session_id` on `runtime_key`'s runtime,
+    /// read from its live members now, as a frame's capture reads it.
+    #[cfg(test)]
+    pub(crate) async fn capture_member_provenance_for_test(
+        &self,
+        runtime_key: &str,
+        identity: &str,
+        session_id: &str,
+    ) -> Option<ConsoleFrameMemberProvenance> {
+        let entry = self.inner.runtimes.read().ok()?.get(runtime_key).cloned()?;
+        Box::pin(member_provenance_for_identity(
+            &self.inner,
+            &entry,
+            identity,
+            Some(session_id),
+            true,
+        ))
+        .await
     }
 
     #[cfg(test)]
@@ -9401,27 +9514,33 @@ pub(crate) fn timeline_frame_visible_to(
 
 /// The access decision's input for a captured provenance. A provenance
 /// captured before lineage was holds only the member's record: the member
-/// is decided by it, and any parent it names counts as unconfirmed.
+/// is decided by it, and the spawner it names (`spawned_by`) counts as
+/// unconfirmed. Side chats came after lineage capture, so such a record's
+/// side chat labels count as neither.
 fn captured_lineage(
     provenance: &ConsoleFrameMemberProvenance,
 ) -> Vec<crate::access::CapturedLineageLink> {
     if provenance.lineage.is_empty() {
         let record = &provenance.identity;
+        // Lineage capture predates side chats, so a provenance captured
+        // without it names a spawner at most: a `side_chat_of` label a
+        // member carried then is an ordinary label, neither a parent nor a
+        // side chat's lineage.
+        let mut labels = record.labels.clone();
+        labels.remove(crate::side_chat::SIDE_CHAT_OF_LABEL);
+        labels.remove(crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL);
+        let parent =
+            crate::console_spawn::lineage_parent(&labels).map(|parent| parent.identity.to_string());
         let mut lineage = vec![crate::access::CapturedLineageLink {
             identity: record.identity.clone(),
             attributes: Some(crate::access::AgentResourceAttributes {
                 identity: record.identity.clone(),
                 agent_id: Some(record.runtime_member_id.clone()),
                 role: Some(provenance.member.role.clone()),
-                labels: record.labels.clone(),
+                labels,
             }),
         }];
-        if let Some(parent) = record
-            .labels
-            .get(crate::console_spawn::SPAWNED_BY_LABEL)
-            .map(|parent| parent.trim().to_string())
-            .filter(|parent| !parent.is_empty())
-        {
+        if let Some(parent) = parent {
             lineage.push(crate::access::CapturedLineageLink {
                 identity: parent,
                 attributes: None,
@@ -9667,11 +9786,33 @@ async fn identity_record_for_member(
     // registered by the agent-tool spawn path fills gaps the roster does not
     // carry; roster labels win on conflict — except lineage, which only the
     // spawn registry may assert (these records feed aggregate-mode ABAC
-    // attribute priming).
+    // attribute priming), and a side chat's source, which only Meerkat's
+    // fork record asserts.
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
     if let Some(registered) = entry.console_events.identity_labels(durable_identity).await {
         crate::console_spawn::merge_registered_labels(&mut labels, &registered);
     }
+    // A side chat's source, as the roster's fork facts verify it, kept per
+    // incarnation by the runtime: a read lists the fork facts at most once,
+    // whatever number of side chats it records.
+    let side_chat = match member.binding_atoms() {
+        Some((runtime_id, fence_token)) => {
+            entry
+                .runtime
+                .side_chat_lineages()
+                .lineage(handle, &runtime_id, fence_token, &member.labels)
+                .await
+        }
+        None => {
+            crate::side_chat::verified_side_chat_lineage(
+                handle,
+                &member.agent_identity,
+                &member.labels,
+            )
+            .await
+        }
+    };
+    crate::side_chat::project_side_chat_lineage(&mut labels, side_chat.as_ref());
     let display_name = labels
         .get("display_name")
         .cloned()
@@ -9749,6 +9890,13 @@ fn identity_record_for_status(
         .map(crate::identity_first::DisplayName::as_str)
         .unwrap_or_else(|| status.identity.as_str())
         .to_string();
+    // An identity's labels are declared, and a declaration asserts no
+    // lineage: a spawn's comes from the spawn registry and a side chat's
+    // from Meerkat's fork record, never from a declared `spawned_by` or
+    // `side_chat_of`. The record feeds the console's member rows and their
+    // access decisions while the identity has no live member.
+    let mut labels = status.labels.clone();
+    crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
     ConsoleIdentityRecord {
         identity,
         display_name,
@@ -9760,7 +9908,7 @@ fn identity_record_for_status(
         addressable,
         health,
         topology_peers: Vec::new(),
-        labels: status.labels.clone(),
+        labels,
     }
 }
 
@@ -16218,6 +16366,201 @@ comms = true
         assert_eq!(other[1].identity, parent_record.identity);
         assert_eq!(other[1].labels, None, "a later namesake was captured");
         runtime.shutdown().await;
+    }
+
+    /// A side chat's source is captured as a spawner is, through the member
+    /// cut a read lists its members in: only from the incarnation the side
+    /// chat was forked from (`side_chat_of_session`), named in the namespace
+    /// the access attribute cache uses.
+    #[tokio::test]
+    async fn a_side_chat_source_is_captured_only_from_the_forked_incarnation() {
+        let runtime = build_single_member_runtime().await;
+        let entry = runtime_entry_for_test("runtime-a", &runtime);
+        let source = member_sources_for_entry_including_hidden(&entry)
+            .await
+            .into_iter()
+            .next()
+            .expect("member");
+        let source_record = identity_record_for_resolved_member(&source)
+            .await
+            .expect("source identity");
+        let source_session = source_record
+            .session_id
+            .clone()
+            .expect("a live member has a session");
+        let source_name = source_record.runtime_member_id.clone();
+        let side_chat_record = |forked_session: &str| ConsoleIdentityRecord {
+            identity: "test/source-side".into(),
+            display_name: "source (side chat)".into(),
+            runtime_key: "runtime-a".into(),
+            runtime_member_id: "source-side".into(),
+            session_id: Some("side-chat-session".into()),
+            member_id: None,
+            visibility: ConsoleVisibility::RetiredReadable,
+            addressable: false,
+            health: "retired".into(),
+            topology_peers: Vec::new(),
+            labels: BTreeMap::from([
+                (
+                    crate::side_chat::SIDE_CHAT_OF_LABEL.to_string(),
+                    source_name.clone(),
+                ),
+                (
+                    crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL.to_string(),
+                    forked_session.to_string(),
+                ),
+            ]),
+        };
+
+        // One read's cut: both walks below read the members it listed.
+        let cut = MemberCut::new(&entry);
+        let bound =
+            capture_member_lineage_in(&cut, &source, &side_chat_record(&source_session)).await;
+        assert_eq!(bound.len(), 2, "{bound:#?}");
+        assert_eq!(bound[1].identity, source_record.identity);
+        assert!(
+            bound[1].labels.is_some(),
+            "the forked incarnation is captured with its attributes: {bound:#?}"
+        );
+        assert_eq!(
+            bound[0]
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(crate::side_chat::SIDE_CHAT_OF_LABEL)),
+            Some(&apply_namespace(&source_name, "test")),
+            "the side chat names its source in the cache's namespace"
+        );
+
+        let other =
+            capture_member_lineage_in(&cut, &source, &side_chat_record("an-earlier-source")).await;
+        assert_eq!(other.len(), 2, "{other:#?}");
+        assert_eq!(other[1].identity, source_record.identity);
+        assert_eq!(other[1].labels, None, "a later namesake was captured");
+        runtime.shutdown().await;
+    }
+
+    /// An identity's labels are declared, and a declaration asserts no
+    /// lineage: the record the console lists for an identity with no live
+    /// member keeps neither a declared spawner (`spawned_by`,
+    /// `spawned_by_session`, `via_tool`) nor a declared side chat source
+    /// (`side_chat_of`, `side_chat_of_session`), so neither lists nor hides
+    /// it, and keeps every other label.
+    #[tokio::test]
+    async fn a_status_record_keeps_no_declared_lineage() {
+        let runtime = build_empty_runtime("status-record-lineage").await;
+        let entry = runtime_entry_for_test("runtime-a", &runtime);
+        let status: crate::identity_first::IdentityStatus = serde_json::from_value(json!({
+            "identity": "domain:declared",
+            "state": "dormant",
+            "addressability": "addressable",
+            "labels": {
+                "team": "review",
+                "spawned_by": "ops-lead",
+                "spawned_by_session": "ops-lead-session",
+                "via_tool": "mob_spawn_member",
+                "side_chat_of": "secret-lead",
+                "side_chat_of_session": "secret-lead-session",
+            },
+        }))
+        .expect("a declared identity's status");
+        let record = identity_record_for_status(&entry, &status);
+        assert_eq!(
+            record.labels,
+            BTreeMap::from([("team".to_string(), "review".to_string())]),
+            "the record keeps the declared labels, without lineage"
+        );
+        assert_eq!(crate::console_spawn::lineage_parent(&record.labels), None);
+        runtime.shutdown().await;
+    }
+
+    /// A provenance captured before lineage was holds the member's record
+    /// only. Side chats came after lineage capture, so a `side_chat_of` label
+    /// on such a record is an ordinary label: it names no parent and makes no
+    /// side chat, so a deny on the agent it names does not hide the frame and
+    /// a grant on that agent does not show it. A spawner the record names is
+    /// still an unconfirmed parent.
+    #[test]
+    fn a_lineage_less_provenance_takes_no_side_chat_parent() {
+        let provenance = |labels: Value| -> ConsoleFrameMemberProvenance {
+            serde_json::from_value(json!({
+                "identity": {"identity":"agent-a", "display_name":"Agent",
+                    "runtime_key":"runtime-a", "runtime_member_id":"agent-a",
+                    "session_id":"session-a", "visibility":"retired_readable",
+                    "addressable":false, "health":"retired", "labels": labels},
+                "member": {"agent_identity":"agent-a", "role":"worker", "state":"retired",
+                    "session_id":"session-a", "wired_to":[], "labels":{}},
+                "primary_mob_id":"primary", "source_mob_id":"primary"
+            }))
+            .expect("a provenance captured before lineage")
+        };
+        let side_chat_labels = json!({
+            "side_chat_of": "secret-lead",
+            "side_chat_of_session": "secret-session",
+        });
+        let lineage = captured_lineage(&provenance(side_chat_labels));
+        assert_eq!(lineage.len(), 1, "no parent: {lineage:?}");
+        let own = lineage[0]
+            .attributes
+            .as_ref()
+            .expect("the member's own attributes");
+        assert!(
+            !crate::console_spawn::names_side_chat_source(&own.labels),
+            "the member is no side chat: {own:?}"
+        );
+
+        let with_spawner = captured_lineage(&provenance(json!({
+            "side_chat_of": "secret-lead",
+            "spawned_by": "ops-lead",
+        })));
+        assert_eq!(with_spawner.len(), 2, "{with_spawner:?}");
+        assert_eq!(with_spawner[1].identity, "ops-lead");
+        assert!(
+            with_spawner[1].attributes.is_none(),
+            "an unconfirmed spawner"
+        );
+
+        let controller = crate::access::AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                crate::access::AccessRule {
+                    id: "broad-views-everything".to_string(),
+                    subjects: vec!["broad@example.test".to_string()],
+                    actions: vec!["agent.view".to_string()],
+                    agents: vec!["*".to_string()],
+                    ..crate::access::AccessRule::default()
+                },
+                crate::access::AccessRule {
+                    id: "hide-the-secret-lead".to_string(),
+                    effect: crate::access::AccessEffect::Deny,
+                    subjects: vec!["broad@example.test".to_string()],
+                    actions: vec!["agent.*".to_string()],
+                    agents: vec!["secret-lead".to_string()],
+                    ..crate::access::AccessRule::default()
+                },
+                crate::access::AccessRule {
+                    id: "narrow-views-the-secret-lead".to_string(),
+                    subjects: vec!["narrow@example.test".to_string()],
+                    actions: vec!["agent.view".to_string()],
+                    agents: vec!["secret-lead".to_string()],
+                    ..crate::access::AccessRule::default()
+                },
+            ],
+            ..crate::access::AccessControlConfig::default()
+        })
+        .expect("controller");
+        assert!(
+            controller
+                .view_for_subject(Some("broad@example.test"))
+                .can_view_captured_member(&lineage),
+            "a deny on the agent the label names does not hide the frame"
+        );
+        assert!(
+            !controller
+                .view_for_subject(Some("narrow@example.test"))
+                .can_view_captured_member(&lineage),
+            "a grant on the agent the label names does not show the frame"
+        );
     }
 
     #[tokio::test]

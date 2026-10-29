@@ -101,8 +101,7 @@ RespawnRunning respawn over the spawn ladder; spawn ladder variants: the spawn a
 ClassifySpawn* spawn-many failure classification; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
 ResolveSpawn* spawn member admission; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
 ClassifyRetire* retire disposition of a pending spawn; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
-EnsureMember* ensure-member over the spawn ladder; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
-ProbeMember* spawn admission duplicate probe; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
+ProbeMember* spawn admission probe in the Completed and Destroyed phases; identity_entry_audit drives its Running and Stopped arms
 RecordMember* spawn materialization failure record; spawn ladder variants: the spawn arms bind up to 28 parameters, 12 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape
 Kickoff* member kickoff lifecycle; the seat owes no kickoff and no audit drives the kickoff arms
 RecoverMemberKickoff* member kickoff replay; no audit drives it
@@ -176,10 +175,12 @@ ClassifyIdentity* identity reconciliation decisions; no audit drives them
 ConvergeRecovered* recovered roster and respawn topology convergence; no audit drives it
 ObserveRespawn* respawn topology preservation records; no audit drives them
 ResolveRespawn* respawn topology restore; no audit drives it
-RecoverIdentity* generation high-water recovery; generation_highwater_audit drives it and checks its witnesses, without a coverage list
+RecoverIdentityGeneration* generation high-water recovery; generation_highwater_audit drives it and checks its witnesses, without a coverage list
 SealIdentity* generation high-water seal; generation_highwater_audit drives it and checks its witnesses, without a coverage list
 AdvanceDefinition* definition epoch advance; no audit drives it
-Reconcile* desired-roster reconcile; no audit drives it
+Reconcile* desired-roster reconcile in the Completed and Destroyed phases; identity_entry_audit drives its Running and Stopped arms
+ResolveAgentLaneMemberAdmission* the agent lane's member admission in the Completed and Destroyed phases; identity_entry_audit drives its Running and Stopped arms
+AdoptLegacyIdentityEntryMobNotRunning* the legacy adoption in the Completed and Destroyed phases; identity_entry_audit drives every other arm and the Stopped one
 ResetToRunning mob reset; no audit drives it
 RetireAll* they change only the phase and the step count (member_lifecycle_audit header)
 ShutdownStopped Shutdown outside Running; member_residency_audit drives ShutdownRunning

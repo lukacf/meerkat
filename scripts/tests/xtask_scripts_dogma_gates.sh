@@ -379,6 +379,12 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # property violated.
 # source_credential_publication_audit.sh (auth) requires each of its five
 # reachability witnesses violated.
+# identity_entry_audit.sh (mob_machine) requires a final distinct-state count
+# at or above its floor, a coverage block in which each of its covered actions
+# generated a state, its eight step witnesses and three state witnesses
+# violated, and with --mutants its reconcile mutant's generated invariant, its
+# probe mutant's invariant, its adoption mutant's invariant or property and
+# its replay mutant's generated invariant violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -633,6 +639,22 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessWindowRenewed is violated."' \
   'echo "Error: Invariant NotAuditWitnessRefusedValueBlocked is violated."' \
   'echo "Error: Invariant NotAuditWitnessLoggedOutValueBlocked is violated."' \
+  'for action in AbortSpawnExecActiveRunning RecoverIdentityEntrySeatedRunning RecoverIdentityEntrySeatedStopped AdoptLegacyIdentityEntryAdopted AdoptLegacyIdentityEntryNameHeldByWorker AdoptLegacyIdentityEntryNotAdoptable AdoptLegacyIdentityEntryStaleObservation AdoptLegacyIdentityEntryNotSeated AdoptLegacyIdentityEntryAlreadyAnEntry AdoptLegacyIdentityEntryNonAuthoritative AdoptLegacyIdentityEntryMobNotRunningStopped ProbeMemberAdmissionDuplicateRunning ProbeMemberAdmissionAdmittedRunning ProbeMemberAdmissionIdentityMemberRunning ProbeMemberAdmissionDuplicateStopped ProbeMemberAdmissionAdmittedStopped ProbeMemberAdmissionIdentityMemberStopped ResolveAgentLaneMemberAdmissionAdmittedRunning ResolveAgentLaneMemberAdmissionIdentityMemberRunning ResolveAgentLaneMemberAdmissionAdmittedStopped ResolveAgentLaneMemberAdmissionIdentityMemberStopped ReconcileRunning ReconcileStopped EnsureMemberRunningExisting EnsureMemberRunningMissing; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Action property NotAuditWitnessCustodyCommit is violated."' \
+  'echo "Error: Action property NotAuditWitnessCustodyAborted is violated."' \
+  'echo "Error: Action property NotAuditWitnessReplayed is violated."' \
+  'echo "Error: Action property NotAuditWitnessReplayedStopped is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdopted is violated."' \
+  'echo "Error: Action property NotAuditWitnessReconcileSparesEntry is violated."' \
+  'echo "Error: Action property NotAuditWitnessReconcileSpawnsWorkerOnly is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnseated is violated."' \
+  'echo "Error: Invariant NotAuditWitnessProbeRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessLaneRefusedStopped is violated."' \
+  'echo "Error: Invariant NotAuditWitnessTwoEntries is violated."' \
+  'echo "Error: Invariant worker_reconcile_spares_entries is violated."' \
+  'echo "Error: Invariant AuditProbeExactlyOne is violated."' \
+  'echo "Error: Invariant AuditAdoptionExactlyOne is violated."' \
+  'echo "Error: Invariant entry_is_seated_or_has_an_unseated_cause is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

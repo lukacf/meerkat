@@ -272,7 +272,8 @@ account, for example `ok: GitHub Copilot ready as svc-bot (plan business) via
 COPILOT_GITHUB_TOKEN; routes global:copilot_openai, global:copilot_anthropic,
 global:copilot_gemini`. The routes read `COPILOT_GITHUB_TOKEN`, then
 `GH_TOKEN`, then `GITHUB_TOKEN`, Copilot CLI's order, and `RKAT_<NAME>` before
-each:
+each; a variable that is set but empty is skipped, so an empty
+`COPILOT_GITHUB_TOKEN` does not hide `GH_TOKEN`:
 
 ```toml
 [realm.global.backend.copilot_openai]
@@ -369,7 +370,7 @@ What each refusal looks like:
 
 | What happened | Error kind | Effect |
 |---|---|---|
-| No token in any of the variables (or an empty one) | `missing_secret` | none |
+| No token in any of the variables (one that is set but empty counts as unset) | `missing_secret` | none |
 | A classic personal access token | `unsupported_combination` (`auth = "classic_personal_access_token"`) | none |
 | GitHub refused the token itself: revoked, expired or invalid | `user_reauth_required` | the `github_copilot` account is `reauth_required` until a different token value appears: each request reads the source again, so a command or resolver that mints a new token heals it; replace the token rather than signing in again |
 | Copilot refused the account: no seat, no Copilot Requests permission, an organization policy, chat disabled | `refresh_failed`, with GitHub's message | none: the same token works once that is fixed |

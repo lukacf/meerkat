@@ -7930,18 +7930,28 @@ fn refuse_copilot_login_flags(
     Ok(())
 }
 
-/// The first variable a `--from-env` route reads that is set, in the
-/// resolver's order (`RKAT_<VAR>` before `<VAR>`, variable by variable), and
-/// its value.
+/// The variable a `--from-env` route reads its token from now, and the
+/// token: the resolver's own rule for the route's `env` source (`RKAT_<VAR>`
+/// before `<VAR>`, variable by variable, a blank variable skipped as for
+/// every `github_copilot_token` route).
 #[cfg(feature = "copilot")]
 fn copilot_token_from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<(String, String)> {
-    COPILOT_TOKEN_ENV_VARS.iter().find_map(|name| {
-        let prefixed = format!("RKAT_{name}");
-        match lookup(&prefixed) {
-            Some(value) => Some((prefixed, value)),
-            None => lookup(name).map(|value| ((*name).to_string(), value)),
-        }
-    })
+    let meerkat_core::CredentialSourceSpec::Env { env, fallback } =
+        CopilotTokenSource::Environment.spec()
+    else {
+        return None;
+    };
+    let route = meerkat_copilot::CopilotProviderRoute::OpenAi;
+    let method = meerkat_providers::NormalizedAuthMethod::parse_for_provider(
+        route.provider(),
+        route.token_auth_method(),
+    )?;
+    meerkat_auth_core::resolver::env_credential_variable(
+        &env,
+        &fallback,
+        meerkat_auth_core::resolver::BlankEnvValue::of_auth_method(method),
+        &lookup,
+    )
 }
 
 /// Check an operator GitHub token the way the routes will use it
@@ -25965,6 +25975,17 @@ default_model = "gemini-3.8-flash"
             .as_deref(),
             Some("RKAT_COPILOT_GITHUB_TOKEN")
         );
+        // A blank variable is skipped, as the routes' resolver skips it.
+        assert_eq!(
+            found(&[
+                ("RKAT_COPILOT_GITHUB_TOKEN", " "),
+                ("COPILOT_GITHUB_TOKEN", ""),
+                ("GH_TOKEN", "b")
+            ])
+            .as_deref(),
+            Some("GH_TOKEN")
+        );
+        assert_eq!(found(&[("COPILOT_GITHUB_TOKEN", "\t")]), None);
         assert_eq!(
             CopilotTokenCheck {
                 login: None,

@@ -1323,6 +1323,31 @@ mod tests {
                 .expect("readiness"),
             CredentialReadiness::Ready
         );
+
+        // A blank variable is no token, and it hides none: readiness agrees
+        // with the resolver, which skips it for this method.
+        let blank_only = ResolverEnvironment::testing()
+            .with_env_lookup(|name| (name == "COPILOT_GITHUB_TOKEN").then(|| "  ".to_string()));
+        assert_eq!(
+            OpenAiProviderRuntime
+                .observe_credential_readiness(&binding, &blank_only)
+                .await
+                .expect("readiness"),
+            CredentialReadiness::Missing
+        );
+        let blank_then_present =
+            ResolverEnvironment::testing().with_env_lookup(|name| match name {
+                "COPILOT_GITHUB_TOKEN" => Some(String::new()),
+                "GITHUB_TOKEN" => Some("github_pat_ready".to_string()),
+                _ => None,
+            });
+        assert_eq!(
+            OpenAiProviderRuntime
+                .observe_credential_readiness(&binding, &blank_then_present)
+                .await
+                .expect("readiness"),
+            CredentialReadiness::Ready
+        );
     }
 
     #[test]

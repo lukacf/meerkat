@@ -5218,6 +5218,27 @@ mod tests {
             }
         }
 
+        /// A variable that is set but blank does not hide the next one: a CI
+        /// secret that expands empty in `COPILOT_GITHUB_TOKEN` (or its `RKAT_`
+        /// form) leaves `GH_TOKEN` in charge, as in GitHub Copilot CLI.
+        #[tokio::test]
+        async fn blank_variable_does_not_hide_the_next_one() {
+            let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
+            harness.operator.set("RKAT_COPILOT_GITHUB_TOKEN", " ");
+            harness.operator.set("COPILOT_GITHUB_TOKEN", "");
+            harness.operator.set("GH_TOKEN", &user_token("gh"));
+
+            harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("GH_TOKEN is read past the blank variables");
+
+            assert_eq!(
+                harness.transport.bearer(0),
+                Some(format!("Bearer {}", user_token("gh")))
+            );
+        }
+
         /// T3a: a Copilot 401 on a request drops that account state; the retry
         /// reads the source again, looks the identity and the models up once
         /// more, and runs under a new receipt. The token stays valid.

@@ -103,12 +103,14 @@ them.
   `reauth_required`. `rkat auth login copilot --non-interactive` stores a token
   read from `--secret` or stdin, and with `--from-env` configures the three
   Copilot routes to read `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then
-  `GITHUB_TOKEN`. `rkat auth test` prints the account the token resolves to.
+  `GITHUB_TOKEN`, skipping a variable that is set but empty. `rkat auth test`
+  prints the account the token resolves to.
   For hosts and embedders: `meerkat_copilot::verify_operator_token` checks a
   token without storing it and returns a `CopilotAccountIdentity`;
   `CopilotAuthorizer::account_identity` and
   `CopilotProviderRoute::token_auth_method` are new;
-  `meerkat_auth_core::resolver::simple_secret_source_publishes_lifecycle` and
+  `meerkat_auth_core::resolver::{simple_secret_source_publishes_lifecycle,
+  env_credential_variable, BlankEnvValue}` and
   `meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_URL` are new. The
   OpenAI, Anthropic and Gemini runtimes report the readiness of a
   `github_copilot_token` route from its source, without a network request.

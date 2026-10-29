@@ -32,10 +32,72 @@ use meerkat_core::{
     HttpAuthorizer, OpenAiAuthMetadata, ProviderAuthMetadata, ResolvedAuthEnvelope,
 };
 
-use meerkat_llm_core::provider_runtime::binding::{DynamicLease, StaticLease, ValidatedBinding};
+use meerkat_llm_core::provider_runtime::binding::{
+    DynamicLease, NormalizedAuthMethod, StaticLease, ValidatedBinding,
+};
 use meerkat_llm_core::provider_runtime::errors::ProviderAuthError;
 use meerkat_llm_core::provider_runtime::registry::ResolverEnvironment;
 use meerkat_llm_core::provider_runtime::runtime::CredentialReadiness;
+
+/// What a variable that is set but blank (empty or only whitespace) does to
+/// the search of an `env` credential source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlankEnvValue {
+    /// It is the credential, and the search stops at it.
+    StopsTheSearch,
+    /// It is skipped, and the search goes on to the next variable.
+    IsSkipped,
+}
+
+impl BlankEnvValue {
+    /// The rule of an auth method's `env` sources. The GitHub Copilot
+    /// operator token (`github_copilot_token`) skips a blank variable, as
+    /// GitHub Copilot CLI reads `COPILOT_GITHUB_TOKEN`, `GH_TOKEN` and
+    /// `GITHUB_TOKEN`: a CI secret that expands empty must not hide the next
+    /// variable. Every other method stops at the first variable that is set.
+    pub fn of_auth_method(method: NormalizedAuthMethod) -> Self {
+        use meerkat_core::provider_matrix::{
+            AnthropicAuthMethod, GoogleAuthMethod, OpenAiAuthMethod,
+        };
+        match method {
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::GitHubCopilotToken)
+            | NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::GitHubCopilotToken)
+            | NormalizedAuthMethod::Google(GoogleAuthMethod::GitHubCopilotToken) => Self::IsSkipped,
+            NormalizedAuthMethod::OpenAi(_)
+            | NormalizedAuthMethod::Anthropic(_)
+            | NormalizedAuthMethod::Google(_)
+            | NormalizedAuthMethod::SelfHosted(_) => Self::StopsTheSearch,
+        }
+    }
+}
+
+/// The variable an `env` credential source takes its credential from, and
+/// its value. For each name of `var`, then `fallback`, in order,
+/// `RKAT_<NAME>` comes before `<NAME>` (a name that already starts with
+/// `RKAT_` has no override); the first variable that is set wins, unless
+/// `blank` skips one whose value is blank. The one owner of that order, for
+/// [`resolve_simple_secret`], [`observe_simple_secret_readiness`] and any
+/// surface that names the variable a route reads.
+pub fn env_credential_variable(
+    var: &str,
+    fallback: &[String],
+    blank: BlankEnvValue,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Option<(String, String)> {
+    std::iter::once(var)
+        .chain(fallback.iter().map(String::as_str))
+        .flat_map(|name| {
+            let rkat_override = (!name.starts_with("RKAT_")).then(|| format!("RKAT_{name}"));
+            rkat_override
+                .into_iter()
+                .chain(std::iter::once(name.to_string()))
+        })
+        .find_map(|candidate| {
+            lookup(&candidate)
+                .filter(|value| blank == BlankEnvValue::StopsTheSearch || !value.trim().is_empty())
+                .map(|value| (candidate, value))
+        })
+}
 
 /// Resolve a [`CredentialSourceSpec`] into a single secret string. Used
 /// by api_key / static_bearer auth methods. Returns the resolved secret
@@ -50,22 +112,18 @@ pub async fn resolve_simple_secret(
         CredentialSourceSpec::InlineSecret { secret } => Ok(secret.clone()),
         CredentialSourceSpec::Env { env: var, fallback } => {
             // Single canonical owner of env-var credential resolution
-            // policy (dogma §1). For each var name (primary + ordered
-            // fallback chain), `RKAT_<VAR>` overrides `<VAR>`. The
-            // factory body no longer encodes this policy inline.
-            let candidates =
-                std::iter::once(var.as_str()).chain(fallback.iter().map(String::as_str));
-            for candidate in candidates {
-                let rkat_override = if candidate.starts_with("RKAT_") {
-                    None
-                } else {
-                    (env.env_lookup)(&format!("RKAT_{candidate}"))
-                };
-                if let Some(value) = rkat_override.or_else(|| (env.env_lookup)(candidate)) {
-                    return Ok(value);
-                }
+            // policy (dogma §1): `env_credential_variable` reads `RKAT_<VAR>`
+            // before `<VAR>`, name by name, under the binding method's rule
+            // for a blank value. The factory body encodes none of it.
+            match env_credential_variable(
+                var,
+                fallback,
+                BlankEnvValue::of_auth_method(binding.auth()),
+                &*env.env_lookup,
+            ) {
+                Some((_, value)) => Ok(value),
+                None => Err(ProviderAuthError::Auth(AuthError::MissingSecret)),
             }
-            Err(ProviderAuthError::Auth(AuthError::MissingSecret))
         }
         CredentialSourceSpec::ExternalResolver { handle } => {
             let resolver = env
@@ -276,14 +334,16 @@ pub async fn observe_simple_secret_readiness(
     match source {
         CredentialSourceSpec::InlineSecret { .. } => CredentialReadiness::Ready,
         CredentialSourceSpec::Env { env: var, fallback } => {
-            let present = std::iter::once(var.as_str())
-                .chain(fallback.iter().map(String::as_str))
-                .any(|candidate| {
-                    (!candidate.starts_with("RKAT_")
-                        && (env.env_lookup)(&format!("RKAT_{candidate}")).is_some())
-                        || (env.env_lookup)(candidate).is_some()
-                });
-            if present {
+            // The variable `resolve_simple_secret` would read, by the same
+            // rule (a blank value skipped where the method says so).
+            if env_credential_variable(
+                var,
+                fallback,
+                BlankEnvValue::of_auth_method(binding.auth()),
+                &*env.env_lookup,
+            )
+            .is_some()
+            {
                 CredentialReadiness::Ready
             } else {
                 CredentialReadiness::Missing
@@ -2516,6 +2576,90 @@ mod tests {
                 simple_secret_source_publishes_lifecycle(&source),
                 expected,
                 "{source:?}"
+            );
+        }
+    }
+
+    /// The env chain reads `RKAT_<NAME>` before `<NAME>`, name by name. A
+    /// blank variable stops the search for every method but the GitHub
+    /// Copilot operator token, which skips it as GitHub Copilot CLI does.
+    #[test]
+    fn env_credential_variable_skips_blank_values_only_for_the_copilot_token() {
+        use meerkat_core::provider_matrix::{
+            AnthropicAuthMethod, GoogleAuthMethod, OpenAiAuthMethod,
+        };
+
+        let fallback = vec!["GH_TOKEN".to_string(), "GITHUB_TOKEN".to_string()];
+        let vars = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(candidate, _)| *candidate == name)
+                    .map(|(_, value)| (*value).to_string())
+            }
+        };
+        let found = |blank: BlankEnvValue, pairs: &'static [(&'static str, &'static str)]| {
+            env_credential_variable("COPILOT_GITHUB_TOKEN", &fallback, blank, &vars(pairs))
+        };
+        let pair = |name: &str, value: &str| Some((name.to_string(), value.to_string()));
+
+        // RKAT_<NAME> before <NAME>, name by name, under either rule.
+        for blank in [BlankEnvValue::StopsTheSearch, BlankEnvValue::IsSkipped] {
+            assert_eq!(
+                found(
+                    blank,
+                    &[("GH_TOKEN", "gh"), ("RKAT_GITHUB_TOKEN", "rkat-github")]
+                ),
+                pair("GH_TOKEN", "gh")
+            );
+            assert_eq!(
+                found(blank, &[("GH_TOKEN", "gh"), ("RKAT_GH_TOKEN", "rkat-gh")]),
+                pair("RKAT_GH_TOKEN", "rkat-gh")
+            );
+            assert_eq!(found(blank, &[]), None);
+        }
+
+        // A blank variable stops the search, or is skipped.
+        let blank_first: &[(&str, &str)] = &[
+            ("RKAT_COPILOT_GITHUB_TOKEN", " "),
+            ("COPILOT_GITHUB_TOKEN", ""),
+            ("GH_TOKEN", "gh"),
+        ];
+        assert_eq!(
+            found(BlankEnvValue::StopsTheSearch, blank_first),
+            pair("RKAT_COPILOT_GITHUB_TOKEN", " ")
+        );
+        assert_eq!(
+            found(BlankEnvValue::IsSkipped, blank_first),
+            pair("GH_TOKEN", "gh")
+        );
+        assert_eq!(
+            found(BlankEnvValue::IsSkipped, &[("COPILOT_GITHUB_TOKEN", "\t")]),
+            None
+        );
+
+        // Only the operator token skips; API keys keep the first set variable.
+        for method in [
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::GitHubCopilotToken),
+            NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::GitHubCopilotToken),
+            NormalizedAuthMethod::Google(GoogleAuthMethod::GitHubCopilotToken),
+        ] {
+            assert_eq!(
+                BlankEnvValue::of_auth_method(method),
+                BlankEnvValue::IsSkipped,
+                "{method:?}"
+            );
+        }
+        for method in [
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::ApiKey),
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::GitHubCopilotOauth),
+            NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::ApiKey),
+            NormalizedAuthMethod::Google(GoogleAuthMethod::ApiKey),
+        ] {
+            assert_eq!(
+                BlankEnvValue::of_auth_method(method),
+                BlankEnvValue::StopsTheSearch,
+                "{method:?}"
             );
         }
     }

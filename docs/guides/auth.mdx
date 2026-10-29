@@ -345,10 +345,10 @@ source = { kind = "external_resolver", handle = "copilot-token" }
 
 A command source with `refresh_interval_ms` publishes each token with that
 lifetime: a minute before it ends, the next request runs the command again.
-`refresh_interval_ms` must therefore be above `60000` (one minute); a shorter
-one is refused as a configuration error rather than running the command on
-every request. An external resolver is asked again after the Copilot API
-refuses a token, so a rotated token heals that request.
+`refresh_interval_ms` must therefore be above `60000` (one minute); `60000` or
+less is refused as a configuration error, before the command runs, rather
+than running it on every request. An external resolver is asked again after
+the Copilot API refuses a token, so a rotated token heals that request.
 
 Token kinds (read from the documented prefix only):
 
@@ -374,7 +374,8 @@ What each refusal looks like:
 |---|---|---|
 | No token in any of the variables (one that is set but empty counts as unset) | `missing_secret` | none |
 | A classic personal access token | `unsupported_combination` (`auth = "classic_personal_access_token"`) | none |
-| GitHub refused the token itself: revoked, expired or invalid | `user_reauth_required` | the `github_copilot` account is `reauth_required` until a different token value appears: each request reads the source again, so a command or resolver that mints a new token heals it; replace the token rather than signing in again |
+| A command source whose `refresh_interval_ms` is `60000` or less | `unsupported_combination` | none: the command does not run |
+| GitHub refused the token itself: revoked, expired or invalid | `user_reauth_required` | the `github_copilot` account is `reauth_required` until a different token value appears or the process restarts: each request reads the source again, so a command or resolver that mints a new token heals it; replace the token rather than signing in again |
 | Copilot refused the account: no seat, no Copilot Requests permission, an organization policy, chat disabled | `refresh_failed`, with GitHub's message | none: the same token works once that is fixed |
 | Rate limited, or GitHub unavailable | `refresh_failed` | the identity lookup waits for the time GitHub states, for every session of the account; a rate-limited model listing fails nothing and is asked again after that time |
 | Logged out (`rkat auth logout global:copilot_openai`) | `lease_absent` | until a different token value appears or the process restarts |

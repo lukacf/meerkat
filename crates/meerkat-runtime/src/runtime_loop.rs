@@ -7385,11 +7385,14 @@ enum ResumedRunAdmissionLap {
 /// an admission may take its bounded attempts. A refused run is settled at
 /// once, as a stop settles a run, without running.
 ///
-/// First, a run with an input the machine holds for its controller (a kept
-/// resume of retained work whose host cannot say yet) waits, marked, with
-/// its inputs bound: the loop parks and the controller re-ask brings it
-/// back, which releases the hold or ends the run as refused. Its admission
-/// is not asked before.
+/// First, the run must be describable. A run whose first input is kept
+/// governed work with no way back to its controller client (a governed
+/// prompt whose client did not survive the store) can never resume: it is
+/// settled as refused, instead of stopping the loop. A run with an input the
+/// machine holds for its controller (a kept resume of retained work whose
+/// host cannot say yet) waits, marked, with its inputs bound: the loop parks
+/// and the controller re-ask brings it back, which releases the hold or ends
+/// the run as refused. Its admission is not asked before.
 async fn admit_resumed_run(
     driver: &crate::meerkat_machine::SharedDriver,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
@@ -7397,7 +7400,25 @@ async fn admit_resumed_run(
     authority_binding: &RuntimeLoopAuthorityBinding,
     run_id: RunId,
 ) -> ResumedRunAdmissionLap {
-    let held = driver.lock().await.run_inputs_controller_held(&run_id);
+    let (lacks_controller, held) = {
+        let d = driver.lock().await;
+        (
+            d.resumed_run_first_input_lacks_controller(&run_id),
+            d.run_inputs_controller_held(&run_id),
+        )
+    };
+    if lacks_controller {
+        return settle_refused_resumed_run(
+            driver,
+            completions,
+            executor,
+            authority_binding,
+            &run_id,
+            "its first input is kept governed work whose controller cannot be supplied again"
+                .to_string(),
+        )
+        .await;
+    }
     if held {
         return ResumedRunAdmissionLap::Exit(false);
     }

@@ -283,6 +283,23 @@ impl DriverEntry {
             .kept_retained_resume_destination_superseded(input_id)
     }
 
+    /// The queued kept governed inputs with no way back to their controller
+    /// client, in admission order.
+    pub(crate) fn queued_kept_governed_inputs_without_controller(&self) -> Vec<InputId> {
+        self.shell_driver()
+            .queued_kept_governed_inputs_without_controller()
+    }
+
+    /// Whether the first input of the run marked resumable `run_id` is kept
+    /// governed work with no way back to its controller client.
+    pub(crate) fn resumed_run_first_input_lacks_controller(
+        &self,
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> bool {
+        self.shell_driver()
+            .resumed_run_first_input_lacks_controller(run_id)
+    }
+
     /// End each still queued input of `input_ids` as a refused resume
     /// (`Abandoned { ResumeRefused }`) through the machine's `AbandonInput`,
     /// before any of them stages: kept retained-resume rows whose installed

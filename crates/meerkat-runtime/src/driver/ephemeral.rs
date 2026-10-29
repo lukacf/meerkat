@@ -1020,6 +1020,49 @@ impl EphemeralRuntimeDriver {
         }
     }
 
+    /// Whether `input_id` is kept governed work with no way back to its
+    /// controller client: an input this registration recovered from the
+    /// store, admitted with an authority association of its own (not a
+    /// resume of retained work, whose host is asked again), whose client did
+    /// not survive the store. The host contract can supply such an input's
+    /// client again only with a fresh authentication of its caller, so it
+    /// can never run.
+    pub(crate) fn kept_governed_input_without_controller(&self, input_id: &InputId) -> bool {
+        self.ledger.get(input_id).is_some_and(|row| {
+            row.retained_resume.is_none()
+                && !row.authority_contributors.is_empty()
+                && row.controller_client.is_none()
+        }) && self.with_dsl_state(|state| {
+            state
+                .recovered_admitted_inputs
+                .contains(&Self::dsl_key(input_id))
+        })
+    }
+
+    /// The queued kept governed inputs with no way back to their controller
+    /// client ([`Self::kept_governed_input_without_controller`]), in
+    /// admission order.
+    pub(crate) fn queued_kept_governed_inputs_without_controller(&self) -> Vec<InputId> {
+        self.admission_order()
+            .into_iter()
+            .filter(|input_id| {
+                self.input_phase(input_id) == Some(InputLifecycleState::Queued)
+                    && self.kept_governed_input_without_controller(input_id)
+            })
+            .collect()
+    }
+
+    /// Whether the first input of the run marked resumable `run_id`, whose
+    /// controller client a resumed run executes with, is kept governed work
+    /// with no way back to that client
+    /// ([`Self::kept_governed_input_without_controller`]): the run can never
+    /// resume.
+    pub(crate) fn resumed_run_first_input_lacks_controller(&self, run_id: &RunId) -> bool {
+        self.resumed_run_bound_input_ids(run_id)
+            .first()
+            .is_some_and(|first| self.kept_governed_input_without_controller(first))
+    }
+
     /// A governed resume of retained work: runtime-minted custody bound to
     /// this exact input and this runtime, re-validated by the native owner
     /// under driver custody. It never carries an association or ingress of

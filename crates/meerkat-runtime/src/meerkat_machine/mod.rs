@@ -3980,6 +3980,12 @@ const SETTLED_RUN_TERMINAL_PUBLICATION_BOUND: std::time::Duration =
 const EXPIRED_KEPT_RUN_TERMINATION_REASON: &str =
     "a kept run outlived the stop's max age and was settled instead of resumed";
 
+/// The runtime-termination reason a kept governed input with no way back to
+/// its controller client, or a kept run it is the first input of, carries to
+/// its interaction terminals.
+const KEPT_GOVERNED_INPUT_TERMINATION_REASON: &str =
+    "a kept governed input's controller cannot be supplied again without a fresh authentication";
+
 impl PendingRuntimeExecutorAttachment {
     /// The driver and completion registry of this exact pending (non-serving)
     /// attachment, under its retained mutation guard.
@@ -4412,6 +4418,193 @@ impl PendingRuntimeExecutorAttachment {
             }));
         }
         Ok(expired)
+    }
+
+    /// End, before this attachment can serve, every kept governed input with
+    /// no way back to its controller client: an input this registration
+    /// recovered from the store that was admitted with an authority
+    /// association of its own (a governed prompt, for example), not as a
+    /// resume of retained work, whose host is asked for the client again. A
+    /// controller client never survives the store, and the host contract can
+    /// supply such an input's client again only with a fresh authentication
+    /// of its caller, so it could never run: each run of it would fail before
+    /// the model is called until its attempts ran out, and while it waited
+    /// the whole machine would refuse controller grant changes, credential
+    /// publications and auth lease releases. Each queued one is abandoned
+    /// through the machine's `AbandonInput` as a refused resume
+    /// ([`crate::input_state::InputAbandonReason::ResumeRefused`]), in its own
+    /// durable commit with the runless runtime-termination carrier it is owed.
+    ///
+    /// A run this registration keeps resumable whose first input (the input
+    /// whose client the resumed run executes with) is such an input is settled
+    /// the same way first, as a whole, with its carriers in the same commit,
+    /// instead of stopping the runtime loop when it would resume. Every
+    /// attachment passes here before its serving gate, after the expired
+    /// requeue settlement. Returns the ended inputs.
+    pub(crate) async fn settle_kept_governed_inputs_without_controller(
+        &mut self,
+    ) -> Result<Vec<InputId>, RuntimeDriverError> {
+        let (driver, completions) = self
+            .exact_pending_driver("kept governed input settlement")
+            .await?;
+        let mut reload_for_run = None;
+        let mut settled_batches = Vec::new();
+        let mut settled_terminal = None;
+        let mut settled_inputs = Vec::new();
+        let ended = {
+            let mut driver = driver.lock().await;
+            let mut ended = Vec::new();
+            let mut settled_run = None;
+            if let Some(run_id) = driver.resumable_run_id()
+                && driver.resumed_run_first_input_lacks_controller(&run_id)
+            {
+                let crate::meerkat_machine::driver::SettledResumableRun {
+                    abandoned,
+                    batches,
+                    terminal,
+                } = driver
+                    .settle_resumable_run_with_terminals(
+                        &run_id,
+                        crate::input_state::InputAbandonReason::ResumeRefused,
+                        KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+                    )
+                    .await?;
+                settled_batches = batches;
+                settled_terminal = terminal;
+                tracing::warn!(
+                    session_id = %self.witness.session_id(),
+                    %run_id,
+                    inputs = abandoned.len(),
+                    "a kept run's first input is kept governed work whose controller cannot be supplied again; settled as a refused resume instead of resumed"
+                );
+                if !abandoned.is_empty() {
+                    // Committed: told once this attachment releases its
+                    // mutation guard.
+                    self.runless_terminal.owe();
+                }
+                ended.extend(abandoned);
+                settled_run = Some(run_id);
+            }
+            let candidates = driver.queued_kept_governed_inputs_without_controller();
+            if !candidates.is_empty() {
+                let runless_terminal = &mut self.runless_terminal;
+                let outcome = driver
+                    .settle_refused_queued_resumes(
+                        &candidates,
+                        KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+                        || runless_terminal.owe(),
+                    )
+                    .await;
+                tracing::warn!(
+                    session_id = %self.witness.session_id(),
+                    inputs = outcome.settled.len(),
+                    "kept governed inputs whose controller cannot be supplied again ended as refused resumes before the attachment serves"
+                );
+                ended.extend(outcome.settled.iter().map(|(input_id, _)| input_id.clone()));
+                settled_inputs = outcome.settled;
+                if let Some(error) = outcome.failure {
+                    return Err(error);
+                }
+            }
+            // The settled run never resumes, so its provisional tail is
+            // repaired as an interrupted run's, after the abandonment
+            // committed, as for an expired kept run.
+            if let Some(run_id) = settled_run
+                && driver
+                    .repair_settled_run_tail(self.witness.session_id(), &run_id)
+                    .await
+            {
+                reload_for_run = Some(run_id);
+            }
+            ended
+        };
+        if !ended.is_empty() {
+            // The old input is durably ended; a retry is a new request with a
+            // fresh authentication of its caller.
+            completions.lock().await.fail_inputs(
+                ended.clone(),
+                crate::completion::CompletionWaitError::AttachmentReplaced,
+            );
+        }
+        if let Some(run_id) = reload_for_run {
+            let reason = format!("refused kept run {run_id}'s provisional tail still stands");
+            self.machine
+                .require_session_durability_reload(
+                    self.witness.session_id(),
+                    "refused_kept_run_tail_repair",
+                    reason.clone(),
+                )
+                .await;
+            return Err(RuntimeDriverError::Internal(format!(
+                "{reason}; the session reloads before it serves"
+            )));
+        }
+        // Published detached, through the publisher the attachment already
+        // carries, as an expired kept run's are: the session actor answers a
+        // publication only once this attachment is served.
+        if !settled_batches.is_empty() || settled_terminal.is_some() || !settled_inputs.is_empty() {
+            let publication_handle = self
+                .machine
+                .sessions
+                .read()
+                .await
+                .get(self.witness.session_id())
+                .and_then(RuntimeSessionEntry::publication_handle);
+            let session_id = self.witness.session_id().clone();
+            let driver = Arc::clone(&driver);
+            let completions = Arc::clone(&completions);
+            let deadline =
+                meerkat_core::time_compat::Instant::now() + SETTLED_RUN_TERMINAL_PUBLICATION_BOUND;
+            drop(crate::tokio::spawn(async move {
+                if let Err(error) =
+                    crate::control_plane::publish_and_resolve_runless_runtime_terminations_before(
+                        &driver,
+                        Some(&completions),
+                        publication_handle.as_deref(),
+                        &settled_batches,
+                        KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+                        Some(deadline),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        %session_id,
+                        %error,
+                        "the refused kept run's terminals were not published; their outboxes stay for the next drain"
+                    );
+                }
+                for (input_id, directed_owner) in &settled_inputs {
+                    if let Err(error) =
+                        crate::control_plane::publish_and_resolve_runless_runtime_termination_before(
+                            &driver,
+                            Some(&completions),
+                            publication_handle.as_deref(),
+                            std::slice::from_ref(input_id),
+                            directed_owner.as_ref(),
+                            KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+                            Some(deadline),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            %session_id,
+                            %input_id,
+                            %error,
+                            "a refused kept governed input's terminal was not published; its outbox stays for the next drain"
+                        );
+                    }
+                }
+                if let Some(terminal) = settled_terminal.as_ref() {
+                    crate::control_plane::publish_settled_run_terminal_before(
+                        publication_handle.as_deref(),
+                        terminal,
+                        Some(deadline),
+                    )
+                    .await;
+                }
+            }));
+        }
+        Ok(ended)
     }
 
     /// Settle the session's interrupted-run evidence before serving, in a

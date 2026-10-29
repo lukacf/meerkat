@@ -46,11 +46,11 @@ const MODEL_DISCOVERY_MAX_RETRY_SECONDS: u64 = 3600;
 const BEARER_SCHEME: &str = "Bearer";
 const COPILOT_HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 const MAX_COPILOT_HTTP_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-/// The pause after GitHub rate limits the operator-token identity lookup: at
-/// least a minute (GitHub's rule for a limit that states no wait), at most an
-/// hour.
-const IDENTITY_RATE_LIMIT_MIN_SECONDS: u64 = 60;
-const IDENTITY_RATE_LIMIT_MAX_SECONDS: u64 = 3600;
+/// The pause after GitHub rate limits an operator-token request (the
+/// identity lookup or the model listing): GitHub's stated time, at least a
+/// minute (GitHub's rule for a limit that states no wait), at most an hour.
+const GITHUB_RATE_LIMIT_MIN_SECONDS: u64 = 60;
+const GITHUB_RATE_LIMIT_MAX_SECONDS: u64 = 3600;
 /// GitHub's error `message` is quoted in errors with control characters
 /// removed and at most this many characters.
 const GITHUB_ERROR_MESSAGE_MAX_CHARS: usize = 200;
@@ -116,6 +116,10 @@ enum CopilotModelDiscoveryError {
         status: u16,
         message: String,
         retry_after: Option<StdDuration>,
+        /// Whether GitHub rate limited the listing ([`github_rate_limited`]).
+        rate_limited: bool,
+        /// `x-ratelimit-reset`: the epoch second the primary limit resets.
+        rate_limit_reset: Option<u64>,
     },
     #[error("invalid Copilot model-discovery request headers")]
     Header(#[source] ProviderAuthError),
@@ -251,6 +255,9 @@ fn github_rate_limited(status: u16, remaining: Option<&str>, has_retry_after: bo
 
 pub struct CopilotRuntime {
     accounts: Mutex<BTreeMap<CopilotAccountCacheKey, Weak<CopilotAccountState>>>,
+    /// Rate-limit pacing per account, held for the runtime's life so it
+    /// outlives the account states that read it.
+    pacing: Mutex<BTreeMap<CopilotAccountCacheKey, Arc<CopilotAccountPacing>>>,
     transport: Arc<dyn CopilotHttpTransport>,
 }
 
@@ -262,9 +269,14 @@ struct CopilotAccountCacheKey {
 
 impl CopilotRuntime {
     pub fn new() -> Self {
+        Self::with_transport(Arc::new(ReqwestCopilotHttpTransport::new()))
+    }
+
+    fn with_transport(transport: Arc<dyn CopilotHttpTransport>) -> Self {
         Self {
             accounts: Mutex::new(BTreeMap::new()),
-            transport: Arc::new(ReqwestCopilotHttpTransport::new()),
+            pacing: Mutex::new(BTreeMap::new()),
+            transport,
         }
     }
 
@@ -377,7 +389,8 @@ impl CopilotRuntime {
             }
             return Ok(existing);
         }
-        let state = Arc::new(CopilotAccountState::new(config, mode));
+        let pacing = Arc::clone(self.pacing.lock().entry(key.clone()).or_default());
+        let state = Arc::new(CopilotAccountState::with_pacing(config, mode, pacing));
         accounts.insert(key, Arc::downgrade(&state));
         Ok(state)
     }
@@ -1245,13 +1258,31 @@ struct CopilotAccountState {
     next_refresh_flight: AtomicU64,
     last_refresh_outcome: Mutex<Option<CopilotRefreshOutcome>>,
     next_generation: AtomicU64,
-    /// Operator-token mode: no identity lookup before this instant, because
-    /// GitHub rate limited the last one.
+    /// Operator-token mode: the account's rate-limit pacing, shared with
+    /// every later account state of the same account.
+    pacing: Arc<CopilotAccountPacing>,
+}
+
+/// Rate-limit pacing of an operator-token account. The runtime keeps it per
+/// account for its own life: a resolve that fails on GitHub's rate limit
+/// drops its account state, and the next one must still wait.
+#[derive(Default)]
+struct CopilotAccountPacing {
+    /// No identity lookup before this instant: GitHub rate limited the last
+    /// one.
     identity_retry_at: Mutex<Option<DateTime<Utc>>>,
 }
 
 impl CopilotAccountState {
     fn new(config: CopilotBackendConfig, mode: CopilotCredentialMode) -> Self {
+        Self::with_pacing(config, mode, Arc::default())
+    }
+
+    fn with_pacing(
+        config: CopilotBackendConfig,
+        mode: CopilotCredentialMode,
+        pacing: Arc<CopilotAccountPacing>,
+    ) -> Self {
         Self {
             config,
             mode,
@@ -1261,7 +1292,7 @@ impl CopilotAccountState {
             next_refresh_flight: AtomicU64::new(1),
             last_refresh_outcome: Mutex::new(None),
             next_generation: AtomicU64::new(1),
-            identity_retry_at: Mutex::new(None),
+            pacing,
         }
     }
 }
@@ -1799,6 +1830,8 @@ async fn fetch_copilot_models(
             status: response.status,
             message: github_error_message(&response.body),
             retry_after: response.retry_after,
+            rate_limited: response.rate_limited,
+            rate_limit_reset: response.rate_limit_reset,
         });
     }
     let body: CopilotModelsEnvelope =
@@ -2031,7 +2064,7 @@ impl CopilotAuthorizer {
     ) -> Result<CachedTokenView, ProviderAuthError> {
         let now = (self.env.now)();
         if material.kind != GitHubTokenKind::Installation {
-            let retry_at = *self.state.identity_retry_at.lock();
+            let retry_at = *self.state.pacing.identity_retry_at.lock();
             if let Some(until) = retry_at
                 && now < until
             {
@@ -2050,7 +2083,7 @@ impl CopilotAuthorizer {
             Ok(identity) => identity,
             Err(refusal) => return Err(self.operator_refusal(refusal)),
         };
-        *self.state.identity_retry_at.lock() = None;
+        *self.state.pacing.identity_retry_at.lock() = None;
         let models_result = self.fetch_models(&identity.api_base, &material.token).await;
         if let Err(error) = &models_result
             && let Some(refusal) = models_refusal(error, identity.installation)
@@ -2067,16 +2100,12 @@ impl CopilotAuthorizer {
                 )),
             ),
             Err(error) => {
-                let retry_delay = error.retry_delay();
                 tracing::warn!(
                     credential_identity = %self.binding.credential_identity(),
                     error = %error,
                     "GitHub Copilot accepted the operator token but account model discovery failed"
                 );
-                (
-                    None,
-                    Some(model_discovery_deadline(discovery_now, retry_delay)),
-                )
+                (None, Some(operator_models_retry_at(&error, discovery_now)))
             }
         };
         tracing::info!(
@@ -2148,14 +2177,13 @@ impl CopilotAuthorizer {
                         ));
                     }
                     Err(error) if refusal.is_none() => {
-                        let retry_delay = error.retry_delay();
                         tracing::warn!(
                             credential_identity = %self.binding.credential_identity(),
                             error = %error,
                             "Copilot account model discovery retry failed"
                         );
                         current.model_discovery_refresh_at =
-                            Some(model_discovery_deadline(discovery_now, retry_delay));
+                            Some(operator_models_retry_at(&error, discovery_now));
                     }
                     Err(_) => {
                         *cache = None;
@@ -2226,7 +2254,7 @@ impl CopilotAuthorizer {
                 }
             }
             OperatorRefusal::RateLimited { until } => {
-                *self.state.identity_retry_at.lock() = Some(*until);
+                *self.state.pacing.identity_retry_at.lock() = Some(*until);
             }
             OperatorRefusal::Refused(_) => {}
         }
@@ -2489,7 +2517,7 @@ async fn lookup_operator_identity(
         })?;
     if response.rate_limited {
         return Err(OperatorRefusal::RateLimited {
-            until: rate_limit_until(&response, now),
+            until: rate_limit_until(response.retry_after, response.rate_limit_reset, now),
         });
     }
     match response.status {
@@ -2559,19 +2587,26 @@ fn copilot_user_headers(
 
 /// The refusal a model listing answer is for an operator token: a 401 or 403
 /// is Copilot refusing the token, and for an installation token, which has no
-/// identity lookup, a 401 is GitHub refusing the token itself. Any other
-/// failure is transient and the listing is retried later.
+/// identity lookup, a 401 is GitHub refusing the token itself. A rate limit
+/// (a 403 with `Retry-After` or an exhausted primary limit) is no refusal:
+/// the listing waits for GitHub's stated time
+/// ([`operator_models_retry_at`]). Any other failure is transient and the
+/// listing is retried later.
 fn models_refusal(
     error: &CopilotModelDiscoveryError,
     installation: bool,
 ) -> Option<OperatorRefusal> {
     let CopilotModelDiscoveryError::Http {
-        status, message, ..
+        status,
+        message,
+        rate_limited,
+        ..
     } = error
     else {
         return None;
     };
     match *status {
+        _ if *rate_limited => None,
         401 if installation => Some(OperatorRefusal::TokenRejected {
             status: 401,
             message: message.clone(),
@@ -2626,25 +2661,40 @@ fn github_error_message(body: &[u8]) -> String {
 /// When a rate-limited GitHub request may be retried: `Retry-After`, else the
 /// primary limit's `x-ratelimit-reset`, else a minute, clamped to between a
 /// minute and an hour.
-fn rate_limit_until(response: &CopilotHttpResponse, now: DateTime<Utc>) -> DateTime<Utc> {
-    let delay = response
-        .retry_after
+fn rate_limit_until(
+    retry_after: Option<StdDuration>,
+    rate_limit_reset: Option<u64>,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
+    let delay = retry_after
         .map(|delay| delay.as_secs())
-        .or_else(|| {
-            response
-                .rate_limit_reset
-                .map(|reset| reset.saturating_sub(epoch_secs(now)))
-        })
-        .unwrap_or(IDENTITY_RATE_LIMIT_MIN_SECONDS)
-        .clamp(
-            IDENTITY_RATE_LIMIT_MIN_SECONDS,
-            IDENTITY_RATE_LIMIT_MAX_SECONDS,
-        );
+        .or_else(|| rate_limit_reset.map(|reset| reset.saturating_sub(epoch_secs(now))))
+        .unwrap_or(GITHUB_RATE_LIMIT_MIN_SECONDS)
+        .clamp(GITHUB_RATE_LIMIT_MIN_SECONDS, GITHUB_RATE_LIMIT_MAX_SECONDS);
     i64::try_from(delay)
         .ok()
         .and_then(Duration::try_seconds)
         .and_then(|delay| now.checked_add_signed(delay))
         .unwrap_or(DateTime::<Utc>::MAX_UTC)
+}
+
+/// When an operator-token account lists its models again after `error`: a
+/// rate limit (a 429, or a 403 whose primary limit is exhausted or that
+/// carries `Retry-After`) waits for GitHub's stated time, as the identity
+/// lookup does; any other failure retries as model discovery does.
+fn operator_models_retry_at(
+    error: &CopilotModelDiscoveryError,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
+    match error {
+        CopilotModelDiscoveryError::Http {
+            rate_limited: true,
+            retry_after,
+            rate_limit_reset,
+            ..
+        } => rate_limit_until(*retry_after, *rate_limit_reset, now),
+        _ => model_discovery_deadline(now, error.retry_delay()),
+    }
 }
 
 /// A classic personal access token is refused before any request: Copilot
@@ -3548,6 +3598,8 @@ mod tests {
             status: 429,
             message: "busy".to_string(),
             retry_after: Some(StdDuration::from_secs(u64::MAX)),
+            rate_limited: true,
+            rate_limit_reset: None,
         };
 
         let delay = error.retry_delay();
@@ -4469,10 +4521,7 @@ mod tests {
                     token_response("maintenance-derived-two"),
                     models_response(),
                 ]));
-                let runtime = Arc::new(CopilotRuntime {
-                    accounts: Mutex::new(BTreeMap::new()),
-                    transport: transport.clone(),
-                });
+                let runtime = Arc::new(CopilotRuntime::with_transport(transport.clone()));
                 let resolved = runtime.resolve(&binding, &env).await.unwrap();
                 let authorizer = resolved.concrete_authorizer();
                 let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
@@ -4955,10 +5004,7 @@ mod tests {
                 operator: OperatorEnv,
             ) -> Self {
                 let transport = OutcomeTransport::new(outcomes);
-                let runtime = CopilotRuntime {
-                    accounts: Mutex::new(BTreeMap::new()),
-                    transport: transport.clone(),
-                };
+                let runtime = CopilotRuntime::with_transport(transport.clone());
                 Self {
                     runtime,
                     transport,
@@ -5433,10 +5479,7 @@ mod tests {
                 401,
                 serde_json::json!({"message": "Bad credentials"}),
             ))]);
-            let other = CopilotRuntime {
-                accounts: Mutex::new(BTreeMap::new()),
-                transport: other_transport.clone(),
-            };
+            let other = CopilotRuntime::with_transport(other_transport.clone());
             harness
                 .operator
                 .set("COPILOT_GITHUB_TOKEN", &user_token("cached"));
@@ -5727,13 +5770,10 @@ mod tests {
                     401,
                     serde_json::json!({"message": "Bad credentials"}),
                 ))]);
-                let runtime = CopilotRuntime {
-                    accounts: Mutex::new(BTreeMap::new()),
-                    transport: Arc::new(InterleavingTransport {
-                        inner: Arc::clone(&inner),
-                        before: Mutex::new(Some(before)),
-                    }),
-                };
+                let runtime = CopilotRuntime::with_transport(Arc::new(InterleavingTransport {
+                    inner: Arc::clone(&inner),
+                    before: Mutex::new(Some(before)),
+                }));
 
                 let refused = runtime
                     .resolve(
@@ -5816,8 +5856,8 @@ mod tests {
                 Some(AuthLeasePhase::Valid)
             );
 
-            // The pause belongs to the account state, so one authorizer keeps
-            // it across calls.
+            // One authorizer keeps the pause across calls; the pacing row
+            // below covers later account states of the account.
             let operator = OperatorEnv::new();
             operator.set("COPILOT_GITHUB_TOKEN", &user_token("busy"));
             let transport = OutcomeTransport::new([
@@ -5860,6 +5900,94 @@ mod tests {
                 .expect("the lookup runs again after the wait");
             assert_eq!(transport.request_count(), 3);
             assert_eq!(operator.lease().phase, Some(AuthLeasePhase::Valid));
+        }
+
+        /// GitHub's rate limit on the identity lookup pauses the account, not
+        /// one account state: a resolve that failed on it drops its account
+        /// state, and the next resolve still makes no request before GitHub's
+        /// stated time.
+        #[tokio::test]
+        async fn identity_pause_outlives_the_account_state() {
+            let harness = Harness::new([
+                Ok(rate_limited(403, 120)),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("paced"));
+            let detail = refresh_failure(
+                harness
+                    .resolve(CopilotProviderRoute::OpenAi)
+                    .await
+                    .err()
+                    .expect("the identity lookup is rate limited"),
+            );
+            assert!(detail.contains("rate limited"), "{detail}");
+
+            harness.operator.advance(60);
+            let detail = refresh_failure(
+                harness
+                    .resolve(CopilotProviderRoute::Anthropic)
+                    .await
+                    .err()
+                    .expect("a later account state still waits"),
+            );
+            assert!(detail.contains("rate limited"), "{detail}");
+            assert_eq!(
+                harness.transport.request_count(),
+                1,
+                "no request before GitHub's stated time"
+            );
+
+            harness.operator.advance(61);
+            harness
+                .resolve(CopilotProviderRoute::Anthropic)
+                .await
+                .expect("the lookup runs again after the wait");
+            assert_eq!(harness.transport.request_count(), 3);
+        }
+
+        /// A rate-limited model listing (a 403 with `Retry-After`, GitHub's
+        /// secondary limit) is no refusal: the account resolves without its
+        /// model list, which is asked again only after GitHub's stated time,
+        /// with no identity lookup in between.
+        #[tokio::test]
+        async fn models_rate_limit_waits_for_githubs_time() {
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(rate_limited(403, 120)),
+                Ok(models_response()),
+            ]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("listing-paced"));
+            let resolved = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("a rate-limited listing does not refuse the token");
+            assert!(resolved.model_snapshot().is_none());
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+            let authorizer = resolved.concrete_authorizer();
+            let url = format!("{BUSINESS_API}/responses");
+
+            harness.operator.advance(119);
+            authorize_once(&authorizer, &url).await;
+            assert_eq!(
+                harness.transport.request_count(),
+                2,
+                "no listing before GitHub's stated time"
+            );
+
+            harness.operator.advance(2);
+            authorize_once(&authorizer, &url).await;
+            assert_eq!(harness.transport.request_count(), 3);
+            assert_eq!(
+                harness.transport.urls()[2],
+                format!("{BUSINESS_API}/models"),
+                "only the listing runs again"
+            );
+            assert!(authorizer.model_snapshot().is_some());
         }
 
         /// Two authorizers of one operator-token account, as two routes or two

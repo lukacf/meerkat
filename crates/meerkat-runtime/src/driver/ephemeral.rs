@@ -1970,6 +1970,20 @@ impl EphemeralRuntimeDriver {
         let Some(target) = crate::input_authority::input_context_target(input)? else {
             return Ok(());
         };
+        self.bind_context_target(input_id, target)
+    }
+
+    /// Record `target`, the destination binding governed input `input_id`
+    /// names (`input_authority::context_target_binding`), as
+    /// [`Self::bind_input_context_target`] records an input's own. On a host
+    /// that requires scoped destinations it first requires one of the
+    /// document (`RequireScopedContext`), so recovered governed work waits,
+    /// queued, until the registration owner binds its destination again.
+    fn bind_context_target(
+        &mut self,
+        input_id: &InputId,
+        target: String,
+    ) -> Result<(), RuntimeDriverError> {
         let key = Self::dsl_key(input_id);
         let (governed, scoped) = self.with_dsl_state(|state| {
             (
@@ -2722,7 +2736,14 @@ impl EphemeralRuntimeDriver {
                     },
                     "BindInputAuthority(recovered retained resume)",
                 )?;
-                self.bind_input_context_target(&work_id, persisted_input)?;
+                // The stored input carries no retained-resume grant (it does
+                // not survive the store), so the destination is read from the
+                // canonical original, as at admission: the recovered resume
+                // then waits for its destination as a recovered prompt does.
+                let target = crate::input_authority::context_target_binding(
+                    &canonical.association().candidate().target,
+                )?;
+                self.bind_context_target(&work_id, target)?;
                 self.restore_admitted_context_target(
                     &work_id,
                     &recovered_state.scoped_destination,

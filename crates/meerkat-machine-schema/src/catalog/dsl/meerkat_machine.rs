@@ -10386,14 +10386,17 @@ macro_rules! meerkat_catalog_machine_dsl {
         // A held input is kept governed work waiting unstaged for its
         // controller: an input the registration recovered (a resume of
         // retained work its host is asked about again), bound to a governed
-        // association, and either queued in a lane or bound, Staged or
-        // Applied, to the run marked resumable, which does not resume while
-        // it is held. Every transition that ends an input, or settles or
-        // releases its run, drops its hold.
+        // association, with no live-boundary delivery, and either queued in
+        // a lane or bound, Staged or Applied, to the run marked resumable,
+        // which does not resume while it is held: exactly what
+        // HoldInputController requires. Every transition that ends an input,
+        // or settles or releases its run, drops its hold.
         invariant input_controller_holds_are_kept_unstaged_governed_inputs {
             for_all(input_id in self.input_controller_holds,
                 self.recovered_admitted_inputs.contains(input_id)
                 && self.input_authority_bindings.contains_key(input_id)
+                && !self.input_live_boundary_delivery.contains_key(input_id)
+                && !self.input_live_boundary_join_run.contains_key(input_id)
                 && ((self.input_phases.get_cloned(input_id) == Some(InputPhase::Queued)
                         && self.input_lane.contains_key(input_id))
                     || (self.resumable_run_id != None

@@ -27,7 +27,8 @@ use meerkat_core::{
     HttpAuthorizationResponseAction, HttpAuthorizer, Provider,
 };
 use meerkat_llm_core::provider_runtime::{
-    ProviderAuthError, ProviderClientError, ResolverEnvironment, ValidatedBinding,
+    ProviderAuthError, ProviderBindingError, ProviderClientError, ResolverEnvironment,
+    ValidatedBinding,
 };
 use parking_lot::{Mutex, RwLock};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -51,6 +52,10 @@ const MAX_COPILOT_HTTP_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 /// minute (GitHub's rule for a limit that states no wait), at most an hour.
 const GITHUB_RATE_LIMIT_MIN_SECONDS: u64 = 60;
 const GITHUB_RATE_LIMIT_MAX_SECONDS: u64 = 3600;
+/// The floor of a command source's `refresh_interval_ms` on an operator-token
+/// route: the AuthMachine's refresh window, which starts that long before a
+/// declared lifetime ends.
+const OPERATOR_COMMAND_REFRESH_INTERVAL_FLOOR_MS: u64 = AUTH_LEASE_TTL_REFRESH_WINDOW_SECS * 1000;
 /// GitHub's error `message` is quoted in errors with control characters
 /// removed and at most this many characters.
 const GITHUB_ERROR_MESSAGE_MAX_CHARS: usize = 200;
@@ -314,6 +319,30 @@ impl CopilotRuntime {
                 "github_copilot_oauth requires source.kind = managed_store; for an \
                  operator-supplied GitHub token use auth_method = \"github_copilot_token\""
                     .to_string(),
+            ));
+        }
+        // A command source's declared lifetime must outlast the AuthMachine's
+        // refresh window, which starts that long before the lifetime ends:
+        // an interval inside it would run the command and look the account
+        // up again on every request. Refused, never clamped.
+        if mode == CopilotCredentialMode::OperatorToken
+            && let CredentialSourceSpec::Command {
+                refresh_interval_ms: Some(interval_ms),
+                ..
+            } = &binding.auth_profile().source
+            && *interval_ms <= OPERATOR_COMMAND_REFRESH_INTERVAL_FLOOR_MS
+        {
+            return Err(ProviderAuthError::Binding(
+                ProviderBindingError::UnsupportedCombination {
+                    backend: meerkat_core::provider_matrix::OpenAiBackendKind::Copilot
+                        .as_str()
+                        .to_string(),
+                    auth: format!(
+                        "github_copilot_token with a command refresh_interval_ms of \
+                         {interval_ms}, at or below the {OPERATOR_COMMAND_REFRESH_INTERVAL_FLOOR_MS} \
+                         ms refresh window"
+                    ),
+                },
             ));
         }
         let Some(persistence) = env.provider_auth_persistence() else {
@@ -5536,6 +5565,47 @@ mod tests {
             assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
             assert_eq!(harness.transport.request_count(), 4);
             assert_eq!(other_transport.request_count(), 1);
+        }
+
+        /// A command source's `refresh_interval_ms` at or below the
+        /// AuthMachine's refresh window would run the command and look the
+        /// account up again on every request: it is a typed binding refusal,
+        /// before the command runs, any request is made or the lease moves.
+        #[tokio::test]
+        async fn command_refresh_interval_inside_the_refresh_window_is_refused() {
+            for interval_ms in [500, 30_000, AUTH_LEASE_TTL_REFRESH_WINDOW_SECS * 1000] {
+                let harness = Harness::new(std::iter::empty());
+                let source = CredentialSourceSpec::Command {
+                    program: "/nonexistent/mint-copilot-token".into(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                    timeout_ms: 1_000,
+                    refresh_interval_ms: Some(interval_ms),
+                };
+
+                let refused = harness
+                    .resolve_from(CopilotProviderRoute::OpenAi, source)
+                    .await
+                    .err()
+                    .expect("the interval is refused");
+
+                assert!(
+                    matches!(
+                        refused,
+                        ProviderAuthError::Binding(
+                            ProviderBindingError::UnsupportedCombination { .. }
+                        )
+                    ),
+                    "{interval_ms}: {refused:?}"
+                );
+                assert!(
+                    refused.to_string().contains("refresh_interval_ms"),
+                    "{refused}"
+                );
+                assert_eq!(harness.transport.request_count(), 0);
+                assert_eq!(harness.operator.lease().generation, 0, "no lease moved");
+            }
         }
 
         /// T4: GitHub refusing the token itself moves the shared account to

@@ -27,8 +27,7 @@ use meerkat_core::{
     HttpAuthorizationResponseAction, HttpAuthorizer, Provider,
 };
 use meerkat_llm_core::provider_runtime::{
-    ProviderAuthError, ProviderBindingError, ProviderClientError, ResolverEnvironment,
-    ValidatedBinding,
+    ProviderAuthError, ProviderClientError, ResolverEnvironment, ValidatedBinding,
 };
 use parking_lot::{Mutex, RwLock};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -343,18 +342,7 @@ impl CopilotRuntime {
             } = &binding.auth_profile().source
             && *interval_ms <= OPERATOR_COMMAND_REFRESH_INTERVAL_FLOOR_MS
         {
-            return Err(ProviderAuthError::Binding(
-                ProviderBindingError::UnsupportedCombination {
-                    backend: meerkat_core::provider_matrix::OpenAiBackendKind::Copilot
-                        .as_str()
-                        .to_string(),
-                    auth: format!(
-                        "github_copilot_token with a command refresh_interval_ms of \
-                         {interval_ms}, at or below the {OPERATOR_COMMAND_REFRESH_INTERVAL_FLOOR_MS} \
-                         ms refresh window"
-                    ),
-                },
-            ));
+            return Err(short_command_refresh_interval_refusal());
         }
         let Some(persistence) = env.provider_auth_persistence() else {
             return Err(ProviderAuthError::SourceResolutionFailed(
@@ -2824,6 +2812,25 @@ fn classic_personal_access_token_refusal() -> ProviderAuthError {
         auth: GitHubTokenKind::ClassicPersonalAccessToken
             .as_str()
             .to_string(),
+    })
+}
+
+/// The `auth` an operator-token route's command source is refused with when
+/// its `refresh_interval_ms` ends inside the AuthMachine's refresh window.
+const COMMAND_REFRESH_INTERVAL_WITHIN_REFRESH_WINDOW: &str =
+    "command_refresh_interval_within_refresh_window";
+
+/// A command source whose declared lifetime ends inside the AuthMachine's
+/// refresh window is refused before it runs, typed as the classic-token
+/// refusal is (`unsupported_combination`): its token would be due for a
+/// re-run as soon as it is published, so the command would run, and the
+/// account be looked up again, on every request.
+fn short_command_refresh_interval_refusal() -> ProviderAuthError {
+    ProviderAuthError::Auth(AuthError::UnsupportedCombination {
+        backend: meerkat_core::provider_matrix::OpenAiBackendKind::Copilot
+            .as_str()
+            .to_string(),
+        auth: COMMAND_REFRESH_INTERVAL_WITHIN_REFRESH_WINDOW.to_string(),
     })
 }
 
@@ -5846,8 +5853,9 @@ mod tests {
 
         /// A command source's `refresh_interval_ms` at or below the
         /// AuthMachine's refresh window would run the command and look the
-        /// account up again on every request: it is a typed binding refusal,
-        /// before the command runs, any request is made or the lease moves.
+        /// account up again on every request: it is refused as
+        /// `unsupported_combination`, before the command runs, any request is
+        /// made or the lease moves.
         #[tokio::test]
         async fn command_refresh_interval_inside_the_refresh_window_is_refused() {
             for interval_ms in [500, 30_000, AUTH_LEASE_TTL_REFRESH_WINDOW_SECS * 1000] {
@@ -5867,22 +5875,57 @@ mod tests {
                     .err()
                     .expect("the interval is refused");
 
-                assert!(
-                    matches!(
-                        refused,
-                        ProviderAuthError::Binding(
-                            ProviderBindingError::UnsupportedCombination { .. }
-                        )
-                    ),
-                    "{interval_ms}: {refused:?}"
-                );
-                assert!(
-                    refused.to_string().contains("refresh_interval_ms"),
-                    "{refused}"
+                assert_eq!(
+                    refused,
+                    ProviderAuthError::Auth(AuthError::UnsupportedCombination {
+                        backend: "copilot".to_string(),
+                        auth: "command_refresh_interval_within_refresh_window".to_string(),
+                    }),
+                    "{interval_ms}"
                 );
                 assert_eq!(harness.transport.request_count(), 0);
                 assert_eq!(harness.operator.lease().generation, 0, "no lease moved");
             }
+        }
+
+        /// The interval refusal surfaces typed, as the classic-token refusal
+        /// does: the authorizer's `AuthError` (and so every surface's error
+        /// kind) is `unsupported_combination` naming the backend and the
+        /// refused combination, not a generic refresh failure.
+        #[tokio::test]
+        async fn command_refresh_interval_refusal_surfaces_typed() {
+            let harness = Harness::new(std::iter::empty());
+            let refused = harness
+                .resolve_from(
+                    CopilotProviderRoute::Gemini,
+                    CredentialSourceSpec::Command {
+                        program: "/nonexistent/mint-copilot-token".into(),
+                        args: Vec::new(),
+                        cwd: None,
+                        env: BTreeMap::new(),
+                        timeout_ms: 1_000,
+                        refresh_interval_ms: Some(60_000),
+                    },
+                )
+                .await
+                .err()
+                .expect("the interval is refused");
+
+            let auth = auth_error_from_provider(refused);
+            assert_eq!(auth.kind().as_str(), "unsupported_combination");
+            assert_eq!(
+                serde_json::to_value(&auth).expect("AuthError JSON")["kind"],
+                "unsupported_combination"
+            );
+            assert!(
+                matches!(
+                    &auth,
+                    AuthError::UnsupportedCombination { backend, auth: combination }
+                        if backend == "copilot"
+                            && combination == "command_refresh_interval_within_refresh_window"
+                ),
+                "{auth:?}"
+            );
         }
 
         /// T4: GitHub refusing the token itself moves the shared account to

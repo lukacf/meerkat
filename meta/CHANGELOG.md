@@ -92,12 +92,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   spawned, and a rule on the bare name (`ops-lead`) no longer reaches the
   members another runtime's agent of that name spawned.
 - `meta/retire` on an identity-first gateway retires a member that no
-  identity of the gateway holds (a Console side chat, a member made on the
-  worker plane), on the Console and on the stdio gateway: it leaves the
-  roster. Before, the identity runtime released such a member in place and
-  answered success, so a closed side chat stayed listed.
-  `IdentityRuntime::retire` now refuses a name the runtime does not hold
-  (`UnknownIdentity`), as its respawn, reset and delete do.
+  identity of the gateway holds and no host adopted (a Console side chat, a
+  member made on the worker plane), on the Console and on the stdio gateway:
+  Core's retire removes it from the roster, with its `spawned_by`
+  descendants. Before, the identity runtime released such a member in place
+  and answered success, so a closed side chat stayed listed.
+  `IdentityRuntime::retire` and `retire_tracked`, and
+  `PublicIdentityRuntime::retire_tracked`, refuse a host-adopted identity
+  first (`IdentityHostAdopted`), held or not, then a name the runtime does
+  not hold (`UnknownIdentity`), as delete does; the host's retired-member
+  hook is not called for such a name.
 
 ### Known limitations
 

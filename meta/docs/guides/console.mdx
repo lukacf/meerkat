@@ -978,8 +978,10 @@ Primary RPC methods on `/console/rpc`:
   `agent.respawn` action.
 - `meta/retire`, `meta/respawn`, `meta/reset`, and `meta/reset_all` -
   operator lifecycle actions. `meta/retire` releases the member, which stays
-  seated on its session at its generation. `reset_all` resets every identity
-  the identity runtime knows, whatever its state (generation advance, one
+  seated on its session at its generation. A member that no identity holds
+  and no host adopted, such as a side chat, is retired by Core instead: it
+  leaves the roster with the members it spawned. `reset_all` resets every
+  identity the identity runtime knows, whatever its state (generation advance, one
   `identity_reset` lifecycle frame each, listed under `reset`): each reset is
   Core's rotation, which seats a `dormant` identity Core holds no member for
   on a fresh session too, and starts a `broken` one over. It retires only

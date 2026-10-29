@@ -1550,6 +1550,11 @@ async fn closing_a_restored_side_chat_on_an_identity_first_console_retires_it() 
     }));
     let closed = close_when_idle(&runtime, &identity_runtime, "alpha-side").await;
     assert!(closed["error"].is_null(), "closed: {closed:#?}");
+    assert_eq!(
+        closed["result"],
+        json!({ "identity": "alpha-side" }),
+        "the live path answers, with no cleanup_warning: {closed:#?}"
+    );
     assert!(
         runtime.handle().get_member(&side_chat).await?.is_none(),
         "the closed side chat leaves the roster: {closed:#?}"

@@ -7896,13 +7896,15 @@ impl IdentityRuntime {
     /// observes the generation actually retired, even when this request had
     /// waited behind a concurrent reset.
     ///
-    /// An identity this runtime does not hold is refused
-    /// ([`IdentityRuntimeError::UnknownIdentity`]) before Core is read, as
-    /// respawn and delete refuse it: a member Core holds under the same name
-    /// (one a host or the console made directly, a console side chat among
-    /// them) is not the identity's, and releasing it would answer success
-    /// for a retire that retired nothing. The caller retires such a member
-    /// itself.
+    /// Under the lifecycle lock, as delete does, after the expected alias's
+    /// check: a host-adopted identity is refused
+    /// ([`IdentityRuntimeError::IdentityHostAdopted`]), whether or not this
+    /// runtime holds it; then an identity this runtime does not hold
+    /// ([`IdentityRuntimeError::UnknownIdentity`]), before Core's member is
+    /// touched: a member Core holds under the same name (one a host or the
+    /// console made directly, a console side chat among them) is not the
+    /// identity's, and releasing it would answer success for a retire that
+    /// retired nothing. The caller retires such a member itself.
     pub(crate) async fn retire_and_cleanup_live_members_tracked<T, F, Fut>(
         self: &Arc<Self>,
         identity: &AgentIdentity,
@@ -7921,13 +7923,14 @@ impl IdentityRuntime {
             let (retired, cleaned) = {
                 let lifecycle_lock = runtime.lifecycle_lock_for(&identity).await;
                 let _lifecycle_guard = lifecycle_lock.lock().await;
-                if !runtime.entries.read().await.contains_key(&identity) {
-                    return Err(IdentityRuntimeError::UnknownIdentity(identity));
-                }
                 if let Some(expected_alias) = expected_alias.as_deref() {
                     runtime
                         .ensure_expected_member_alias_current(&identity, expected_alias)
                         .await?;
+                }
+                runtime.refuse_host_adopted(&identity).await?;
+                if !runtime.entries.read().await.contains_key(&identity) {
+                    return Err(IdentityRuntimeError::UnknownIdentity(identity));
                 }
                 let retired_alias = runtime
                     .core_live_member(&identity)
@@ -12394,15 +12397,17 @@ impl IdentityRuntime {
     /// scope the host captured with [`Self::capture_delivery_scope`].
     ///
     /// Cancellation-safe, like [`Self::retire_tracked`], and with its
-    /// semantics: Core releases the live materialization of the incarnation
+    /// release: Core releases the live materialization of the incarnation
     /// the scope names and keeps the identity seated on the same session at
     /// the same generation, so the scope, and every scope saved for that
     /// incarnation, stays valid, and the next delivery materializes the
-    /// member again. Under the identity's lifecycle lock Meta checks the
-    /// scope against the incarnation Core holds now, and runs an ordinary
-    /// retire's memory hooks before the release, only while the scope names
-    /// the live member. Meta holds no lease and writes no continuity record
-    /// for it.
+    /// member again. Unlike [`Self::retire_tracked`], it does not refuse a
+    /// name this runtime does not hold: the scope, captured from Core, names
+    /// the one incarnation it releases. Under the identity's lifecycle lock
+    /// Meta checks the scope against the incarnation Core holds now, and runs
+    /// an ordinary retire's memory hooks before the release, only while the
+    /// scope names the live member. Meta holds no lease and writes no
+    /// continuity record for it.
     ///
     /// Returns the Core fence of the incarnation the scope names. `Ok` also
     /// answers a scope no incarnation of the identity is current at, which
@@ -13508,10 +13513,12 @@ impl IdentityRuntime {
 
     /// Retire an identity: Core releases its member's live materialization.
     /// The identity stays a member of Core's mob, on the same session at the
-    /// same generation, and its next delivery materializes it again. An
-    /// identity this runtime does not hold is refused
-    /// ([`IdentityRuntimeError::UnknownIdentity`]) before Core is read: a
-    /// member Core holds under the same name is not the identity's.
+    /// same generation, and its next delivery materializes it again. As
+    /// delete does, a host-adopted identity is refused first
+    /// ([`IdentityRuntimeError::IdentityHostAdopted`]), then an identity this
+    /// runtime does not hold ([`IdentityRuntimeError::UnknownIdentity`]),
+    /// before Core's member is touched: a member Core holds under the same
+    /// name is not the identity's.
     pub async fn retire(&self, identity: &AgentIdentity) -> Result<(), IdentityRuntimeError> {
         self.retire_with_expected_member_alias(identity, None).await
     }
@@ -13524,12 +13531,13 @@ impl IdentityRuntime {
         let retired = {
             let lifecycle_lock = self.lifecycle_lock_for(identity).await;
             let _lifecycle_guard = lifecycle_lock.lock().await;
-            if !self.entries.read().await.contains_key(identity) {
-                return Err(IdentityRuntimeError::UnknownIdentity(identity.clone()));
-            }
             if let Some(expected_alias) = expected_alias {
                 self.ensure_expected_member_alias_current(identity, expected_alias)
                     .await?;
+            }
+            self.refuse_host_adopted(identity).await?;
+            if !self.entries.read().await.contains_key(identity) {
+                return Err(IdentityRuntimeError::UnknownIdentity(identity.clone()));
             }
             let mut retiring = self
                 .retiring_incarnation(identity, super::types::RetiredIdentityCause::Retire)
@@ -18231,6 +18239,81 @@ mod completion_wait_tests {
         assert!(
             matches!(outcome, CompletionWait::Retiring(_)),
             "{outcome:?}"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod retire_held_name_tests {
+    use super::*;
+    use crate::identity_first::core_test_bridge::{CoreReadsBridge, bind_live, register_live};
+    use crate::identity_first::{LocalContinuityStore, LocalLeaseProvider};
+
+    fn spec(identity: &AgentIdentity) -> DurableAgentSpec {
+        DurableAgentSpec {
+            identity: identity.clone(),
+            profile: meerkat_mob::ProfileName::from("worker"),
+            addressability: AgentAddressability::Addressable,
+            display_name: None,
+            labels: BTreeMap::new(),
+            context: None,
+            additional_instructions: Vec::new(),
+            initial_message: None,
+            runtime_mode_override: None,
+            backend: None,
+            binding: None,
+            placement: None,
+        }
+    }
+
+    /// `retire` and `retire_tracked` refuse a name this runtime does not
+    /// hold, though Core holds a member under it: they answer
+    /// `UnknownIdentity` and Core releases nothing. The retire of an identity
+    /// the runtime holds still releases its member.
+    #[tokio::test]
+    async fn a_retire_of_a_name_the_runtime_does_not_hold_releases_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bridge = Arc::new(CoreReadsBridge::default());
+        let session_bridge: Arc<dyn SessionBridge> = bridge.clone();
+        let runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: "retire-held-name-test".to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(session_bridge),
+            default_timeout: None,
+        }));
+        let unheld = AgentIdentity::parse("agent:made-directly")?;
+        bind_live(
+            &bridge.core,
+            &unheld,
+            &meerkat_mob::ProfileName::from("worker"),
+            1,
+            Some(SessionId::new()),
+        )?;
+        for (verb, refused) in [
+            ("retire", runtime.retire(&unheld).await),
+            ("retire_tracked", runtime.retire_tracked(&unheld).await),
+        ] {
+            assert!(
+                matches!(
+                    &refused,
+                    Err(IdentityRuntimeError::UnknownIdentity(name)) if *name == unheld
+                ),
+                "{verb}: {refused:?}"
+            );
+        }
+        assert!(bridge.releases().is_empty(), "Core released nothing");
+
+        let held = AgentIdentity::parse("agent:held")?;
+        register_live(&runtime, &bridge.core, spec(&held), 1, SessionId::new()).await?;
+        runtime.retire(&held).await?;
+        assert_eq!(
+            bridge.releases(),
+            vec![held],
+            "the retire of an identity the runtime holds releases its member"
         );
         Ok(())
     }

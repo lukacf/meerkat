@@ -274,7 +274,7 @@ errors. SDKs surface it on `RpcError.data`.
 | `-32051` | Core cannot resume the identity's last session while Meta seats the identity on it (its first seat on a session, a seat on its last session after Core retired it, or the one-time revival of an archived session): the session is archived and its lifecycle refuses revival, or Core holds durable authority or lifecycle rows for it without a session body it can load. Final: nothing was seated, the identity reads `broken` unless Core still holds it as a member, and `meta/delete_identity` starts it over. A member Core already holds and cannot restore is Core's to settle: Core holds it Broken (the identity reads `broken` with no `wake_refusal`), and a delivery to it is refused by Core's wake. A session Core holds no copy of is never replaced by a fresh one: Meta starts no fresh session in its place (a delivery answers `-32052` `identity_session_absent`, and a first-boot `Resume` row `-32014` `first_boot_row_refused`). `IdentityUnresumableError` in both SDKs. | `{kind: "identity_unresumable", identity, session_id, reason, remedy: "delete_identity", retryable: false}`; `reason` is `archived_not_revivable` or `contradictory_durable_authority` |
 | `-32052` | Core's history for the identity cannot be read now, or the wake failed in a way a retry can clear: nothing was spawned. This includes a send or dispatch to an identity a host adopted whose intent declares a live member that Core has not brought live yet (after a restart, until the previous process's identity lease expires): Meta never wakes it and queues nothing, and the same request, sent again, is delivered once Core holds the member. Or a delivery reached a member whose session Core holds no durable copy of: nothing was delivered, Core settles the member, and Meta starts no fresh session in its place; deliver again. Or a send, dispatch or peer message reached a member of a stopped mob, a live member included (a peer sender sees `peer_wake_refused` with the reason `mob_not_running`). Or `meta/retire` reached a member that is being woken or has work in flight: Core does not release it now, nothing was interrupted, and the retire succeeds once the member is quiescent. Or Core refused a `meta/reset` or `meta/delete_identity` before any of it started (the mob is not running, or another lifecycle operation of the member is in progress): nothing was retired, the rotation is not recorded, and no later start carries it out; ask again. `IdentityHistoryUnavailableError` in both SDKs. | `{kind: "identity_history_unavailable", identity?, retryable: true}` (`identity` when the refusal names one), `{kind: "identity_wake_retryable", identity, session_id, retryable: true}` (`session_id` may be `null`) or `{kind: "identity_session_absent", identity, session_id, retryable: true}` |
 | `-32053` | A host adopted the identity (Core holds an identity intent row for it), so Meta's lifecycle verbs leave it alone. A send or dispatch to it answers `-32053` only when its intent declares no live member, when Core reports its convergence blocked (`repair_blocked`, `quarantined`, `tombstoned`, `drain_blocked`), or when Meta cannot read one of them; otherwise it answers `-32052`. `IdentityHostAdoptedError` in both SDKs. | `{kind: "identity_host_adopted", identity, retryable: false}` |
-| `-32055` | `meta/fork_member` (Console) refused a side chat. `kind: "fork_source_unavailable"` when the agent cannot be forked now: `cause` is `running` (it is working or owes queued work; fork again when it is idle), `no_session`, `remote_read_unavailable` or `authority_unavailable` (its alias could not be pinned to a current identity). `kind: "unwired_seat_unavailable"` when the mob definition wires the agent's role, so the runtime would wire the side chat to peers when it seats it (`wiring.rule` `auto_wire_orchestrator` with `orchestrator_role`, or `role_wiring` with `peer_role`). Nothing was forked, except when a seated side chat had peer edges anyway (`wiring.rule` `seated_with_peers` with `peers`): it is retired again, and `retired` says whether that succeeded. | `{kind, source_member_id?, cause?, role?, wiring?, agent_identity?, retired?}` |
+| `-32055` | `meta/fork_member` (Console) refused a side chat. `kind: "fork_source_unavailable"` when the agent cannot be forked now, and nothing was forked: `cause` is `running` (it is working or owes queued work; fork again when it is idle), `no_session` (it has no conversation: it was seated and has never run, and it is not woken for the fork), `remote_read_unavailable` or `authority_unavailable` (its alias could not be pinned to a current identity). `kind: "unwired_seat_unavailable"` (`wiring.rule` `seated_with_peers` with `peers`) when a seated side chat had peer edges after all: it is retired again, and `retired` says whether that succeeded. | `{kind, source_member_id?, cause?, wiring?, agent_identity?, retired?}` |
 | `-32015` | `meta/bound_member_transcript` target session is live/running (transcript surgery only supports reject-while-active); quiesce the member first (retire or park it), then retry. Also `meta/member_activate_instruction` refused at its safe boundary (runtime work still queued at the turn boundary, open live channel, no materialized session, fenced-store backoff); retry at your own next boundary | `meta/member_activate_instruction`: `{class: "admission", instruction_activation_code}` |
 | `-32016` | operator verb exists but its gateway wiring is absent (no compaction-floor registry / no concrete transcript-edit service threaded into the RPC context) | none |
 | `-32017` | a covered unified/stdin read arm exhausted its deadline. The member's meerkat session task and the mob actor loop are strict sequential command loops, so a read issued while the member is mid-turn queues behind that turn instead of degrading; the wrapped arms (`identity/resolved_tools`, `identity/routing_status`, `member_status`, `list_members`, `get_member`, `find_members`, `flow_status`, `list_runs`) give up after the read budget and say so. The read is abandoned, never half-applied. Budget defaults to 30s, overridable with `META_CONSOLE_READ_TIMEOUT_SECS` (clamped to 1..3600). The independent HTTP console dispatcher does not apply this wrapper. | `{kind: "console_read_timeout", arm, awaiting, timeout_secs}` |
@@ -608,24 +608,33 @@ touched.
 </Accordion>
 
 The fork takes the agent's transcript as it is now; a `message_count` prefix is
-refused with `-32602`. It needs `agent.spawn` for `agent_identity` and
-`agent.view` for the agent, and is refused on a read-only console (`-32010`)
-and on a candidate launch (`-32047`).
+refused with `-32602`. It needs `agent.spawn` for `agent_identity`, and
+`agent.view` and `agent.send` for the agent: a side chat runs with the
+agent's tools, so a caller who may only read the agent cannot fork it. A
+refused check answers `-32030` naming the action. The fork is refused on a
+read-only console (`-32010`) and on a candidate launch (`-32047`). An agent
+that has never run has no conversation to fork and is refused (`-32055`,
+cause `no_session`) without being woken; a dormant agent that has run forks
+from its stored session and stays dormant.
 
 The side chat:
 
 - takes the agent's role, profile and model overrides and runtime mode, and
   through the fork its application labels, context and tool overlay: it runs
   with the agent's tools;
-- has the agent's audience: the access rules follow a side chat to the
-  agent, as they follow a spawned member to its spawner (see
-  [Spawn-lineage inheritance](/concepts/access-control#spawn-lineage-inheritance)).
-  A rule that matches the agent, by identity, role or labels, covers its side
-  chats for every action (`agent.view`, `agent.send`, `agent.retire`, ...), a
-  rule on another identity does not, and a deny on the agent hides them;
-- is never wired to a peer. A role the mob definition wires is refused
-  (`-32055`, `unwired_seat_unavailable`), and the definition-wiring reconcile
-  leaves side chats out;
+- has exactly the agent's audience: every access decision on a side chat is
+  the agent's (see
+  [Side chats](/concepts/access-control#side-chats)). A rule that matches
+  the agent, by identity, role or labels, or the agent's own lineage, covers
+  its side chats for every action (`agent.view`, `agent.send`,
+  `agent.retire`, ...), a deny on any of them hides them, and a rule that
+  matches only the side chat (its name, its role or a label only it carries)
+  grants nothing;
+- is never wired to a peer, whatever the agent's role: the runtime seats it
+  exempt from the mob definition's wiring rules (`auto_wire_orchestrator`,
+  `role_wiring`), so it gets no edge they declare and no member seated,
+  spawned or rotated after it is wired to it; the definition-wiring
+  reconcile leaves side chats out too;
 - is kept until it is retired (`meta/retire` or `meta/retire_member`): the
   fork sets an explicit keep-until-retired idle-retire override, so no idle
   sweep retires it. It survives a gateway restart; the runtime may unload it
@@ -634,8 +643,12 @@ The side chat:
 - names the agent in its console labels, `side_chat_of` (the agent's
   identity) and `side_chat_of_session` (the session it was forked from), and
   in its experience sidebar row's `side_chat_of`. They are read from
-  Meerkat's durable roster (the member's fork source); either label supplied
-  any other way, in spawn or roster labels, is dropped;
+  Meerkat's durable roster (the member's fork source), on the experience, on
+  the list calls (`meta/list_members`, `meta/find_members`,
+  `meta/console/list_identities`, `GET /console/identities`) and on event
+  streams; either label supplied any other way, in spawn or roster labels or
+  an identity's declaration, is dropped. A multi-runtime Console names the
+  agent with its runtime's prefix, as it names the side chat;
 - does not take the agent's own console flags: where the agent carries them,
   `addressable`, `singleton`, `console_watched`, `console_degraded`,
   `console_degraded_reason`, `console_alert_level`, `console_inbox_count`
@@ -667,17 +680,28 @@ Result:
 }
 ```
 
-Errors: `-32055` (typed refusal, see the error codes above), `-32037`,
-`-32602` (a missing or invalid param, an unknown agent, a prefix), `-32004`
-and `-32603`. A fork that
-committed its session but could not seat the side chat keeps Meerkat's
-`fork_member_provision_failed` data with the `fork_session_id`.
+Errors: `-32055` (typed refusal, see the error codes above), `-32030`
+(`agent.view` or `agent.send` refused on the agent), `-32037`, `-32602` (a
+missing or invalid param, an unknown agent, a prefix, or, under
+`runtime_options.member_auth_binding`, an agent whose session records
+another binding or none: `member_auth_binding_uncarried`, since the runtime
+seats a side chat from its agent's records, nothing forked), `-32004` and
+`-32603`. A fork that committed its session but could not seat the side chat
+keeps Meerkat's `fork_member_provision_failed` data with the
+`fork_session_id`.
 
-Known limitation: a side chat is in no declared roster. A host that
-reconciles the whole mob against a declared roster (`UnifiedRuntime::reconcile`
-on a runtime without identity-first authority) retires its side chats there,
-as it retires every member the roster does not name. The stock gateway is
-identity-first, does not reconcile that way, and keeps them.
+Known limitations:
+
+- A side chat is in no declared roster. A host that reconciles the whole mob
+  against a declared roster (`UnifiedRuntime::reconcile` on a runtime
+  without identity-first authority) retires its side chats there, as it
+  retires every member the roster does not name. The stock gateway is
+  identity-first, does not reconcile that way, and keeps them.
+- A side chat forked before a launch named
+  `runtime_options.member_auth_binding` is refused at its rebuild under that
+  launch (`member_auth_binding_uncarried`), as is every fork seated before
+  the launch named the binding: the runtime rebuilds it from its own
+  records, which carry no binding or another one. Close it and fork again.
 
 ### `meta/ensure_member`
 

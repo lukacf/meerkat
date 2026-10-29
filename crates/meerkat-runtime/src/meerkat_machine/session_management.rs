@@ -13025,6 +13025,10 @@ Ok::<(), RuntimeDriverError>(())
         if let Some(entry) = removed_entry.as_ref() {
             entry.post_commit_hooks.shutdown();
             entry.notify_registration_removed();
+            // The session is no longer served: its grants' deadlines are
+            // settled by the next read, boundary or dispatch, wherever it is
+            // served next.
+            self.tool_grant_deadlines.disarm(session_id);
         }
         drop(sessions);
         drop(mutation_guard);

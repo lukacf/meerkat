@@ -11116,6 +11116,102 @@ pub trait RuntimeStore: Send + Sync {
             "revoke_mob_host_binding".into(),
         ))
     }
+
+    // -----------------------------------------------------------------------
+    // Scoped tool grants (`runtime-tool-grants`)
+    // -----------------------------------------------------------------------
+    //
+    // Raw record-JSON accessors only: the typed row (one grant's descriptor
+    // and its generated `ToolGrantLifecycleMachine` state) and the audit
+    // vocabulary live in `crate::tool_grant`; this store never interprets
+    // the blobs. A grant row is filed under its subject's key, and each
+    // subject's audit rows are numbered 0, 1, 2, ... in append order. CAS
+    // compares the full stored row. The lifecycle audit rows a write carries
+    // commit in the same transaction as the row, or not at all.
+    //
+    // Every default answers `Unsupported`, so a store without grants still
+    // compiles; the grant service then refuses every grant, and a gated
+    // name stays closed. A decorator forwards these methods to the store it
+    // wraps.
+
+    /// Load one grant's row, if any.
+    async fn load_tool_grant(&self, grant_id: &str) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+        let _ = grant_id;
+        Err(RuntimeStoreError::Unsupported("load_tool_grant".into()))
+    }
+
+    /// Every grant row filed under `subject_key`, as `(grant_id, row)` in
+    /// grant id order. A subject with no grants reads as empty.
+    async fn list_tool_grants(
+        &self,
+        subject_key: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
+        let _ = subject_key;
+        Err(RuntimeStoreError::Unsupported("list_tool_grants".into()))
+    }
+
+    /// Insert `grant_id`'s row under `subject_key` iff no row has that id,
+    /// appending `audit_rows` to the subject's log in the same transaction.
+    /// Returns whether the row was inserted; when it was not, nothing was
+    /// written.
+    async fn put_tool_grant_if_absent(
+        &self,
+        grant_id: &str,
+        subject_key: &str,
+        record_json: &[u8],
+        audit_rows: &[Vec<u8>],
+    ) -> Result<bool, RuntimeStoreError> {
+        let _ = (grant_id, subject_key, record_json, audit_rows);
+        Err(RuntimeStoreError::Unsupported(
+            "put_tool_grant_if_absent".into(),
+        ))
+    }
+
+    /// Replace `grant_id`'s row iff it is filed under `subject_key` and
+    /// equals `expected_json`, appending `audit_rows` to the subject's log in
+    /// the same transaction. Returns whether the swap applied; when it did
+    /// not, nothing was written.
+    async fn compare_and_put_tool_grant(
+        &self,
+        grant_id: &str,
+        subject_key: &str,
+        expected_json: &[u8],
+        next_json: &[u8],
+        audit_rows: &[Vec<u8>],
+    ) -> Result<bool, RuntimeStoreError> {
+        let _ = (grant_id, subject_key, expected_json, next_json, audit_rows);
+        Err(RuntimeStoreError::Unsupported(
+            "compare_and_put_tool_grant".into(),
+        ))
+    }
+
+    /// Append `audit_rows` to `subject_key`'s log, after every row it holds
+    /// and in order, in one transaction. An empty append writes nothing.
+    async fn append_tool_grant_audit(
+        &self,
+        subject_key: &str,
+        audit_rows: &[Vec<u8>],
+    ) -> Result<(), RuntimeStoreError> {
+        let _ = (subject_key, audit_rows);
+        Err(RuntimeStoreError::Unsupported(
+            "append_tool_grant_audit".into(),
+        ))
+    }
+
+    /// At most `limit` of `subject_key`'s audit rows, as `(sequence, row)`
+    /// in sequence order: those after `after` when it is given, else from
+    /// the first. A subject with no rows reads as empty.
+    async fn read_tool_grant_audit(
+        &self,
+        subject_key: &str,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(u64, Vec<u8>)>, RuntimeStoreError> {
+        let _ = (subject_key, after, limit);
+        Err(RuntimeStoreError::Unsupported(
+            "read_tool_grant_audit".into(),
+        ))
+    }
 }
 
 pub use memory::InMemoryRuntimeStore;
@@ -11426,6 +11522,47 @@ mod runtime_store_write_fence_tests {
             matches!(read, Err(RuntimeStoreError::Unsupported(_))),
             "{read:?}"
         );
+    }
+
+    /// A store that does not implement scoped tool grants answers
+    /// `Unsupported` for every grant method: the provided defaults, which a
+    /// decorator that forwards nothing keeps even when the store it wraps
+    /// implements them.
+    #[tokio::test]
+    async fn a_store_without_tool_grants_answers_unsupported() {
+        let store = DefaultFenceDecorator {
+            inner: InMemoryRuntimeStore::new(),
+        };
+        assert!(matches!(
+            store.load_tool_grant("g1").await,
+            Err(RuntimeStoreError::Unsupported(_))
+        ));
+        assert!(matches!(
+            store.list_tool_grants("s:a").await,
+            Err(RuntimeStoreError::Unsupported(_))
+        ));
+        assert!(matches!(
+            store
+                .put_tool_grant_if_absent("g1", "s:a", b"one", &[])
+                .await,
+            Err(RuntimeStoreError::Unsupported(_))
+        ));
+        assert!(matches!(
+            store
+                .compare_and_put_tool_grant("g1", "s:a", b"one", b"two", &[])
+                .await,
+            Err(RuntimeStoreError::Unsupported(_))
+        ));
+        assert!(matches!(
+            store
+                .append_tool_grant_audit("s:a", &[b"row".to_vec()])
+                .await,
+            Err(RuntimeStoreError::Unsupported(_))
+        ));
+        assert!(matches!(
+            store.read_tool_grant_audit("s:a", None, 1).await,
+            Err(RuntimeStoreError::Unsupported(_))
+        ));
     }
 
     /// A store that does not implement the whole-blob session import
@@ -13509,5 +13646,258 @@ mod recovery_disposition_pairing_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+pub(crate) mod tool_grant_store_tests {
+    use super::*;
+
+    fn rows(read: Vec<(u64, Vec<u8>)>) -> Vec<(u64, String)> {
+        read.into_iter()
+            .map(|(sequence, row)| (sequence, String::from_utf8(row).unwrap()))
+            .collect()
+    }
+
+    fn expected(rows: &[(u64, &str)]) -> Vec<(u64, String)> {
+        rows.iter()
+            .map(|(sequence, row)| (*sequence, (*row).to_string()))
+            .collect()
+    }
+
+    /// The scoped tool grant rows every store keeps: an insert iff absent
+    /// that carries its audit rows, a CAS on the full row (and its subject)
+    /// that writes nothing when it misses, a listing by subject, and an
+    /// append-only audit log numbered from 0 per subject, read with a cursor
+    /// and a limit. Run on a fresh store.
+    pub(crate) async fn tool_grant_rows_conform(store: &dyn RuntimeStore) {
+        assert_eq!(store.load_tool_grant("g1").await.unwrap(), None);
+        assert!(store.list_tool_grants("s:a").await.unwrap().is_empty());
+        assert!(
+            store
+                .read_tool_grant_audit("s:a", None, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        assert!(
+            store
+                .put_tool_grant_if_absent("g1", "s:a", b"one", &[b"granted-1".to_vec()])
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .put_tool_grant_if_absent("g1", "s:a", b"other", &[b"granted-again".to_vec()])
+                .await
+                .unwrap(),
+            "a grant id is inserted once, and a refused insert appends nothing"
+        );
+        assert!(
+            store
+                .put_tool_grant_if_absent("g2", "s:a", b"two", &[b"granted-2".to_vec()])
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .put_tool_grant_if_absent("g3", "s:b", b"three", &[])
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.load_tool_grant("g1").await.unwrap(),
+            Some(b"one".to_vec())
+        );
+        assert_eq!(
+            store.list_tool_grants("s:a").await.unwrap(),
+            vec![
+                ("g1".to_string(), b"one".to_vec()),
+                ("g2".to_string(), b"two".to_vec()),
+            ]
+        );
+        assert_eq!(
+            store.list_tool_grants("s:b").await.unwrap(),
+            vec![("g3".to_string(), b"three".to_vec())]
+        );
+
+        // A CAS against a stale row or another subject writes nothing, its
+        // audit rows included.
+        assert!(
+            !store
+                .compare_and_put_tool_grant("g1", "s:a", b"stale", b"next", &[b"x".to_vec()])
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .compare_and_put_tool_grant("g1", "s:b", b"one", b"next", &[b"x".to_vec()])
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .compare_and_put_tool_grant("g1", "s:a", b"one", b"next", &[b"expired-1".to_vec()])
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.load_tool_grant("g1").await.unwrap(),
+            Some(b"next".to_vec())
+        );
+
+        store
+            .append_tool_grant_audit("s:a", &[b"refused-1".to_vec(), b"refused-2".to_vec()])
+            .await
+            .unwrap();
+        store.append_tool_grant_audit("s:a", &[]).await.unwrap();
+        assert_eq!(
+            rows(store.read_tool_grant_audit("s:a", None, 10).await.unwrap()),
+            expected(&[
+                (0, "granted-1"),
+                (1, "granted-2"),
+                (2, "expired-1"),
+                (3, "refused-1"),
+                (4, "refused-2"),
+            ])
+        );
+        assert_eq!(
+            rows(
+                store
+                    .read_tool_grant_audit("s:a", Some(1), 2)
+                    .await
+                    .unwrap()
+            ),
+            expected(&[(2, "expired-1"), (3, "refused-1")])
+        );
+        assert!(
+            store
+                .read_tool_grant_audit("s:a", Some(4), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .read_tool_grant_audit("s:b", None, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "an insert without audit rows appends none"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_in_memory_store_keeps_tool_grant_rows_like_the_sqlite_store() {
+        tool_grant_rows_conform(&InMemoryRuntimeStore::new()).await;
+    }
+
+    /// The SQLite rows live in their own schema domain, which the first
+    /// grant write provisions: opening the store and reading grants
+    /// provision nothing. The rows outlive a reopen.
+    #[cfg(feature = "sqlite-store")]
+    #[tokio::test]
+    async fn tool_grant_domain_is_provisioned_by_the_first_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("runtime.sqlite3");
+        let ledger_version = |domain: &str| {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            meerkat_sqlite::domain_version(&conn, domain).unwrap()
+        };
+        let store = SqliteRuntimeStore::new(path.clone()).unwrap();
+        assert_eq!(store.load_tool_grant("g1").await.unwrap(), None);
+        assert!(store.list_tool_grants("s:a").await.unwrap().is_empty());
+        assert!(
+            store
+                .read_tool_grant_audit("s:a", None, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            ledger_version("runtime-tool-grants"),
+            None,
+            "opening and reading provision nothing"
+        );
+
+        tool_grant_rows_conform(&store).await;
+        assert_eq!(
+            ledger_version("runtime-tool-grants"),
+            Some(1),
+            "the first grant write provisioned the domain"
+        );
+        drop(store);
+
+        let reopened = SqliteRuntimeStore::new(path.clone()).unwrap();
+        assert_eq!(
+            reopened.load_tool_grant("g1").await.unwrap(),
+            Some(b"next".to_vec())
+        );
+        reopened
+            .append_tool_grant_audit("s:a", &[b"after-reopen".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .read_tool_grant_audit("s:a", Some(4), 10)
+                .await
+                .unwrap(),
+            vec![(5, b"after-reopen".to_vec())]
+        );
+    }
+
+    /// A file whose grant domain was provisioned still opens through the
+    /// runtime store's own domain alone, as a binary that does not know the
+    /// grant domain opens it: the runtime store's domain is unchanged, and
+    /// the grant rows stay for a binary that knows them.
+    #[cfg(feature = "sqlite-store")]
+    #[tokio::test]
+    async fn a_binary_without_the_domain_still_opens_the_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("runtime.sqlite3");
+        let runtime_store_version = {
+            let store = SqliteRuntimeStore::new(path.clone()).unwrap();
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let version = meerkat_sqlite::domain_version(&conn, "runtime-store").unwrap();
+            store
+                .put_tool_grant_if_absent("g1", "s:a", b"one", &[b"granted".to_vec()])
+                .await
+                .unwrap();
+            version
+        };
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            assert_eq!(
+                meerkat_sqlite::domain_version(&conn, "runtime-tool-grants").unwrap(),
+                Some(1)
+            );
+            assert_eq!(
+                meerkat_sqlite::domain_version(&conn, "runtime-store").unwrap(),
+                runtime_store_version,
+                "grant use leaves the runtime store's domain alone"
+            );
+        }
+
+        // What a binary without the grant domain does at open: preflight and
+        // migrate the runtime store's own domain, nothing else.
+        let mut conn = meerkat_sqlite::open_with(
+            &path,
+            meerkat_sqlite::ConnectionProfile::PRIMARY,
+            meerkat_sqlite::OpenOptions {
+                schema_preflight: &[&sqlite::RUNTIME_STORE_DOMAIN],
+                ..meerkat_sqlite::OpenOptions::default()
+            },
+        )
+        .unwrap();
+        meerkat_sqlite::apply_domain_migrations(&mut conn, &sqlite::RUNTIME_STORE_DOMAIN).unwrap();
+        drop(conn);
+
+        let reopened = SqliteRuntimeStore::new(path).unwrap();
+        assert_eq!(
+            reopened.load_tool_grant("g1").await.unwrap(),
+            Some(b"one".to_vec())
+        );
     }
 }

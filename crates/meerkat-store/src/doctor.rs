@@ -260,6 +260,10 @@ pub const KNOWN_LEDGER_DOMAINS: &[&str] = &[
     // in the runtime store's file; absent on realms that never made one, so
     // it is not in any expected-domain list either.
     "runtime-service-call-audit",
+    // Lazily provisioned by the first scoped tool grant write, in the
+    // runtime store's file; absent on realms that never wrote a grant, so
+    // it is not in any expected-domain list either.
+    "runtime-tool-grants",
     "workgraph",
     "jobs",
     "memory",

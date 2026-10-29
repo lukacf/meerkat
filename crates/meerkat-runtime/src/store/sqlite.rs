@@ -3077,6 +3077,68 @@ CREATE TABLE runtime_service_call_audit (
             retired_objects: &[],
         };
 
+    /// Scoped tool grants: one row per grant (its descriptor and its
+    /// generated `ToolGrantLifecycleMachine` state), filed under its
+    /// subject's key, and each subject's append-only audit log.
+    const CREATE_RUNTIME_TOOL_GRANTS_SCHEMA_SQL: &str = r"
+CREATE TABLE runtime_tool_grants (
+    grant_id TEXT PRIMARY KEY NOT NULL,
+    subject_key TEXT NOT NULL,
+    record_json BLOB NOT NULL
+);
+CREATE INDEX idx_runtime_tool_grants_subject ON runtime_tool_grants (subject_key);
+CREATE TABLE runtime_tool_grant_audit (
+    subject_key TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 0),
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (subject_key, sequence)
+)";
+
+    fn migration_0001_runtime_tool_grants(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        tx.execute_batch(CREATE_RUNTIME_TOOL_GRANTS_SCHEMA_SQL)
+    }
+
+    /// The scoped tool grants' own schema domain, beside
+    /// [`RUNTIME_STORE_DOMAIN`] in the runtime store's file.
+    ///
+    /// Like [`RUNTIME_SERVICE_CALL_AUDIT_DOMAIN`], it is NOT applied by
+    /// [`open_runtime_connection`]: the first grant write provisions it
+    /// ([`open_runtime_tool_grants_write_connection`]), so only a file where
+    /// a grant was written carries the domain row and its tables. A binary
+    /// that does not know the domain leaves it alone as a foreign co-tenant:
+    /// the runtime store's own domain is unchanged, and such a binary still
+    /// opens the file.
+    pub const RUNTIME_TOOL_GRANTS_DOMAIN: meerkat_sqlite::SchemaDomain =
+        meerkat_sqlite::SchemaDomain {
+            name: "runtime-tool-grants",
+            migrations: &[meerkat_sqlite::Migration {
+                version: 1,
+                name: "tool-grants",
+                apply: migration_0001_runtime_tool_grants,
+            }],
+            initialize_current: migration_0001_runtime_tool_grants,
+            allowed_existing_versions: &[1],
+            bridge_recoverable_versions: &[],
+            released_predecessors: &[],
+            owned_objects: &[
+                meerkat_sqlite::SchemaObject {
+                    kind: meerkat_sqlite::SchemaObjectKind::Table,
+                    name: "runtime_tool_grants",
+                },
+                meerkat_sqlite::SchemaObject {
+                    kind: meerkat_sqlite::SchemaObjectKind::Index,
+                    name: "idx_runtime_tool_grants_subject",
+                },
+                meerkat_sqlite::SchemaObject {
+                    kind: meerkat_sqlite::SchemaObjectKind::Table,
+                    name: "runtime_tool_grant_audit",
+                },
+            ],
+            retired_objects: &[],
+        };
+
     #[cfg(test)]
     mod schema_floor_tests {
         use super::*;
@@ -5457,6 +5519,103 @@ CREATE TABLE runtime_service_call_audit (
             conn,
             _guard: guard,
         })
+    }
+
+    /// Scoped tool grant read connection: `None` when the store's file or
+    /// the grant domain is absent, since a store where no grant was written
+    /// holds no rows. It never creates the store or provisions the domain.
+    fn open_runtime_tool_grants_read_connection(
+        path: &Path,
+    ) -> Result<Option<RuntimeConn>, RuntimeStoreError> {
+        if runtime_database_absent(path) {
+            meerkat_sqlite::OperationGuard::admit_missing_database(path)
+                .map_err(map_shared_sqlite_error)?;
+            return Ok(None);
+        }
+        let guard =
+            meerkat_sqlite::OperationGuard::for_database(path).map_err(map_shared_sqlite_error)?;
+        let conn = match meerkat_sqlite::open_with(
+            path,
+            meerkat_sqlite::ConnectionProfile::Primary { create: false },
+            meerkat_sqlite::OpenOptions {
+                schema_preflight: &[&RUNTIME_TOOL_GRANTS_DOMAIN],
+                ..meerkat_sqlite::OpenOptions::default()
+            },
+        ) {
+            Ok(conn) => conn,
+            // Removed between the check and the open: still no rows.
+            Err(_) if runtime_database_absent(path) => return Ok(None),
+            Err(error) => return Err(map_shared_sqlite_error(error)),
+        };
+        let version = meerkat_sqlite::preflight_domain_version(&conn, &RUNTIME_TOOL_GRANTS_DOMAIN)
+            .map_err(map_shared_sqlite_error)?;
+        Ok(version.map(|_| RuntimeConn {
+            conn,
+            _guard: guard,
+        }))
+    }
+
+    /// Scoped tool grant write connection: provisions the grant domain on
+    /// first use. This is the ONLY place the `runtime-tool-grants` ledger
+    /// row is stamped: writing a grant marks the file, opening a realm or
+    /// reading grants does not.
+    fn open_runtime_tool_grants_write_connection(
+        path: &Path,
+    ) -> Result<RuntimeConn, RuntimeStoreError> {
+        let guard =
+            meerkat_sqlite::OperationGuard::for_database(path).map_err(map_shared_sqlite_error)?;
+        let mut conn = meerkat_sqlite::open_with(
+            path,
+            meerkat_sqlite::ConnectionProfile::PRIMARY,
+            meerkat_sqlite::OpenOptions {
+                schema_preflight: &[&RUNTIME_TOOL_GRANTS_DOMAIN],
+                ..meerkat_sqlite::OpenOptions::default()
+            },
+        )
+        .map_err(map_shared_sqlite_error)?;
+        meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_TOOL_GRANTS_DOMAIN)
+            .map_err(map_shared_sqlite_error)?;
+        Ok(RuntimeConn {
+            conn,
+            _guard: guard,
+        })
+    }
+
+    /// Append `audit_rows` to `subject_key`'s scoped tool grant audit log
+    /// inside `tx`, after every row the subject holds.
+    fn append_tool_grant_audit_rows(
+        tx: &Transaction<'_>,
+        subject_key: &str,
+        audit_rows: &[Vec<u8>],
+    ) -> Result<(), RuntimeStoreError> {
+        if audit_rows.is_empty() {
+            return Ok(());
+        }
+        // The subject's next sequence, read in the write's own transaction:
+        // rows follow every row the subject holds, whichever call or process
+        // appended them.
+        let next: i64 = tx
+            .query_row(
+                r"
+                SELECT COALESCE(MAX(sequence) + 1, 0)
+                  FROM runtime_tool_grant_audit
+                 WHERE subject_key = ?1
+                ",
+                params![subject_key],
+                |row| row.get(0),
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        for (sequence, record_json) in (next..).zip(audit_rows) {
+            tx.execute(
+                r"
+                INSERT INTO runtime_tool_grant_audit (subject_key, sequence, record_json)
+                VALUES (?1, ?2, ?3)
+                ",
+                params![subject_key, sequence, record_json],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        }
+        Ok(())
     }
 
     #[track_caller]
@@ -16531,6 +16690,215 @@ ORDER BY runtime_id";
                         sequence,
                         observation,
                     ));
+                }
+                Ok(records)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn load_tool_grant(
+            &self,
+            grant_id: &str,
+        ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+            let path = self.path.clone();
+            let grant_id = grant_id.to_string();
+            spawn_blocking_holding_claim(move || {
+                let Some(conn) = open_runtime_tool_grants_read_connection(&path)? else {
+                    return Ok(None);
+                };
+                conn.query_row(
+                    r"
+                    SELECT record_json
+                      FROM runtime_tool_grants
+                     WHERE grant_id = ?1
+                    ",
+                    params![grant_id],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn list_tool_grants(
+            &self,
+            subject_key: &str,
+        ) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
+            let path = self.path.clone();
+            let subject_key = subject_key.to_string();
+            spawn_blocking_holding_claim(move || {
+                let Some(conn) = open_runtime_tool_grants_read_connection(&path)? else {
+                    return Ok(Vec::new());
+                };
+                let read_failed =
+                    |error: rusqlite::Error| RuntimeStoreError::ReadFailed(error.to_string());
+                let mut statement = conn
+                    .prepare(
+                        r"
+                        SELECT grant_id, record_json
+                          FROM runtime_tool_grants
+                         WHERE subject_key = ?1
+                         ORDER BY grant_id
+                        ",
+                    )
+                    .map_err(read_failed)?;
+                let rows = statement
+                    .query_map(params![subject_key], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(read_failed)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(read_failed)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn put_tool_grant_if_absent(
+            &self,
+            grant_id: &str,
+            subject_key: &str,
+            record_json: &[u8],
+            audit_rows: &[Vec<u8>],
+        ) -> Result<bool, RuntimeStoreError> {
+            let path = self.path.clone();
+            let grant_id = grant_id.to_string();
+            let subject_key = subject_key.to_string();
+            let record_json = record_json.to_vec();
+            let audit_rows = audit_rows.to_vec();
+            spawn_blocking_holding_claim(move || {
+                let mut conn = open_runtime_tool_grants_write_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let inserted = tx
+                    .execute(
+                        r"
+                        INSERT INTO runtime_tool_grants (grant_id, subject_key, record_json)
+                        VALUES (?1, ?2, ?3)
+                        ON CONFLICT (grant_id) DO NOTHING
+                        ",
+                        params![grant_id, subject_key, record_json],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                if inserted == 0 {
+                    return Ok(false);
+                }
+                append_tool_grant_audit_rows(&tx, &subject_key, &audit_rows)?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(true)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn compare_and_put_tool_grant(
+            &self,
+            grant_id: &str,
+            subject_key: &str,
+            expected_json: &[u8],
+            next_json: &[u8],
+            audit_rows: &[Vec<u8>],
+        ) -> Result<bool, RuntimeStoreError> {
+            let path = self.path.clone();
+            let grant_id = grant_id.to_string();
+            let subject_key = subject_key.to_string();
+            let expected_json = expected_json.to_vec();
+            let next_json = next_json.to_vec();
+            let audit_rows = audit_rows.to_vec();
+            spawn_blocking_holding_claim(move || {
+                let mut conn = open_runtime_tool_grants_write_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let swapped = tx
+                    .execute(
+                        r"
+                        UPDATE runtime_tool_grants
+                           SET record_json = ?4
+                         WHERE grant_id = ?1 AND subject_key = ?2 AND record_json = ?3
+                        ",
+                        params![grant_id, subject_key, expected_json, next_json],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                if swapped == 0 {
+                    return Ok(false);
+                }
+                append_tool_grant_audit_rows(&tx, &subject_key, &audit_rows)?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(true)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn append_tool_grant_audit(
+            &self,
+            subject_key: &str,
+            audit_rows: &[Vec<u8>],
+        ) -> Result<(), RuntimeStoreError> {
+            if audit_rows.is_empty() {
+                return Ok(());
+            }
+            let path = self.path.clone();
+            let subject_key = subject_key.to_string();
+            let audit_rows = audit_rows.to_vec();
+            spawn_blocking_holding_claim(move || {
+                let mut conn = open_runtime_tool_grants_write_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                append_tool_grant_audit_rows(&tx, &subject_key, &audit_rows)?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn read_tool_grant_audit(
+            &self,
+            subject_key: &str,
+            after: Option<u64>,
+            limit: usize,
+        ) -> Result<Vec<(u64, Vec<u8>)>, RuntimeStoreError> {
+            let path = self.path.clone();
+            let subject_key = subject_key.to_string();
+            // The first sequence to read; a cursor past every representable
+            // sequence reads nothing.
+            let Ok(first) = i64::try_from(after.map_or(0, |after| after.saturating_add(1))) else {
+                return Ok(Vec::new());
+            };
+            let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+            spawn_blocking_holding_claim(move || {
+                let Some(conn) = open_runtime_tool_grants_read_connection(&path)? else {
+                    return Ok(Vec::new());
+                };
+                let read_failed =
+                    |error: rusqlite::Error| RuntimeStoreError::ReadFailed(error.to_string());
+                let mut statement = conn
+                    .prepare(
+                        r"
+                        SELECT sequence, record_json
+                          FROM runtime_tool_grant_audit
+                         WHERE subject_key = ?1 AND sequence >= ?2
+                         ORDER BY sequence
+                         LIMIT ?3
+                        ",
+                    )
+                    .map_err(read_failed)?;
+                let rows = statement
+                    .query_map(params![subject_key, first, limit], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(read_failed)?;
+                let mut records = Vec::new();
+                for row in rows {
+                    let (sequence, record_json) = row.map_err(read_failed)?;
+                    let sequence = u64::try_from(sequence).map_err(|_| {
+                        RuntimeStoreError::ReadFailed(format!(
+                            "tool grant audit row has the negative sequence {sequence}"
+                        ))
+                    })?;
+                    records.push((sequence, record_json));
                 }
                 Ok(records)
             })

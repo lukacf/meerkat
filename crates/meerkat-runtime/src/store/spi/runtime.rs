@@ -33,6 +33,13 @@
 //! record scopes (the in-memory store does not support them); they follow
 //! the SQLite store's semantics exactly (`SqliteRuntimeStore`'s
 //! `*_mob_host_*` methods).
+//!
+//! Scoped tool grants are this adapter's own scopes too, with the SQLite
+//! store's semantics (`SqliteRuntimeStore`'s `*_tool_grant*` methods): one
+//! record scope per grant, its head holding the stored row and the subject's
+//! key, and one record scope per subject whose rows are the subject's audit
+//! log. A lifecycle write commits the grant's head and its audit rows in one
+//! batch.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -109,6 +116,28 @@ pub(crate) const MOB_HOST_REVOCATION_FAMILY: ScopeFamily = ScopeFamily {
     pinned: &["v"],
 };
 
+/// One scoped tool grant: a record scope keyed by the grant id. Its head
+/// pins the stored row (`v`) and the key of the subject it is filed under
+/// (`s`).
+pub(crate) const TOOL_GRANT_FAMILY: ScopeFamily = ScopeFamily {
+    tag: "tg",
+    kind: ScopeKind::Record,
+    pinned: &["v", "s"],
+};
+
+/// One subject's scoped tool grant audit log: a record scope keyed by the
+/// subject's key. Each row entry is one audit row, keyed by its sequence
+/// ([`tool_grant_audit_entry_key`]); nothing is pinned, so the log loads on
+/// its first read or append in a process.
+pub(crate) const TOOL_GRANT_AUDIT_FAMILY: ScopeFamily = ScopeFamily {
+    tag: "tga",
+    kind: ScopeKind::Record,
+    pinned: &[],
+};
+
+/// A tool grant's subject entry.
+const TOOL_GRANT_SUBJECT_ENTRY: &str = "s";
+
 /// The single entry of a record scope.
 const RECORD_ENTRY: &str = "v";
 
@@ -161,6 +190,20 @@ fn mob_host_binding_scope(mob_id: &str) -> ScopeId {
 
 fn mob_host_revocation_scope(mob_id: &str) -> ScopeId {
     ScopeId::new(MOB_HOST_REVOCATION_FAMILY, mob_id)
+}
+
+fn tool_grant_scope(grant_id: &str) -> ScopeId {
+    ScopeId::new(TOOL_GRANT_FAMILY, grant_id)
+}
+
+fn tool_grant_audit_scope(subject_key: &str) -> ScopeId {
+    ScopeId::new(TOOL_GRANT_AUDIT_FAMILY, subject_key)
+}
+
+/// An audit row's entry key: its sequence, zero padded, so the entries'
+/// key order is their sequence order.
+fn tool_grant_audit_entry_key(sequence: u64) -> String {
+    format!("{sequence:020}")
 }
 
 fn scope_id_of(scope: &TouchScope) -> ScopeId {
@@ -278,6 +321,26 @@ struct MobHostRecords {
     revocations: BTreeMap<String, Vec<u8>>,
 }
 
+/// The scoped tool grants in memory: every grant, imported from its head at
+/// the open, and the audit log of each subject whose log this process
+/// loaded.
+#[derive(Debug, Default)]
+struct ToolGrantRecords {
+    /// Each grant's subject key and stored row, by grant id.
+    grants: BTreeMap<String, (String, Vec<u8>)>,
+    /// Each loaded subject's audit rows, oldest first: a row's sequence is
+    /// its index.
+    audit: BTreeMap<String, Vec<Vec<u8>>>,
+}
+
+fn lock_tool_grants(
+    records: &StdMutex<ToolGrantRecords>,
+) -> std::sync::MutexGuard<'_, ToolGrantRecords> {
+    records
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// The [`RuntimeStore`] over a host store. See the module documentation.
 pub struct SpiRuntimeStore {
     realm: Arc<SpiRealm>,
@@ -288,6 +351,9 @@ pub struct SpiRuntimeStore {
     /// The mob host records; a change lands here only after its batch did,
     /// on the task that committed it.
     mob_host: Arc<StdMutex<MobHostRecords>>,
+    /// The scoped tool grants; a change lands here only after its batch did,
+    /// on the task that committed it.
+    tool_grants: Arc<StdMutex<ToolGrantRecords>>,
     /// Runtimes whose head, as the open found it, pins boot facts written
     /// before the ops lifecycle's work was folded into them
     /// ([`head_predates_ops_fold`]) and whose body is not loaded. The
@@ -409,6 +475,37 @@ impl SpiRuntimeStore {
                 }
             }
         }
+        // Every grant's head is in the listing the realm already read; only a
+        // chunked row is read from the host. The audit logs load on first
+        // use.
+        let mut tool_grants = ToolGrantRecords::default();
+        for cell in realm.claim(TOOL_GRANT_FAMILY)? {
+            let state = cell.lock().await;
+            let pinned = realm.pinned_values(&state).await?;
+            match (
+                pinned.get(RECORD_ENTRY),
+                pinned.get(TOOL_GRANT_SUBJECT_ENTRY),
+            ) {
+                (Some(record), Some(subject)) => {
+                    let subject = String::from_utf8(Vec::clone(subject)).map_err(|_| {
+                        SpiError::Corrupt(format!(
+                            "{} names a subject that is not UTF-8",
+                            state.id()
+                        ))
+                    })?;
+                    tool_grants
+                        .grants
+                        .insert(state.id().key.clone(), (subject, Vec::clone(record)));
+                }
+                _ => {
+                    return Err(SpiError::Corrupt(format!(
+                        "{} lacks its row or its subject",
+                        state.id()
+                    )));
+                }
+            }
+        }
+        realm.claim(TOOL_GRANT_AUDIT_FAMILY)?;
         let mut unfolded_heads = HashSet::new();
         // The runtimes are read up to BOOT_LOAD_CONCURRENCY at once, each
         // holding only its own scope's lock. Nothing is installed until every
@@ -454,6 +551,7 @@ impl SpiRuntimeStore {
             memory,
             gate: Arc::new(RwLock::new(())),
             mob_host: Arc::new(StdMutex::new(records)),
+            tool_grants: Arc::new(StdMutex::new(tool_grants)),
             unfolded_heads: Arc::new(StdMutex::new(unfolded_heads)),
         })
     }
@@ -735,6 +833,109 @@ impl SpiRuntimeStore {
             let outcome = scopes.commit_in_place(deltas).await;
             if outcome.is_ok() {
                 apply(&mut lock_records(&records));
+            }
+            outcome
+        });
+        match task.await {
+            Ok(outcome) => outcome.map_err(SpiError::into_write),
+            Err(error) => {
+                Err(SpiError::Misuse(format!("the host commit task failed: {error}")).into_write())
+            }
+        }
+    }
+
+    /// Install `subject_key`'s audit log in memory when its scope's rows are
+    /// not folded yet: load the body, check that its entries are the
+    /// sequences 0, 1, 2, ... and mark the scope loaded. The scope must be
+    /// locked in `scopes`.
+    async fn ensure_tool_grant_audit_loaded(
+        &self,
+        scopes: &mut ArmedScopes,
+        subject_key: &str,
+        mutate: bool,
+    ) -> Result<(), RuntimeStoreError> {
+        let refuse = |error: SpiError| {
+            if mutate {
+                error.into_write()
+            } else {
+                error.into_read()
+            }
+        };
+        let id = tool_grant_audit_scope(subject_key);
+        let guard = scopes
+            .guards_mut()
+            .iter_mut()
+            .find(|guard| guard.id() == &id)
+            .ok_or_else(|| refuse(SpiError::Misuse(format!("{id} is not locked"))))?;
+        if guard.is_loaded() {
+            return Ok(());
+        }
+        let body = self.realm.load_body(&mut **guard).await.map_err(refuse)?;
+        let mut rows = Vec::with_capacity(body.len());
+        for ((key, value), sequence) in body.into_iter().zip(0_u64..) {
+            if key != tool_grant_audit_entry_key(sequence) {
+                return Err(refuse(SpiError::Corrupt(format!(
+                    "{id} holds the audit entry {key:?} where sequence {sequence} belongs"
+                ))));
+            }
+            rows.push(Vec::clone(&value));
+        }
+        lock_tool_grants(&self.tool_grants)
+            .audit
+            .insert(subject_key.to_string(), rows);
+        guard.mark_loaded();
+        Ok(())
+    }
+
+    /// The entries that append `audit_rows` to `subject_key`'s loaded log.
+    fn tool_grant_audit_entries(
+        &self,
+        subject_key: &str,
+        audit_rows: &[Vec<u8>],
+    ) -> Vec<(String, Option<Arc<Vec<u8>>>)> {
+        let first = lock_tool_grants(&self.tool_grants)
+            .audit
+            .get(subject_key)
+            .map_or(0, Vec::len);
+        (first..)
+            .zip(audit_rows)
+            .map(|(index, row)| {
+                (
+                    tool_grant_audit_entry_key(index as u64),
+                    Some(Arc::new(row.clone())),
+                )
+            })
+            .collect()
+    }
+
+    /// Commit scoped tool grant changes, each locked scope's entries as
+    /// given, then `apply` them to the records in memory. Both run on a task
+    /// that owns the scopes and the gate, so a caller dropped meanwhile still
+    /// leaves memory and host agreeing.
+    async fn commit_tool_grants(
+        &self,
+        scopes: ArmedScopes,
+        mut changes: BTreeMap<ScopeId, Vec<(String, Option<Arc<Vec<u8>>>)>>,
+        apply: impl FnOnce(&mut ToolGrantRecords) + Send + 'static,
+    ) -> Result<(), RuntimeStoreError> {
+        let mut deltas = Vec::with_capacity(changes.len());
+        for (index, guard) in scopes.guards().iter().enumerate() {
+            if let Some(entries) = changes.remove(guard.id()) {
+                deltas.push((index, ScopeDelta::Changes(entries)));
+            }
+        }
+        if !changes.is_empty() {
+            return Err(SpiError::Misuse("a tool grant scope is not locked".into()).into_write());
+        }
+        let records = Arc::clone(&self.tool_grants);
+        let task = tokio::spawn(async move {
+            let mut scopes = scopes;
+            // A task dropped mid-commit (a runtime shutdown) poisons: the
+            // batch may land without memory following it.
+            scopes.arm();
+            let outcome = scopes.commit_in_place(deltas).await;
+            if outcome.is_ok() {
+                apply(&mut lock_tool_grants(&records));
             }
             outcome
         });
@@ -2095,5 +2296,204 @@ impl RuntimeStore for SpiRuntimeStore {
         })
         .await?;
         Ok(true)
+    }
+
+    // Scoped tool grants: the adapter's own record scopes (see the module
+    // documentation), with the SQLite store's semantics: CAS compares the
+    // full stored row, and a write's audit rows land in its batch. Every
+    // write of a subject's grants holds the subject's audit scope, so a
+    // listing that holds it reads a cut no such write is inside.
+
+    async fn load_tool_grant(&self, grant_id: &str) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+        let _scopes = self
+            .mob_host_scopes(&[tool_grant_scope(grant_id)], false)
+            .await?;
+        Ok(lock_tool_grants(&self.tool_grants)
+            .grants
+            .get(grant_id)
+            .map(|(_, record)| record.clone()))
+    }
+
+    async fn list_tool_grants(
+        &self,
+        subject_key: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
+        let _scopes = self
+            .mob_host_scopes(&[tool_grant_audit_scope(subject_key)], false)
+            .await?;
+        Ok(lock_tool_grants(&self.tool_grants)
+            .grants
+            .iter()
+            .filter(|(_, (subject, _))| subject == subject_key)
+            .map(|(grant_id, (_, record))| (grant_id.clone(), record.clone()))
+            .collect())
+    }
+
+    async fn put_tool_grant_if_absent(
+        &self,
+        grant_id: &str,
+        subject_key: &str,
+        record_json: &[u8],
+        audit_rows: &[Vec<u8>],
+    ) -> Result<bool, RuntimeStoreError> {
+        let grant = tool_grant_scope(grant_id);
+        let audit = tool_grant_audit_scope(subject_key);
+        let mut scopes = self
+            .mob_host_scopes(&[grant.clone(), audit.clone()], true)
+            .await?;
+        if lock_tool_grants(&self.tool_grants)
+            .grants
+            .contains_key(grant_id)
+        {
+            return Ok(false);
+        }
+        let mut changes = BTreeMap::new();
+        changes.insert(
+            grant,
+            vec![
+                (
+                    RECORD_ENTRY.to_string(),
+                    Some(Arc::new(record_json.to_vec())),
+                ),
+                (
+                    TOOL_GRANT_SUBJECT_ENTRY.to_string(),
+                    Some(Arc::new(subject_key.as_bytes().to_vec())),
+                ),
+            ],
+        );
+        if !audit_rows.is_empty() {
+            self.ensure_tool_grant_audit_loaded(&mut scopes, subject_key, true)
+                .await?;
+            changes.insert(
+                audit,
+                self.tool_grant_audit_entries(subject_key, audit_rows),
+            );
+        }
+        let (grant_id, subject, record, rows) = (
+            grant_id.to_string(),
+            subject_key.to_string(),
+            record_json.to_vec(),
+            audit_rows.to_vec(),
+        );
+        self.commit_tool_grants(scopes, changes, move |records| {
+            if !rows.is_empty() {
+                records
+                    .audit
+                    .entry(subject.clone())
+                    .or_default()
+                    .extend(rows);
+            }
+            records.grants.insert(grant_id, (subject, record));
+        })
+        .await?;
+        Ok(true)
+    }
+
+    async fn compare_and_put_tool_grant(
+        &self,
+        grant_id: &str,
+        subject_key: &str,
+        expected_json: &[u8],
+        next_json: &[u8],
+        audit_rows: &[Vec<u8>],
+    ) -> Result<bool, RuntimeStoreError> {
+        let grant = tool_grant_scope(grant_id);
+        let audit = tool_grant_audit_scope(subject_key);
+        let mut scopes = self
+            .mob_host_scopes(&[grant.clone(), audit.clone()], true)
+            .await?;
+        let matches = lock_tool_grants(&self.tool_grants)
+            .grants
+            .get(grant_id)
+            .is_some_and(|(subject, record)| {
+                subject == subject_key && record.as_slice() == expected_json
+            });
+        if !matches {
+            return Ok(false);
+        }
+        let mut changes = BTreeMap::new();
+        changes.insert(
+            grant,
+            vec![(RECORD_ENTRY.to_string(), Some(Arc::new(next_json.to_vec())))],
+        );
+        if !audit_rows.is_empty() {
+            self.ensure_tool_grant_audit_loaded(&mut scopes, subject_key, true)
+                .await?;
+            changes.insert(
+                audit,
+                self.tool_grant_audit_entries(subject_key, audit_rows),
+            );
+        }
+        let (grant_id, subject, record, rows) = (
+            grant_id.to_string(),
+            subject_key.to_string(),
+            next_json.to_vec(),
+            audit_rows.to_vec(),
+        );
+        self.commit_tool_grants(scopes, changes, move |records| {
+            if !rows.is_empty() {
+                records
+                    .audit
+                    .entry(subject.clone())
+                    .or_default()
+                    .extend(rows);
+            }
+            records.grants.insert(grant_id, (subject, record));
+        })
+        .await?;
+        Ok(true)
+    }
+
+    async fn append_tool_grant_audit(
+        &self,
+        subject_key: &str,
+        audit_rows: &[Vec<u8>],
+    ) -> Result<(), RuntimeStoreError> {
+        if audit_rows.is_empty() {
+            return Ok(());
+        }
+        let audit = tool_grant_audit_scope(subject_key);
+        let mut scopes = self
+            .mob_host_scopes(std::slice::from_ref(&audit), true)
+            .await?;
+        self.ensure_tool_grant_audit_loaded(&mut scopes, subject_key, true)
+            .await?;
+        let mut changes = BTreeMap::new();
+        changes.insert(
+            audit,
+            self.tool_grant_audit_entries(subject_key, audit_rows),
+        );
+        let (subject, rows) = (subject_key.to_string(), audit_rows.to_vec());
+        self.commit_tool_grants(scopes, changes, move |records| {
+            records.audit.entry(subject).or_default().extend(rows);
+        })
+        .await
+    }
+
+    async fn read_tool_grant_audit(
+        &self,
+        subject_key: &str,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(u64, Vec<u8>)>, RuntimeStoreError> {
+        let audit = tool_grant_audit_scope(subject_key);
+        let mut scopes = self
+            .mob_host_scopes(std::slice::from_ref(&audit), false)
+            .await?;
+        self.ensure_tool_grant_audit_loaded(&mut scopes, subject_key, false)
+            .await?;
+        let first = after.map_or(0, |after| after.saturating_add(1));
+        Ok(lock_tool_grants(&self.tool_grants)
+            .audit
+            .get(subject_key)
+            .map(|rows| {
+                rows.iter()
+                    .zip(0_u64..)
+                    .filter(|(_, sequence)| *sequence >= first)
+                    .take(limit)
+                    .map(|(row, sequence)| (sequence, row.clone()))
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 }

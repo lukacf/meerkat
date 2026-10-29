@@ -722,6 +722,33 @@ impl std::fmt::Debug for ServiceCallAuditFaults {
     }
 }
 
+/// The in-memory scoped tool grant tables.
+#[derive(Debug, Default)]
+struct ToolGrantTables {
+    /// Each grant's subject key and stored row, by grant id.
+    grants: BTreeMap<String, (String, Vec<u8>)>,
+    /// Each subject's audit rows, oldest first, so a row's sequence is its
+    /// index. Append-only.
+    audit: BTreeMap<String, Vec<Vec<u8>>>,
+}
+
+impl ToolGrantTables {
+    fn append_audit(
+        &mut self,
+        subject_key: &str,
+        audit_rows: &[Vec<u8>],
+    ) -> Result<(), RuntimeStoreError> {
+        if audit_rows.is_empty() {
+            return Ok(());
+        }
+        let rows = self.audit.entry(subject_key.to_string()).or_default();
+        rows.try_reserve(audit_rows.len())
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        rows.extend(audit_rows.iter().cloned());
+        Ok(())
+    }
+}
+
 /// In-memory runtime store. Thread-safe via `tokio::sync::Mutex`, except the
 /// ops lifecycle state, which is behind its own std mutex (see
 /// `OpsLifecycleState`).
@@ -739,6 +766,12 @@ pub struct InMemoryRuntimeStore {
     /// Test support: scripted outcomes of service-call audit appends.
     #[cfg(any(test, feature = "test-support"))]
     service_call_audit_faults: Arc<StdMutex<ServiceCallAuditFaults>>,
+    /// The scoped tool grant rows and their audit logs.
+    tool_grants: Arc<StdMutex<ToolGrantTables>>,
+    /// Test support: while set, every scoped tool grant method fails with
+    /// this cause and writes nothing.
+    #[cfg(any(test, feature = "test-support"))]
+    tool_grant_failure: Arc<StdMutex<Option<String>>>,
     #[cfg(test)]
     auth_oauth_flow_store_calls: Arc<AtomicUsize>,
     #[cfg(test)]
@@ -867,6 +900,50 @@ impl InMemoryRuntimeStore {
         refusal.map_or(Ok(()), Err)
     }
 
+    /// Test support: while `cause` is set, every scoped tool grant method
+    /// fails with it (a read as `ReadFailed`, a write as `WriteFailed`) and
+    /// writes nothing; `None` ends the failure.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_tool_grant_store_for_test(&self, cause: Option<&str>) {
+        if let Ok(mut failure) = self.tool_grant_failure.lock() {
+            *failure = cause.map(str::to_string);
+        }
+    }
+
+    /// The scripted failure of a scoped tool grant method, when one is set.
+    fn tool_grant_failure(&self, write: bool) -> Result<(), RuntimeStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(cause) = self
+            .tool_grant_failure
+            .lock()
+            .map_err(|_| RuntimeStoreError::ReadFailed("tool grant faults poisoned".into()))?
+            .clone()
+        {
+            return Err(if write {
+                RuntimeStoreError::WriteFailed(cause)
+            } else {
+                RuntimeStoreError::ReadFailed(cause)
+            });
+        }
+        let _ = write;
+        Ok(())
+    }
+
+    fn lock_tool_grants(
+        &self,
+        write: bool,
+    ) -> Result<std::sync::MutexGuard<'_, ToolGrantTables>, RuntimeStoreError> {
+        self.tool_grant_failure(write)?;
+        self.tool_grants.lock().map_err(|_| {
+            let cause = "tool grant tables poisoned".to_string();
+            if write {
+                RuntimeStoreError::WriteFailed(cause)
+            } else {
+                RuntimeStoreError::ReadFailed(cause)
+            }
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn auth_oauth_flow_store_calls(&self) -> usize {
         self.auth_oauth_flow_store_calls.load(Ordering::Acquire)
@@ -978,6 +1055,9 @@ impl InMemoryRuntimeStore {
             service_call_audit: Arc::new(StdMutex::new(ServiceCallAuditLog::new())),
             #[cfg(any(test, feature = "test-support"))]
             service_call_audit_faults: Arc::new(StdMutex::new(ServiceCallAuditFaults::default())),
+            tool_grants: Arc::new(StdMutex::new(ToolGrantTables::default())),
+            #[cfg(any(test, feature = "test-support"))]
+            tool_grant_failure: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             auth_oauth_flow_store_calls: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
@@ -3081,6 +3161,103 @@ impl RuntimeStore for InMemoryRuntimeStore {
                     .map(|(observation, sequence)| {
                         super::ServiceCallAuditRecord::new(sequence, observation.clone())
                     })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    async fn load_tool_grant(&self, grant_id: &str) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+        let tables = self.lock_tool_grants(false)?;
+        Ok(tables
+            .grants
+            .get(grant_id)
+            .map(|(_, record)| record.clone()))
+    }
+
+    async fn list_tool_grants(
+        &self,
+        subject_key: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
+        let tables = self.lock_tool_grants(false)?;
+        Ok(tables
+            .grants
+            .iter()
+            .filter(|(_, (subject, _))| subject == subject_key)
+            .map(|(grant_id, (_, record))| (grant_id.clone(), record.clone()))
+            .collect())
+    }
+
+    async fn put_tool_grant_if_absent(
+        &self,
+        grant_id: &str,
+        subject_key: &str,
+        record_json: &[u8],
+        audit_rows: &[Vec<u8>],
+    ) -> Result<bool, RuntimeStoreError> {
+        let mut tables = self.lock_tool_grants(true)?;
+        if tables.grants.contains_key(grant_id) {
+            return Ok(false);
+        }
+        tables.append_audit(subject_key, audit_rows)?;
+        tables.grants.insert(
+            grant_id.to_string(),
+            (subject_key.to_string(), record_json.to_vec()),
+        );
+        Ok(true)
+    }
+
+    async fn compare_and_put_tool_grant(
+        &self,
+        grant_id: &str,
+        subject_key: &str,
+        expected_json: &[u8],
+        next_json: &[u8],
+        audit_rows: &[Vec<u8>],
+    ) -> Result<bool, RuntimeStoreError> {
+        let mut tables = self.lock_tool_grants(true)?;
+        let matches = tables
+            .grants
+            .get(grant_id)
+            .is_some_and(|(subject, record)| {
+                subject == subject_key && record.as_slice() == expected_json
+            });
+        if !matches {
+            return Ok(false);
+        }
+        tables.append_audit(subject_key, audit_rows)?;
+        tables.grants.insert(
+            grant_id.to_string(),
+            (subject_key.to_string(), next_json.to_vec()),
+        );
+        Ok(true)
+    }
+
+    async fn append_tool_grant_audit(
+        &self,
+        subject_key: &str,
+        audit_rows: &[Vec<u8>],
+    ) -> Result<(), RuntimeStoreError> {
+        let mut tables = self.lock_tool_grants(true)?;
+        tables.append_audit(subject_key, audit_rows)
+    }
+
+    async fn read_tool_grant_audit(
+        &self,
+        subject_key: &str,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(u64, Vec<u8>)>, RuntimeStoreError> {
+        let tables = self.lock_tool_grants(false)?;
+        let first = after.map_or(0, |after| after.saturating_add(1));
+        Ok(tables
+            .audit
+            .get(subject_key)
+            .map(|rows| {
+                rows.iter()
+                    .zip(0_u64..)
+                    .filter(|(_, sequence)| *sequence >= first)
+                    .take(limit)
+                    .map(|(row, sequence)| (sequence, row.clone()))
                     .collect()
             })
             .unwrap_or_default())

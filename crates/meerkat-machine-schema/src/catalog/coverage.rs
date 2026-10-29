@@ -2970,6 +2970,45 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "expiry_never_precedes_its_deadline",
                         "revocation_precedes_the_deadline",
                     ]),
+            ),
+            machine_anchor(
+                "tool_grant_service",
+                "ToolGrantLifecycleMachine",
+                "crates/meerkat-runtime/src/tool_grant/service.rs",
+                "ToolGrantService rebuilds each grant's machine from its stored row, applies one input per adjudication at one clock reading and decides from the effects alone: issuance, revocation, settlement on list, audit read and timer fire, a boundary's open set, and each gated dispatch's admission",
+                CoverageClaims::none()
+                    .transitions(&[
+                        "Issue",
+                        "IssueRefusedWindow",
+                        "ExpireDue",
+                        "ExpireNotDue",
+                        "ExpireSettledExpired",
+                        "ExpireSettledRevoked",
+                        "RevokeActive",
+                        "RevokeAfterDeadline",
+                        "RevokeSettledExpired",
+                        "RevokeSettledRevoked",
+                        "AdmitLive",
+                        "AdmitDue",
+                        "AdmitEndedExpired",
+                        "AdmitEndedRevoked",
+                    ])
+                    .effects(&[
+                        "Issued",
+                        "Expired",
+                        "Revoked",
+                        "UseAdmitted",
+                        "UseRefused",
+                        "IssueRefused",
+                    ])
+                    .invariants(&[
+                        "unissued_is_empty",
+                        "issued_window_is_nonempty",
+                        "active_has_no_end",
+                        "ended_grants_record_their_end",
+                        "expiry_never_precedes_its_deadline",
+                        "revocation_precedes_the_deadline",
+                    ]),
             )],
             &[
                 scenario(

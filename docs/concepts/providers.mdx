@@ -254,7 +254,7 @@ OpenAI has separate backend/auth pairs:
 | `openai_api` | `api_key`, `static_bearer`, or host authorizer | Public OpenAI API organization/project |
 | `chatgpt_backend` | `managed_chatgpt_oauth` or host-supplied ChatGPT tokens | ChatGPT/Codex subscription and workspace |
 | `azure_openai` | `azure_api_key` | Azure deployment |
-| `copilot` | `github_copilot_oauth` | GitHub Copilot account |
+| `copilot` | `github_copilot_oauth` or `github_copilot_token` | GitHub Copilot account, through the device sign-in or an operator GitHub token |
 
 These are not interchangeable credential paths. A model ID available to an API
 organization may be unavailable to a ChatGPT workspace, and vice versa.

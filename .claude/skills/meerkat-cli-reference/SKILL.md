@@ -675,6 +675,7 @@ rkat auth test <BINDING_ID>
 rkat auth status <PROFILE_ID>
 rkat auth login [PROVIDER] [--backend <BACKEND>] [--method <METHOD>]
 rkat auth login <PROVIDER> --non-interactive [--secret <SECRET>] [--backend <BACKEND>] [--method <METHOD>]
+rkat auth login copilot --non-interactive [--secret <TOKEN> | --from-env]
 rkat auth logout [<REALM>:]<BINDING_ID>
 rkat auth refresh <PROFILE_ID>
 rkat auth connector-client set <ID> --issuer <ISSUER> --client <CLIENT_ID> [--client-secret [--secret-stdin]] [--authorize-param NAME=VALUE...] [--no-resource-indicator] [--protocol <PROTOCOL>] [--redirect-uri <HTTPS_URI>...]
@@ -693,6 +694,16 @@ GitHub device OAuth (`github_copilot_oauth`) and provisions
 `global:copilot_gemini`. These routes share the `github_copilot` credential
 account and use provider-specific Copilot backends; Copilot is not a fourth
 LLM `--provider` value. Reduced builds without `copilot` cannot use this login.
+`rkat auth login copilot --non-interactive` uses a GitHub token instead of the
+device flow, like GitHub Copilot CLI with `COPILOT_GITHUB_TOKEN`: it writes the
+same three routes with `auth_method = "github_copilot_token"`. With
+`--from-env` they read `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then
+`GITHUB_TOKEN` and nothing is stored; otherwise the token from `--secret` or
+stdin is checked and stored under the `github_copilot` account. A refused
+token is never stored; classic `ghp_` tokens are refused; `--backend` and
+`--method` are refused. The routes hold one method at a time, so each login
+refuses routes configured for the other. `rkat auth test copilot_openai`
+prints the `account:` and `plan:` the token resolves to.
 Non-interactive api-key login (`--non-interactive` requires the provider and
 reads the secret from stdin when `--secret` is omitted) only stores the token
 under `global:default_<provider>`; it writes no backend/auth/binding config, so

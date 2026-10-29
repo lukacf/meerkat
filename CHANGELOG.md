@@ -35,6 +35,40 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-core`: the Copilot auth methods gain an operator-supplied GitHub
+  token: `OpenAiAuthMethod::GitHubCopilotToken`,
+  `AnthropicAuthMethod::GitHubCopilotToken` and
+  `GoogleAuthMethod::GitHubCopilotToken` (wire `github_copilot_token`). An
+  exhaustive match on these enums needs the new arm. The Web SDK's generated
+  `WIRE_AUTH_METHODS` and `WIRE_PROVIDER_AUTH_METHODS` list it too.
+
+### Added
+
+- GitHub Copilot with a service-account token: `auth_method =
+  "github_copilot_token"` authenticates the `copilot` backends with a GitHub
+  token from any credential source and no device sign-in, as GitHub Copilot
+  CLI does with `COPILOT_GITHUB_TOKEN`. Fine-grained personal access tokens
+  with the Copilot Requests permission, OAuth and GitHub App user tokens, and
+  GitHub App installation tokens (GitHub's server-to-server preview) are
+  accepted; classic personal access tokens are refused. The token is the
+  Copilot API credential; the account login, plan and API host are looked up
+  on first use; a token GitHub refuses moves the shared credential account to
+  `reauth_required`. `rkat auth login copilot --non-interactive` stores a token
+  read from `--secret` or stdin, and with `--from-env` configures the three
+  Copilot routes to read `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then
+  `GITHUB_TOKEN`. `rkat auth test` prints the account the token resolves to.
+  For hosts and embedders: `meerkat_copilot::verify_operator_token` checks a
+  token without storing it and returns a `CopilotAccountIdentity`;
+  `CopilotAuthorizer::account_identity` and
+  `CopilotProviderRoute::token_auth_method` are new;
+  `meerkat_auth_core::resolver::{simple_secret_source_publishes_lifecycle,
+  credential_fingerprint, CredentialFingerprint}` and
+  `meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_URL` are new. The
+  OpenAI, Anthropic and Gemini runtimes report the readiness of a
+  `github_copilot_token` route from its source, without a network request.
+
 ## [0.9.7] - 2026-10-28
 
 ### Breaking

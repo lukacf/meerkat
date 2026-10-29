@@ -94,7 +94,7 @@ Supported `backend_kind` / `auth_method` pairs:
 | anthropic | `bedrock` | `bedrock_bearer`, `bedrock_aws_sigv4`, `external_authorizer` |
 | anthropic | `vertex` | `vertex_google_auth`, `external_authorizer` |
 | anthropic | `foundry` | `foundry_api_key`, `foundry_azure_ad`, `external_authorizer` |
-| anthropic, openai, gemini | `copilot` | `github_copilot_oauth` |
+| anthropic, openai, gemini | `copilot` | `github_copilot_oauth`, `github_copilot_token` |
 | openai | `openai_api` | `api_key`, `static_bearer`, `external_authorizer` |
 | openai | `chatgpt_backend` | `managed_chatgpt_oauth`, `external_chatgpt_tokens` |
 | openai | `azure_openai` | `azure_api_key` |
@@ -255,6 +255,16 @@ the token store. It sets `[realm.global] default_binding` if none is set.
   callback fails as a callback parse error. Nothing is saved in each case.
 - `--backend` and `--method` are ignored in interactive mode.
 - Copilot needs the `copilot` feature (in default builds).
+- `rkat auth login copilot --non-interactive` uses a GitHub token instead of
+  the device code (`github_copilot_token`, as GitHub Copilot CLI uses
+  `COPILOT_GITHUB_TOKEN`). `--from-env` writes the three routes reading
+  `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN` and stores
+  nothing; without it the token from `--secret` or stdin is checked, then
+  stored under `global:account:github_copilot` with the login as its account
+  id. The token is the Copilot API bearer, identity and API host come from
+  GitHub's `copilot_internal/user`, a classic `ghp_` token is refused, and a
+  token GitHub refuses moves the account to `reauth_required`. The routes hold
+  one method at a time: each login refuses routes set up for the other.
 
 Scripted API-key storage (the binding must exist first):
 

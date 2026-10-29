@@ -3,9 +3,10 @@
 //! page-cache overflow statistics), and every place that sets its build flags
 //! carries the one value meerkat-sqlite declares,
 //! `meerkat_sqlite::REQUIRED_LIBSQLITE3_FLAGS`: `.cargo/config.toml` for
-//! Cargo and `MODULE.bazel` for Bazel. Cargo reads the configuration of the
-//! directory it builds in, never a dependency's, so Meerkat's own settings do
-//! not reach this workspace. Every host binary also turns SQLite's allocator
+//! Cargo and `MODULE.bazel` for Bazel. Meta's crates are members of this
+//! repository's one Cargo workspace, so those are the repository root's files:
+//! Cargo reads the configuration of the directory it builds in. Every host
+//! binary also turns SQLite's allocator
 //! statistics off as the first statement of `main`, for builds made without
 //! the flags. These rows mirror meerkat-sqlite's `lock_profile` and
 //! `lock_profile_sources` tests.
@@ -17,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use meerkat_sqlite::{REQUIRED_LIBSQLITE3_FLAGS, SqliteLockProfile};
 
-/// The host binaries and their `main` files. release.yml's gateway build step
+/// The host binaries and their `main` files. meta-release.yml's gateway build step
 /// ships `meta_gateway`, `rpc_gateway` and `meta_repair`; the flow editor is a
 /// long-running server too. Every binary target the workspace manifests
 /// declare is either here, and switches allocator statistics off as the first
@@ -37,7 +38,7 @@ const HOST_BINARIES: &[(&str, &str)] = &[
 
 /// Binary targets that do not switch, each with the reason. A reason that
 /// says it is not a release binary is checked against the binaries
-/// release.yml builds.
+/// meta-release.yml builds.
 const EXEMPT_BINARIES: &[(&str, &str)] = &[
     (
         "baseline_check",
@@ -69,7 +70,7 @@ const EXEMPT_BINARIES: &[(&str, &str)] = &[
     ),
 ];
 
-/// The words of an exemption reason that release.yml must agree with.
+/// The words of an exemption reason that meta-release.yml must agree with.
 const NOT_A_RELEASE_BINARY: &str = "not a release binary";
 
 /// The call each host `main` makes first.
@@ -79,11 +80,25 @@ const SWITCH_CALL: &str = "meerkat_sqlite::disable_memory_statistics_at_process_
 /// this file is not one of the allowances it counts.
 const ALLOW_UNSAFE_CODE: &str = concat!("#[allow(", "unsafe_code)]");
 
+/// Meta's root, `meta/` in this repository: the host binaries' sources and
+/// Meta's crates and examples are relative to it.
 fn workspace_root() -> PathBuf {
-    std::env::var_os("WORKSPACE_ROOT").map_or_else(
-        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-        PathBuf::from,
-    )
+    std::env::var_os("WORKSPACE_ROOT")
+        .map_or_else(
+            || Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            PathBuf::from,
+        )
+        .canonicalize()
+        .expect("Meta's root exists")
+}
+
+/// The repository root: its Cargo workspace (Meta's crates are members),
+/// `.cargo/config.toml`, `MODULE.bazel` and Meta's release workflow.
+fn repository_root(meta_root: &Path) -> PathBuf {
+    meta_root
+        .parent()
+        .expect("Meta's root sits in the repository")
+        .to_path_buf()
 }
 
 fn read(root: &Path, relative: &str) -> String {
@@ -129,7 +144,7 @@ fn annotation_block<'a>(module: &'a str, krate: &str) -> &'a str {
 
 #[test]
 fn cargo_and_bazel_set_the_declared_sqlite_flags() {
-    let root = workspace_root();
+    let root = repository_root(&workspace_root());
 
     // Cargo: `.cargo/config.toml` [env], forced over a value the environment
     // already carries, so every repository build follows the declaration.
@@ -173,10 +188,19 @@ fn cargo_and_bazel_set_the_declared_sqlite_flags() {
     );
 }
 
-/// Every workspace member directory: the root manifest's
-/// `[workspace].members`.
+/// Meta's member directories: the repository manifest's
+/// `[workspace].members` under Meta's root, with `dir/*` expanded to the
+/// directories under `dir` that hold a `Cargo.toml`. The other products'
+/// members keep their own lock profile rules.
 fn workspace_members(root: &Path) -> Vec<PathBuf> {
-    let manifest: toml::Table = read(root, "Cargo.toml")
+    let repository = repository_root(root);
+    let product = format!(
+        "{}/",
+        root.file_name()
+            .expect("Meta's root has a name")
+            .to_string_lossy()
+    );
+    let manifest: toml::Table = read(&repository, "Cargo.toml")
         .parse()
         .expect("the root manifest parses");
     let members = manifest
@@ -184,14 +208,25 @@ fn workspace_members(root: &Path) -> Vec<PathBuf> {
         .and_then(|workspace| workspace.get("members"))
         .and_then(toml::Value::as_array)
         .expect("[workspace].members is an array");
-    let mut dirs: Vec<PathBuf> = members
-        .iter()
-        .map(|member| {
-            let member = member.as_str().expect("a workspace member is a path");
+    let mut dirs = Vec::new();
+    for member in members {
+        let member = member.as_str().expect("a workspace member is a path");
+        let Some(member) = member.strip_prefix(&product) else {
+            continue;
+        };
+        if let Some(parent) = member.strip_suffix("/*") {
+            assert!(!parent.contains('*'), "unsupported member glob {member}");
+            for entry in fs::read_dir(root.join(parent)).expect("a member glob's directory reads") {
+                let dir = entry.expect("a member directory entry").path();
+                if dir.join("Cargo.toml").is_file() {
+                    dirs.push(dir);
+                }
+            }
+        } else {
             assert!(!member.contains('*'), "unsupported member glob {member}");
-            root.join(member)
-        })
-        .collect();
+            dirs.push(root.join(member));
+        }
+    }
     dirs.sort();
     dirs
 }
@@ -301,14 +336,16 @@ fn workspace_binaries(root: &Path) -> BTreeMap<String, String> {
     binaries
 }
 
-/// The binaries release.yml's gateway build step builds: the `--bin` names of
-/// its `cargo build -p meerkat-meta` command, continuation lines included.
+/// The binaries Meta's release workflow (`.github/workflows/meta-release.yml`
+/// at the repository root) builds in its gateway build step: the `--bin`
+/// names of its `build -p meerkat-meta` command, continuation lines included.
 fn release_binaries(root: &Path) -> Vec<String> {
-    let workflow = read(root, ".github/workflows/release.yml");
+    let workflow = read(&repository_root(root), ".github/workflows/meta-release.yml");
     let lines: Vec<&str> = workflow.lines().collect();
     let mut binaries = Vec::new();
     for (index, line) in lines.iter().enumerate() {
-        if !line.trim_start().starts_with("cargo build -p meerkat-meta") {
+        let line = line.trim_start();
+        if line.starts_with('#') || !line.contains(" build -p meerkat-meta ") {
             continue;
         }
         let mut command = String::new();
@@ -363,11 +400,11 @@ fn every_workspace_binary_is_a_host_or_exempt_with_a_reason() {
     );
 
     // What a release ships is a host, and an exemption that says it is not a
-    // release binary is not built by release.yml.
+    // release binary is not built by meta-release.yml.
     let released = release_binaries(&root);
     assert!(
         !released.is_empty(),
-        "release.yml's gateway build step names its binaries"
+        "meta-release.yml's gateway build step names its binaries"
     );
     for name in &released {
         assert!(
@@ -379,7 +416,7 @@ fn every_workspace_binary_is_a_host_or_exempt_with_a_reason() {
         if reason.contains(NOT_A_RELEASE_BINARY) {
             assert!(
                 !released.iter().any(|built| built.as_str() == *name),
-                "{name}: the reason says {NOT_A_RELEASE_BINARY}, but release.yml builds it"
+                "{name}: the reason says {NOT_A_RELEASE_BINARY}, but meta-release.yml builds it"
             );
         }
     }

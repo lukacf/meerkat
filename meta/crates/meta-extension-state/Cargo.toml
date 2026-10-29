@@ -17,7 +17,8 @@ rust-version.workspace = true
 release = false
 
 [lints.rust]
-unsafe_code = "forbid"
+# deny, the level every Meta crate shares (see meerkat-meta's manifest).
+unsafe_code = "deny"
 
 [lints.clippy]
 # Lint groups

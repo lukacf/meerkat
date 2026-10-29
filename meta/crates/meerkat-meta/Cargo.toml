@@ -41,7 +41,11 @@ release = false
 ignored = ["meerkat-openai"]
 
 [lints.rust]
-unsafe_code = "forbid"
+# deny, not forbid: each host binary's first statement calls the unsafe
+# meerkat_sqlite::disable_memory_statistics_at_process_start under
+# #[allow(unsafe_code)], which forbid would refuse. sqlite_lock_profile_tests
+# keep those calls the only allowances.
+unsafe_code = "deny"
 
 [lints.clippy]
 # Lint groups

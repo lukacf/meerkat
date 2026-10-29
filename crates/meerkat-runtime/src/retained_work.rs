@@ -320,7 +320,7 @@ pub(crate) const CONTROLLER_HOLD_ATTEMPT_TIMEOUT: std::time::Duration =
     crate::resumed_run_admission::RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT;
 #[cfg(test)]
 pub(crate) const CONTROLLER_HOLD_ATTEMPT_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(800);
+    std::time::Duration::from_millis(1500);
 
 /// The pause between two asks for the clients of the held rows, as between
 /// two attempts of a resumed run's admission

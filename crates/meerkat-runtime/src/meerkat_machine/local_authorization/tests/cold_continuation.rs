@@ -4413,8 +4413,8 @@ async fn machine_state(
     );
     let locked = driver.lock().await;
     let authority = locked.shared_dsl_authority();
-    let state = authority.lock().expect("machine authority").state().clone();
-    state
+    let guard = authority.lock().expect("machine authority");
+    guard.state().clone()
 }
 
 /// `resume_id`, a kept resume this composition (which requires scoped

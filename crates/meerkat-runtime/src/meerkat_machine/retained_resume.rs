@@ -261,11 +261,6 @@ impl DriverEntry {
         self.shell_driver().run_inputs_controller_held(run_id)
     }
 
-    /// Whether `input_id` is a kept resume of retained work.
-    pub(crate) fn is_kept_retained_resume(&self, input_id: &InputId) -> bool {
-        self.shell_driver().is_kept_retained_resume(input_id)
-    }
-
     /// Whether `input_id` is a kept resume of retained work that holds no
     /// controller client (yet).
     pub(crate) fn kept_retained_resume_without_client(&self, input_id: &InputId) -> bool {

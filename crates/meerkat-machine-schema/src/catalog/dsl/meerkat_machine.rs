@@ -11623,7 +11623,12 @@ macro_rules! meerkat_catalog_machine_dsl {
         // batch its inputs were staged for, as a staged run does
         // (StageForRun): the inputs bound to one run share its authority
         // batch, whose key includes the exact destination, so the context
-        // target and batch key of any of them are the first one's.
+        // target and batch key of any of them are the first one's. An input
+        // bound to the run is one associated with it in a bound phase (Staged,
+        // Applied or AppliedPendingConsumption), as the resumed-run plan
+        // selects them: an association can outlive the binding (a discarded
+        // live join returns to its lane, and recovery restores a queued
+        // input's last run), and such an input is not the run's.
         transition ResumeRun {
             per_phase [Running]
             on input ResumeRun { run_id }
@@ -11645,7 +11650,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.scoped_context_generation != 0
                 || for_all(bound_input_id in self.input_run_associations.keys(),
                     self.input_run_associations.get_cloned(bound_input_id) != Some(run_id)
-                    || !self.input_authority_bindings.contains_key(bound_input_id))
+                    || !self.input_authority_bindings.contains_key(bound_input_id)
+                    || (self.input_phases.get_cloned(bound_input_id) != Some(InputPhase::Staged)
+                        && self.input_phases.get_cloned(bound_input_id)
+                            != Some(InputPhase::Applied)
+                        && self.input_phases.get_cloned(bound_input_id)
+                            != Some(InputPhase::AppliedPendingConsumption)))
             }
             update {
                 self.resumable_run_id = None;
@@ -11653,7 +11663,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.run_context_binding = None;
                 self.authority_staged_batch = None;
                 for bound_input_id in self.input_run_associations.keys() {
-                    if self.input_run_associations.get_cloned(bound_input_id) == Some(run_id) {
+                    if self.input_run_associations.get_cloned(bound_input_id) == Some(run_id)
+                        && (self.input_phases.get_cloned(bound_input_id) == Some(InputPhase::Staged)
+                            || self.input_phases.get_cloned(bound_input_id)
+                                == Some(InputPhase::Applied)
+                            || self.input_phases.get_cloned(bound_input_id)
+                                == Some(InputPhase::AppliedPendingConsumption))
+                    {
                         self.run_context_binding =
                             self.input_context_targets.get_cloned(bound_input_id);
                         self.authority_staged_batch =
@@ -40319,13 +40335,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             /// Whether the run `run_id` marked resumable may resume under the
             /// session document's destination: the document requires none,
             /// one is bound (or was bound, and then retired), or no governed
-            /// input is bound to the run. Mirrors the `ResumeRun` guard
+            /// input is bound to the run (associated with it in a bound
+            /// phase: Staged, Applied or AppliedPendingConsumption, as the
+            /// plan selects them; an input that only still names the run is
+            /// not bound to it). Mirrors the `ResumeRun` guard
             /// `resumed_run_destination_attached`, as `scoped_context_stageable`
             /// mirrors the `StageForRun` guard: a governed run left open waits,
             /// marked, until the registration owner binds its destination
             /// again.
             #[must_use]
-            pub fn resumed_run_destination_attached(
+            pub(crate) fn resumed_run_destination_attached(
                 state: &MeerkatMachineState,
                 run_id: &RunId,
             ) -> bool {
@@ -40337,6 +40356,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                         .iter()
                         .any(|(input_id, associated)| {
                             associated == run_id
+                                && matches!(
+                                    state.input_phases.get(input_id),
+                                    Some(
+                                        InputPhase::Staged
+                                            | InputPhase::Applied
+                                            | InputPhase::AppliedPendingConsumption
+                                    )
+                                )
                                 && state.input_authority_bindings.contains_key(input_id)
                         })
             }

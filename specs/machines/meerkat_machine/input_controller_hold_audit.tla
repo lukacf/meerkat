@@ -51,6 +51,12 @@
 \*     target and the authority batch key of an input bound to it (none when
 \*     no input is bound).
 \*
+\* An input is bound to a run when it is associated with the run in a bound
+\* phase (Staged, Applied or AppliedPendingConsumption), as the resumed-run
+\* plan selects them. An association can outlive the binding: an abandoned
+\* input keeps it, so the abandon of the bound input leaves the marked run
+\* named by an input that is not its own, which neither property counts.
+\*
 \* The generated invariant input_controller_holds_are_kept_unstaged_governed_inputs
 \* (every held input is a recovered governed input with no live-boundary
 \* delivery, queued in a lane or bound, Staged or Applied, to the marked run)
@@ -100,13 +106,20 @@ AuditTarget == "target_1"
 AuditScope == "scope_1"
 AuditPrefixLength == 10
 AppliedPhases == {"Applied", "AppliedPendingConsumption"}
+\* An input is bound to a run when it is associated with the run in a bound
+\* phase, as the resumed-run plan selects them: an association can outlive
+\* the binding (an abandoned input keeps it), and such an input is not the
+\* run's.
+BoundPhases == {"Staged"} \cup AppliedPhases
 
 PhaseOf(i) == IF i \in DOMAIN input_phases THEN input_phases[i] ELSE "Absent"
 Attempts(i) == IF i \in DOMAIN input_attempt_counts THEN input_attempt_counts[i] ELSE 0
 Assoc(i) == IF i \in DOMAIN input_run_associations THEN Some(input_run_associations[i]) ELSE None
 TargetOf(i) == IF i \in DOMAIN input_context_targets THEN Some(input_context_targets[i]) ELSE None
 BatchOf(i) == IF i \in DOMAIN input_authority_batch_keys THEN Some(input_authority_batch_keys[i]) ELSE None
-BoundTo(r) == {i \in DOMAIN input_run_associations : input_run_associations[i] = r}
+BoundTo(r) ==
+    {i \in DOMAIN input_run_associations :
+        input_run_associations[i] = r /\ PhaseOf(i) \in BoundPhases}
 GovernedBoundTo(r) == {i \in BoundTo(r) : i \in DOMAIN input_authority_bindings}
 
 \* The document's destination is attached: it requires none, one is bound,

@@ -369,17 +369,32 @@ impl AuthenticatedOriginalSource for Custody {
 /// The controller owner: reacquires the actual client for a retained
 /// selection; every reacquisition is observable. Once its clients are
 /// withdrawn (the second field) it has no client for any selection, as an
-/// owner whose session moved to another controller.
+/// owner whose session moved to another controller. Every ask is counted
+/// (the third field), and while the fourth field is nonzero each ask answers
+/// that the owner cannot say now, as a contended owner does, and counts it
+/// down.
 #[derive(Default)]
 struct Controllers(
     std::sync::Mutex<Vec<ControllerModelClient>>,
     std::sync::atomic::AtomicBool,
+    AtomicUsize,
+    AtomicUsize,
 );
 
 impl Controllers {
     /// From now on, no client for any selection.
     fn withdraw_clients(&self) {
         self.1.store(true, Ordering::SeqCst);
+    }
+
+    /// The next `asks` reacquisitions answer that the owner cannot say now.
+    fn contend(&self, asks: usize) {
+        self.3.store(asks, Ordering::SeqCst);
+    }
+
+    /// Every reacquisition asked so far, answered or not.
+    fn asks(&self) -> usize {
+        self.2.load(Ordering::SeqCst)
     }
 }
 
@@ -388,6 +403,16 @@ impl RetainedControllerOwner for Controllers {
         &self,
         selection: &ControllerModelSelection,
     ) -> Result<Option<ControllerModelClient>, ControllerReadinessFailure> {
+        self.2.fetch_add(1, Ordering::SeqCst);
+        if self
+            .3
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(ControllerReadinessFailure::PolicyUnavailable);
+        }
         if self.1.load(Ordering::SeqCst) {
             return Ok(None);
         }
@@ -4097,4 +4122,941 @@ async fn a_withheld_published_row_still_yields_its_published_binding() {
         &directed_id,
         meerkat_core::interaction::InteractionId(directed_id.0)
     ));
+}
+
+/// A first machine on `store` runs the original of `template` once and
+/// commits its continuation. A second machine, with no executor serving the
+/// session, admits the continuation's resume through the governed host (so
+/// it stays queued) and is dropped, as a host stops. The store keeps the
+/// admitted resume queued, and a controller client never survives the store.
+/// Returns the original's destination, the resume's id and the run identity
+/// it resumes.
+async fn keep_admitted_resume(
+    store: &InMemoryRuntimeStore,
+    blobs: &Arc<MemoryBlobStore>,
+    owners: &HostOwners,
+    session: &SessionId,
+    template: &Input,
+) -> (
+    meerkat_authorization_contracts::work_association::NativeWorkTarget,
+    InputId,
+    RetainedWorkIdentity,
+) {
+    let runtime = LogicalRuntimeId::for_session(session);
+    let destination = {
+        let machine = open(store, blobs, owners).await;
+        let (destination, _effects, _applied) = settle_original_with_continuation(
+            &machine,
+            store,
+            session,
+            template,
+            owners,
+            "the original's result",
+        )
+        .await;
+        destination
+    };
+
+    let machine = open(store, blobs, owners).await;
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("a registration no executor serves");
+    machine
+        .prepare_bindings(session.clone())
+        .await
+        .expect("actual runtime binding");
+    machine.support_governed_work_for_test(session).await;
+    install_credential(
+        &machine,
+        &EphemeralTokenStore::new(),
+        &controller_selection(template),
+    )
+    .await;
+    bind_when_settled(&machine, session, &destination).await;
+    let request = head_request(store, &runtime, DELIVERY, 1).await;
+    let identity = request.identity().clone();
+    let resume = continuation();
+    let resume_id = resume.id().clone();
+    let (outcome, _) = machine
+        .accept_retained_resume(session, resume, request)
+        .await
+        .expect("the resume is admitted through the governed host");
+    assert!(
+        matches!(outcome, AcceptOutcome::Accepted { .. }),
+        "{outcome:?}"
+    );
+    let kept = machine
+        .input_state(session, &resume_id)
+        .await
+        .expect("row read")
+        .expect("the admitted resume's row");
+    assert_eq!(
+        kept.seed.phase,
+        InputLifecycleState::Queued,
+        "no executor serves the session, so the admitted resume stays queued"
+    );
+    drop(machine);
+    (destination, resume_id, identity)
+}
+
+/// A machine on `store`, with no executor serving the session, admits an
+/// ordinary governed prompt of `template` (authenticated fresh, under its own
+/// association) bound to its destination, so it stays queued, and is dropped,
+/// as a host stops. The store keeps the prompt queued without its controller
+/// client. Returns the prompt's destination and id.
+async fn keep_admitted_prompt(
+    store: &InMemoryRuntimeStore,
+    blobs: &Arc<MemoryBlobStore>,
+    owners: &HostOwners,
+    session: &SessionId,
+    template: &Input,
+) -> (
+    meerkat_authorization_contracts::work_association::NativeWorkTarget,
+    InputId,
+) {
+    let runtime = LogicalRuntimeId::for_session(session);
+    let machine = open(store, blobs, owners).await;
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("a registration no executor serves");
+    machine
+        .prepare_bindings(session.clone())
+        .await
+        .expect("actual runtime binding");
+    machine.support_governed_work_for_test(session).await;
+    install_credential(
+        &machine,
+        &EphemeralTokenStore::new(),
+        &controller_selection(template),
+    )
+    .await;
+    let prompt = original_prompt(template, &runtime);
+    owners.custody.hold(&prompt);
+    let destination = prompt
+        .header()
+        .authority_association
+        .as_ref()
+        .expect("claims")
+        .candidate()
+        .target
+        .clone();
+    bind_when_settled(&machine, session, &destination).await;
+    let prompt_id = prompt.id().clone();
+    let outcome = machine
+        .ingest(&runtime, prompt)
+        .await
+        .expect("the governed prompt is admitted");
+    assert!(
+        matches!(outcome, AcceptOutcome::Accepted { .. }),
+        "{outcome:?}"
+    );
+    let kept = machine
+        .input_state(session, &prompt_id)
+        .await
+        .expect("row read")
+        .expect("the admitted prompt's row");
+    assert_eq!(
+        kept.seed.phase,
+        InputLifecycleState::Queued,
+        "no executor serves the session, so the admitted prompt stays queued"
+    );
+    drop(machine);
+    (destination, prompt_id)
+}
+
+/// [`keep_admitted_resume`], then what a graceful stop that kept a durable
+/// run of that resume leaves in `store`, seeded as `recovery_contract`'s
+/// `a_kept_run_of` seeds it: the session's committed document, a continuable
+/// provisional tail whose run cursor binds the resume (the staged call only
+/// in the cursor), and the resume's row bound to that run, applied and
+/// pending its consumption. The registration that opens the session again
+/// marks the run resumable, with the resume bound to it. Returns the
+/// destination, the resume's id and the kept run.
+async fn keep_resume_in_open_run(
+    store: &InMemoryRuntimeStore,
+    blobs: &Arc<MemoryBlobStore>,
+    owners: &HostOwners,
+    session: &SessionId,
+    template: &Input,
+) -> (
+    meerkat_authorization_contracts::work_association::NativeWorkTarget,
+    InputId,
+    RunId,
+) {
+    use crate::store::{PreparedRuntimeSessionCommit, PreparedWholeBlobProvisionalTail};
+    use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, TranscriptMessageIdentity,
+        UserMessage,
+    };
+
+    let (destination, resume_id, _identity) =
+        keep_admitted_resume(store, blobs, owners, session, template).await;
+    let runtime = LogicalRuntimeId::for_session(session);
+    let run_id = RunId::new();
+    let mut committed = meerkat_core::Session::with_id(session.clone());
+    committed.push(Message::User(UserMessage::text("the kept run's prompt")));
+    let committed_authority = store
+        .commit_prepared_session_boundary(
+            &runtime,
+            PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::sealed(Arc::new(committed.clone())).expect("a sealed boundary"),
+            ),
+        )
+        .await
+        .expect("the session's committed document")
+        .authority()
+        .and_then(|authority| authority.whole_blob())
+        .cloned()
+        .expect("the initial boundary returns a WholeBlob store authority");
+    let staged = BlockAssistantMessage {
+        blocks: vec![AssistantBlock::ToolUse {
+            id: "kept-call".to_string(),
+            name: "durable_tool".to_string(),
+            args: serde_json::value::RawValue::from_string("{}".to_string())
+                .expect("raw arguments"),
+            meta: None,
+        }],
+        stop_reason: Some(StopReason::ToolUse),
+        identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
+        created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: Some(
+            serde_json::from_value(serde_json::Value::String(
+                "0190b5f0-0000-7000-8000-000000000004".to_string(),
+            ))
+            .expect("assistant message id"),
+        ),
+    };
+    let mut round = committed.clone();
+    round
+        .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+            run_id.clone(),
+            vec![resume_id.clone()],
+            0,
+            meerkat_core::RunResumePoint::ToolsPending {
+                assistant_message: staged,
+            },
+        ))
+        .expect("the run cursor binds the resume");
+    store
+        .write_prepared_whole_blob_provisional_tail(
+            &runtime,
+            PreparedWholeBlobProvisionalTail::prepare(
+                committed_authority,
+                run_id.clone(),
+                1,
+                &BoundSessionCommit::sealed(Arc::new(round)).expect("a sealed round"),
+            )
+            .expect("a provisional tail"),
+        )
+        .await
+        .expect("the kept run's provisional tail");
+    let mut row = store
+        .load_input_state(&runtime, &resume_id)
+        .await
+        .expect("row read")
+        .expect("the kept resume's row");
+    row.seed.phase = InputLifecycleState::AppliedPendingConsumption;
+    row.seed.last_run_id = Some(run_id.clone());
+    row.seed.last_boundary_sequence = Some(1);
+    row.seed.attempt_count = 1;
+    row.seed.admission_sequence = None;
+    store
+        .persist_input_state(
+            &runtime,
+            &crate::input_state::InputStatePersistenceRecord::stored_row_for_test(row)
+                .expect("an applied row passes the stored-seed authority"),
+        )
+        .await
+        .expect("the resume's row bound to the kept run");
+    (destination, resume_id, run_id)
+}
+
+/// `input_id`'s row once it is terminal, within bound.
+async fn terminal_row(
+    machine: &MeerkatMachine,
+    session: &SessionId,
+    input_id: &InputId,
+) -> crate::input_state::StoredInputState {
+    tokio::time::timeout(BOUND, async {
+        loop {
+            if let Some(row) = machine
+                .input_state(session, input_id)
+                .await
+                .expect("row read")
+                && row.seed.terminal_outcome.is_some()
+            {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the row ends within bound")
+}
+
+/// The generated machine state of `session`'s live registration.
+async fn machine_state(
+    machine: &MeerkatMachine,
+    session: &SessionId,
+) -> crate::meerkat_machine::dsl::MeerkatMachineState {
+    let driver = Arc::clone(
+        &machine
+            .sessions
+            .read()
+            .await
+            .get(session)
+            .expect("registered session")
+            .driver,
+    );
+    let locked = driver.lock().await;
+    let authority = locked.shared_dsl_authority();
+    let state = authority.lock().expect("machine authority").state().clone();
+    state
+}
+
+/// `resume_id`, a kept resume this composition (which requires scoped
+/// destinations) recovered, waits for its destination as a recovered
+/// governed prompt does: it is queued, the session document requires a
+/// destination and has none bound since the restart, and no batch is
+/// selected, so nothing can run it before the registration owner binds its
+/// destination again.
+async fn assert_waits_for_its_destination(
+    machine: &MeerkatMachine,
+    session: &SessionId,
+    resume_id: &InputId,
+) {
+    use crate::meerkat_machine::dsl::command_capabilities::AuthorizedRuntimeLoopBatch;
+    let state = machine_state(machine, session).await;
+    assert!(
+        state.input_lane.contains_key(&resume_id.to_string()),
+        "the kept resume is queued"
+    );
+    assert!(
+        state.scoped_context_required,
+        "the kept resume's recovery requires the document's destination"
+    );
+    assert!(
+        state.scoped_context_binding.is_none(),
+        "no destination is bound since the restart"
+    );
+    assert!(
+        AuthorizedRuntimeLoopBatch::authorize_runtime_loop_batch_from_state(&state).is_none(),
+        "nothing is selected before the destination is bound again"
+    );
+}
+
+/// Publish `selection`'s credential on `machine` (a login or token commit),
+/// retrying only while native controller custody is busy, within bound.
+async fn publish_credential(
+    machine: &MeerkatMachine,
+    selection: &ControllerModelSelection,
+) -> Result<(), meerkat_core::BoundedLifecyclePublicationError> {
+    meerkat_core::publish_token_lifecycle_acquired_for_identity_within(
+        &machine.generated_auth_lease_handle(),
+        selection.credential(),
+        &meerkat_core::auth::PersistedTokens::api_key("synthetic-republication"),
+        tokio::time::Instant::now() + BOUND,
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Attach to `session`, which is already registered and bound, an executor
+/// that answers `reply` and keeps every run open until `hold` is notified.
+async fn attach_registered_holding(
+    machine: &Arc<MeerkatMachine>,
+    session: &SessionId,
+    reply: &'static str,
+    hold: Arc<tokio::sync::Notify>,
+) -> (
+    Arc<AtomicUsize>,
+    tokio::sync::mpsc::UnboundedReceiver<Applied>,
+) {
+    let effects = Arc::new(AtomicUsize::new(0));
+    let (tx, applied) = tokio::sync::mpsc::unbounded_channel();
+    machine
+        .register_session_with_executor(
+            session.clone(),
+            Box::new(CountingExecutor {
+                session: session.clone(),
+                reply,
+                effects: Arc::clone(&effects),
+                applied: tx,
+                hold: Some(hold),
+                actor: None,
+                loop_boundary: None,
+                callback_arguments: None,
+                publication: None,
+            }),
+        )
+        .await
+        .expect("actual executor attachment");
+    (effects, applied)
+}
+
+/// A resume admitted before a restart, kept queued in the store (whose rows
+/// carry no controller client), runs on the next registration: its recovery
+/// asks the installed host for the client once, and once the registration
+/// owner binds its destination again (it waits for it until then, as a
+/// recovered prompt does) the resume runs on the client the host supplied
+/// after the restart, naming the kept resume as the input that resumes the
+/// retained work (the input whose notice receipt moves parked consent into
+/// the run). It runs once, staged once, and its host is not asked again. RED
+/// at base: recovery never asked the host (0 asks); with that fixed, the
+/// recovered resume did not require its destination and was selected at
+/// once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_resume_runs_after_a_restart_on_the_client_its_host_supplies_again() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (destination, resume_id, identity) =
+        keep_admitted_resume(&store, &blobs, &owners, &session, &template).await;
+
+    let machine = open(&store, &blobs, &owners).await;
+    let asked = owners.controllers.asks();
+    let reacquired = owners.controllers.0.lock().expect("reacquisitions").len();
+    let (effects, mut applied) = attach(&machine, &session, "resumed after the restart").await;
+    assert_eq!(
+        owners.controllers.asks() - asked,
+        1,
+        "the registration's recovery asks the host for the kept resume's client once"
+    );
+    assert_waits_for_its_destination(&machine, &session, &resume_id).await;
+    bind_when_settled(&machine, &session, &destination).await;
+    machine
+        .wake_runtime_if_active_inputs(&session)
+        .await
+        .expect("the attached loop takes a wake");
+
+    let entered = next_apply(&mut applied, "kept resume").await;
+    assert_eq!(entered.ids, vec![resume_id.clone()]);
+    let running = entered
+        .context
+        .controller_client()
+        .expect("the resume runs on a controller client");
+    assert!(
+        owners.controllers.0.lock().expect("reacquisitions")[reacquired..]
+            .iter()
+            .any(|client| Arc::ptr_eq(running.client(), client.client())),
+        "the resume runs on the client its host supplied after the restart"
+    );
+    assert!(
+        entered
+            .context
+            .resumed_inputs()
+            .iter()
+            .any(|resumed| resumed.input_id == resume_id && resumed.resumes == identity),
+        "the run names the kept resume as the input that resumes the retained work"
+    );
+    assert_eq!(
+        completed_text(&machine, &session, &resume_id).await,
+        "resumed after the restart"
+    );
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        1,
+        "the kept resume ran once"
+    );
+    assert_eq!(
+        owners.controllers.asks() - asked,
+        1,
+        "a row that holds its client is not asked for again"
+    );
+    let row = machine
+        .input_state(&session, &resume_id)
+        .await
+        .expect("row read")
+        .expect("the resume's row");
+    assert_eq!(row.seed.phase, InputLifecycleState::Consumed);
+    assert_eq!(row.seed.attempt_count, 1, "staged once");
+}
+
+/// With required scoped destinations, a kept resume recovered after a
+/// restart, its client pinned again at recovery, stays queued and is never
+/// selected until the registration owner binds its destination again, as
+/// recovered governed prompts are (see
+/// `memory_persistent_required_destination_holds_recovered_work_until_rebound`);
+/// then it is the next selected batch and runs once. RED at base: the store
+/// drops the resume's retained-resume grant, so its recovery read no
+/// destination and never required one, and it was selectable at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_resume_waits_for_its_destination_until_the_owner_binds_it_again() {
+    use crate::meerkat_machine::dsl::command_capabilities::AuthorizedRuntimeLoopBatch;
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (destination, resume_id, _identity) =
+        keep_admitted_resume(&store, &blobs, &owners, &session, &template).await;
+
+    let machine = open(&store, &blobs, &owners).await;
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("the registration recovers the kept resume");
+    machine
+        .prepare_bindings(session.clone())
+        .await
+        .expect("actual runtime binding");
+    assert_waits_for_its_destination(&machine, &session, &resume_id).await;
+
+    bind_when_settled(&machine, &session, &destination).await;
+    let rebound = machine_state(&machine, &session).await;
+    let (_, selected, _) =
+        AuthorizedRuntimeLoopBatch::authorize_runtime_loop_batch_from_state(&rebound)
+            .expect("the kept resume is selectable under its destination")
+            .into_parts();
+    assert_eq!(selected, vec![resume_id.to_string()]);
+
+    let (effects, mut applied) = attach(&machine, &session, "resumed once rebound").await;
+    machine
+        .wake_runtime_if_active_inputs(&session)
+        .await
+        .expect("the attached loop takes a wake");
+    let entered = next_apply(&mut applied, "kept resume").await;
+    assert_eq!(entered.ids, vec![resume_id.clone()]);
+    assert_eq!(
+        completed_text(&machine, &session, &resume_id).await,
+        "resumed once rebound"
+    );
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        1,
+        "the kept resume ran once"
+    );
+}
+
+/// A kept resume whose host answers after the restart that it supplies no
+/// controller for it (`Readiness(UnsupportedScope)`: its owner has no client
+/// for the resume's selection any more) ends as a refused resume at the
+/// runtime loop's first pass, before it is ever staged and without waiting
+/// for its destination: `Abandoned { ResumeRefused }`, with no attempt
+/// counted and nothing run, and its host is not asked again (no retry
+/// loop). A consent waiting on the resume is then withdrawn as for any ended
+/// notice input. Once it ended, the controller's credential can be published
+/// again. RED at base: the row had no client and nothing asked the host;
+/// three stagings failed before the executor, and it ended
+/// `Abandoned { MaxAttemptsExhausted }`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_resume_its_host_has_no_client_for_ends_refused_without_a_retry_loop() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (_destination, resume_id, _identity) =
+        keep_admitted_resume(&store, &blobs, &owners, &session, &template).await;
+
+    owners.controllers.withdraw_clients();
+    let machine = open(&store, &blobs, &owners).await;
+    let asked = owners.controllers.asks();
+    let (effects, mut applied) = attach(&machine, &session, "never runs").await;
+    machine
+        .wake_runtime_if_active_inputs(&session)
+        .await
+        .expect("the attached loop takes a wake");
+
+    let row = terminal_row(&machine, &session, &resume_id).await;
+    assert_eq!(
+        row.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::ResumeRefused,
+        }),
+        "the kept resume ends as a refused resume"
+    );
+    assert_eq!(row.seed.attempt_count, 0, "it was never staged");
+    assert_eq!(
+        owners.controllers.asks() - asked,
+        2,
+        "its host is asked once at recovery and once at the loop's first pass"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        owners.controllers.asks() - asked,
+        2,
+        "a definite answer is final: the host is not asked again"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 0, "nothing ran");
+    assert!(
+        applied.try_recv().is_err(),
+        "the executor was never entered"
+    );
+    publish_credential(&machine, &controller_selection(&template))
+        .await
+        .expect("no unfinished work references the controller's credential any more");
+}
+
+/// A kept resume whose host cannot say at the restart's recovery (its owner
+/// is contended once, `Readiness(PolicyUnavailable)`) is held, queued with its
+/// attempts, and asked again after one pause; it runs on the client the host
+/// supplies then, once the registration owner binds its destination again.
+/// The answer that could not say now used no attempt: it is staged once. RED
+/// at base: nothing asked the host again, and the recovered resume did not
+/// even wait for its destination.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_resume_whose_host_is_contended_once_still_runs_with_its_attempts() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (destination, resume_id, _identity) =
+        keep_admitted_resume(&store, &blobs, &owners, &session, &template).await;
+
+    owners.controllers.contend(1);
+    let machine = open(&store, &blobs, &owners).await;
+    let asked = owners.controllers.asks();
+    let (effects, mut applied) = attach(&machine, &session, "resumed once answered").await;
+    assert_waits_for_its_destination(&machine, &session, &resume_id).await;
+    bind_when_settled(&machine, &session, &destination).await;
+    machine
+        .wake_runtime_if_active_inputs(&session)
+        .await
+        .expect("the attached loop takes a wake");
+
+    let entered = next_apply(&mut applied, "kept resume").await;
+    assert_eq!(entered.ids, vec![resume_id.clone()]);
+    assert_eq!(
+        completed_text(&machine, &session, &resume_id).await,
+        "resumed once answered"
+    );
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        1,
+        "the kept resume ran once"
+    );
+    assert_eq!(
+        owners.controllers.asks() - asked,
+        2,
+        "the contended ask at recovery, then the one that answered after a pause"
+    );
+    let row = machine
+        .input_state(&session, &resume_id)
+        .await
+        .expect("row read")
+        .expect("the resume's row");
+    assert_eq!(row.seed.phase, InputLifecycleState::Consumed);
+    assert_eq!(
+        row.seed.attempt_count, 1,
+        "the contended answer used no attempt"
+    );
+}
+
+/// A kept resume whose host cannot say now through several pauses is held,
+/// never staged and never refused for it within its budget: it is asked once
+/// per pause, keeps its attempts, and runs once the host answers. RED at
+/// base: nothing asked the host again, and the recovered resume did not even
+/// wait for its destination.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_resume_whose_host_cannot_say_now_waits_with_its_attempts_for_the_re_ask() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (destination, resume_id, _identity) =
+        keep_admitted_resume(&store, &blobs, &owners, &session, &template).await;
+
+    // The recovery's ask and the next two re-asks cannot say now; each pause
+    // asks the held row once.
+    let contended = 3;
+    owners.controllers.contend(contended);
+    let machine = open(&store, &blobs, &owners).await;
+    let asked = owners.controllers.asks();
+    let (effects, mut applied) = attach(&machine, &session, "resumed after the re-ask").await;
+    assert_waits_for_its_destination(&machine, &session, &resume_id).await;
+    bind_when_settled(&machine, &session, &destination).await;
+    machine
+        .wake_runtime_if_active_inputs(&session)
+        .await
+        .expect("the attached loop takes a wake");
+
+    let entered = next_apply(&mut applied, "kept resume").await;
+    assert_eq!(entered.ids, vec![resume_id.clone()]);
+    assert_eq!(
+        completed_text(&machine, &session, &resume_id).await,
+        "resumed after the re-ask"
+    );
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        1,
+        "the kept resume ran once"
+    );
+    assert_eq!(
+        owners.controllers.asks() - asked,
+        contended + 1,
+        "one ask per pause: every ask that could not say now, then the one that answered"
+    );
+    let row = machine
+        .input_state(&session, &resume_id)
+        .await
+        .expect("row read")
+        .expect("the resume's row");
+    assert_eq!(row.seed.phase, InputLifecycleState::Consumed);
+    assert_eq!(
+        row.seed.attempt_count, 1,
+        "answers that could not say now used no attempt"
+    );
+}
+
+/// A kept resume whose host never answers (it keeps saying it cannot say
+/// now) does not wait for good: once its budget, measured from its first such
+/// answer, has passed, the next such answer ends it as a refused resume,
+/// `Abandoned { ResumeRefused }`, with its attempts unchanged and nothing
+/// run. While it waits without its client, the machine refuses the
+/// controller's credential publication; once it ended, that publication
+/// succeeds, as the machine-wide refusal cleared. RED at base: nothing asked
+/// the host again; three stagings without a client used the attempts up and
+/// it ended `Abandoned { MaxAttemptsExhausted }`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_resume_whose_host_never_answers_ends_refused_after_its_budget() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (_destination, resume_id, _identity) =
+        keep_admitted_resume(&store, &blobs, &owners, &session, &template).await;
+
+    owners.controllers.contend(usize::MAX);
+    let machine = open(&store, &blobs, &owners).await;
+    let asked = owners.controllers.asks();
+    let (effects, mut applied) = attach(&machine, &session, "never runs").await;
+    let refused = publish_credential(&machine, &controller_selection(&template)).await;
+    let Err(meerkat_core::BoundedLifecyclePublicationError::Refused(error)) = refused else {
+        panic!("a credential publication is refused while the kept resume waits: {refused:?}");
+    };
+    assert_eq!(
+        error.context, "NativeControllerCredentialRelease::AuthorityUnavailable",
+        "the kept resume without its client refuses it"
+    );
+
+    let row = terminal_row(&machine, &session, &resume_id).await;
+    assert_eq!(
+        row.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::ResumeRefused,
+        }),
+        "a host that never answers ends the kept resume as refused after its budget"
+    );
+    assert_eq!(
+        row.seed.attempt_count, 0,
+        "waiting for its host used no attempt"
+    );
+    assert!(
+        owners.controllers.asks() - asked >= 2,
+        "it was asked again while it waited"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 0, "nothing ran");
+    assert!(
+        applied.try_recv().is_err(),
+        "the executor was never entered"
+    );
+    publish_credential(&machine, &controller_selection(&template))
+        .await
+        .expect("the machine-wide refusal cleared with the kept resume's end");
+}
+
+/// An ordinary governed prompt (authenticated fresh, under its own
+/// association) that a restart finds queued cannot run: its controller
+/// client did not survive the store, and the host contract can supply it
+/// again only with a fresh authentication of its caller. The attachment ends
+/// it before it serves, as a refused resume, `Abandoned { ResumeRefused }`,
+/// with its runtime-termination receipt, without staging it: nothing runs,
+/// even once its destination is bound again. RED at base: it was staged once
+/// its destination was bound, every staging failed before the executor, and
+/// it ended `Abandoned { MaxAttemptsExhausted }` after three attempts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_governed_prompt_ends_refused_before_the_attachment_serves() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (destination, prompt_id) =
+        keep_admitted_prompt(&store, &blobs, &owners, &session, &template).await;
+
+    let machine = open(&store, &blobs, &owners).await;
+    let (effects, mut applied) = attach(&machine, &session, "never runs").await;
+    bind_when_settled(&machine, &session, &destination).await;
+    machine
+        .wake_runtime_if_active_inputs(&session)
+        .await
+        .expect("the attached loop takes a wake");
+
+    let row = terminal_row(&machine, &session, &prompt_id).await;
+    assert_eq!(
+        row.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::ResumeRefused,
+        }),
+        "the kept governed prompt ends as a refused resume"
+    );
+    assert_eq!(row.seed.attempt_count, 0, "it was never staged");
+    let wait = tokio::time::timeout(
+        BOUND,
+        machine.wait_input_terminal_receipt(&session, &prompt_id),
+    )
+    .await
+    .expect("its receipt within bound")
+    .expect("receipt read")
+    .expect("the session holds the prompt");
+    let InputTerminalReceiptWait::Resolved(read) = wait else {
+        panic!("the ended prompt's receipt resolves")
+    };
+    let InputTerminalReceiptRead::Finalized(receipt) = read.report else {
+        panic!(
+            "a finalized runtime-termination receipt, not {:?}",
+            read.report
+        )
+    };
+    assert_eq!(
+        receipt.terminal(),
+        &crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::ResumeRefused,
+        }
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 0, "nothing ran");
+    assert!(
+        applied.try_recv().is_err(),
+        "the executor was never entered"
+    );
+}
+
+/// A run a stop or a restart left open, whose input is a kept resume of
+/// retained work, waits for that resume's host when the host cannot say at
+/// the restart (contended once): the run stays marked, its input bound, and
+/// nothing resumes it until the host supplies the client after a pause.
+/// Then the run resumes under its own id on that client, with the kept
+/// resume as its input. RED at base: nothing asked the host again, the
+/// resumed run could not be described without its client, and the runtime
+/// loop stopped instead of resuming it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_runs_resume_waits_for_its_contended_host_and_resumes_on_the_supplied_client() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (destination, resume_id, run_id) =
+        keep_resume_in_open_run(&store, &blobs, &owners, &session, &template).await;
+
+    owners.controllers.contend(1);
+    let machine = open(&store, &blobs, &owners).await;
+    let asked = owners.controllers.asks();
+    let reacquired = owners.controllers.0.lock().expect("reacquisitions").len();
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("the registration marks the kept run resumable");
+    machine
+        .prepare_bindings(session.clone())
+        .await
+        .expect("actual runtime binding");
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        Some(run_id.clone()),
+        "the registration keeps the run resumable, its resume bound to it"
+    );
+    // A resumed run does not stage again, so the destination is bound before
+    // anything is attached: the run then resumes whenever its host answers.
+    bind_when_settled(&machine, &session, &destination).await;
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let (effects, mut applied) =
+        attach_registered_holding(&machine, &session, "resumed run", Arc::clone(&hold)).await;
+
+    let entered = next_apply(&mut applied, "the kept run").await;
+    assert_eq!(entered.run, run_id, "the run resumes under its own id");
+    assert_eq!(entered.ids, vec![resume_id.clone()]);
+    let running = entered
+        .context
+        .controller_client()
+        .expect("the resumed run runs on a controller client");
+    assert!(
+        owners.controllers.0.lock().expect("reacquisitions")[reacquired..]
+            .iter()
+            .any(|client| Arc::ptr_eq(running.client(), client.client())),
+        "the resumed run runs on the client its host supplied after the pause"
+    );
+    assert_eq!(
+        owners.controllers.asks() - asked,
+        2,
+        "the contended ask at recovery, then the one that answered"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 1, "the run resumed once");
+    hold.notify_waiters();
+}
+
+/// A run a stop or a restart left open, whose input is a kept resume of
+/// retained work its host supplies no client for any more
+/// (`Readiness(UnsupportedScope)`), never resumes: at the runtime loop's
+/// first pass the run is settled as a refused resume, its input ends
+/// `Abandoned { ResumeRefused }`, and nothing is applied. RED at base:
+/// nothing asked the host again, the resumed run could not be described
+/// without its client, and the runtime loop stopped instead of settling it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_run_whose_host_has_no_client_settles_refused_and_runs_nothing() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (_destination, resume_id, run_id) =
+        keep_resume_in_open_run(&store, &blobs, &owners, &session, &template).await;
+
+    owners.controllers.withdraw_clients();
+    let machine = open(&store, &blobs, &owners).await;
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("the registration marks the kept run resumable");
+    machine
+        .prepare_bindings(session.clone())
+        .await
+        .expect("actual runtime binding");
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        Some(run_id.clone()),
+        "the registration keeps the run resumable, its resume bound to it"
+    );
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let (effects, mut applied) =
+        attach_registered_holding(&machine, &session, "never runs", Arc::clone(&hold)).await;
+
+    let row = terminal_row(&machine, &session, &resume_id).await;
+    assert_eq!(
+        row.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::ResumeRefused,
+        }),
+        "the kept run's resume ends with the run as a refused resume"
+    );
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        None,
+        "the run is settled, not resumable any more"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(effects.load(Ordering::SeqCst), 0, "nothing was applied");
+    assert!(
+        applied.try_recv().is_err(),
+        "the executor was never entered"
+    );
+    hold.notify_waiters();
 }

@@ -119,13 +119,16 @@ AuditVerdictAlreadyPublished(m) ==
     \/ ENABLED ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired(m)
     \/ ENABLED ResolveSourceCredentialPublicationAlreadyPublishedReleased(m)
 
-\* Some arm of Acquire accepts a publication naming `value` (an option; the
-\* expiry and publication time enter no guard): Acquire outside a run-out
-\* window, AcquireFromExpiring and AcquireFromExpired inside one.
-AuditAcquireEnabled(value) ==
-    \/ ENABLED Acquire(None, 1, value)
-    \/ ENABLED AcquireFromExpiring(None, 1, value)
-    \/ ENABLED AcquireFromExpired(None, 1, value)
+\* Some arm of Acquire accepts a publication naming `fingerprint` (an option;
+\* the expiry and publication time enter no guard): Acquire outside a run-out
+\* window, AcquireFromExpiring and AcquireFromExpired inside one. The
+\* parameter is not called `value`: TLC orders record fields by the order it
+\* first meets their names, and a `value` met before `tag` makes it compare
+\* None's string value with Some's number first, which it refuses.
+AuditAcquireEnabled(fingerprint) ==
+    \/ ENABLED Acquire(None, 1, fingerprint)
+    \/ ENABLED AcquireFromExpiring(None, 1, fingerprint)
+    \/ ENABLED AcquireFromExpired(None, 1, fingerprint)
 
 \* Acquire naming value `m`.
 AuditAcquireAdmits(m) == AuditAcquireEnabled(Some(m))

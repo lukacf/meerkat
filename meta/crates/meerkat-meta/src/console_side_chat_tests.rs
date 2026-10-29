@@ -1943,6 +1943,91 @@ async fn a_console_without_a_local_runtime_decides_a_send_to_a_side_chat_as_its_
     Ok(())
 }
 
+/// A Console with no local runtime never decides a lineage-labelled member
+/// by its bare name. Its access cache, primed from the aggregator's runtimes,
+/// knows a side chat by its namespaced identity only; a send that names the
+/// side chat by its bare member id, which the cache still cannot resolve and
+/// whose aggregate record names the side chat's source, is refused, though a
+/// rule grants that bare id. The namespaced identity is decided as its source.
+#[tokio::test]
+async fn a_send_to_a_side_chat_the_primed_cache_cannot_resolve_is_refused() -> TestResult {
+    use crate::console_aggregator::{ConsoleAggregatorOptions, MetaConsoleAggregator};
+
+    let (_temp_dir, runtime) =
+        persistent_console_runtime("console-side-chat-unresolved", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let forked = fork_when_idle(&runtime, "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+    let aggregator = MetaConsoleAggregator::in_memory_with_options(ConsoleAggregatorOptions {
+        session_history_backfill_enabled: false,
+        ..ConsoleAggregatorOptions::default()
+    });
+    aggregator.register_runtime_handles_with_policy(
+        "runtime-b",
+        "b",
+        runtime.clone(),
+        None,
+        ConsoleEventStore::new(),
+        Arc::new(AllowAllConsoleVisibilityPolicy),
+    );
+    let controller = enforced(vec![
+        grant(
+            "the-bare-member-id",
+            "bare-sender@example.test",
+            &[ACTION_AGENT_SEND],
+            "alpha-side",
+        ),
+        grant(
+            "the-source",
+            "source-sender@example.test",
+            &[ACTION_AGENT_SEND],
+            "b/alpha",
+        ),
+    ])?;
+    let decisions = RuntimeDecisionState::local_console(
+        crate::ConsolePolicy {
+            require_app_auth: false,
+            ..Default::default()
+        },
+        None,
+    );
+
+    assert!(
+        matches!(
+            send_gate_without_runtime(
+                &decisions,
+                &aggregator,
+                &controller,
+                "bare-sender@example.test",
+                "alpha-side",
+            )
+            .await,
+            Err(ConsoleSendGateRefusal::AccessDenied)
+        ),
+        "a lineage-labelled member the primed cache cannot resolve is refused, not decided by \
+         its bare name"
+    );
+    let bare_sender = controller.view_for_subject(Some("bare-sender@example.test"));
+    assert!(
+        !bare_sender.knows_agent("alpha-side"),
+        "the primed cache knows the side chat by its namespaced identity only"
+    );
+    assert!(bare_sender.knows_agent("b/alpha-side"));
+    assert!(
+        send_gate_without_runtime(
+            &decisions,
+            &aggregator,
+            &controller,
+            "source-sender@example.test",
+            "b/alpha-side",
+        )
+        .await
+        .is_ok(),
+        "the namespaced identity is decided as its source"
+    );
+    Ok(())
+}
+
 /// The `/console/send` gate of a Console with no local runtime, for
 /// `subject` sending to `identity`.
 async fn send_gate_without_runtime(

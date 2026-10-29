@@ -920,7 +920,9 @@ impl ProviderRuntime for GoogleProviderRuntime {
             GoogleAuthMethod::ExternalAuthorizer => {
                 resolve_external_authorizer(&binding.auth_profile().source, env, binding).await?
             }
-            GoogleAuthMethod::GitHubCopilotOauth => {
+            // Both Copilot methods resolve through the shared Copilot runtime,
+            // which owns the device sign-in and the operator-token modes.
+            GoogleAuthMethod::GitHubCopilotOauth | GoogleAuthMethod::GitHubCopilotToken => {
                 #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
                 {
                     let runtime = self.copilot.as_ref().ok_or_else(|| {

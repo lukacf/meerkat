@@ -480,7 +480,9 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             AnthropicAuthMethod::ExternalAuthorizer => {
                 resolve_external_authorizer(&binding.auth_profile().source, env, binding).await?
             }
-            AnthropicAuthMethod::GitHubCopilotOauth => {
+            // Both Copilot methods resolve through the shared Copilot runtime,
+            // which owns the device sign-in and the operator-token modes.
+            AnthropicAuthMethod::GitHubCopilotOauth | AnthropicAuthMethod::GitHubCopilotToken => {
                 #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
                 {
                     let runtime = self.copilot.as_ref().ok_or_else(|| {

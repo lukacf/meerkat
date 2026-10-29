@@ -848,7 +848,9 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             OpenAiAuthMethod::ExternalAuthorizer => {
                 resolve_external_authorizer(&binding.auth_profile().source, env, binding).await?
             }
-            OpenAiAuthMethod::GitHubCopilotOauth => {
+            // Both Copilot methods resolve through the shared Copilot runtime,
+            // which owns the device sign-in and the operator-token modes.
+            OpenAiAuthMethod::GitHubCopilotOauth | OpenAiAuthMethod::GitHubCopilotToken => {
                 #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
                 {
                     let runtime = self.copilot.as_ref().ok_or_else(|| {

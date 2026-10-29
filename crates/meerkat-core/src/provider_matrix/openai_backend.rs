@@ -56,7 +56,10 @@ impl OpenAiBackendKind {
                 OpenAiAuthMethod::ExternalChatGptTokens,
             ],
             Self::AzureOpenAi => &[OpenAiAuthMethod::AzureApiKey],
-            Self::Copilot => &[OpenAiAuthMethod::GitHubCopilotOauth],
+            Self::Copilot => &[
+                OpenAiAuthMethod::GitHubCopilotOauth,
+                OpenAiAuthMethod::GitHubCopilotToken,
+            ],
         }
     }
 
@@ -115,6 +118,29 @@ mod tests {
             assert_eq!(
                 kind.admits_mid_conversation_system_messages(),
                 *kind != OpenAiBackendKind::ChatGptBackend,
+                "{}",
+                kind.as_str()
+            );
+        }
+    }
+
+    /// The operator GitHub token authenticates the Copilot backend and no
+    /// other OpenAI backend.
+    #[test]
+    fn only_the_copilot_backend_accepts_the_operator_token_method() {
+        let token = OpenAiAuthMethod::parse("github_copilot_token");
+        assert!(
+            token.is_some_and(|method| OpenAiBackendKind::Copilot
+                .supported_auth_methods()
+                .contains(&method)),
+            "copilot must accept github_copilot_token"
+        );
+        for kind in OpenAiBackendKind::ALL
+            .iter()
+            .filter(|kind| **kind != OpenAiBackendKind::Copilot)
+        {
+            assert!(
+                token.is_none_or(|method| !kind.supported_auth_methods().contains(&method)),
                 "{}",
                 kind.as_str()
             );

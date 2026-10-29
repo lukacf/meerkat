@@ -1713,6 +1713,12 @@ struct AccountCredentialContract {
     source: CredentialSourceSpec,
 }
 
+/// The credential contract a route brings to a shared credential account.
+///
+/// Both GitHub Copilot methods (device sign-in and operator token) are the
+/// one issuer `GitHubCopilot`, so the three provider routes can share one
+/// account; the persisted mode still tells the two apart, so device and token
+/// routes on one account disagree and are refused.
 fn account_credential_contract(auth: &AuthProfile) -> Option<AccountCredentialContract> {
     let (auth_method, persisted_mode, github_copilot) = match auth.provider {
         Provider::OpenAI => {
@@ -1720,7 +1726,10 @@ fn account_credential_contract(auth: &AuthProfile) -> Option<AccountCredentialCo
             (
                 method.as_str(),
                 method.persisted_auth_mode()?,
-                method == OpenAiAuthMethod::GitHubCopilotOauth,
+                matches!(
+                    method,
+                    OpenAiAuthMethod::GitHubCopilotOauth | OpenAiAuthMethod::GitHubCopilotToken
+                ),
             )
         }
         Provider::Anthropic => {
@@ -1728,7 +1737,11 @@ fn account_credential_contract(auth: &AuthProfile) -> Option<AccountCredentialCo
             (
                 method.as_str(),
                 method.persisted_auth_mode()?,
-                method == AnthropicAuthMethod::GitHubCopilotOauth,
+                matches!(
+                    method,
+                    AnthropicAuthMethod::GitHubCopilotOauth
+                        | AnthropicAuthMethod::GitHubCopilotToken
+                ),
             )
         }
         Provider::Gemini => {
@@ -1736,7 +1749,10 @@ fn account_credential_contract(auth: &AuthProfile) -> Option<AccountCredentialCo
             (
                 method.as_str(),
                 method.persisted_auth_mode()?,
-                method == GoogleAuthMethod::GitHubCopilotOauth,
+                matches!(
+                    method,
+                    GoogleAuthMethod::GitHubCopilotOauth | GoogleAuthMethod::GitHubCopilotToken
+                ),
             )
         }
         Provider::SelfHosted => {
@@ -3865,6 +3881,122 @@ credential_account = "shared"
         assert!(matches!(
             error,
             ProviderBindingError::CredentialAccountContractMismatch { .. }
+        ));
+    }
+
+    /// The three GitHub Copilot routes of an operator token (one per provider
+    /// family) share one credential account, as the device routes do.
+    #[test]
+    fn credential_account_shares_copilot_token_routes_across_providers() {
+        let config: Config = toml::from_str(
+            r#"
+[realm.global.backend.copilot_openai]
+provider = "openai"
+backend_kind = "copilot"
+
+[realm.global.backend.copilot_anthropic]
+provider = "anthropic"
+backend_kind = "copilot"
+
+[realm.global.backend.copilot_gemini]
+provider = "gemini"
+backend_kind = "copilot"
+
+[realm.global.auth.copilot_openai]
+provider = "openai"
+auth_method = "github_copilot_token"
+source = { kind = "env", env = "COPILOT_GITHUB_TOKEN", fallback = ["GH_TOKEN", "GITHUB_TOKEN"] }
+
+[realm.global.auth.copilot_anthropic]
+provider = "anthropic"
+auth_method = "github_copilot_token"
+source = { kind = "env", env = "COPILOT_GITHUB_TOKEN", fallback = ["GH_TOKEN", "GITHUB_TOKEN"] }
+
+[realm.global.auth.copilot_gemini]
+provider = "gemini"
+auth_method = "github_copilot_token"
+source = { kind = "env", env = "COPILOT_GITHUB_TOKEN", fallback = ["GH_TOKEN", "GITHUB_TOKEN"] }
+
+[realm.global.binding.copilot_openai]
+backend_profile = "copilot_openai"
+auth_profile = "copilot_openai"
+credential_account = "github_copilot"
+
+[realm.global.binding.copilot_anthropic]
+backend_profile = "copilot_anthropic"
+auth_profile = "copilot_anthropic"
+credential_account = "github_copilot"
+
+[realm.global.binding.copilot_gemini]
+backend_profile = "copilot_gemini"
+auth_profile = "copilot_gemini"
+credential_account = "github_copilot"
+"#,
+        )
+        .unwrap();
+
+        let realm = RealmConnectionSet::from_config("global", &config.realm["global"])
+            .expect("the three token routes share the github_copilot account");
+        let account = CredentialAccountRef {
+            realm: RealmId::global(),
+            account: CredentialAccountId::parse("github_copilot").unwrap(),
+        };
+        for route in ["copilot_openai", "copilot_anthropic", "copilot_gemini"] {
+            let auth_binding = AuthBindingRef {
+                realm: RealmId::global(),
+                binding: BindingId::parse(route).unwrap(),
+                profile: None,
+                origin: BindingOrigin::Configured,
+            };
+            assert_eq!(
+                realm.bindings[route].credential_identity(&auth_binding),
+                AuthCredentialIdentity::Account(account.clone()),
+                "{route}"
+            );
+        }
+    }
+
+    /// One credential account holds one GitHub Copilot mode at a time: a
+    /// device route and an operator-token route on the same account are
+    /// refused at config load.
+    #[test]
+    fn credential_account_refuses_copilot_device_and_token_routes_together() {
+        let config: Config = toml::from_str(
+            r#"
+[realm.global.backend.copilot_openai]
+provider = "openai"
+backend_kind = "copilot"
+
+[realm.global.backend.copilot_anthropic]
+provider = "anthropic"
+backend_kind = "copilot"
+
+[realm.global.auth.copilot_openai]
+provider = "openai"
+auth_method = "github_copilot_oauth"
+source = { kind = "managed_store" }
+
+[realm.global.auth.copilot_anthropic]
+provider = "anthropic"
+auth_method = "github_copilot_token"
+source = { kind = "managed_store" }
+
+[realm.global.binding.copilot_openai]
+backend_profile = "copilot_openai"
+auth_profile = "copilot_openai"
+credential_account = "github_copilot"
+
+[realm.global.binding.copilot_anthropic]
+backend_profile = "copilot_anthropic"
+auth_profile = "copilot_anthropic"
+credential_account = "github_copilot"
+"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            RealmConnectionSet::from_config("global", &config.realm["global"]),
+            Err(ProviderBindingError::CredentialAccountContractMismatch { .. })
         ));
     }
 

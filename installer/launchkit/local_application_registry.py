@@ -298,7 +298,7 @@ class LocalApplicationRegistry:
                         or not expected.keys() <= set(old._protected_application_paths(state))
                         or any(selected.get(name) != data for name, data in expected.items())):
                     raise CustodyError("Continue with the original ordinary gateway and protected Console source.")
-                self.ordinary_meta_gateway.read()
+                self.ordinary_meta_gateway.verify(executable=True)
             self._require_registry()
             return True
 

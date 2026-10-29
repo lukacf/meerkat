@@ -95,6 +95,29 @@ async def test_reserved_helperless_build_protects_console_source_without_adding_
     assert saved["proposal"].get("acquisition") is None
 
 
+async def test_legacy_continuation_verifies_gateway_above_input_file_limit(ordinary_registry):
+    f = ordinary_registry
+    path = f.gateway.path.with_name("larger-rpc-gateway")
+    # An inert executable exceeds the input-artifact limit but remains within
+    # the executable custody bound. No native program is started by this row.
+    with path.open("wb") as stream:
+        stream.truncate(16 * 1024 * 1024 + 1)
+    path.chmod(0o700)
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    f.gateway = ExactFile(path, digest)
+    f.registry = LocalApplicationRegistry(guide_store=f.store, implementation=f.implementation,
+        deployment=f.service, runtime_target=f.target, ordinary_meta_gateway=f.gateway)
+    f.implementation.prepare_workspace = f.registry.prepare_workspace
+    bind_registry(f.service, f.registry)
+    saved = ordinary_guide(f)
+    result = await build(f, saved)
+
+    tasks = dict(f.implementation.tasks)
+    assert f.registry.legacy_ordinary_continuation(saved["id"], result["build_id"]) is True
+    assert f.implementation.tasks == tasks and not f.implementation.processes
+
+
 async def test_missing_gateway_refuses_before_workspace_and_preserves_explicit_retry(
         ordinary_registry, monkeypatch):
     f = ordinary_registry
@@ -209,7 +232,7 @@ def reloaded_registry(f, *, gateway=None, model_configuration=None):
     from launchkit.guide import GuideService
     from launchkit.implementation import ImplementationService
     store = GuideStore(f.store.root)
-    guide = GuideService(store, architect=None)
+    guide = GuideService(store, architect=SimpleNamespace())
     implementation = ImplementationService(f.implementation.root.parent, guide)
     service = deployment.DeploymentService(f.service.root.parent, guide, implementation)
     owner = LocalApplicationRegistry(guide_store=store, implementation=implementation,

@@ -24,7 +24,9 @@ BACKUP = "runtime-before"
 FORMAT = "mobkit-launch-runtime-retention-v1"
 MAX_RUNTIME_BYTES = 2 * 1024 * 1024 * 1024
 MAX_RUNTIME_ENTRIES = 50_000
-MAX_FILE_BYTES = 512 * 1024 * 1024
+# Retention streams native files, which can exceed 512 MiB. Keep a finite
+# per-file ceiling matching executable custody, within the total runtime bound.
+MAX_FILE_BYTES = 1024 * 1024 * 1024
 MAX_INVENTORY_BYTES = 16 * 1024 * 1024
 MAX_RECEIPT_BYTES = 1024 * 1024
 HEX = re.compile(r"[a-f0-9]{64}")

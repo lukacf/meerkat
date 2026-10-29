@@ -83,6 +83,44 @@ def test_retain_preserves_exact_inodes_bytes_modes_and_private_inventory(install
     assert (transaction / runtime.BACKUP).stat().st_mode & 0o777 == 0o700
 
 
+def test_retention_accepts_gateway_sized_file_above_512_mib(installed):
+    destination, transaction = installed
+    # Match the reported Meta 0.9.6 Linux gateway size without downloading or
+    # executing a binary. Sparse bytes exercise the real inventory/hash path.
+    path = destination / ".bin/retained-gateway"
+    size = 545_707_016
+    with path.open("wb") as stream:
+        stream.truncate(size)
+        stream.seek(size - 1)
+        stream.write(b"x")
+    path.chmod(0o700)
+    inode = path.stat().st_ino
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+
+    proof = runtime.retain_runtime(destination, transaction)
+    saved = transaction / runtime.BACKUP / ".bin/retained-gateway"
+    assert proof["retained"] is True
+    assert saved.stat().st_ino == inode and saved.stat().st_size == size
+    entry = read_inventory(transaction)["roots"][".bin"][".bin/retained-gateway"]
+    assert (entry["size"], entry["sha256"], entry["mode"]) == (size, digest, 0o700)
+    assert not (destination / ".bin").exists()
+
+
+def test_retention_refuses_file_above_one_gib_before_moving_roots(installed):
+    destination, transaction = installed
+    path = destination / ".bin/oversized-gateway"
+    with path.open("wb") as stream:
+        stream.truncate(1024 * 1024 * 1024 + 1)
+    path.chmod(0o700)
+    roots = {name: (destination / name).stat().st_ino for name in runtime.ROOTS}
+    with pytest.raises(runtime.RuntimeDependencyError, match="oversized file"):
+        runtime.retain_runtime(destination, transaction)
+    assert roots == {name: (destination / name).stat().st_ino for name in runtime.ROOTS}
+    assert not (transaction / runtime.INVENTORY).exists()
+    assert not (transaction / runtime.COMPLETED).exists()
+
+
 def test_repeat_keeps_previous_backup_and_never_labels_candidate_as_previous(installed):
     destination, transaction = installed
     first = runtime.retain_runtime(destination, transaction)

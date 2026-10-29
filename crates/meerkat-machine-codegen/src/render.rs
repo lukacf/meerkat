@@ -500,6 +500,16 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "ClaimCompositionResidencyRunning",
     "ClaimCompositionResidencyRetired",
     "ClaimCompositionResidencyStopped",
+    "HoldInputControllerIdle",
+    "HoldInputControllerAttached",
+    "HoldInputControllerRunning",
+    "HoldInputControllerRetired",
+    "HoldInputControllerStopped",
+    "ReleaseInputControllerIdle",
+    "ReleaseInputControllerAttached",
+    "ReleaseInputControllerRunning",
+    "ReleaseInputControllerRetired",
+    "ReleaseInputControllerStopped",
 ];
 
 // Append-only emission tails for the other machines, whose public

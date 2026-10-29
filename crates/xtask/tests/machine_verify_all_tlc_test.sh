@@ -771,7 +771,13 @@ run_machine_verify() {
 # audits-g = member residency without its mutants, alone: on the push its
 # eight whole-space runs took 165 s and its first 23 of 32 witness runs 173 s
 # before the job timeout cut it off, about 430 s in all, and about 525 s on
-# the pull request's runner, 1.22x slower on the rest of its shard.
+# the pull request's runner, 1.22x slower on the rest of its shard. The
+# wiring exemption of side chats (2026-10-29) about doubled its seat, wake and
+# retire spaces (46248, 3198 and 11174 distinct states) and brought it to 34
+# witnesses: locally, with 4 TLC workers, the whole audit took 299 s (its
+# eight whole-space runs 140 s of TLC time, the seat run 67 s of it), where
+# the same lane took about 230 s before; the hosted shard has not been
+# measured again.
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
 # inside the 1080 s execution budget even on a runner 1.6x slower than the
 # faster ones here. As three shards these audits ran 13-18 minutes (audits-a),

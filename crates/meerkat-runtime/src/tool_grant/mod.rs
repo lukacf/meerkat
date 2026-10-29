@@ -48,8 +48,8 @@ pub use audit::{
 pub use deadlines::ToolGrantDeadlines;
 pub use gate::RuntimeSessionToolGrants;
 pub use service::{
-    StoredToolGrant, ToolGrantListing, ToolGrantRequest, ToolGrantRevocation, ToolGrantService,
-    ToolGrantServiceError, ToolGrantStatus, ToolGrantWindow, UnreadableToolGrant,
+    RevokedToolGrant, StoredToolGrant, ToolGrantListing, ToolGrantRequest, ToolGrantRevocation,
+    ToolGrantService, ToolGrantServiceError, ToolGrantStatus, ToolGrantWindow, UnreadableToolGrant,
 };
 
 /// The host clock the grant service reads: wall-clock UNIX milliseconds.

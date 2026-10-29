@@ -172,6 +172,14 @@ pub struct ToolGrantRevocation {
     pub reason: Option<String>,
 }
 
+/// A revoke's answer: the grant as it now stands, and whether this revoke
+/// ended it. Revoking a grant that already ended changes nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokedToolGrant {
+    pub grant: StoredToolGrant,
+    pub changed: bool,
+}
+
 /// Why a grant operation failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -595,25 +603,34 @@ impl ToolGrantService {
 
     /// Revoke one grant. A revoke at or after the deadline records the
     /// expiry the grant reached instead, and a grant that already ended is
-    /// answered as it stands.
+    /// answered as it stands. The answer says whether this revoke changed
+    /// the grant: its input's effects ended it (`Revoked`, or `Expired` for a
+    /// revoke at or after the deadline).
     ///
     /// # Errors
-    /// [`ToolGrantServiceError::NotFound`], and store and clock failures.
+    /// [`ToolGrantServiceError::NotFound`], [`ToolGrantServiceError::CorruptRow`]
+    /// for a row this binary cannot read, and store and clock failures.
     pub async fn revoke(
         &self,
         grant_id: &ToolGrantId,
         revocation: ToolGrantRevocation,
-    ) -> Result<StoredToolGrant, ToolGrantServiceError> {
+    ) -> Result<RevokedToolGrant, ToolGrantServiceError> {
         let read = self.load_row(&grant_id.to_string()).await?;
         let now_ms = self.now_ms()?;
-        let (row, _) = self
+        let (grant, effects) = self
             .apply_and_commit(
                 read,
                 &|| ToolGrantLifecycleInput::Revoke { now_ms },
                 AuditContext::Revocation(&revocation),
             )
             .await?;
-        Ok(row)
+        let changed = effects.iter().any(|effect| {
+            matches!(
+                effect,
+                ToolGrantLifecycleEffect::Revoked { .. } | ToolGrantLifecycleEffect::Expired { .. }
+            )
+        });
+        Ok(RevokedToolGrant { grant, changed })
     }
 
     /// Every grant of `subject`, each due one settled as expired first, and

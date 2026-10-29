@@ -639,7 +639,12 @@ async fn revoke_through_another_service_instance_is_refused_at_the_next_dispatch
             )
             .await
             .unwrap();
-        assert_eq!(revoked.status, ToolGrantStatus::Revoked, "{backend:?}");
+        assert_eq!(
+            revoked.grant.status,
+            ToolGrantStatus::Revoked,
+            "{backend:?}"
+        );
+        assert!(revoked.changed, "{backend:?}: this revoke ended the grant");
 
         let refusal = served
             .call("shell", "call-after-revoke")
@@ -695,7 +700,7 @@ async fn lifecycle_audit_rows_commit_with_the_row_and_refusals_append() {
         assert_eq!(refusal, ToolGrantRefusal::Required, "{backend:?}");
 
         clock.set(T0 + 10_000);
-        machine
+        let revoked = machine
             .revoke_tool_grant(
                 &grant.record.grant_id,
                 ToolGrantRevocation {
@@ -705,6 +710,10 @@ async fn lifecycle_audit_rows_commit_with_the_row_and_refusals_append() {
             )
             .await
             .unwrap();
+        assert!(
+            revoked.changed,
+            "{backend:?}: the first revoke ends the grant"
+        );
         assert_eq!(
             stored(&*store, &grant).await.status,
             ToolGrantStatus::Revoked
@@ -721,7 +730,11 @@ async fn lifecycle_audit_rows_commit_with_the_row_and_refusals_append() {
             .revoke_tool_grant(&grant.record.grant_id, ToolGrantRevocation::default())
             .await
             .unwrap();
-        assert_eq!(again.status, ToolGrantStatus::Revoked);
+        assert_eq!(again.grant.status, ToolGrantStatus::Revoked);
+        assert!(
+            !again.changed,
+            "{backend:?}: a second revoke changes nothing"
+        );
 
         let grant_id = grant.record.grant_id.clone();
         let events = audit_events(&*store, &session_id).await;

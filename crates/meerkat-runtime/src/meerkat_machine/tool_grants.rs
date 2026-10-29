@@ -13,9 +13,9 @@ use meerkat_core::types::SessionId;
 
 use super::MeerkatMachine;
 use crate::tool_grant::{
-    RuntimeSessionToolGrants, StoredToolGrant, ToolGrantAuditRecord, ToolGrantClock,
-    ToolGrantDeadlines, ToolGrantExpiryDriver, ToolGrantListing, ToolGrantPolicy, ToolGrantRequest,
-    ToolGrantRevocation, ToolGrantService, ToolGrantServiceError,
+    RevokedToolGrant, RuntimeSessionToolGrants, StoredToolGrant, ToolGrantAuditRecord,
+    ToolGrantClock, ToolGrantDeadlines, ToolGrantExpiryDriver, ToolGrantListing, ToolGrantPolicy,
+    ToolGrantRequest, ToolGrantRevocation, ToolGrantService, ToolGrantServiceError,
 };
 
 impl MeerkatMachine {
@@ -60,7 +60,8 @@ impl MeerkatMachine {
     /// Revoke one grant ([`ToolGrantService::revoke`]). A session that
     /// serves it refuses its names at the next gated dispatch, in this
     /// process or any other over the same store, and hides them at its next
-    /// model-request boundary.
+    /// model-request boundary. The answer says whether this revoke changed
+    /// the grant.
     ///
     /// # Errors
     /// The service's refusal.
@@ -68,7 +69,7 @@ impl MeerkatMachine {
         &self,
         grant_id: &ToolGrantId,
         revocation: ToolGrantRevocation,
-    ) -> Result<StoredToolGrant, ToolGrantServiceError> {
+    ) -> Result<RevokedToolGrant, ToolGrantServiceError> {
         self.tool_grant_service.revoke(grant_id, revocation).await
     }
 

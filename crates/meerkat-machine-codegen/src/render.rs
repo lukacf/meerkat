@@ -1297,7 +1297,11 @@ fn render_command_capability_section(out: &mut String, schema: &MachineSchema) {
         pushln!(out, "    ) -> Option<RuntimeLoopBatchPlan> {{");
         pushln!(
             out,
-            "        let ordered = ordered_queued_lane_inputs(state, lane)?;"
+            "        // A kept governed input held for its controller is never selected: later work of its lane goes first."
+        );
+        pushln!(
+            out,
+            "        let ordered: Vec<String> = ordered_queued_lane_inputs(state, lane)?.into_iter().filter(|input_id| !state.input_controller_holds.contains(input_id)).collect();"
         );
         pushln!(out, "        let first = ordered.first()?;");
         pushln!(
@@ -1398,6 +1402,16 @@ fn render_command_capability_section(out: &mut String, schema: &MachineSchema) {
         pushln!(
             out,
             "            if state.input_run_associations.contains_key(input_id) {{"
+        );
+        pushln!(out, "                return None;");
+        pushln!(out, "            }}");
+        pushln!(
+            out,
+            "            // Mirrors the StageForRun `input_controller_not_held` guard."
+        );
+        pushln!(
+            out,
+            "            if state.input_controller_holds.contains(input_id) {{"
         );
         pushln!(out, "                return None;");
         pushln!(out, "            }}");

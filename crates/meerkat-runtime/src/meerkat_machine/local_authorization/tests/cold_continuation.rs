@@ -67,6 +67,9 @@ struct Applied {
     run: RunId,
     ids: Vec<InputId>,
     context: WorkAuthorizationContext,
+    /// The outcome of the run's destination-scoped read, when its executor
+    /// performs one.
+    scoped_read: Option<Result<(), String>>,
 }
 
 /// The actual executor of one machine: every entry is one effect.
@@ -89,6 +92,10 @@ struct CountingExecutor {
     /// When set, the attachment publishes directed terminals through this
     /// owner instead of its actor's.
     publication: Option<Arc<dyn CoreExecutorPublicationHandle>>,
+    /// When set, every run first prepares a read of a record of this domain
+    /// through its work authorization, a destination-scoped operation, and
+    /// reports the outcome with its entry.
+    scoped_read: Option<ResourceDomain>,
 }
 
 #[async_trait::async_trait]
@@ -107,12 +114,20 @@ impl CoreExecutor for CountingExecutor {
             .and_then(|metadata| metadata.work_authorization.clone())
             .expect("actual native batch forwards its work context");
         let ids = primitive.contributing_input_ids().to_vec();
+        let scoped_read = self.scoped_read.as_ref().map(|domain| {
+            context
+                .authorization()
+                .prepare(&binding(&context, &run, domain))
+                .map(|_| ())
+                .map_err(|error| format!("{error:?}"))
+        });
         self.effects.fetch_add(1, Ordering::SeqCst);
         self.applied
             .send(Applied {
                 run: run.clone(),
                 ids: ids.clone(),
                 context,
+                scoped_read,
             })
             .expect("test owns the apply receiver");
         if let Some(hold) = &self.hold {
@@ -643,6 +658,7 @@ async fn attach_executor(
                 loop_boundary,
                 callback_arguments,
                 publication,
+                scoped_read: None,
             }),
         )
         .await
@@ -2426,6 +2442,7 @@ async fn a_stale_witness_or_inexact_evidence_runs_no_publication_step() {
                 loop_boundary: Some(newest_actor.boundary.clone()),
                 callback_arguments: None,
                 publication: None,
+                scoped_read: None,
             }),
         )
         .await
@@ -2704,6 +2721,7 @@ async fn a_reattach_while_the_call_waits_for_the_boundary_runs_no_step() {
                     loop_boundary: None,
                     callback_arguments: None,
                     publication: None,
+                    scoped_read: None,
                 }),
             )
             .await
@@ -2826,6 +2844,7 @@ async fn a_live_admission_waits_for_its_open_run_to_release_the_boundary() {
                 loop_boundary: Some(boundary.clone()),
                 callback_arguments: None,
                 publication: None,
+                scoped_read: None,
             }),
         )
         .await
@@ -4475,6 +4494,35 @@ async fn attach_registered_holding(
     Arc<AtomicUsize>,
     tokio::sync::mpsc::UnboundedReceiver<Applied>,
 ) {
+    attach_registered(machine, session, reply, hold, None).await
+}
+
+/// [`attach_registered_holding`] with an executor whose every run first
+/// prepares a read of a record of `domain` through its work authorization (a
+/// destination-scoped operation) and reports the outcome with its entry.
+async fn attach_registered_reading(
+    machine: &Arc<MeerkatMachine>,
+    session: &SessionId,
+    reply: &'static str,
+    hold: Arc<tokio::sync::Notify>,
+    domain: &ResourceDomain,
+) -> (
+    Arc<AtomicUsize>,
+    tokio::sync::mpsc::UnboundedReceiver<Applied>,
+) {
+    attach_registered(machine, session, reply, hold, Some(domain.clone())).await
+}
+
+async fn attach_registered(
+    machine: &Arc<MeerkatMachine>,
+    session: &SessionId,
+    reply: &'static str,
+    hold: Arc<tokio::sync::Notify>,
+    scoped_read: Option<ResourceDomain>,
+) -> (
+    Arc<AtomicUsize>,
+    tokio::sync::mpsc::UnboundedReceiver<Applied>,
+) {
     let effects = Arc::new(AtomicUsize::new(0));
     let (tx, applied) = tokio::sync::mpsc::unbounded_channel();
     machine
@@ -4490,11 +4538,68 @@ async fn attach_registered_holding(
                 loop_boundary: None,
                 callback_arguments: None,
                 publication: None,
+                scoped_read,
             }),
         )
         .await
         .expect("actual executor attachment");
     (effects, applied)
+}
+
+/// Source reads (the fixture's resource owner) and controller inference (the
+/// mutable controller account) under one operation owner, so the only refusal
+/// a run's destination-scoped read can meet is its destination's.
+struct ControllerAndReads {
+    source: ResourceOwner,
+    controller: Arc<MutableControllerAccount>,
+}
+
+impl OperationPolicyOwner for ControllerAndReads {
+    fn authorize_controller_admission(
+        &self,
+        association: &InputAuthorityAssociation,
+        facts: &meerkat_core::ControllerModelFacts,
+        now_ms: u64,
+    ) -> Result<
+        meerkat_authorization::grant_policy::ControllerAdmissionAllowance,
+        meerkat_core::OperationAuthorizationError,
+    > {
+        self.controller
+            .authorize_controller_admission(association, facts, now_ms)
+    }
+
+    fn authorize_operation(
+        &self,
+        association: &InputAuthorityAssociation,
+        binding: &PreparedAuthorizationBinding,
+        purpose: LocalPolicyPurpose,
+        now_ms: u64,
+    ) -> Result<LocalPolicyAllowance, meerkat_core::OperationAuthorizationError> {
+        if matches!(&binding.facts().operation, AuthorizationOperation::Model(_)) {
+            self.controller
+                .authorize_operation(association, binding, purpose, now_ms)
+        } else {
+            self.source
+                .authorize_operation(association, binding, purpose, now_ms)
+        }
+    }
+}
+
+/// The governed host of these rows, whose operation owner also permits the
+/// fixture's source reads: its owners, the template input, and the domain of
+/// the records a run reads.
+fn reading_host() -> (HostOwners, Input, ResourceDomain) {
+    let (mut configuration, template, account, _publication) =
+        mutable_controller_configuration(true);
+    let domain = account.domain.clone();
+    configuration.operation_owner = Arc::new(ControllerAndReads {
+        source: ResourceOwner {
+            domain: domain.clone(),
+            processor: account.executor.clone(),
+        },
+        controller: account,
+    });
+    (owners_of(&configuration, &template), template, domain)
 }
 
 /// A resume admitted before a restart, kept queued in the store (whose rows
@@ -5058,6 +5163,129 @@ async fn a_kept_run_whose_host_has_no_client_settles_refused_and_runs_nothing() 
         applied.try_recv().is_err(),
         "the executor was never entered"
     );
+    hold.notify_waiters();
+}
+
+/// A run a stop or a restart left open, whose input is a kept resume of
+/// retained work, resumes under the destination its input was staged for: on
+/// this host, which requires scoped destinations, once the registration owner
+/// has bound that destination again, the resumed run's destination-scoped
+/// operations run, as the executor's read of a record shows. RED while
+/// `ResumeRun` staged the run under no destination: its destination was never
+/// current, and the read was refused (`Denied`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_runs_resume_runs_its_scoped_operations_under_its_inputs_destination() {
+    let (owners, template, domain) = reading_host();
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (destination, resume_id, run_id) =
+        keep_resume_in_open_run(&store, &blobs, &owners, &session, &template).await;
+
+    let machine = open(&store, &blobs, &owners).await;
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("the registration marks the kept run resumable");
+    machine
+        .prepare_bindings(session.clone())
+        .await
+        .expect("actual runtime binding");
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        Some(run_id.clone()),
+        "the registration keeps the run resumable, its resume bound to it"
+    );
+    bind_when_settled(&machine, &session, &destination).await;
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let (effects, mut applied) = attach_registered_reading(
+        &machine,
+        &session,
+        "resumed run",
+        Arc::clone(&hold),
+        &domain,
+    )
+    .await;
+
+    let entered = next_apply(&mut applied, "the kept run").await;
+    assert_eq!(entered.run, run_id, "the run resumes under its own id");
+    assert_eq!(entered.ids, vec![resume_id.clone()]);
+    assert_eq!(
+        entered.scoped_read,
+        Some(Ok(())),
+        "the resumed run's destination-scoped read runs under its input's destination"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 1, "the run resumed once");
+    hold.notify_waiters();
+}
+
+/// A run a stop or a restart left open, whose input is a kept resume of
+/// retained work, waits on a host that requires scoped destinations until
+/// the registration owner binds its destination again: attached before the
+/// bind, the run stays marked, its input bound, and nothing resumes it. The
+/// bind and a wake then resume it under its own id, and its
+/// destination-scoped read runs under that destination. RED while `ResumeRun`
+/// did not wait for a destination: the run resumed at once, before any
+/// destination was bound, and its read was refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_runs_resume_waits_for_its_destination_and_then_reads_under_it() {
+    let (owners, template, domain) = reading_host();
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (destination, resume_id, run_id) =
+        keep_resume_in_open_run(&store, &blobs, &owners, &session, &template).await;
+
+    let machine = open(&store, &blobs, &owners).await;
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("the registration marks the kept run resumable");
+    machine
+        .prepare_bindings(session.clone())
+        .await
+        .expect("actual runtime binding");
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let (effects, mut applied) = attach_registered_reading(
+        &machine,
+        &session,
+        "resumed run",
+        Arc::clone(&hold),
+        &domain,
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        applied.try_recv().is_err(),
+        "the kept run does not resume before its destination is bound again"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 0, "nothing was applied");
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        Some(run_id.clone()),
+        "the run waits, marked, with its resume bound to it"
+    );
+    let state = machine_state(&machine, &session).await;
+    assert!(
+        state.scoped_context_required && state.scoped_context_binding.is_none(),
+        "the document requires a destination and has none bound since the restart"
+    );
+
+    bind_when_settled(&machine, &session, &destination).await;
+    machine
+        .wake_runtime_if_active_inputs(&session)
+        .await
+        .expect("the attached loop takes a wake");
+    let entered = next_apply(&mut applied, "the kept run").await;
+    assert_eq!(entered.run, run_id, "the run resumes under its own id");
+    assert_eq!(entered.ids, vec![resume_id.clone()]);
+    assert_eq!(
+        entered.scoped_read,
+        Some(Ok(())),
+        "the resumed run's destination-scoped read runs under the destination bound again"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 1, "the run resumed once");
     hold.notify_waiters();
 }
 

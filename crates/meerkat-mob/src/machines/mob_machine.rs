@@ -2706,6 +2706,17 @@ mod tests {
         identity: &AgentIdentity,
         runtime_id: &AgentRuntimeId,
     ) -> SessionId {
+        seed_membership_committed_member_wired(authority, identity, runtime_id, false)
+    }
+
+    /// `seed_membership_committed_member` whose membership commit carries
+    /// `definition_wiring_exempt`.
+    fn seed_membership_committed_member_wired(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        runtime_id: &AgentRuntimeId,
+        definition_wiring_exempt: bool,
+    ) -> SessionId {
         let bridge_session_id = SessionId::from(format!("session-{}", identity.0.as_str()));
         let profile_material_digest = format!("test-profile-digest-{}", identity.0.as_str());
         MobMachineMutator::apply(
@@ -2775,6 +2786,7 @@ mod tests {
                 ack_engine_version: None,
                 placed_spawn_id: None,
                 provision_operation_id: None,
+                definition_wiring_exempt,
             },
         )
         .expect("CommitSpawnMembership should seed a live member through machine authority");
@@ -2786,7 +2798,23 @@ mod tests {
         identity: &AgentIdentity,
         runtime_id: &AgentRuntimeId,
     ) -> SessionId {
-        let bridge_session_id = seed_membership_committed_member(authority, identity, runtime_id);
+        seed_live_member_wired(authority, identity, runtime_id, false)
+    }
+
+    /// `seed_live_member` whose membership commit carries
+    /// `definition_wiring_exempt`.
+    fn seed_live_member_wired(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        runtime_id: &AgentRuntimeId,
+        definition_wiring_exempt: bool,
+    ) -> SessionId {
+        let bridge_session_id = seed_membership_committed_member_wired(
+            authority,
+            identity,
+            runtime_id,
+            definition_wiring_exempt,
+        );
         MobMachineMutator::apply(
             authority,
             MobMachineInput::CommitSpawnActivation {
@@ -5935,6 +5963,7 @@ mod tests {
                 ack_engine_version: None,
                 placed_spawn_id: None,
                 provision_operation_id: None,
+                definition_wiring_exempt: false,
             },
         )
         .expect("commit peer-only membership without an activation rung");
@@ -6696,6 +6725,7 @@ mod tests {
                     ack_engine_version: None,
                     placed_spawn_id: None,
                     provision_operation_id: None,
+                    definition_wiring_exempt: false,
                 },
             )
             .is_err(),
@@ -6718,6 +6748,7 @@ mod tests {
                 ack_engine_version: None,
                 placed_spawn_id: None,
                 provision_operation_id: None,
+                definition_wiring_exempt: false,
             },
         )
         .expect("strict successor should commit membership");
@@ -7624,6 +7655,7 @@ mod tests {
                     ack_engine_version: None,
                     placed_spawn_id: None,
                     provision_operation_id: None,
+                    definition_wiring_exempt: false,
                 },
             )
             .expect("commit the membership");
@@ -10001,9 +10033,21 @@ mod tests {
         name: &str,
         key_byte: u8,
     ) -> SeatedMember {
+        seat_live_member_with_endpoint_wired(authority, name, key_byte, false)
+    }
+
+    /// `seat_live_member_with_endpoint` whose membership commit carries
+    /// `definition_wiring_exempt`.
+    fn seat_live_member_with_endpoint_wired(
+        authority: &mut MobMachineAuthority,
+        name: &str,
+        key_byte: u8,
+        definition_wiring_exempt: bool,
+    ) -> SeatedMember {
         let identity = AgentIdentity(name.to_string());
         let runtime_id = AgentRuntimeId(format!("{name}:0"));
-        let session_id = seed_live_member(authority, &identity, &runtime_id);
+        let session_id =
+            seed_live_member_wired(authority, &identity, &runtime_id, definition_wiring_exempt);
         register_test_member_peer(authority, &identity, name, [key_byte; 32]);
         let fence_token = live_fence(authority, &runtime_id);
         SeatedMember {
@@ -10340,6 +10384,7 @@ mod tests {
             external_addressable: false,
             kickoff_owed: false,
             kickoff_objective_id: String::new(),
+            definition_wiring_exempt: false,
         };
         let mut undestroyed = MobMachineAuthority::recover_from_state(authority.state().clone())
             .expect("the in-flight rotation recovers");
@@ -11171,6 +11216,7 @@ mod tests {
                 external_addressable: false,
                 kickoff_owed: true,
                 kickoff_objective_id: "rotation-objective".to_string(),
+                definition_wiring_exempt: false,
             },
         )
         .expect("a rotation that owes a kickoff re-seats with the kickoff pending");
@@ -11268,6 +11314,7 @@ mod tests {
             kickoff_owed,
             session_unborn: true,
             fresh_launch: true,
+            definition_wiring_exempt: false,
         };
         assert!(
             MobMachineMutator::apply(&mut authority, seat(true)).is_err(),
@@ -11623,6 +11670,7 @@ mod tests {
                 external_addressable: false,
                 kickoff_owed: false,
                 kickoff_objective_id: String::new(),
+                definition_wiring_exempt: false,
             },
         )
         .expect("the rotation re-seats the next incarnation");
@@ -11738,6 +11786,7 @@ mod tests {
             kickoff_owed: false,
             session_unborn,
             fresh_launch,
+            definition_wiring_exempt: false,
         }
     }
 
@@ -11982,6 +12031,7 @@ mod tests {
                 external_addressable: true,
                 kickoff_owed: false,
                 kickoff_objective_id: String::new(),
+                definition_wiring_exempt: false,
             },
         )
         .expect("the rotation commits under its own grant");
@@ -12059,150 +12109,209 @@ mod tests {
         }
     }
 
-    /// R7: the exemption is a fact of a seated member's current incarnation:
-    /// recorded for exactly that incarnation, refused for another runtime id,
-    /// and cleared when the member is unseated (its retirement's archive).
+    /// `seat_input` (a fresh launch's unborn seat) whose spec takes the
+    /// member out of the definition's wiring rules.
+    fn exempt_seat_input(member: &SeatedMember, generation: Generation) -> MobMachineInput {
+        let mut seat = seat_input(member, generation, true, true);
+        if let MobMachineInput::CommitDormantSeat {
+            definition_wiring_exempt,
+            ..
+        } = &mut seat
+        {
+            *definition_wiring_exempt = true;
+        }
+        seat
+    }
+
+    /// A spawn records its incarnation's exemption from the definition's
+    /// wiring rules in its own membership commit, so the member is exempt
+    /// from the transition that seats it; a spawn bound by the rules records
+    /// none.
     #[test]
-    fn a_seated_incarnation_is_exempted_and_its_unseat_clears_it() {
-        let (mut authority, member) = dormant_member_authority("exempt-retire");
-        assert!(
-            authority
-                .apply_signal(exempt_signal(
-                    &member.identity,
-                    &AgentRuntimeId::from("exempt-retire:9"),
-                ))
-                .is_err(),
-            "only the identity's current incarnation is exempted"
-        );
-        assert!(authority.state().member_definition_wiring_exempt.is_empty());
-        authority
-            .apply_signal(exempt_signal(&member.identity, &member.runtime_id))
-            .expect("the seated incarnation is exempted");
-        assert!(
-            authority
-                .state()
-                .member_definition_wiring_exempt
-                .contains(&member.identity)
-        );
-        MobMachineMutator::apply(
+    fn a_spawn_records_its_exemption_in_its_membership_commit() {
+        let mut authority = MobMachineAuthority::new();
+        let exempt = AgentIdentity::from("exempt-spawn");
+        let bound = AgentIdentity::from("bound-spawn");
+        seed_membership_committed_member_wired(
             &mut authority,
-            retire_input(&member, Some(member.session_id.clone())),
-        )
-        .expect("the exempt member's retirement is admitted");
+            &exempt,
+            &AgentRuntimeId::from("exempt-spawn:0"),
+            true,
+        );
         assert!(
             authority
                 .state()
                 .member_definition_wiring_exempt
-                .contains(&member.identity),
-            "a retiring member is still seated"
+                .contains(&exempt),
+            "the exempt spawn's membership commit records the exemption"
         );
-        close_ingress_detach(&mut authority, &member);
-        authority
-            .apply_signal(archived_signal(&member))
-            .expect("the session archive unseats the member");
+        seed_membership_committed_member_wired(
+            &mut authority,
+            &bound,
+            &AgentRuntimeId::from("bound-spawn:0"),
+            false,
+        );
         assert!(
             !authority
                 .state()
-                .identity_to_runtime
-                .contains_key(&member.identity)
+                .member_definition_wiring_exempt
+                .contains(&bound),
+            "a spawn bound by the rules records no exemption"
         );
+        assert_eq!(authority.state().member_definition_wiring_exempt.len(), 1);
+    }
+
+    /// A dormant seat records its incarnation's exemption in its own
+    /// transition (`CommitDormantSeat`), and the member's unseat (its
+    /// retirement's archive) clears it.
+    #[test]
+    fn a_seat_records_its_exemption_and_its_unseat_clears_it() {
+        let exempt = SeatedMember {
+            identity: AgentIdentity::from("exempt-seat"),
+            runtime_id: AgentRuntimeId::from("exempt-seat:0"),
+            session_id: SessionId::from("exempt-seat-session"),
+            fence_token: FenceToken(7),
+        };
+        let bound = SeatedMember {
+            identity: AgentIdentity::from("bound-seat"),
+            runtime_id: AgentRuntimeId::from("bound-seat:0"),
+            session_id: SessionId::from("bound-seat-session"),
+            fence_token: FenceToken(8),
+        };
+        let mut authority = MobMachineAuthority::new();
+        open_seat_ladder(&mut authority, &bound, Generation(0));
+        MobMachineMutator::apply(
+            &mut authority,
+            seat_input(&bound, Generation(0), true, true),
+        )
+        .expect("a seat bound by the rules commits");
+        open_seat_ladder(&mut authority, &exempt, Generation(0));
+        MobMachineMutator::apply(&mut authority, exempt_seat_input(&exempt, Generation(0)))
+            .expect("an exempt seat commits");
+        assert!(
+            authority
+                .state()
+                .member_definition_wiring_exempt
+                .contains(&exempt.identity),
+            "the exempt seat records its exemption"
+        );
+        assert!(
+            !authority
+                .state()
+                .member_definition_wiring_exempt
+                .contains(&bound.identity),
+            "a seat bound by the rules records none"
+        );
+        retire_and_archive(&mut authority, &exempt);
         assert!(
             authority.state().member_definition_wiring_exempt.is_empty(),
             "the unseat clears the exemption"
         );
-        assert!(
-            authority
-                .apply_signal(exempt_signal(&member.identity, &member.runtime_id))
-                .is_err(),
-            "an unseated identity is not exempted"
-        );
     }
 
-    /// R7: a rotation decides its next incarnation's exemption anew. Its
-    /// commit clears the retiring incarnation's, and the rotation's own step
-    /// exempts the next incarnation when the rotation's spec is exempt; an
-    /// exemption never names the retired incarnation's runtime.
+    /// A rotation decides its next incarnation's exemption anew, in its own
+    /// transition: an exempt incarnation rotated by a spec bound by the
+    /// rules leaves the next incarnation bound, and a bound incarnation
+    /// rotated by an exempt spec records the next one exempt. An exemption
+    /// never names the retired incarnation's runtime.
     #[test]
     fn a_rotation_decides_its_next_incarnation_exemption_anew() {
-        let mut authority = MobMachineAuthority::new();
-        let member = seat_live_member_with_endpoint(&mut authority, "exempt-rotation", 43);
-        authority
-            .apply_signal(exempt_signal(&member.identity, &member.runtime_id))
-            .expect("the live member is exempted");
-        let next_session = SessionId::from("exempt-rotation-next");
-        let next_runtime = AgentRuntimeId::from("exempt-rotation:1");
-        MobMachineMutator::apply(
-            &mut authority,
-            retire_input(&member, Some(member.session_id.clone())),
-        )
-        .expect("the rotation's retirement starts");
-        MobMachineMutator::apply(
-            &mut authority,
-            MobMachineInput::BeginMemberRotation {
-                agent_identity: member.identity.clone(),
-                agent_runtime_id: member.runtime_id.clone(),
-                fence_token: member.fence_token,
-                generation: Generation(0),
-                session_id: next_session,
-                peer_endpoint: None,
-                session_archived: false,
-            },
-        )
-        .expect("the rotation records its intent");
-        MobMachineMutator::apply(
-            &mut authority,
-            profile_check(&member.identity, "test", false),
-        )
-        .expect("the rotation authorizes its next incarnation's profile");
-        close_ingress_detach(&mut authority, &member);
-        MobMachineMutator::apply(
-            &mut authority,
-            MobMachineInput::CommitMemberRotation {
-                agent_identity: member.identity.clone(),
-                agent_runtime_id: member.runtime_id.clone(),
-                fence_token: member.fence_token,
-                generation: Generation(0),
-                session_id: Some(member.session_id.clone()),
-                disposal: MemberSessionDisposal::Archived,
-                next_agent_runtime_id: next_runtime.clone(),
-                next_fence_token: FenceToken(8),
-                next_generation: Generation(1),
-                runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
-                external_addressable: false,
-                kickoff_owed: false,
-                kickoff_objective_id: String::new(),
-            },
-        )
-        .expect("the rotation re-seats the next incarnation");
-        assert!(
-            authority.state().member_definition_wiring_exempt.is_empty(),
-            "the next incarnation is bound by the rules until its step exempts it"
-        );
-        assert!(
-            authority
-                .apply_signal(exempt_signal(&member.identity, &member.runtime_id))
-                .is_err(),
-            "the retired incarnation is not exempted again"
-        );
-        authority
-            .apply_signal(exempt_signal(&member.identity, &next_runtime))
-            .expect("the rotation's step exempts the next incarnation");
-        assert!(
-            authority
-                .state()
-                .member_definition_wiring_exempt
-                .contains(&member.identity)
-        );
+        for exempt_before in [true, false] {
+            let exempt_after = !exempt_before;
+            let mut authority = MobMachineAuthority::new();
+            let member = seat_live_member_with_endpoint_wired(
+                &mut authority,
+                "exempt-rotation",
+                43,
+                exempt_before,
+            );
+            assert_eq!(
+                authority
+                    .state()
+                    .member_definition_wiring_exempt
+                    .contains(&member.identity),
+                exempt_before,
+                "the spawn records its own exemption"
+            );
+            let next_session = SessionId::from("exempt-rotation-next");
+            let next_runtime = AgentRuntimeId::from("exempt-rotation:1");
+            MobMachineMutator::apply(
+                &mut authority,
+                retire_input(&member, Some(member.session_id.clone())),
+            )
+            .expect("the rotation's retirement starts");
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::BeginMemberRotation {
+                    agent_identity: member.identity.clone(),
+                    agent_runtime_id: member.runtime_id.clone(),
+                    fence_token: member.fence_token,
+                    generation: Generation(0),
+                    session_id: next_session,
+                    peer_endpoint: None,
+                    session_archived: false,
+                },
+            )
+            .expect("the rotation records its intent");
+            MobMachineMutator::apply(
+                &mut authority,
+                profile_check(&member.identity, "test", false),
+            )
+            .expect("the rotation authorizes its next incarnation's profile");
+            close_ingress_detach(&mut authority, &member);
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::CommitMemberRotation {
+                    agent_identity: member.identity.clone(),
+                    agent_runtime_id: member.runtime_id.clone(),
+                    fence_token: member.fence_token,
+                    generation: Generation(0),
+                    session_id: Some(member.session_id.clone()),
+                    disposal: MemberSessionDisposal::Archived,
+                    next_agent_runtime_id: next_runtime.clone(),
+                    next_fence_token: FenceToken(8),
+                    next_generation: Generation(1),
+                    runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                    external_addressable: false,
+                    kickoff_owed: false,
+                    kickoff_objective_id: String::new(),
+                    definition_wiring_exempt: exempt_after,
+                },
+            )
+            .expect("the rotation re-seats the next incarnation");
+            assert_eq!(
+                authority
+                    .state()
+                    .member_definition_wiring_exempt
+                    .contains(&member.identity),
+                exempt_after,
+                "the rotation's own transition decides the next incarnation's exemption \
+                 (exempt before: {exempt_before})"
+            );
+            assert!(
+                authority
+                    .apply_signal(exempt_signal(&member.identity, &member.runtime_id))
+                    .is_err(),
+                "the retired incarnation is not exempted again"
+            );
+        }
     }
 
-    /// R7: replay restores an exempt incarnation from its row: the roster
-    /// recovery seats it bound by the rules, and the replay of its exempt
-    /// row exempts it.
+    /// The replay of an exempt row exempts its incarnation, before the boot
+    /// plan is sealed: only the identity's current incarnation, and only a
+    /// seated one. After the seal no exemption is recorded apart from a
+    /// seat (`replay_not_sealed`).
     #[test]
-    fn the_replay_of_an_exempt_row_exempts_its_incarnation() {
+    fn the_replay_of_an_exempt_row_exempts_its_incarnation_before_the_seal() {
         let identity = AgentIdentity::from("exempt-replay");
         let runtime_v0 = AgentRuntimeId::from("exempt-replay:0");
         let mut authority = MobMachineAuthority::new();
+        assert!(
+            authority
+                .apply_signal(exempt_signal(&identity, &runtime_v0))
+                .is_err(),
+            "an identity that is not seated is not exempted"
+        );
         authority
             .apply_signal(MobMachineSignal::RecoverRosterMember {
                 agent_identity: identity.clone(),
@@ -12215,6 +12324,15 @@ mod tests {
             })
             .expect("replay seats the row's member");
         assert!(authority.state().member_definition_wiring_exempt.is_empty());
+        assert!(
+            authority
+                .apply_signal(exempt_signal(
+                    &identity,
+                    &AgentRuntimeId::from("exempt-replay:9"),
+                ))
+                .is_err(),
+            "only the identity's current incarnation is exempted"
+        );
         authority
             .apply_signal(exempt_signal(&identity, &runtime_v0))
             .expect("the exempt row's replay exempts its incarnation");
@@ -12224,11 +12342,23 @@ mod tests {
                 .member_definition_wiring_exempt
                 .contains(&identity)
         );
+
+        let (mut sealed, member) = dormant_member_authority("exempt-sealed");
+        MobMachineMutator::apply(&mut sealed, MobMachineInput::SealBootMaterializationPlan)
+            .expect("the seal admits the Dormant member");
+        assert!(
+            sealed
+                .apply_signal(exempt_signal(&member.identity, &member.runtime_id))
+                .is_err(),
+            "no exemption is recorded apart from a seat after the seal"
+        );
+        assert!(sealed.state().member_definition_wiring_exempt.is_empty());
     }
 
-    /// R7: a member placed on a member host is never exempted from the
-    /// definition's wiring rules: the exemption is a fact of a local member
-    /// (`member_local`), and the invariant holds it to local seats.
+    /// A member placed on a member host is never exempted from the
+    /// definition's wiring rules: the replay of an exempt row refuses it
+    /// (`member_local`), and the invariant holds the exemption to local
+    /// seats.
     #[test]
     fn a_placed_member_is_never_exempted() {
         let identity = AgentIdentity::from("exempt-placed");
@@ -12302,9 +12432,9 @@ mod tests {
         );
     }
 
-    /// R7: the subset invariant: an exemption names a seated member. A
-    /// state whose exemption names an identity that is not seated is refused
-    /// at recovery (`definition_wiring_exempt_member_is_seated`).
+    /// The subset invariant: an exemption names a seated member. A state
+    /// whose exemption names an identity that is not seated is refused at
+    /// recovery (`definition_wiring_exempt_member_is_seated`).
     #[test]
     fn an_exemption_of_an_unseated_identity_is_refused_at_recovery() {
         let (mut authority, member) = dormant_member_authority("exempt-recovery");

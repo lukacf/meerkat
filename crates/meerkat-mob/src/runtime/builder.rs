@@ -4227,7 +4227,10 @@ fn seed_mob_authority_sync_from_events(
                     "recover_member_spawned",
                 )?;
                 // A member exempt from the definition's wiring rules: no seat,
-                // spawn or rotation after the restart wires it by them.
+                // spawn or rotation after the restart wires it by them. The
+                // replay records it before the boot plan is sealed, the one
+                // place MobMachine takes the exemption apart from a seat's
+                // own input.
                 if member_spawned.definition_wiring.is_exempt() {
                     apply_seeded_mob_signal(
                         authority,

@@ -44,9 +44,6 @@ pub(super) struct MemberRotation {
 struct SeatedInChunk {
     index: usize,
     agent_identity: AgentIdentity,
-    agent_runtime_id: crate::ids::AgentRuntimeId,
-    /// Whether the definition's wiring rules apply to the seated member.
-    definition_wiring: crate::DefinitionWiring,
     session_id: SessionId,
     endpoint: Option<TrustedPeerDescriptor>,
     /// The process-local build inputs its unborn session's first build
@@ -512,29 +509,6 @@ impl MobActor {
             mut seated,
             plan,
         } = settled;
-        // The seats exempt from the definition's wiring rules, recorded in
-        // the chunk's own step, before its declared edges read them: no
-        // member is wired to them, and they to none, by those rules.
-        for seat in &seated {
-            if seat.definition_wiring.is_exempt() {
-                let exempted = authority
-                    .apply_signal(
-                        mob_dsl::MobMachineSignal::ExemptMemberFromDefinitionWiring {
-                            agent_identity: mob_dsl::AgentIdentity::from_domain(
-                                &seat.agent_identity,
-                            ),
-                            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
-                                &seat.agent_runtime_id,
-                            ),
-                        },
-                    )
-                    .map_err(|error| MobError::MobMachineRejected {
-                        context: "dormant_seat_definition_wiring_exempt",
-                        reason: error.to_string(),
-                    })?;
-                effects.extend(exempted.into_effects());
-            }
-        }
 
         // Each identity's boot verdict, from one runtime obligation scan
         // over the chunk's seated state. Exactly the Wake verdicts wake,
@@ -777,6 +751,10 @@ impl MobActor {
             session_unborn: candidate.session_unborn,
             // A resume seat is unborn only on a session no build created.
             fresh_launch: candidate.launch == DormantSeatLaunch::Fresh,
+            // The seat is recorded exempt from the definition's wiring rules
+            // exactly when its spec says so, in this same step, before the
+            // chunk's declared edges read it.
+            definition_wiring_exempt: candidate.definition_wiring.is_exempt(),
         };
         Ok(StagedSeat {
             inputs: [candidate.authorize_input.clone(), begin, seat],
@@ -1074,6 +1052,10 @@ impl MobActor {
             // incarnation in the same step.
             kickoff_owed: candidate.kickoff_owed,
             kickoff_objective_id: candidate.kickoff_objective_id.to_string(),
+            // The next incarnation is recorded exempt from the definition's
+            // wiring rules exactly when its spec says so, in this same step,
+            // before its declared edges are read below.
+            definition_wiring_exempt: candidate.definition_wiring.is_exempt(),
         };
         let mut authority = self.dsl_authority.prepare_authority();
         let mut transitions = authority.apply_batch([rotation_input]).map_err(|error| {
@@ -1163,23 +1145,6 @@ impl MobActor {
             .into_iter()
             .flat_map(mob_dsl::MobMachineTransition::into_effects)
             .collect();
-        // A next incarnation exempt from the definition's wiring rules is
-        // recorded in the rotation's own step, before its declared edges
-        // are read below.
-        if candidate.definition_wiring.is_exempt() {
-            let exempted = authority
-                .apply_signal(
-                    mob_dsl::MobMachineSignal::ExemptMemberFromDefinitionWiring {
-                        agent_identity: dsl_identity.clone(),
-                        agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&next_runtime_id),
-                    },
-                )
-                .map_err(|error| MobError::MobMachineRejected {
-                    context: "commit_member_rotation_definition_wiring_exempt",
-                    reason: error.to_string(),
-                })?;
-            effects.extend(exempted.into_effects());
-        }
         let kickoff_notices = effects
             .iter()
             .filter_map(|effect| match effect {
@@ -1519,7 +1484,6 @@ impl SettledSeatChunk {
                 let StagedSeat {
                     mut candidate,
                     endpoint,
-                    agent_runtime_id,
                     ..
                 } = *seat;
                 let agent_identity = candidate.agent_identity.clone();
@@ -1532,8 +1496,6 @@ impl SettledSeatChunk {
                 self.seated.push(SeatedInChunk {
                     index,
                     agent_identity,
-                    agent_runtime_id,
-                    definition_wiring: candidate.definition_wiring,
                     session_id: candidate.session_id.clone(),
                     endpoint,
                     local_build_inputs,

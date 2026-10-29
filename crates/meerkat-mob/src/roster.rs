@@ -1570,7 +1570,7 @@ mod tests {
         assert_eq!(parsed.agent_identity, entry.agent_identity);
         assert_eq!(parsed.wired_to.len(), 1);
 
-        // R6: an entry the definition's wiring rules apply to keeps the
+        // An entry the definition's wiring rules apply to keeps the
         // pre-existing serialized shape, and an entry serialized before the
         // field existed reads `applies`; an exempt entry round-trips.
         assert!(

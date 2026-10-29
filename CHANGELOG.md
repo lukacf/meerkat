@@ -50,7 +50,19 @@ them.
   gains `ExemptMemberFromDefinitionWiringSeatedRunning` and
   `ExemptMemberFromDefinitionWiringSeatedStopped`, also appended last, so no
   existing variant's discriminant moves. Exhaustive matches must add the new
-  variants.
+  variants. The signal records the exemption only when a restore replays an
+  exempt member's row, before the boot plan is sealed.
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the
+  inputs that seat a member carry its exemption from the mob definition's
+  wiring rules, so the transition that seats it records it. The
+  `MobMachineInput` variants `CommitSpawnMembership`, `CommitDormantSeat` and
+  `CommitMemberRotation` (meerkat-machine-schema and meerkat-mob) and the
+  kernel `generated::mob::inputs` structs `CommitSpawnMembership`,
+  `CommitDormantSeat` and `CommitMemberRotation` gain the public field
+  `definition_wiring_exempt: bool`, so code that builds them literally must
+  set it (`false` keeps the previous behaviour), and a serialized kernel input
+  without the field no longer deserializes. A placed member's membership
+  commit refuses `true`.
 
 ### Added
 
@@ -67,9 +79,11 @@ them.
   current incarnation, recorded in the same step that seats it; the member's
   `MemberSpawned` event and its roster entry carry it
   (`MemberSpawnedEvent::definition_wiring`, `RosterEntry::definition_wiring`,
-  omitted when `applies`, so existing journals and goldens are unchanged), a
-  restore replays it, a respawn keeps it, and a rotation decides it anew from
-  the spec it seats. A member placed on a member host cannot be exempt: its
+  omitted when `applies`, so existing journals and goldens are unchanged),
+  `MobMemberListEntry::definition_wiring()` reports MobMachine's record of it
+  for a listed member (a host reconciling the definition's edges leaves an
+  exempt member out), a restore replays it, a respawn keeps it, and a
+  rotation decides it anew from the spec it seats. A member placed on a member host cannot be exempt: its
   spawn is refused typed (`MobError::WiringError`). The option is Rust-only;
   the wire spawn contracts do not carry it.
 

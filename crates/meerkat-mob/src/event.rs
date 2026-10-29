@@ -3104,7 +3104,7 @@ mod tests {
         }
     }
 
-    /// R6: a member the definition's wiring rules apply to keeps the
+    /// A member the definition's wiring rules apply to keeps the
     /// pre-existing wire shape (no `definition_wiring` key), so existing
     /// journals and goldens are unchanged; a journal written before the field
     /// reads `applies`; an exempt member round-trips, through the public and
@@ -3117,10 +3117,10 @@ mod tests {
             "mob_id": "test-mob",
             "kind": {
                 "type": "member_spawned",
-                "agent_identity": "side-chat",
+                "agent_identity": "exempt-member",
                 "generation": 0,
                 "fence_token": 1,
-                "agent_runtime_id": {"identity": "side-chat", "generation": 0},
+                "agent_runtime_id": {"identity": "exempt-member", "generation": 0},
                 "role": "lead",
                 "runtime_mode": "turn_driven"
             },

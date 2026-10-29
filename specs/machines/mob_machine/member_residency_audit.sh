@@ -20,14 +20,16 @@
 #   plan and seal, every WakeMember arm for six input shapes, every
 #   attempt-fenced resolution (the fresh create of an unborn seat's session
 #   among them), the late feedback in Running and Stopped, the seat session
-#   replay, the member's own profile check, the runtime-ready observation,
-#   three release shapes, the drift and terminal classifications, the peer
-#   notice classification, the release verdict, Stop and Resume;
+#   replay, the member's own profile check, the replay of an exempt row
+#   before the seal, the runtime-ready observation, three release shapes, the
+#   drift and terminal classifications, the peer notice classification, the
+#   release verdict, Stop and Resume;
 # - retire (AuditRetireSpec): one identity woken, released and retired, the
 #   routed and archive-only retirement starts, the routed retire retry, the
 #   archives, the replayed starts, a rotation finished in Running and in
 #   Stopped, a host-pending seed, the identity seated again on its first
-#   seat's session, its exemption from the definition's wiring rules in
+#   seat's session, its exemption from the definition's wiring rules (from
+#   its reseat's or rotation's own input, or the replay of its row) in
 #   Running and Stopped, and the mob's destroy;
 # - terminal (AuditTerminalSpec): the Completed and Destroyed phases;
 # - resume (AuditResumeSpec): one identity through an explicit resume, its
@@ -50,15 +52,17 @@
 # close Live when it owes no endpoint cause, that the release verdict is
 # Release exactly when the Released arm would honour the member's own
 # registration, that a refused binding request applies only to the wake it
-# belongs to, that only an unborn seat's session is created afresh, and that a
-# release of another epoch never demotes. The seed run checks that the boot
+# belongs to, that only an unborn seat's session is created afresh, that a
+# release of another epoch never demotes, and that after the seal a member
+# becomes exempt from the definition's wiring rules only in a step that seats
+# a new incarnation of it. The seed run checks that the boot
 # plan never leaves a member that blocks the seal. The retire run checks that
 # no runtime retire is routed for a member with no registration, that a
 # settled retirement can always archive and under an admitted destroy nothing
 # holds it, that no rotation begins or commits under an admitted destroy, that
 # a resume seat is unborn exactly when no build created its session, and that
-# a rotation's terminal never carries an exemption over to the next
-# incarnation. The
+# a rotation's terminal records its next incarnation exempt exactly when its
+# own input says so. The
 # resume run checks that the explicit resume can always join a wake in flight
 # while its readiness is not in flight and its topology has not started,
 # whatever readiness it already settled (AuditResumeJoinable), that it
@@ -170,6 +174,7 @@ wake_covered_actions=(
   ResolveMemberRevivalSessionCreatedStaleStopped
   RecoverMemberSeatSessionUnbornRunning
   RecoverMemberSeatSessionBornRunning
+  ExemptMemberFromDefinitionWiringSeatedRunning
   AuthorizeSpawnProfileSeatedRunning
   ObserveRuntimeReady
   ReleaseMemberMaterializationReleasedRunning
@@ -395,7 +400,8 @@ write_cfg() {
   AuditSucceededLeavesEndpoint
   AuditReleaseEpochFence
   AuditBindingRefusalFenced
-  AuditFreshCreateOnlyUnborn"
+  AuditFreshCreateOnlyUnborn
+  AuditSealedExemptsOnlyASeat"
       run_invariants="
   AuditWakingClosable
   AuditWakeExactlyOne
@@ -876,11 +882,16 @@ rewrite_frame("RecoverMemberSessionBindingAlreadyCurrentRunning", {
   mutate retire archive_keeps_exemption \
     "Error: Invariant definition_wiring_exempt_member_is_seated is violated" \
     'keep_var("ObserveMemberRetirementArchivedLive", "member_definition_wiring_exempt")' "$@"
-  # A rotation's terminal that carries the retiring incarnation's exemption
-  # over to the next one.
+  # A rotation's terminal that keeps the retiring incarnation's exemption
+  # whatever its own input says.
   mutate retire rotation_keeps_exemption \
     "Error: Action property AuditRotationDecidesExemptionAnew is violated" \
     'keep_var("CommitMemberRotationLiveRunning", "member_definition_wiring_exempt")' "$@"
+  # The replay of an exempt row applied after the seal: a seated member
+  # becomes exempt in a step that seats nothing.
+  mutate wake exempt_after_seal \
+    "Error: Action property AuditSealedExemptsOnlyASeat is violated" \
+    'drop_guard("ExemptMemberFromDefinitionWiringSeatedRunning", "boot_plan_sealed")' "$@"
   # A restore that binds an unborn seat, whose session was never created.
   mutate wake bound_without_born_guard \
     "Error: Invariant seat_session_unborn_is_never_bound is violated" \

@@ -959,6 +959,17 @@ impl WiringMob {
             .contains(&dsl::AgentIdentity::from_domain(identity))
     }
 
+    /// The definition wiring `identity`'s member list entry carries.
+    async fn listed_definition_wiring(&self, identity: &AgentIdentity) -> crate::DefinitionWiring {
+        self.handle
+            .list_members()
+            .await
+            .into_iter()
+            .find(|entry| &entry.agent_identity == identity)
+            .expect("a listed member")
+            .definition_wiring()
+    }
+
     /// The definition wiring `identity`'s roster entry records.
     async fn roster_definition_wiring(&self, identity: &AgentIdentity) -> crate::DefinitionWiring {
         self.handle
@@ -1029,11 +1040,11 @@ async fn spawn_settled(handle: &MobHandle, profile: &str, identity: &AgentIdenti
     wait_for_fork_source_settled(handle, &session).await;
 }
 
-/// R1: a member spawned or seated exempt from the definition's wiring rules
+/// A member spawned or seated exempt from the definition's wiring rules
 /// takes none of the edges they declare for its role (the orchestrator's
 /// auto-wire and the worker-reviewer rule): no edge, no MembersWired row and
 /// no `mob.peer_added` notice, and its roster entry and MobMachine record
-/// the exemption.
+/// the exemption, which its member list entry carries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_exempt_member_takes_no_declared_edge_when_it_is_spawned_or_seated() {
     let mob = WiringMob::new("exempt-seated", orchestrated_reviewer_definition(), false).await;
@@ -1085,6 +1096,11 @@ async fn an_exempt_member_takes_no_declared_edge_when_it_is_spawned_or_seated() 
             crate::DefinitionWiring::Exempt,
             "{identity}"
         );
+        assert_eq!(
+            mob.listed_definition_wiring(identity).await,
+            crate::DefinitionWiring::Exempt,
+            "{identity}"
+        );
     }
     for identity in [&lead, &reviewer] {
         assert!(!mob.machine_exempt(identity), "{identity}");
@@ -1093,10 +1109,15 @@ async fn an_exempt_member_takes_no_declared_edge_when_it_is_spawned_or_seated() 
             crate::DefinitionWiring::Applies,
             "{identity}"
         );
+        assert_eq!(
+            mob.listed_definition_wiring(identity).await,
+            crate::DefinitionWiring::Applies,
+            "{identity}"
+        );
     }
 }
 
-/// R2: an exempt member is no target of a later member's declared edges. A
+/// An exempt member is no target of a later member's declared edges. A
 /// worker spawned after an exempt member of the orchestrator's role is
 /// wired to the real orchestrator only, and a reviewer spawned after an
 /// exempt worker is wired to the bound worker only.
@@ -1130,8 +1151,8 @@ async fn later_members_are_not_wired_to_an_exempt_member() {
     assert!(mob.wired_to(&exempt_worker).await.is_empty());
 }
 
-/// Core 0.9.7 seat wiring: an identity seated after an exempt member of the
-/// orchestrator's role is wired to the real orchestrator only. The seat's
+/// An identity seated after an exempt member of the orchestrator's role is
+/// wired to the real orchestrator only. The seat's
 /// active index (`seated_declared_pairs`) leaves the exempt member out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_seat_after_an_exempt_orchestrator_member_is_not_wired_to_it() {
@@ -1162,10 +1183,10 @@ async fn a_seat_after_an_exempt_orchestrator_member_is_not_wired_to_it() {
     assert!(mob.wired_to(&side_lead).await.is_empty());
 }
 
-/// Core 0.9.7 rotation wiring: the next incarnation of a rotated worker is
-/// wired to the real orchestrator only, never to an exempt member of the
-/// orchestrator's role; and an exempt member rotated with an exempt spec
-/// stays exempt and unwired.
+/// The next incarnation of a rotated worker is wired to the real
+/// orchestrator only, never to an exempt member of the orchestrator's role;
+/// and an exempt member rotated with an exempt spec stays exempt and
+/// unwired.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_rotation_is_not_wired_to_an_exempt_orchestrator_member() {
     let mob = WiringMob::new("exempt-rotation", sample_definition_with_auto_wire(), false).await;
@@ -1207,9 +1228,8 @@ async fn a_rotation_is_not_wired_to_an_exempt_orchestrator_member() {
     assert_eq!(mob.edges(), edges);
 }
 
-/// Core 0.9.7 seat wiring, both ways: an orchestrator seated after the
-/// workers that auto-wire to it is wired to every one of them except an
-/// exempt worker.
+/// Seat wiring both ways: an orchestrator seated after the workers that
+/// auto-wire to it is wired to every one of them except an exempt worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_orchestrator_seat_is_not_wired_to_an_exempt_member_of_another_profile() {
     let mob = WiringMob::new(
@@ -1237,9 +1257,8 @@ async fn an_orchestrator_seat_is_not_wired_to_an_exempt_member_of_another_profil
     assert!(mob.wired_to(&exempt_worker).await.is_empty());
 }
 
-/// R3: a durable fork seated exempt (as a console side chat is) is unwired
-/// whatever its source's role, its source keeps its edges, and a worker
-/// seated after it is not wired to it.
+/// A durable fork seated exempt is unwired whatever its source's role, its
+/// source keeps its edges, and a worker seated after it is not wired to it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_exempt_fork_of_any_role_is_unwired_and_no_later_seat_targets_it() {
     let mob = WiringMob::new("exempt-fork", sample_definition_with_auto_wire(), false).await;
@@ -1281,7 +1300,7 @@ async fn an_exempt_fork_of_any_role_is_unwired_and_no_later_seat_targets_it() {
     );
 }
 
-/// R4: the exemption is durable. A respawn of an exempt member keeps it,
+/// The exemption is durable. A respawn of an exempt member keeps it,
 /// unwired; after a restart the member is still exempt (its roster entry
 /// from its `MemberSpawned` row, MobMachine from the row's replay), and a
 /// worker seated after the restart is not wired to it.
@@ -1331,7 +1350,7 @@ async fn an_exempt_member_stays_exempt_across_a_respawn_and_a_restart() {
     assert!(mob.wired_to(&side_lead).await.is_empty());
 }
 
-/// R5: explicit wiring is unaffected. The host wires an exempt member with
+/// Explicit wiring is unaffected. The host wires an exempt member with
 /// `MobHandle::wire`, and its respawn restores that edge, as for any member,
 /// while the member stays exempt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

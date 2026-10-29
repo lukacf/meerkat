@@ -1804,6 +1804,12 @@ pub struct MobMemberListEntry {
     pub is_final: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kickoff: Option<MobMemberKickoffSnapshot>,
+    /// Whether the mob definition's wiring rules apply to the member's
+    /// current incarnation, as MobMachine records it
+    /// (`member_definition_wiring_exempt`). Read through
+    /// [`Self::definition_wiring`]; not part of the serialized shape.
+    #[serde(skip)]
+    pub(crate) definition_wiring: crate::DefinitionWiring,
     // --- Bridge internals (pub(crate)) ---
     // `list_members` stays the lightweight roster view: no session_id
     // in the wire shape (see `tests.rs::test_identity_first_list_members_returns_identity_native_entries`
@@ -1851,6 +1857,15 @@ impl MemberExecutionProfileWitness {
 }
 
 impl MobMemberListEntry {
+    /// Whether the mob definition's wiring rules (`auto_wire_orchestrator`
+    /// and `role_wiring`) apply to the member's current incarnation.
+    /// [`crate::DefinitionWiring::Exempt`] names a member they never touch:
+    /// a host that reconciles the edges a definition declares leaves it out.
+    #[must_use]
+    pub fn definition_wiring(&self) -> crate::DefinitionWiring {
+        self.definition_wiring
+    }
+
     pub(crate) fn with_current_bridge_session_id(
         mut self,
         current_bridge_session_id: Option<SessionId>,
@@ -7015,7 +7030,10 @@ pub struct SpawnMemberSpec {
     pub application_tool_policy: Option<meerkat_core::ApplicationToolPolicyBinding>,
     /// Hard resource caps for the spawned member session.
     pub budget_limits: Option<meerkat_core::BudgetLimits>,
-    /// When true, automatically wire this member to its spawner.
+    /// When true, automatically wire this member to its spawner. That edge
+    /// is explicit wiring, not a definition rule: a member whose
+    /// [`Self::definition_wiring`] is [`crate::DefinitionWiring::Exempt`] is
+    /// wired to its spawner all the same.
     pub auto_wire_parent: bool,
     /// Whether the mob definition's wiring rules (`auto_wire_orchestrator`
     /// and `role_wiring`) apply to this member.
@@ -9552,10 +9570,16 @@ impl MobHandle {
     /// the new incarnation owes it: the kickoff wakes it once and runs
     /// exactly once on its new session. Its wiring is not carried over: the
     /// new incarnation is wired to the edges the definition declares, as a
-    /// spawn of it would be (see [`Self::seat_dormant_members`]). An
-    /// identity that is not seated (its last retirement already completed) is
-    /// seated as one fresh seat, which a spec that owes a kickoff spawns live,
-    /// as [`Self::seat_dormant_members`] does. Refused typed unless the mob is
+    /// spawn of it would be (see [`Self::seat_dormant_members`]). The spec's
+    /// [`SpawnMemberSpec::definition_wiring`] decides the new incarnation's
+    /// exemption anew, in the rotation's own step: an
+    /// [`crate::DefinitionWiring::Exempt`] spec seats it with no edge the
+    /// definition's rules declare and leaves it no target of another
+    /// member's seat, spawn or rotation, and an `Applies` spec ends an
+    /// exemption the retired incarnation held. An identity that is not
+    /// seated (its last retirement already completed) is seated as one fresh
+    /// seat, which a spec that owes a kickoff spawns live, as
+    /// [`Self::seat_dormant_members`] does. Refused typed unless the mob is
     /// Running; a refused rotation retires nothing.
     ///
     /// The rotation's intent lives in this process until its terminal step.
@@ -10273,6 +10297,14 @@ impl MobHandle {
                 current_session_id: None,
                 current_bridge_session_id: None,
                 kickoff: snapshot.kickoff,
+                definition_wiring: if machine_state
+                    .member_definition_wiring_exempt
+                    .contains(identity)
+                {
+                    crate::DefinitionWiring::Exempt
+                } else {
+                    crate::DefinitionWiring::Applies
+                },
             }
             .with_current_bridge_session_id(current_bridge_session_id),
         )
@@ -21405,6 +21437,7 @@ mod tests {
                 ack_engine_version: None,
                 placed_spawn_id: None,
                 provision_operation_id: None,
+                definition_wiring_exempt: false,
             },
         )
         .expect("commit spawn membership should admit");
@@ -21510,6 +21543,7 @@ mod tests {
                     ack_engine_version: None,
                     placed_spawn_id: None,
                     provision_operation_id: None,
+                    definition_wiring_exempt: false,
                 },
             )
             .expect("commit spawn membership should admit");
@@ -21869,6 +21903,7 @@ mod tests {
                 ack_engine_version: None,
                 placed_spawn_id: None,
                 provision_operation_id: None,
+                definition_wiring_exempt: false,
             },
         )
         .expect("commit spawn membership should admit");

@@ -257,6 +257,7 @@ fn commit_membership_ack_fields() -> Vec<(FieldId, KernelValue)> {
         (field("ack_engine_version"), KernelValue::None),
         (field("placed_spawn_id"), KernelValue::None),
         (field("provision_operation_id"), KernelValue::None),
+        (field("definition_wiring_exempt"), KernelValue::Bool(false)),
     ]
 }
 

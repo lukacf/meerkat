@@ -9,9 +9,9 @@
 //! profile a `role_wiring` rule pairs with its own). An identity that was
 //! seated already, or that a spawn embodied, is wired by nothing here: it
 //! holds the edges it holds. A member exempt from the definition's wiring
-//! rules (MobMachine's `member_definition_wiring_exempt`, recorded with its
-//! seat or rotation in the same step) is neither wired when it is seated nor
-//! a target of another member's seat or rotation.
+//! rules (MobMachine's `member_definition_wiring_exempt`, recorded by its
+//! seat or rotation input in that input's own transition) is neither wired
+//! when it is seated nor a target of another member's seat or rotation.
 //!
 //! The edges are staged on the seat step's own prepared authority, after its
 //! seats, so the members seated in one chunk see each other: their lifecycle
@@ -322,8 +322,8 @@ impl MobActor {
     /// members of each profile the rule reads). An edge `state` holds already
     /// is left out, as is a seated member that is not active (a Broken one,
     /// say). A member exempt from the definition's wiring rules
-    /// (`member_definition_wiring_exempt`, which the step records for its
-    /// own exempt seats before this read) has no targets and is no target.
+    /// (`member_definition_wiring_exempt`, which each exempt seat's own input
+    /// records, before this read) has no targets and is no target.
     fn seated_declared_pairs(
         &self,
         state: &mob_dsl::MobMachineState,

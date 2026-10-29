@@ -124,6 +124,7 @@ fn spawn_member(authority: &mut MobMachineAuthority, identity_name: &str, bridge
             ack_engine_version: None,
             placed_spawn_id: None,
             provision_operation_id: None,
+            definition_wiring_exempt: false,
         },
     )
     .expect("fresh spawn must be accepted");

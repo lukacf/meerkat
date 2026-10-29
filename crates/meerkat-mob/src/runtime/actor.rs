@@ -18301,6 +18301,7 @@ impl MobActor {
             ack_engine_version: None,
             placed_spawn_id: None,
             provision_operation_id: None,
+            definition_wiring_exempt: false,
         };
         mob_dsl::MobMachineMutator::apply(&mut authority, commit_membership)
             .map_err(|_| self.invalid_transition_to(MobState::Running))?;
@@ -40490,7 +40491,7 @@ impl MobActor {
         // `MemberSpawned` lifecycle journal emit. Prepared (not committed) here
         // so the journal effect is validated before the expensive trust /
         // overlay / append work; committed once those succeed.
-        let mut prepared_spawn = match self.prepare_dsl_input_transition(
+        let prepared_spawn = match self.prepare_dsl_input_transition(
             mob_dsl::MobMachineInput::CommitSpawnMembership {
                 agent_identity: dsl_identity.clone(),
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
@@ -40524,6 +40525,13 @@ impl MobActor {
                     .as_ref()
                     .map(|remote| mob_dsl::PlacedSpawnId(remote.placed_spawn_id.to_string())),
                 provision_operation_id: ctx.remote.as_ref().map(|_| ctx.operation_id.to_string()),
+                // A member exempt from the definition's wiring rules is
+                // recorded exempt in this same step as its seat, so no seat,
+                // spawn or rotation committed after it can be wired to it by
+                // those rules. A placed member is never exempt (refused at
+                // its enqueue and by the remote commit's `placed_not_exempt`
+                // guard).
+                definition_wiring_exempt: ctx.definition_wiring.is_exempt(),
             },
             "finalize_spawn_admit_commit_membership",
         ) {
@@ -40629,35 +40637,6 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_admit validated lifecycle journal"
         );
-        // A member exempt from the definition's wiring rules is recorded in
-        // its membership commit's own step, so no seat, spawn or rotation
-        // committed after it can be wired to it by those rules. A placed
-        // member is never exempt (refused at its enqueue).
-        if ctx.definition_wiring.is_exempt()
-            && let Err(error) = prepared_spawn.authority.apply_signal(
-                mob_dsl::MobMachineSignal::ExemptMemberFromDefinitionWiring {
-                    agent_identity: dsl_identity.clone(),
-                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
-                },
-            )
-        {
-            self.consume_spawn_provision_failure(
-                provision,
-                false,
-                &ctx.operation_id,
-                "definition wiring exemption rejected",
-            )
-            .await;
-            return Err(self.fold_spawn_exec_abort(
-                &dsl_identity,
-                agent_identity,
-                MobError::MobMachineRejected {
-                    context: "finalize_spawn_admit_definition_wiring_exempt",
-                    reason: error.to_string(),
-                },
-                "finalize_spawn_admit_definition_wiring_exempt",
-            ));
-        }
 
         if let Some(remote) = ctx.remote.as_ref() {
             let persist_result = boxed_arm_future(|| {
@@ -66827,6 +66806,7 @@ mod runtime_observation_tests {
                 ack_engine_version: None,
                 placed_spawn_id: None,
                 provision_operation_id: None,
+                definition_wiring_exempt: false,
             },
         )
         .expect("CommitSpawnMembership should seed live runtime ownership");

@@ -2445,6 +2445,7 @@ fn seam_commit_spawn_membership_input() -> CompositionWitnessInput {
             witness_field("ack_engine_version", Expr::None),
             witness_field("placed_spawn_id", Expr::None),
             witness_field("provision_operation_id", Expr::None),
+            witness_field("definition_wiring_exempt", Expr::Bool(false)),
         ],
     )
 }

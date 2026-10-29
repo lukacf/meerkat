@@ -518,7 +518,11 @@ pub trait NativeWorkAuthorizationHost: Send + Sync {
     /// true, governed work is refused until a destination is bound and,
     /// after a restart, recovered governed work (a kept resume of retained
     /// work included, by its canonical original's destination) stays queued
-    /// until the registration owner binds its destination again.
+    /// until the registration owner binds its destination again. A governed
+    /// run left open by a stop or a restart waits, marked, the same way, and
+    /// then resumes under the destination its inputs were staged for. A bind
+    /// does not wake the runtime: wake it after binding on a registration
+    /// whose executor is attached.
     fn requires_scoped_destination(&self) -> bool {
         false
     }
@@ -553,11 +557,18 @@ pub trait NativeWorkAuthorizationHost: Send + Sync {
     ///   asked.
     /// - The runtime asks once when the registration recovers the input, then
     ///   from its runtime loop: once at the loop's next pass while the input
-    ///   is not held, and once per pause of 3 seconds while it is held. The
-    ///   loop asks while it holds the session's turn boundary, queue
-    ///   authority and driver lock, and recovery while it holds the driver:
-    ///   answer synchronously from the host's own records, without calling
-    ///   back into the runtime.
+    ///   is not held, and once per pause of 3 seconds while it is held (an
+    ///   input held at recovery is next asked after the pause). The loop
+    ///   asks while it holds the session's turn boundary, queue authority and
+    ///   driver lock, and recovery while it holds the driver: answer
+    ///   synchronously from the host's own records, without calling back
+    ///   into the runtime. Only a runtime loop asks again, and a registration
+    ///   runs one only once an executor attaches: on a registration with no
+    ///   executor, an input held at recovery is not asked again, its bound
+    ///   below does not end it, and the refusals below last until an
+    ///   executor attaches or the registration ends. A registration that
+    ///   drains for its unregister asks nothing more: it holds every such
+    ///   input instead, and the next registration asks again.
     /// - `Readiness(UnsupportedScope)` is a definite answer that this host
     ///   supplies no client for the resume, as are the actual verdicts and a
     ///   client for another selection: the input ends as a refused resume

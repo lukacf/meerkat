@@ -657,12 +657,16 @@ composition, through `RetainedControllerOwner::reacquire_controller`):
   contributors against its ledger again first: validate what the answer needs
   through your own owners. A resume whose destination its session has since
   superseded is refused before the host is asked.
-- It is asked once when the registration recovers the input, once at the
-  runtime loop's next pass, and then once every 3 seconds while the runtime
-  machine holds the input. The loop asks while it holds the session's turn
-  boundary, queue authority and driver lock, and recovery while it holds the
-  driver: answer from the host's own records, without calling back into the
-  runtime or waiting on a credential publication.
+- It is asked once when the registration recovers the input, then from the
+  runtime loop: once at the loop's next pass while the input is not held, and
+  once per pause of 3 seconds while the runtime machine holds it (an input
+  held at recovery is next asked after the pause). The loop asks while it
+  holds the session's turn boundary, queue authority and driver lock, and
+  recovery while it holds the driver: answer from the host's own records,
+  without calling back into the runtime or waiting on a credential
+  publication. Only a runtime loop asks again, and a registration runs one
+  only once an executor attaches: until then, a held input is not asked
+  again, its bound does not end it, and the refusals below last.
 - Supply the client to run the resume. Answer `Readiness(UnsupportedScope)`
   (a controller owner: `Ok(None)`), or an actual verdict, when you will never
   supply it: the input ends at once as a refused resume
@@ -679,7 +683,12 @@ composition, through `RetainedControllerOwner::reacquire_controller`):
   commits) and auth lease releases and replacements on every session it
   serves.
 - On a host that requires scoped destinations, a kept resume also waits until
-  the registration owner binds its destination again.
+  the registration owner binds its destination again, and so does a run left
+  open that it is bound to: that run then resumes under the destination its
+  inputs were staged for. A bind does not wake the runtime: after binding on
+  a registration whose executor is already attached, wake it
+  (`MeerkatMachine::wake_runtime_if_active_inputs`), as for any recovered
+  governed work that waits for its destination.
 
 The stock governed composition's controller pins do not outlive their
 registration, so a kept notice there cannot run after a registration change:

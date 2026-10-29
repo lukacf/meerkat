@@ -122,11 +122,16 @@ them.
   are now also called for an admitted resume of retained work whose
   controller client did not survive the store, with its stored input (no
   ingress context, no retained-resume grant): once at registration recovery,
-  once at the runtime loop's next pass while the input is not held, and once
-  every 3 seconds while it is held. There `Readiness(UnsupportedScope)` (and
-  `Ok(None)` from the controller owner) ends the input as
-  `Abandoned { ResumeRefused }`, and every other readiness answer holds the
-  input, with its attempts, for up to 30 seconds from its first such answer.
+  then from the runtime loop, once at its next pass while the input is not
+  held and once per pause of 3 seconds while it is held (an input held at
+  recovery is next asked after the pause). There
+  `Readiness(UnsupportedScope)` (and `Ok(None)` from the controller owner)
+  ends the input as `Abandoned { ResumeRefused }`, and every other readiness
+  answer holds the input, with its attempts, for up to 30 seconds from its
+  first such answer. A run left open that a kept resume is bound to now
+  resumes under the destination its inputs were staged for, and on a host
+  that requires scoped destinations it waits, marked, until the
+  registration owner binds one again.
   Before, each staging of such an input failed until it ended
   `Abandoned { MaxAttemptsExhausted }`. `InputAbandonReason::ResumeRefused`
   now also ends a single queued input that belongs to no run, and a kept
@@ -292,8 +297,10 @@ them.
   the installed host for it again, so every run of it failed before the model
   was called, it ended `Abandoned { MaxAttemptsExhausted }` after three
   attempts, and a consent waiting on it was withdrawn. Now the registration's
-  recovery asks the host for the client again, and the runtime loop asks
-  once more at its next pass when that answer was not a client.
+  recovery asks the host for the client again, and then the runtime loop
+  asks: once at its next pass while the input is not held, and once per
+  pause of 3 seconds while it is held (an input held at recovery is next
+  asked after the pause).
   - A definite answer that the host supplies no client for the resume
     (`Readiness(UnsupportedScope)`, an actual refusal, a client for another
     selection), or a destination the session has since superseded, ends the
@@ -309,17 +316,21 @@ them.
     the input: it keeps its attempts, later queued work goes first, and a run
     left open that it is bound to does not resume, which also holds every
     other run of the session until that run settles. The runtime asks again
-    once every 3 seconds. Once 30 seconds have passed since the input's first
-    such answer (the bound a resumed run's admission has), the next such
-    answer ends it as a refused resume. While such an input waits without
-    its client, the machine refuses controller grant changes, credential
-    publications (logins and token commits) and auth lease releases and
-    replacements on every session it serves, so that wait is bounded too.
+    once per pause of 3 seconds. Once 30 seconds have passed since the
+    input's first such answer (the bound a resumed run's admission has), the
+    next such answer ends it as a refused resume. While such an input waits
+    without its client, the machine refuses controller grant changes,
+    credential publications (logins and token commits) and auth lease
+    releases and replacements on every session it serves, so that wait is
+    bounded too.
   - A recovered resume waits for its destination as a recovered governed
     prompt does: on a host that requires scoped destinations it is not
     selected until the registration owner binds its destination again, so its
     run never stages on an unbound document, where every destination-scoped
-    operation of the run would be refused.
+    operation of the run would be refused. A run left open that such a resume
+    is bound to waits the same way, marked, and then resumes under the
+    destination its inputs were staged for, so its destination-scoped
+    operations and its scoped reply run under that destination.
 
 ### Known limitations
 
@@ -342,6 +353,14 @@ them.
   that work binds a newer generation of the resume's destination, the resume
   then ends as a refused resume (its destination was superseded) instead of
   running once its host answers.
+
+- `meerkat-runtime`: only a runtime loop asks a kept resume's host again,
+  and a registration runs one only once an executor attaches. A registration
+  with no executor attached asks only at its recovery: a kept resume held
+  there is not asked again and its 30-second bound does not end it, so the
+  machine-wide refusals of controller grant changes, credential
+  publications and auth lease releases and replacements last until an
+  executor attaches or the registration ends.
 
 ## [0.9.7] - 2026-10-28
 

@@ -1,9 +1,10 @@
 ---- MODULE source_credential_publication_audit ----
 \* Hand-written bounded audit of the AuthMachine's source-credential
 \* publication: the fingerprint of the credential value the lease's current
-\* publication carries (credential_material_fingerprint), the Acquire guard
-\* credential_material_publishable, and the read-only classifier
-\* ResolveSourceCredentialPublication.
+\* publication carries (credential_material_fingerprint), the Acquire arms
+\* (Acquire with its guard credential_material_publishable outside a run-out
+\* window, AcquireFromExpiring and AcquireFromExpired inside one), and the
+\* read-only classifier ResolveSourceCredentialPublication.
 \*
 \* A publisher that re-reads its credential value from a source (an
 \* environment variable, a command, an external resolver) asks the
@@ -24,7 +25,7 @@
 \*     Valid with that same value recorded.
 \*   AuditVerdictMatchesAcquire (invariant): in every reachable state and for
 \*     every value, exactly one classifier verdict is enabled, and it is
-\*     Publish exactly when Acquire naming the value is enabled, so a
+\*     Publish exactly when an Acquire arm naming the value is enabled, so a
 \*     publisher that mirrors the verdict fires exactly the Acquire the
 \*     machine accepts.
 \*
@@ -33,8 +34,10 @@
 \* healed by another, a logged-out value healed by another, a declared window
 \* that ran out renewing the same value, and a refused and a logged-out value
 \* whose Acquire is disabled while another value's is enabled. With
-\* --mutants the runner drops the Acquire guard from a copy of the generated
-\* model and requires TLC to refuse it.
+\* --mutants the runner seeds two defects into copies of the generated model
+\* and requires TLC to refuse each: Acquire without its guard (refused by the
+\* action property), and the renewal arms AcquireFromExpiring and
+\* AcquireFromExpired disabled (refused by AuditVerdictMatchesAcquire).
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* source_credential_publication_audit.sh. Run a deeper bound by hand with:
@@ -116,9 +119,16 @@ AuditVerdictAlreadyPublished(m) ==
     \/ ENABLED ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired(m)
     \/ ENABLED ResolveSourceCredentialPublicationAlreadyPublishedReleased(m)
 
-\* Acquire naming value `m` (its expiry and publication time do not enter
-\* the guard).
-AuditAcquireAdmits(m) == ENABLED Acquire(None, 1, Some(m))
+\* Some arm of Acquire accepts a publication naming `value` (an option; the
+\* expiry and publication time enter no guard): Acquire outside a run-out
+\* window, AcquireFromExpiring and AcquireFromExpired inside one.
+AuditAcquireEnabled(value) ==
+    \/ ENABLED Acquire(None, 1, value)
+    \/ ENABLED AcquireFromExpiring(None, 1, value)
+    \/ ENABLED AcquireFromExpired(None, 1, value)
+
+\* Acquire naming value `m`.
+AuditAcquireAdmits(m) == AuditAcquireEnabled(Some(m))
 
 AuditVerdictMatchesAcquire ==
     \A m \in StringValues :
@@ -133,7 +143,7 @@ AuditWitnessWindowRenewed == audit_window_renewed
 AuditValueBlockedIn(from) ==
     /\ phase = from
     /\ credential_material_fingerprint # None
-    /\ ~ENABLED Acquire(None, 1, credential_material_fingerprint)
+    /\ ~AuditAcquireEnabled(credential_material_fingerprint)
     /\ \E m \in StringValues :
         /\ Some(m) # credential_material_fingerprint
         /\ AuditAcquireAdmits(m)

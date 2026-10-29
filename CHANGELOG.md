@@ -99,11 +99,17 @@ them.
   `ResolveSourceCredentialPublicationRenewalExpired`,
   `ResolveSourceCredentialPublicationAlreadyPublishedValid`,
   `ResolveSourceCredentialPublicationAlreadyPublishedRefreshing`,
-  `ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired` and
-  `ResolveSourceCredentialPublicationAlreadyPublishedReleased`. An `Acquire`
-  that names a value has the new guard `credential_material_publishable`: it
-  refuses the value the lease records unless the lease's declared freshness
-  window ran out. Code that builds `Acquire` sets the new field.
+  `ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired`,
+  `ResolveSourceCredentialPublicationAlreadyPublishedReleased`,
+  `AcquireFromExpiring` and `AcquireFromExpired`. The `Acquire` input now
+  fires one of three transitions by phase: the `Acquire` transition takes
+  the phases outside a declared freshness window that ran out (`Valid`,
+  `Refreshing`, `ReauthRequired`, `Released`) and has the new guard
+  `credential_material_publishable`, which refuses the value the lease
+  records; `AcquireFromExpiring` and `AcquireFromExpired` take `Expiring` and
+  `Expired` and accept any value, the recorded one included, so a run-out
+  window still renews the lease. Code that builds `Acquire` sets the new
+  field.
 
 ### Added
 

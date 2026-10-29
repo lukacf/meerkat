@@ -6440,7 +6440,7 @@ mod tests {
             let auth = auth_error_from_provider(refused);
             assert_eq!(auth.kind().as_str(), "unsupported_combination");
             assert_eq!(
-                serde_json::to_value(&auth).expect("AuthError JSON")["kind"],
+                serde_json::to_value(auth.kind()).expect("AuthErrorKind JSON"),
                 "unsupported_combination"
             );
             assert!(
@@ -7253,7 +7253,8 @@ mod tests {
         }
 
         /// T10: a canary token never reaches an error (`Display`, `Debug`,
-        /// the `AuthError` and its JSON), the cached account state's `Debug`,
+        /// the `AuthError`, its kind and the serialized summary the auth
+        /// surfaces emit), the cached account state's `Debug`,
         /// the resolved metadata's JSON or a log line, on any path, nor does
         /// a device sign-in's GitHub token when its token exchange fails
         /// with a page that echoes the request.
@@ -7360,9 +7361,19 @@ mod tests {
                     Err(error) => {
                         rendered.push_str(&format!("{path}: {error} {error:?}"));
                         let auth = auth_error_from_provider(error);
+                        // What a caller and the surfaces see: the error's
+                        // Display and Debug, its stable kind, and the
+                        // serialized summary the auth status surfaces emit
+                        // (the kind and the Display message).
+                        let summary = meerkat_core::auth::AuthErrorSummary {
+                            kind: auth.kind(),
+                            message: auth.to_string(),
+                            occurred_at: Utc::now(),
+                        };
                         rendered.push_str(&format!(
-                            " {auth} {auth:?} {}",
-                            serde_json::to_string(&auth).expect("AuthError JSON")
+                            " {auth} {auth:?} {} {}",
+                            auth.kind().as_str(),
+                            serde_json::to_string(&summary).expect("auth error summary JSON")
                         ));
                     }
                 }

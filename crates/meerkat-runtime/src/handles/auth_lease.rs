@@ -2214,11 +2214,12 @@ mod tests {
         assert_eq!(h.snapshot(&window).generation, 4);
     }
 
-    /// The publication verdict is the Acquire guard read ahead: in every
+    /// The publication verdict is the Acquire arms read ahead: in every
     /// phase, for the value the lease records and for another one,
-    /// `ResolveSourceCredentialPublication` answers Publish exactly when
-    /// `Acquire` naming that value is accepted, and classifying changes no
-    /// state.
+    /// `ResolveSourceCredentialPublication` answers Publish exactly when an
+    /// `Acquire` input naming that value is accepted (by `Acquire`, or by
+    /// `AcquireFromExpiring` or `AcquireFromExpired` in a run-out window),
+    /// and classifying changes no state.
     #[test]
     fn source_credential_verdict_matches_the_acquire_guard() {
         use auth_dsl::SourceCredentialPublicationDisposition::{AlreadyPublished, Publish};

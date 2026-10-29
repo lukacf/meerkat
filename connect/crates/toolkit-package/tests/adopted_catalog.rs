@@ -57,7 +57,7 @@ fn changed_metadata_cannot_overwrite_same_version() {
 #[test]
 fn adopted_catalog_does_not_relabel_legacy_research() {
     let legacy = bundled_discovery_catalog().unwrap();
-    assert_eq!(legacy.entries().count(), 10);
+    assert_eq!(legacy.entries().count(), 9);
     assert!(legacy.entries().all(|entry| {
         entry
             .package

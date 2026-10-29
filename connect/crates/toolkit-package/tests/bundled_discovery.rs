@@ -71,24 +71,22 @@ fn bundled_discovery_is_inert_and_never_claims_tested_support() {
         assert_eq!(entry.package, decoded);
     }
 
-    for dual_role in ["slack"] {
-        let package = &entries
+    let package = &entries
+        .iter()
+        .find(|entry| entry.package.identity.name.as_str() == "slack")
+        .expect("dual-role recipe")
+        .package;
+    assert_eq!(package.known_exports.len(), 2);
+    assert!(
+        package
+            .known_exports
             .iter()
-            .find(|entry| entry.package.identity.name.as_str() == dual_role)
-            .expect("dual-role recipe")
-            .package;
-        assert_eq!(package.known_exports.len(), 2);
-        assert!(
-            package
-                .known_exports
-                .iter()
-                .any(|export| export.role == ExportRole::ServiceConnector)
-        );
-        assert!(
-            package
-                .known_exports
-                .iter()
-                .any(|export| export.role == ExportRole::AgentFrontend)
-        );
-    }
+            .any(|export| export.role == ExportRole::ServiceConnector)
+    );
+    assert!(
+        package
+            .known_exports
+            .iter()
+            .any(|export| export.role == ExportRole::AgentFrontend)
+    );
 }

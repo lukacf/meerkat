@@ -21,8 +21,8 @@ fn both_canonical_catalogs_are_read_whole_in_identity_order_without_relabeling()
     let discovery = bundled_discovery_catalog().unwrap();
     let catalog = bundled_recipe_catalog().unwrap();
     assert_eq!(adopted.entries().count(), 101);
-    assert_eq!(discovery.entries().count(), 10);
-    assert_eq!(catalog.entries().count(), 111);
+    assert_eq!(discovery.entries().count(), 9);
+    assert_eq!(catalog.entries().count(), 110);
     for entry in adopted.entries().chain(discovery.entries()) {
         assert_eq!(catalog.get(&entry.package.identity), Some(entry));
     }

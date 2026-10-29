@@ -94,6 +94,15 @@ for grant_input in crates/meerkat-authorization/src/grants/mod.rs crates/meerkat
     bad "machine-authority-changed ignored grant authority input $grant_input"
   fi
 done
+# The scoped tool grant machine's production owner and its service apply the
+# generated ToolGrantLifecycleMachine inputs.
+for tool_grant_input in crates/meerkat-runtime/src/tool_grant/dsl.rs crates/meerkat-runtime/src/tool_grant/service.rs; do
+  if scripts/machine-authority-changed -- "$tool_grant_input" >/dev/null; then
+    ok "machine-authority-changed protects tool grant authority input $tool_grant_input"
+  else
+    bad "machine-authority-changed ignored tool grant authority input $tool_grant_input"
+  fi
+done
 for poster_input in scripts/machine-posters/generate-machine-posters.mjs docs/internal/machine-posters/mob_machine.html crates/xtask/src/machine_alphabet.rs scripts/machine-posters-changed; do
   if scripts/machine-posters-changed -- "$poster_input" >/dev/null; then
     ok "machine-posters-changed routes poster input $poster_input to the poster gate"

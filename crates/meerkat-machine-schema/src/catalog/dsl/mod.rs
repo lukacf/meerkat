@@ -47,6 +47,7 @@ pub mod session_document;
 pub mod session_persistence_version_authority;
 pub mod session_turn_admission;
 pub mod temporary_council_lifecycle;
+pub mod tool_grant_lifecycle;
 pub mod work_attention_lifecycle;
 pub mod work_execution_lifecycle;
 pub mod work_item_admission;
@@ -181,6 +182,8 @@ pub const FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
 pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::temporary_council_lifecycle";
+pub const TOOL_GRANT_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
+pub const TOOL_GRANT_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "tool_grant::dsl";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_MODULE: &str = "meerkat_machine::dsl";
 pub const RUNTIME_DELIVERY_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
@@ -5257,6 +5260,39 @@ pub fn temporary_council_lifecycle_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "TemporaryCouncilCleanupRejection",
                 &["ResultNotSealed", "AlreadySettled"],
+            ),
+        ],
+        vec![],
+    )
+}
+
+/// Canonical ToolGrantLifecycleMachine: one scoped tool grant's issuance,
+/// expiry at a supplied clock, revocation and use admission. Record-scoped
+/// and clock-free.
+pub fn dsl_tool_grant_lifecycle_machine() -> MachineSchema {
+    tool_grant_lifecycle_schema_metadata()
+        .attach_to(tool_grant_lifecycle::ToolGrantLifecycleMachineState::schema())
+}
+
+pub fn dsl_tool_grant_lifecycle_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_tool_grant_lifecycle_machine(),
+        TOOL_GRANT_LIFECYCLE_PRODUCTION_RUST_CRATE,
+        TOOL_GRANT_LIFECYCLE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+/// Named-type bindings for the scoped tool grant record machine: the end
+/// reason carried by the state and the two typed refusal vocabularies its
+/// verdict effects carry.
+pub fn tool_grant_lifecycle_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum("ToolGrantEndReason", &["Deadline", "Revoked"]),
+            NamedTypeBinding::string_enum("ToolGrantUseRefusal", &["Expired", "Revoked"]),
+            NamedTypeBinding::string_enum(
+                "ToolGrantIssueRefusal",
+                &["InvalidWindow", "AlreadyIssued"],
             ),
         ],
         vec![],

@@ -25,8 +25,9 @@ use super::{
         dsl_occurrence_lifecycle_machine, dsl_runtime_delivery_machine,
         dsl_schedule_lifecycle_machine, dsl_session_document_machine,
         dsl_session_turn_admission_machine, dsl_temporary_council_lifecycle_machine,
-        dsl_work_attention_lifecycle_machine, dsl_work_execution_lifecycle_machine,
-        dsl_work_item_admission_machine, dsl_workgraph_lifecycle_machine,
+        dsl_tool_grant_lifecycle_machine, dsl_work_attention_lifecycle_machine,
+        dsl_work_execution_lifecycle_machine, dsl_work_item_admission_machine,
+        dsl_workgraph_lifecycle_machine,
     },
 };
 
@@ -2922,6 +2923,120 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "cleanup_attempts_require_a_sealed_result",
                             "debt_and_settlement_have_attempts",
                             "sealed_phase_has_exit_class",
+                        ]),
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &dsl_tool_grant_lifecycle_machine(),
+            &[machine_anchor(
+                "tool_grant_lifecycle",
+                "ToolGrantLifecycleMachine",
+                "crates/meerkat-runtime/src/tool_grant/dsl.rs",
+                "ToolGrantLifecycleMachine owns one scoped tool grant: issuance against a maximum lifetime, expiry at a supplied clock, revocation before the deadline, and the admission of each use; expired and revoked grants are terminal",
+                CoverageClaims::none()
+                    .transitions(&[
+                        "Issue",
+                        "IssueRefusedWindow",
+                        "IssueRefusedIssuedActive",
+                        "IssueRefusedIssuedExpired",
+                        "IssueRefusedIssuedRevoked",
+                        "ExpireDue",
+                        "ExpireNotDue",
+                        "ExpireSettledExpired",
+                        "ExpireSettledRevoked",
+                        "RevokeActive",
+                        "RevokeAfterDeadline",
+                        "RevokeSettledExpired",
+                        "RevokeSettledRevoked",
+                        "AdmitLive",
+                        "AdmitDue",
+                        "AdmitEndedExpired",
+                        "AdmitEndedRevoked",
+                    ])
+                    .effects(&[
+                        "Issued",
+                        "Expired",
+                        "Revoked",
+                        "UseAdmitted",
+                        "UseRefused",
+                        "IssueRefused",
+                    ])
+                    .invariants(&[
+                        "unissued_is_empty",
+                        "issued_window_is_nonempty",
+                        "active_has_no_end",
+                        "ended_grants_record_their_end",
+                        "expiry_never_precedes_its_deadline",
+                        "revocation_precedes_the_deadline",
+                    ]),
+            )],
+            &[
+                scenario(
+                    "tool_grant_issue_window",
+                    "tool_grant_lifecycle_machine.rs::issue_refuses_a_past_empty_or_overlong_window issues exactly the windows that are non-empty, in the future and within the maximum lifetime, and refuses a second issue of an issued record in every issued phase",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "Issue",
+                            "IssueRefusedWindow",
+                            "IssueRefusedIssuedActive",
+                            "IssueRefusedIssuedExpired",
+                            "IssueRefusedIssuedRevoked",
+                        ])
+                        .effects(&["Issued", "IssueRefused"])
+                        .invariants(&["unissued_is_empty", "issued_window_is_nonempty"]),
+                ),
+                scenario(
+                    "tool_grant_use_admission_at_the_deadline",
+                    "tool_grant_lifecycle_machine.rs::use_one_millisecond_before_the_deadline_is_admitted_and_at_the_deadline_expires_and_is_refused admits a use one millisecond before the deadline, expires the grant at the first use at the deadline and refuses it, and refuses every later use",
+                    CoverageClaims::none()
+                        .transitions(&["AdmitLive", "AdmitDue", "AdmitEndedExpired"])
+                        .effects(&["UseAdmitted", "Expired", "UseRefused"])
+                        .invariants(&["active_has_no_end", "expiry_never_precedes_its_deadline"]),
+                ),
+                scenario(
+                    "tool_grant_deadline_driver",
+                    "tool_grant_lifecycle_machine.rs::expire_before_the_deadline_is_a_byte_identical_noop leaves an early timer fire byte-identical and expires the grant at its deadline; settled grants ignore later expiry observations",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "ExpireDue",
+                            "ExpireNotDue",
+                            "ExpireSettledExpired",
+                            "ExpireSettledRevoked",
+                        ])
+                        .effects(&["Expired"])
+                        .invariants(&[
+                            "ended_grants_record_their_end",
+                            "expiry_never_precedes_its_deadline",
+                        ]),
+                ),
+                scenario(
+                    "tool_grant_revocation",
+                    "tool_grant_lifecycle_machine.rs::revoke_after_the_deadline_records_expiry_not_revocation revokes a live grant before its deadline, records expiry for a revoke at or after the deadline, and leaves settled grants unchanged",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "RevokeActive",
+                            "RevokeAfterDeadline",
+                            "RevokeSettledExpired",
+                            "RevokeSettledRevoked",
+                            "AdmitEndedRevoked",
+                        ])
+                        .effects(&["Revoked", "Expired", "UseRefused"])
+                        .invariants(&["revocation_precedes_the_deadline"]),
+                ),
+                scenario(
+                    "tool_grant_terminal_latch",
+                    "tool_grant_lifecycle_machine.rs::terminal_grants_refuse_use_after_a_clock_rollback and recover_from_state_rejects_torn_rows keep expired and revoked grants terminal under a rolled-back clock and refuse a recovered row that breaks any invariant",
+                    CoverageClaims::none()
+                        .transitions(&["AdmitEndedExpired", "AdmitEndedRevoked"])
+                        .effects(&["UseRefused"])
+                        .invariants(&[
+                            "unissued_is_empty",
+                            "issued_window_is_nonempty",
+                            "active_has_no_end",
+                            "ended_grants_record_their_end",
+                            "expiry_never_precedes_its_deadline",
+                            "revocation_precedes_the_deadline",
                         ]),
                 ),
             ],

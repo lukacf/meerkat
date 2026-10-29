@@ -50,6 +50,7 @@ fn every_catalog_machine_schema_is_constructed_at_most_once() {
     use dsl::session_persistence_version_authority::SessionPersistenceVersionAuthorityMachineState;
     use dsl::session_turn_admission::SessionTurnAdmissionMachineState;
     use dsl::temporary_council_lifecycle::TemporaryCouncilLifecycleMachineState;
+    use dsl::tool_grant_lifecycle::ToolGrantLifecycleMachineState;
     use dsl::work_attention_lifecycle::WorkAttentionLifecycleMachineState;
     use dsl::work_item_admission::WorkItemAdmissionMachineState;
     use dsl::workgraph_lifecycle::WorkGraphLifecycleMachineState;
@@ -105,6 +106,10 @@ fn every_catalog_machine_schema_is_constructed_at_most_once() {
     assert_construction_is_cached(
         TemporaryCouncilLifecycleMachineState::schema_static,
         "TemporaryCouncilLifecycleMachine",
+    );
+    assert_construction_is_cached(
+        ToolGrantLifecycleMachineState::schema_static,
+        "ToolGrantLifecycleMachine",
     );
     assert_construction_is_cached(
         SessionPersistenceVersionAuthorityMachineState::schema_static,

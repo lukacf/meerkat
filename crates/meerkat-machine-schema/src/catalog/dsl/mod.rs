@@ -3388,6 +3388,12 @@ runtime_internal_inputs!(
         // of a recovered registration it placed.
         ResolveEmptyResumeRetirement,
         ClaimCompositionResidency,
+        // The scoped tool grant gate: the visibility owner installs each
+        // build's gate and applies the open set the grant service
+        // adjudicated at each model-request boundary. No caller can ask for
+        // either.
+        ReplaceToolGrantGate,
+        ApplyToolGrantOpenSet,
     ]
 );
 

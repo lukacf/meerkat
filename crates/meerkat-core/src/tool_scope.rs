@@ -1162,6 +1162,8 @@ mod generated_visibility_test_owner {
             staged_revision: state_u64(state, "staged_visibility_revision")?,
             requested_witnesses: state_witness_map(state, "requested_visibility_witnesses")?,
             filter_witnesses: state_witness_map(state, "filter_visibility_witnesses")?,
+            tool_grant_gated_names: state_string_set(state, "tool_grant_gated_names")?,
+            tool_grant_open_names: state_string_set(state, "tool_grant_open_names")?,
         })
     }
 
@@ -1383,6 +1385,34 @@ mod generated_visibility_test_owner {
         fn clear_turn_overlay(&self) -> Result<ToolScopeTurnOverlay, ToolScopeStageError> {
             self.apply_for_stage(input("ClearTurnToolOverlay", []), "ClearTurnToolOverlay")?;
             Ok(ToolScopeTurnOverlay::cleared())
+        }
+
+        fn replace_tool_grant_gate(
+            &self,
+            gated: BTreeSet<ToolName>,
+        ) -> Result<(), ToolScopeApplyError> {
+            self.apply_for_apply(
+                input(
+                    "ReplaceToolGrantGate",
+                    [("gated", kernel_string_set(&gated))],
+                ),
+                "ReplaceToolGrantGate",
+            )?;
+            Ok(())
+        }
+
+        fn apply_tool_grant_open_set(
+            &self,
+            open: BTreeSet<ToolName>,
+        ) -> Result<(), ToolScopeApplyError> {
+            self.apply_for_apply(
+                input(
+                    "ApplyToolGrantOpenSet",
+                    [("open", kernel_string_set(&open))],
+                ),
+                "ApplyToolGrantOpenSet",
+            )?;
+            Ok(())
         }
 
         fn requires_filter_witnesses(&self) -> bool {
@@ -3655,6 +3685,122 @@ mod tests {
             applied.visible_names,
             vec!["visible".to_string(), "deferred".to_string()],
             "the next boundary should promote requested deferred tools into the visible set"
+        );
+    }
+
+    /// The grant gate's layer: a gated name is hidden while its gate is
+    /// closed, reappears once a live grant opens it, and hides again when a
+    /// boundary's open set drops it. A new gate closes every open name, and
+    /// an ungated name never opens.
+    #[cfg(feature = "workspace-tests")]
+    #[test]
+    fn closed_gated_names_are_hidden_and_opened_names_reappear() {
+        let scope = scope_with_generated_visibility(tools(&["read_file", "shell", "shell_jobs"]));
+        let gated = BTreeSet::from([ToolName::from("shell"), ToolName::from("shell_jobs")]);
+        scope.replace_tool_grant_gate(gated.clone()).unwrap();
+        assert_eq!(
+            scope.visible_tool_names().unwrap(),
+            BTreeSet::from(["read_file".into()]),
+            "every gated name starts closed"
+        );
+        assert_eq!(
+            scope.visibility_state().unwrap().tool_grant_gated_names,
+            gated
+        );
+
+        scope
+            .apply_tool_grant_open_set(BTreeSet::from(["shell".into()]))
+            .unwrap();
+        assert_eq!(
+            scope.visible_tool_names().unwrap(),
+            BTreeSet::from(["read_file".into(), "shell".into()]),
+            "the opened name reappears and the other gated name stays hidden"
+        );
+        assert_eq!(
+            scope.tool_grant_open_names().unwrap(),
+            BTreeSet::from(["shell".into()])
+        );
+
+        // The open set is the boundary's whole adjudication: one that finds
+        // no live grant closes the name again.
+        scope.apply_tool_grant_open_set(BTreeSet::new()).unwrap();
+        assert_eq!(
+            scope.visible_tool_names().unwrap(),
+            BTreeSet::from(["read_file".into()])
+        );
+
+        // A new build's gate closes every open name, the regated ones too.
+        scope.apply_tool_grant_open_set(gated.clone()).unwrap();
+        assert_eq!(scope.visible_tool_names().unwrap().len(), 3);
+        scope.replace_tool_grant_gate(gated).unwrap();
+        assert_eq!(
+            scope.visible_tool_names().unwrap(),
+            BTreeSet::from(["read_file".into()]),
+            "a replaced gate starts closed"
+        );
+
+        // An ungated name never opens: the generated owner refuses the set,
+        // and the gate stays as it was.
+        let err = scope
+            .apply_tool_grant_open_set(BTreeSet::from(["read_file".into(), "shell".into()]))
+            .expect_err("an ungated name must never open");
+        assert!(
+            err.to_string().contains("ApplyToolGrantOpenSet"),
+            "the refusal comes from generated authority: {err}"
+        );
+        assert!(scope.tool_grant_open_names().unwrap().is_empty());
+        assert_eq!(
+            scope.visible_tool_names().unwrap(),
+            BTreeSet::from(["read_file".into()])
+        );
+    }
+
+    /// A deferred tool the build gated stays closed to the deferred catalog:
+    /// the catalog's filter check refuses the name, and even a load the scope
+    /// staged does not reveal it at the boundary. Only a live grant opens it.
+    #[cfg(feature = "workspace-tests")]
+    #[test]
+    fn deferred_catalog_load_cannot_reveal_a_closed_gated_name() {
+        let visible = tools(&["visible"])[0].clone();
+        let deferred = tool_with_provenance("deploy", "owner-a");
+        let base: Arc<[Arc<ToolDef>]> = vec![Arc::clone(&visible), Arc::clone(&deferred)].into();
+        let scope = scope_with_generated_projection_names(Arc::clone(&base), raw_set(&["deploy"]));
+        scope
+            .replace_tool_grant_gate(BTreeSet::from(["deploy".into()]))
+            .unwrap();
+
+        assert!(
+            !scope.staged_session_filters_allow_name("deploy").unwrap(),
+            "the deferred catalog must not offer a closed gated name"
+        );
+        assert!(scope.staged_session_filters_allow_name("visible").unwrap());
+
+        scope
+            .add_requested_deferred_authorities(&[crate::DeferredToolLoadAuthority::new(
+                "deploy",
+                crate::ToolVisibilityWitness {
+                    last_seen_provenance: deferred.provenance.clone(),
+                },
+            )])
+            .unwrap();
+        let applied = scope.apply_staged(Arc::clone(&base)).unwrap();
+        assert_eq!(
+            applied.visible_names,
+            vec!["visible".to_string()],
+            "a loaded deferred tool stays hidden while its gate is closed"
+        );
+
+        scope
+            .apply_tool_grant_open_set(BTreeSet::from(["deploy".into()]))
+            .unwrap();
+        assert!(
+            scope.staged_session_filters_allow_name("deploy").unwrap(),
+            "a live grant opens the name to the deferred catalog"
+        );
+        assert_eq!(
+            scope.visible_tool_names().unwrap(),
+            BTreeSet::from(["deploy".into(), "visible".into()]),
+            "the loaded tool appears once a grant opens it"
         );
     }
 

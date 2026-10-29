@@ -21912,6 +21912,248 @@ mod tests {
         }
     }
 
+    /// A model call naming a gated tool that its closed gate hides passes the
+    /// visibility precheck to the dispatch gate, the gated name's one refusal
+    /// site. The grants are adjudicated exactly once, and that adjudication
+    /// is where the runtime's grant service appends the refusal's audit row.
+    /// The call is refused as `policy_denied` with `tool_grant_required`, its
+    /// body never runs, and its ungated sibling still executes.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_call_to_a_closed_gated_name_is_refused_once_by_the_gate_and_audited() {
+        /// A session with no live grant. It records every boundary read and
+        /// every call it adjudicates.
+        struct NoLiveGrant {
+            boundaries: Mutex<u32>,
+            adjudicated: Mutex<Vec<(String, String)>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
+            async fn open_names(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                *self.boundaries.lock().unwrap() += 1;
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn admit_call(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+                call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                self.adjudicated
+                    .lock()
+                    .unwrap()
+                    .push((call.call_id.to_string(), call.name.to_string()));
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+        }
+
+        struct RecordingDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+            dispatched: Mutex<Vec<(String, String)>>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for RecordingDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                self.dispatched
+                    .lock()
+                    .unwrap()
+                    .push((call.id.to_string(), call.name.to_string()));
+                Ok(crate::ops::ToolDispatchOutcome::from(ToolResult::new(
+                    call.id.to_string(),
+                    "ok".to_string(),
+                    false,
+                )))
+            }
+        }
+
+        /// Calls the hidden gated tool and an ungated sibling, then ends.
+        struct GatedCallClient {
+            call_count: Mutex<u32>,
+            observed_messages: Mutex<Vec<Vec<Message>>>,
+            observed_tools: Mutex<Vec<Vec<String>>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for GatedCallClient {
+            async fn stream_response(
+                &self,
+                messages: &[Message],
+                tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                self.observed_messages
+                    .lock()
+                    .unwrap()
+                    .push(messages.to_vec());
+                self.observed_tools
+                    .lock()
+                    .unwrap()
+                    .push(tools.iter().map(|tool| tool.name.to_string()).collect());
+                let mut calls = self.call_count.lock().unwrap();
+                let response = if *calls == 0 {
+                    super::LlmStreamResult::new(
+                        ["call-deploy", "call-open"]
+                            .into_iter()
+                            .zip(["deploy", "open_tool"])
+                            .map(|(id, name)| AssistantBlock::ToolUse {
+                                id: id.to_string(),
+                                name: name.into(),
+                                args: serde_json::value::RawValue::from_string("{}".to_string())
+                                    .expect("static raw value should parse"),
+                                meta: None,
+                            })
+                            .collect(),
+                        StopReason::ToolUse,
+                        normalized_test_usage(self, Usage::default()),
+                    )
+                } else {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::Text {
+                            text: "done".to_string(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                        normalized_test_usage(self, Usage::default()),
+                    )
+                };
+                *calls += 1;
+                Ok(response)
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        let inner = Arc::new(RecordingDispatcher {
+            tools: ["deploy", "open_tool"]
+                .into_iter()
+                .map(|name| {
+                    Arc::new(ToolDef::new(
+                        name,
+                        format!("{name} fixture"),
+                        serde_json::json!({ "type": "object" }),
+                    ))
+                })
+                .collect(),
+            dispatched: Mutex::new(Vec::new()),
+        });
+        let grants = Arc::new(NoLiveGrant {
+            boundaries: Mutex::new(0),
+            adjudicated: Mutex::new(Vec::new()),
+        });
+        let gate = crate::tool_grant::ToolGrantGate::new(
+            Arc::clone(&grants) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            crate::tool_grant::GatedToolTable::new(
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::from([crate::types::ToolName::from("deploy")]),
+            ),
+        );
+        let dispatcher = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::clone(&inner),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        let client = Arc::new(GatedCallClient {
+            call_count: Mutex::new(0),
+            observed_messages: Mutex::new(Vec::new()),
+            observed_tools: Mutex::new(Vec::new()),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate)
+            .build_standalone(client.clone(), dispatcher, Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel(256);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            agent.run_with_events("deploy it".to_string().into(), tx),
+        )
+        .await
+        .expect("run must complete promptly after the refusal")
+        .expect("a refused gated call is operation-local feedback");
+        while rx.try_recv().is_ok() {}
+
+        assert_eq!(result.turns, 2);
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            *grants.adjudicated.lock().unwrap(),
+            [("call-deploy".to_string(), "deploy".to_string())],
+            "the dispatch gate adjudicates the gated call exactly once"
+        );
+        assert_eq!(
+            *inner.dispatched.lock().unwrap(),
+            [("call-open".to_string(), "open_tool".to_string())],
+            "only the ungated sibling enters a tool body"
+        );
+        assert!(
+            *grants.boundaries.lock().unwrap() >= 2,
+            "every model-request boundary reads the grants"
+        );
+        for tools in client.observed_tools.lock().unwrap().iter() {
+            assert!(
+                tools.iter().all(|name| name != "deploy"),
+                "the closed gated name is hidden from every model request"
+            );
+            assert!(tools.iter().any(|name| name == "open_tool"));
+        }
+
+        let observations = client.observed_messages.lock().unwrap();
+        let follow_up_results = observations[1]
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResults { results, .. } => Some(results),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            follow_up_results
+                .iter()
+                .map(|result| result.tool_use_id.as_str())
+                .collect::<Vec<_>>(),
+            ["call-deploy", "call-open"],
+            "the next model request receives both results in call order"
+        );
+        let refused = follow_up_results[0];
+        let expected = crate::ops::terminal_tool_outcome_for_error(
+            "call-deploy",
+            crate::tool_grant::ToolGrantRefusal::Required.into_tool_error("deploy"),
+        );
+        assert!(refused.is_error);
+        assert_eq!(refused.content, expected.result.content);
+        let payload: serde_json::Value =
+            serde_json::from_str(&crate::types::text_content(&refused.content))
+                .expect("a grant refusal uses the canonical feedback envelope");
+        assert_eq!(payload["error"], "policy_denied");
+        assert_eq!(payload["data"]["code"], "tool_grant_required");
+        assert!(!follow_up_results[1].is_error);
+    }
+
     /// A model call naming a tool absent from every catalog is typed
     /// operation-local feedback: the permitted sibling still runs, the next
     /// model turn receives both results in call order, and the run completes.

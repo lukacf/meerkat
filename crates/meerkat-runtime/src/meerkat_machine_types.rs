@@ -1342,6 +1342,12 @@ meerkat_machine_runtime_internal_inputs!(
         ResolveEmptyResumeRetirement,
         ClaimCompositionResidency,
     ],
+    // The scoped tool grant gate: each build's gate and each boundary's
+    // adjudicated open set, applied by the visibility owner.
+    VisibilityAuthorityLifecycle => [
+        ReplaceToolGrantGate,
+        ApplyToolGrantOpenSet,
+    ],
 );
 
 macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {

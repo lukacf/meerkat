@@ -4008,6 +4008,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             turn_tool_overlay_allow_active: bool,
             turn_tool_overlay_allow_names: Set<ToolName>,
             turn_tool_overlay_deny_names: Set<ToolName>,
+            // The scoped tool grant gate. `tool_grant_gated_names` are the
+            // names this build marked grant-gated, replaced by every build
+            // (ReplaceToolGrantGate). `tool_grant_open_names` are the gated
+            // names a live grant opened at the last model-request boundary
+            // (ApplyToolGrantOpenSet). The gated names no grant opened are
+            // hidden. The machine never reads a grant: the open set is the
+            // grant service's adjudication, applied as an input.
+            tool_grant_gated_names: Set<ToolName>,
+            tool_grant_open_names: Set<ToolName>,
 
             // --- Input lifecycle substate ---
             // Authenticated shell supplies exact opaque association bytes. These
@@ -4829,6 +4838,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             turn_tool_overlay_allow_active = false,
             turn_tool_overlay_allow_names = EmptySet,
             turn_tool_overlay_deny_names = EmptySet,
+            tool_grant_gated_names = EmptySet,
+            tool_grant_open_names = EmptySet,
             // Input lifecycle substate
             input_authority_bindings = EmptyMap,
             input_authority_batch_keys = EmptyMap,
@@ -7299,6 +7310,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 fence_token: FenceToken,
                 generation: Option<Generation>,
             },
+            // The scoped tool grant gate: every build replaces the gated
+            // names (every open name closes), and every model-request
+            // boundary applies the gated names a live grant opens.
+            ReplaceToolGrantGate { gated: Set<ToolName> },
+            ApplyToolGrantOpenSet { open: Set<ToolName> },
         }
 
         surface_only [
@@ -10615,6 +10631,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.supervisor_bound_address == self.supervisor_rotation_previous_address
                 && self.supervisor_bound_signing_public_key == self.supervisor_rotation_previous_signing_public_key
                 && self.supervisor_bound_epoch == self.supervisor_rotation_previous_epoch)
+        }
+
+        // The scoped tool grant gate opens only names this build gated.
+        invariant tool_grant_open_names_are_gated {
+            for_all(name in self.tool_grant_open_names,
+                self.tool_grant_gated_names.contains(name))
         }
 
 
@@ -36163,6 +36185,51 @@ macro_rules! meerkat_catalog_machine_dsl {
                     self.next_staged_visibility_revision = staged_revision;
                 }
             }
+            to Idle
+        }
+
+        // ReplaceToolGrantGate: every build installs its scoped tool grant
+        // gate, the names it marked grant-gated, and every open name closes.
+        // A new build therefore starts closed until a model-request boundary
+        // applies the open set a live grant admits. A build without a gate
+        // installs the empty gate, which clears the last build's.
+        transition ReplaceToolGrantGate {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ReplaceToolGrantGate { gated }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.tool_grant_gated_names = gated;
+                self.tool_grant_open_names = EmptySet;
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+        }
+
+        // ApplyToolGrantOpenSet: a model-request boundary applies the gated
+        // names a live grant opens now, as the grant service adjudicated
+        // them. Only gated names open: a set naming any other name matches
+        // no arm and is refused, and the gate stays as it was.
+        transition ApplyToolGrantOpenSetChanged {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ApplyToolGrantOpenSet { open }
+            guard "session_registered" { self.session_id != None }
+            guard "open_names_are_gated" {
+                for_all(name in open, self.tool_grant_gated_names.contains(name))
+            }
+            guard "open_set_changed" { open != self.tool_grant_open_names }
+            update {
+                self.tool_grant_open_names = open;
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+        }
+
+        transition ApplyToolGrantOpenSetUnchanged {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ApplyToolGrantOpenSet { open }
+            guard "session_registered" { self.session_id != None }
+            guard "open_set_unchanged" { open == self.tool_grant_open_names }
+            update {}
             to Idle
         }
 

@@ -117,8 +117,8 @@ pub use coordination::{
     WorkIntentStatus,
 };
 pub use definition::{
-    MobDefinition, MobDefinitionSourceIdentity, MobDefinitionSourceKind, ParsedMobDefinition,
-    UnknownProfileKeys,
+    DefinitionWiring, MobDefinition, MobDefinitionSourceIdentity, MobDefinitionSourceKind,
+    ParsedMobDefinition, UnknownProfileKeys,
 };
 pub use error::{
     FlowRoleTargetRefusal, FlowStepDispatchRejectKind, ForkSourceUnavailableCause,

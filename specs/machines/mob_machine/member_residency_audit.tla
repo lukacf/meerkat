@@ -30,8 +30,10 @@
 \*     plain archives, the replayed retirement starts, a rotation with its
 \*     terminal in Running and Stopped, a host-pending seed and its
 \*     carry-out, the identity seated again on the session its first seat
-\*     named, and the mob's destroy: its admission, its member retirement
-\*     and archive arms and DestroyMob.
+\*     named, its exemption from the definition's wiring rules recorded for
+\*     any of its incarnations in Running and Stopped, and the mob's
+\*     destroy: its admission, its member retirement and archive arms and
+\*     DestroyMob.
 \*   terminal (AuditTerminalSpec): one identity in the Completed and
 \*     Destroyed phases: Complete, MarkCompleted, the destroy, Shutdown, the
 \*     late feedback, the release, the wake refusal, the notice
@@ -100,9 +102,11 @@
 \*     retiring member whose ingress detach closed has an enabled archive
 \*     terminal, and under an admitted destroy no rotation and no host
 \*     carry-out holds it), AuditDestroyFencesRotation (no rotation
-\*     begins or commits under an admitted destroy) and
+\*     begins or commits under an admitted destroy),
 \*     AuditReseatUnbornIffNeverBorn (a resume seat is unborn exactly when no
-\*     build created its session);
+\*     build created its session) and AuditRotationDecidesExemptionAnew (a
+\*     rotation's terminal leaves its next incarnation bound by the
+\*     definition's wiring rules: only the step's own exemption records it);
 \*   seat: AuditSeatLeavesDormant (a dormant seat leaves its identity
 \*     Dormant, with its endpoint or owed EndpointPending, and requests no
 \*     runtime binding).
@@ -506,6 +510,14 @@ RReseat ==
 \* a crash is re-driven by the host), or not.
 RSeedHostPending == \E hp \in {{}, {Id1}} : SeedMemberResidencyRunning("OnDemand", "Authoritative", hp)
 
+\* Member 1 exempt from the definition's wiring rules, recorded for the
+\* incarnation it is seated as: its first (Rid1), its reseat (Rid2) or its
+\* rotation's next (Rid3), in a running or a stopped mob.
+RExempt ==
+    \E rid \in {Rid1, Rid2, Rid3} :
+        \/ ExemptMemberFromDefinitionWiringSeatedRunning(Id1, rid)
+        \/ ExemptMemberFromDefinitionWiringSeatedStopped(Id1, rid)
+
 \* The mob's destroy: its member retirement admissions and archives.
 RDestroyMember ==
     \/ AdmitDestroyMemberRetireLiveRunning(AuditMob, Id1, Rid1, 1, 0, Some(Sess1))
@@ -536,6 +548,7 @@ AuditRetireNext ==
     \/ RotationArms
     \/ RReseatOpen
     \/ RReseat
+    \/ RExempt
     \/ AuditQuiesceStop
     \/ StopRunning
     \/ ResumeStopped
@@ -1103,6 +1116,12 @@ AuditRetirementArchivable ==
 \* No rotation begins or commits under an admitted destroy.
 AuditDestroyFencesRotation == [][destroy_admitted => ~RotationArms]_vars
 
+\* A rotation's terminal leaves member 1's next incarnation bound by the
+\* definition's wiring rules: the retiring incarnation's exemption does not
+\* carry over, and only the rotation step's own exemption records one.
+AuditRotationDecidesExemptionAnew ==
+    [][RCommitRotation => Id1 \notin member_definition_wiring_exempt']_vars
+
 \* Over the wake refusal helper's whole input domain, a present,
 \* session-bound member with a phase is never refused as not a member.
 ASSUME \A present, bound, placed, broken, retiring, admitting, authoritative, origin_open,
@@ -1239,6 +1258,18 @@ AuditWitnessRotatedUnbornStep ==
 AuditWitnessRotationGrant ==
     /\ Id1 \in DOMAIN spawn_profile_authority_profile_names
     /\ Id1 \in DOMAIN member_rotation_session_ids
+\* Retire run: an exempt member's archive unseats it, which clears the
+\* exemption.
+AuditWitnessExemptArchivedStep ==
+    /\ Id1 \in member_definition_wiring_exempt
+    /\ Id1 \notin DOMAIN identity_to_runtime'
+    /\ Id1 \notin member_definition_wiring_exempt'
+\* Retire run: the rotation of an exempt member re-seats its next
+\* incarnation bound by the rules.
+AuditWitnessExemptRotatedStep ==
+    /\ Id1 \in member_definition_wiring_exempt
+    /\ RCommitRotation
+    /\ Id1 \notin member_definition_wiring_exempt'
 \* Edge run: the edge's trust repair is owed (an unrealized realization).
 AuditWitnessEdgeRepairOwed == AuditEdge \in owed_edge_repairs
 \* Edge run: after the seal an edge endpoint is unseated and held by the
@@ -1310,4 +1341,6 @@ NotAuditWitnessRotated == [][~AuditWitnessRotatedStep]_vars
 NotAuditWitnessReleasedSpawn == [][~AuditWitnessReleasedSpawnStep]_vars
 NotAuditWitnessCrossNotice == [][~AuditWitnessCrossNoticeStep]_vars
 NotAuditWitnessRetireBesideWaking == [][~AuditWitnessRetireBesideWakingStep]_vars
+NotAuditWitnessExemptArchived == [][~AuditWitnessExemptArchivedStep]_vars
+NotAuditWitnessExemptRotated == [][~AuditWitnessExemptRotatedStep]_vars
 ====

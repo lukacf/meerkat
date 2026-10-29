@@ -68,6 +68,44 @@ pub struct WiringRules {
     pub role_wiring: Vec<RoleWiringRule>,
 }
 
+/// Whether the mob definition's wiring rules ([`WiringRules`]:
+/// `auto_wire_orchestrator` and `role_wiring`) apply to a member.
+///
+/// A durable fact of the member, chosen by its spawn request
+/// ([`crate::SpawnMemberSpec::definition_wiring`]), recorded on its
+/// `MemberSpawned` row and its roster entry (`RosterEntry::definition_wiring`),
+/// and kept by its restore and its respawn. MobMachine holds the exempt members
+/// (`member_definition_wiring_exempt`) and every seat, spawn and rotation
+/// reads them there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DefinitionWiring {
+    /// The definition's wiring rules wire the member like any other: when it
+    /// is seated, to the members they pair it with, and other members to it
+    /// when they are seated.
+    #[default]
+    Applies,
+    /// The definition's wiring rules never touch the member: they wire it to
+    /// no member when it is seated, and no other member to it when that
+    /// member is seated or rotated. Explicit wiring
+    /// ([`crate::MobHandle::wire`], topology operations) is unaffected, and a
+    /// respawn restores the explicit edges it held.
+    Exempt,
+}
+
+impl DefinitionWiring {
+    /// Whether this is the default, [`Self::Applies`] (serde skips it).
+    pub fn is_applies(&self) -> bool {
+        matches!(self, Self::Applies)
+    }
+
+    /// Whether the definition's wiring rules never touch the member.
+    pub fn is_exempt(&self) -> bool {
+        matches!(self, Self::Exempt)
+    }
+}
+
 /// External backend configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalBackendConfig {

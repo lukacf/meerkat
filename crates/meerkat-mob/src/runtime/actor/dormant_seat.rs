@@ -44,6 +44,9 @@ pub(super) struct MemberRotation {
 struct SeatedInChunk {
     index: usize,
     agent_identity: AgentIdentity,
+    agent_runtime_id: crate::ids::AgentRuntimeId,
+    /// Whether the definition's wiring rules apply to the seated member.
+    definition_wiring: crate::DefinitionWiring,
     session_id: SessionId,
     endpoint: Option<TrustedPeerDescriptor>,
     /// The process-local build inputs its unborn session's first build
@@ -392,6 +395,7 @@ impl MobActor {
             creation_origin: spec.creation_origin.clone(),
             effective_profile_override,
             effective_model_override,
+            definition_wiring: spec.definition_wiring,
             authorize_input,
             authorized,
             observations,
@@ -508,6 +512,29 @@ impl MobActor {
             mut seated,
             plan,
         } = settled;
+        // The seats exempt from the definition's wiring rules, recorded in
+        // the chunk's own step, before its declared edges read them: no
+        // member is wired to them, and they to none, by those rules.
+        for seat in &seated {
+            if seat.definition_wiring.is_exempt() {
+                let exempted = authority
+                    .apply_signal(
+                        mob_dsl::MobMachineSignal::ExemptMemberFromDefinitionWiring {
+                            agent_identity: mob_dsl::AgentIdentity::from_domain(
+                                &seat.agent_identity,
+                            ),
+                            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                                &seat.agent_runtime_id,
+                            ),
+                        },
+                    )
+                    .map_err(|error| MobError::MobMachineRejected {
+                        context: "dormant_seat_definition_wiring_exempt",
+                        reason: error.to_string(),
+                    })?;
+                effects.extend(exempted.into_effects());
+            }
+        }
 
         // Each identity's boot verdict, from one runtime obligation scan
         // over the chunk's seated state. Exactly the Wake verdicts wake,
@@ -1136,6 +1163,23 @@ impl MobActor {
             .into_iter()
             .flat_map(mob_dsl::MobMachineTransition::into_effects)
             .collect();
+        // A next incarnation exempt from the definition's wiring rules is
+        // recorded in the rotation's own step, before its declared edges
+        // are read below.
+        if candidate.definition_wiring.is_exempt() {
+            let exempted = authority
+                .apply_signal(
+                    mob_dsl::MobMachineSignal::ExemptMemberFromDefinitionWiring {
+                        agent_identity: dsl_identity.clone(),
+                        agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&next_runtime_id),
+                    },
+                )
+                .map_err(|error| MobError::MobMachineRejected {
+                    context: "commit_member_rotation_definition_wiring_exempt",
+                    reason: error.to_string(),
+                })?;
+            effects.extend(exempted.into_effects());
+        }
         let kickoff_notices = effects
             .iter()
             .filter_map(|effect| match effect {
@@ -1199,6 +1243,7 @@ impl MobActor {
         spawned.continuity_intent = candidate.continuity_intent.clone();
         spawned.effective_profile_override = candidate.effective_profile_override.clone();
         spawned.effective_model_override = candidate.effective_model_override.clone();
+        spawned.definition_wiring = candidate.definition_wiring;
         let mut batch = vec![
             NewMobEvent {
                 mob_id: self.definition.id.clone(),
@@ -1371,6 +1416,7 @@ impl StagedSeat {
         event.continuity_intent = candidate.continuity_intent.clone();
         event.effective_profile_override = candidate.effective_profile_override.clone();
         event.effective_model_override = candidate.effective_model_override.clone();
+        event.definition_wiring = candidate.definition_wiring;
         Ok(event)
     }
 }
@@ -1473,6 +1519,7 @@ impl SettledSeatChunk {
                 let StagedSeat {
                     mut candidate,
                     endpoint,
+                    agent_runtime_id,
                     ..
                 } = *seat;
                 let agent_identity = candidate.agent_identity.clone();
@@ -1485,6 +1532,8 @@ impl SettledSeatChunk {
                 self.seated.push(SeatedInChunk {
                     index,
                     agent_identity,
+                    agent_runtime_id,
+                    definition_wiring: candidate.definition_wiring,
                     session_id: candidate.session_id.clone(),
                     endpoint,
                     local_build_inputs,

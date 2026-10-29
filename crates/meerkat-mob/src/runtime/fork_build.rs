@@ -1226,6 +1226,7 @@ pub(crate) fn member_resume_spec(
     spec.model_override = entry.effective_model_override.clone();
     spec.spawned_by = entry.spawned_by.clone();
     spec.fork_job = entry.fork_job.clone();
+    spec.definition_wiring = entry.definition_wiring;
     spec
 }
 
@@ -1512,6 +1513,7 @@ mod tests {
             fork_job: None,
             fork_source,
             fork_overlay: ForkOverlayOrigin::Source,
+            definition_wiring: crate::DefinitionWiring::Applies,
         });
         roster.get(&identity).cloned().expect("the entry is seated")
     }

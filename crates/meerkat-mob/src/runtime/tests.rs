@@ -90290,15 +90290,18 @@ fn mob_runtime_parity_field_value(
         "member_wake_attempts" => Some(MobRuntimeParityExprValue::Map(
             snapshot.member_wake_attempts.clone(),
         )),
-        // Residency bookkeeping the parity snapshot does not project yet:
-        // the parity probes never read it.
+        // Residency and definition-wiring bookkeeping the parity snapshot
+        // does not project yet: the parity probes never read it.
         "member_wake_bound"
         | "member_host_preparation_pending"
         | "runtime_retire_archive_only"
         | "owed_edge_repairs"
         | "owed_external_edge_repairs"
         | "member_seat_session_unborn"
-        | "unborn_seat_sessions" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
+        | "unborn_seat_sessions"
+        | "member_definition_wiring_exempt" => {
+            Some(MobRuntimeParityExprValue::Set(BTreeSet::new()))
+        }
         "member_materialization_epoch"
         | "member_boot_obligation_owed"
         | "member_rotation_session_ids"

@@ -7017,6 +7017,14 @@ pub struct SpawnMemberSpec {
     pub budget_limits: Option<meerkat_core::BudgetLimits>,
     /// When true, automatically wire this member to its spawner.
     pub auto_wire_parent: bool,
+    /// Whether the mob definition's wiring rules (`auto_wire_orchestrator`
+    /// and `role_wiring`) apply to this member.
+    /// [`crate::DefinitionWiring::Exempt`] seats it with no edge those rules
+    /// declare, and no later seat, spawn or rotation of another member is
+    /// wired to it by them. Explicit wiring is unaffected. The member's
+    /// `MemberSpawned` row and roster entry record it, and its restore and
+    /// respawn keep it. A placed member cannot be exempt.
+    pub definition_wiring: crate::DefinitionWiring,
     /// Additional instruction sections appended to the system prompt for this member.
     pub additional_instructions: Option<Vec<String>>,
     /// Per-agent environment variables injected into shell tool subprocesses.
@@ -7153,6 +7161,7 @@ impl std::fmt::Debug for SpawnMemberSpec {
             .field("application_tool_policy", &self.application_tool_policy)
             .field("budget_limits", &self.budget_limits)
             .field("auto_wire_parent", &self.auto_wire_parent)
+            .field("definition_wiring", &self.definition_wiring)
             .field("additional_instructions", &self.additional_instructions)
             .field("shell_env", &self.shell_env)
             .field("inherited_tool_filter", &self.inherited_tool_filter)
@@ -7226,6 +7235,7 @@ impl SpawnMemberSpec {
             application_tool_policy: None,
             budget_limits: None,
             auto_wire_parent: false,
+            definition_wiring: crate::DefinitionWiring::Applies,
             additional_instructions: None,
             shell_env: None,
             inherited_tool_filter: None,
@@ -7279,6 +7289,14 @@ impl SpawnMemberSpec {
     /// Place this member on a bound member host (multi-host mobs §7.3).
     pub fn with_placement(mut self, host: crate::machines::mob_machine::HostId) -> Self {
         self.placement = Some(host);
+        self
+    }
+
+    /// Set whether the mob definition's wiring rules apply to this member
+    /// (see [`Self::definition_wiring`]).
+    #[must_use]
+    pub fn with_definition_wiring(mut self, definition_wiring: crate::DefinitionWiring) -> Self {
+        self.definition_wiring = definition_wiring;
         self
     }
 
@@ -21767,6 +21785,7 @@ mod tests {
             fork_job: None,
             fork_source: None,
             fork_overlay: Default::default(),
+            definition_wiring: crate::DefinitionWiring::Applies,
             direct_member_fence: None,
         }
     }

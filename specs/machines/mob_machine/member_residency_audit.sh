@@ -27,7 +27,8 @@
 #   routed and archive-only retirement starts, the routed retire retry, the
 #   archives, the replayed starts, a rotation finished in Running and in
 #   Stopped, a host-pending seed, the identity seated again on its first
-#   seat's session, and the mob's destroy;
+#   seat's session, its exemption from the definition's wiring rules in
+#   Running and Stopped, and the mob's destroy;
 # - terminal (AuditTerminalSpec): the Completed and Destroyed phases;
 # - resume (AuditResumeSpec): one identity through an explicit resume, its
 #   readiness before Resume (while Stopped) included;
@@ -54,8 +55,10 @@
 # plan never leaves a member that blocks the seal. The retire run checks that
 # no runtime retire is routed for a member with no registration, that a
 # settled retirement can always archive and under an admitted destroy nothing
-# holds it, that no rotation begins or commits under an admitted destroy, and
-# that a resume seat is unborn exactly when no build created its session. The
+# holds it, that no rotation begins or commits under an admitted destroy, that
+# a resume seat is unborn exactly when no build created its session, and that
+# a rotation's terminal never carries an exemption over to the next
+# incarnation. The
 # resume run checks that the explicit resume can always join a wake in flight
 # while its readiness is not in flight and its topology has not started,
 # whatever readiness it already settled (AuditResumeJoinable), that it
@@ -214,6 +217,8 @@ retire_covered_actions=(
   CommitMemberRotationRetiredRunning
   CommitMemberRotationLiveStopped
   CommitMemberRotationRetiredStopped
+  ExemptMemberFromDefinitionWiringSeatedRunning
+  ExemptMemberFromDefinitionWiringSeatedStopped
   AdmitDestroyCleanup
   AdmitDestroyMemberRetireLiveRunning
   AdmitDestroyMemberRetireArchiveOnlyRunning
@@ -404,7 +409,8 @@ write_cfg() {
   AuditAttemptEndsClosed
   AuditRetireRoutesOnlyRegistered
   AuditDestroyFencesRotation
-  AuditReseatUnbornIffNeverBorn"
+  AuditReseatUnbornIffNeverBorn
+  AuditRotationDecidesExemptionAnew"
       run_invariants="
   AuditWakingClosable
   AuditRetirementArchivable"
@@ -609,7 +615,8 @@ for witness in \
   "seat:Invariant:SeatUnborn" "seat:Action property:RotatedUnborn" \
   "seat:Invariant:BothSeated" "seat:Invariant:SeatEndpointPending" \
   "seat:Action property:Rotated" "seat:Action property:ReleasedSpawn" \
-  "wake2:Action property:CrossNotice" "wake2:Action property:RetireBesideWaking"; do
+  "wake2:Action property:CrossNotice" "wake2:Action property:RetireBesideWaking" \
+  "retire:Action property:ExemptArchived" "retire:Action property:ExemptRotated"; do
   run="${witness%%:*}"
   rest="${witness#*:}"
   kind="${rest%%:*}"
@@ -864,6 +871,16 @@ rewrite_frame("RecoverMemberSessionBindingAlreadyCurrentRunning", {
   mutate retire archive_keeps_unborn \
     "Error: Invariant seat_session_unborn_is_seated is violated" \
     'keep_var("ObserveMemberRetirementArchivedLive", "member_seat_session_unborn")' "$@"
+  # An archive that keeps the archived member's exemption from the
+  # definition's wiring rules.
+  mutate retire archive_keeps_exemption \
+    "Error: Invariant definition_wiring_exempt_member_is_seated is violated" \
+    'keep_var("ObserveMemberRetirementArchivedLive", "member_definition_wiring_exempt")' "$@"
+  # A rotation's terminal that carries the retiring incarnation's exemption
+  # over to the next one.
+  mutate retire rotation_keeps_exemption \
+    "Error: Action property AuditRotationDecidesExemptionAnew is violated" \
+    'keep_var("CommitMemberRotationLiveRunning", "member_definition_wiring_exempt")' "$@"
   # A restore that binds an unborn seat, whose session was never created.
   mutate wake bound_without_born_guard \
     "Error: Invariant seat_session_unborn_is_never_bound is violated" \

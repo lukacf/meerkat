@@ -12046,4 +12046,282 @@ mod tests {
             "a seated member outside a rotation records no grant"
         );
     }
+
+    // -----------------------------------------------------------------
+    // Members exempt from the definition's wiring rules
+    // (DefinitionWiring::Exempt).
+    // -----------------------------------------------------------------
+
+    fn exempt_signal(identity: &AgentIdentity, runtime_id: &AgentRuntimeId) -> MobMachineSignal {
+        MobMachineSignal::ExemptMemberFromDefinitionWiring {
+            agent_identity: identity.clone(),
+            agent_runtime_id: runtime_id.clone(),
+        }
+    }
+
+    /// R7: the exemption is a fact of a seated member's current incarnation:
+    /// recorded for exactly that incarnation, refused for another runtime id,
+    /// and cleared when the member is unseated (its retirement's archive).
+    #[test]
+    fn a_seated_incarnation_is_exempted_and_its_unseat_clears_it() {
+        let (mut authority, member) = dormant_member_authority("exempt-retire");
+        assert!(
+            authority
+                .apply_signal(exempt_signal(
+                    &member.identity,
+                    &AgentRuntimeId::from("exempt-retire:9"),
+                ))
+                .is_err(),
+            "only the identity's current incarnation is exempted"
+        );
+        assert!(authority.state().member_definition_wiring_exempt.is_empty());
+        authority
+            .apply_signal(exempt_signal(&member.identity, &member.runtime_id))
+            .expect("the seated incarnation is exempted");
+        assert!(
+            authority
+                .state()
+                .member_definition_wiring_exempt
+                .contains(&member.identity)
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            retire_input(&member, Some(member.session_id.clone())),
+        )
+        .expect("the exempt member's retirement is admitted");
+        assert!(
+            authority
+                .state()
+                .member_definition_wiring_exempt
+                .contains(&member.identity),
+            "a retiring member is still seated"
+        );
+        close_ingress_detach(&mut authority, &member);
+        authority
+            .apply_signal(archived_signal(&member))
+            .expect("the session archive unseats the member");
+        assert!(
+            !authority
+                .state()
+                .identity_to_runtime
+                .contains_key(&member.identity)
+        );
+        assert!(
+            authority.state().member_definition_wiring_exempt.is_empty(),
+            "the unseat clears the exemption"
+        );
+        assert!(
+            authority
+                .apply_signal(exempt_signal(&member.identity, &member.runtime_id))
+                .is_err(),
+            "an unseated identity is not exempted"
+        );
+    }
+
+    /// R7: a rotation decides its next incarnation's exemption anew. Its
+    /// commit clears the retiring incarnation's, and the rotation's own step
+    /// exempts the next incarnation when the rotation's spec is exempt; an
+    /// exemption never names the retired incarnation's runtime.
+    #[test]
+    fn a_rotation_decides_its_next_incarnation_exemption_anew() {
+        let mut authority = MobMachineAuthority::new();
+        let member = seat_live_member_with_endpoint(&mut authority, "exempt-rotation", 43);
+        authority
+            .apply_signal(exempt_signal(&member.identity, &member.runtime_id))
+            .expect("the live member is exempted");
+        let next_session = SessionId::from("exempt-rotation-next");
+        let next_runtime = AgentRuntimeId::from("exempt-rotation:1");
+        MobMachineMutator::apply(
+            &mut authority,
+            retire_input(&member, Some(member.session_id.clone())),
+        )
+        .expect("the rotation's retirement starts");
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::BeginMemberRotation {
+                agent_identity: member.identity.clone(),
+                agent_runtime_id: member.runtime_id.clone(),
+                fence_token: member.fence_token,
+                generation: Generation(0),
+                session_id: next_session,
+                peer_endpoint: None,
+                session_archived: false,
+            },
+        )
+        .expect("the rotation records its intent");
+        MobMachineMutator::apply(
+            &mut authority,
+            profile_check(&member.identity, "test", false),
+        )
+        .expect("the rotation authorizes its next incarnation's profile");
+        close_ingress_detach(&mut authority, &member);
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::CommitMemberRotation {
+                agent_identity: member.identity.clone(),
+                agent_runtime_id: member.runtime_id.clone(),
+                fence_token: member.fence_token,
+                generation: Generation(0),
+                session_id: Some(member.session_id.clone()),
+                disposal: MemberSessionDisposal::Archived,
+                next_agent_runtime_id: next_runtime.clone(),
+                next_fence_token: FenceToken(8),
+                next_generation: Generation(1),
+                runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                external_addressable: false,
+                kickoff_owed: false,
+                kickoff_objective_id: String::new(),
+            },
+        )
+        .expect("the rotation re-seats the next incarnation");
+        assert!(
+            authority.state().member_definition_wiring_exempt.is_empty(),
+            "the next incarnation is bound by the rules until its step exempts it"
+        );
+        assert!(
+            authority
+                .apply_signal(exempt_signal(&member.identity, &member.runtime_id))
+                .is_err(),
+            "the retired incarnation is not exempted again"
+        );
+        authority
+            .apply_signal(exempt_signal(&member.identity, &next_runtime))
+            .expect("the rotation's step exempts the next incarnation");
+        assert!(
+            authority
+                .state()
+                .member_definition_wiring_exempt
+                .contains(&member.identity)
+        );
+    }
+
+    /// R7: replay restores an exempt incarnation from its row: the roster
+    /// recovery seats it bound by the rules, and the replay of its exempt
+    /// row exempts it.
+    #[test]
+    fn the_replay_of_an_exempt_row_exempts_its_incarnation() {
+        let identity = AgentIdentity::from("exempt-replay");
+        let runtime_v0 = AgentRuntimeId::from("exempt-replay:0");
+        let mut authority = MobMachineAuthority::new();
+        authority
+            .apply_signal(MobMachineSignal::RecoverRosterMember {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_v0.clone(),
+                fence_token: FenceToken(1),
+                generation: Generation(0),
+                profile_name: "worker".to_string(),
+                runtime_mode: SpawnPolicyRuntimeMode::TurnDriven,
+                external_addressable: false,
+            })
+            .expect("replay seats the row's member");
+        assert!(authority.state().member_definition_wiring_exempt.is_empty());
+        authority
+            .apply_signal(exempt_signal(&identity, &runtime_v0))
+            .expect("the exempt row's replay exempts its incarnation");
+        assert!(
+            authority
+                .state()
+                .member_definition_wiring_exempt
+                .contains(&identity)
+        );
+    }
+
+    /// R7: a member placed on a member host is never exempted from the
+    /// definition's wiring rules: the exemption is a fact of a local member
+    /// (`member_local`), and the invariant holds it to local seats.
+    #[test]
+    fn a_placed_member_is_never_exempted() {
+        let identity = AgentIdentity::from("exempt-placed");
+        let runtime_id = AgentRuntimeId("exempt-placed:0".to_string());
+        let host_id = HostId("exempt-placed-host".to_string());
+        let owner_session_id = SessionId("exempt-placed-owner".to_string());
+        let mut authority = MobMachineAuthority::new();
+        authority
+            .apply_signal(MobMachineSignal::RecoverOwnerBridgeSession {
+                bridge_session_id: owner_session_id.clone(),
+                destroy_on_owner_archive: false,
+                implicit_delegation_mob: false,
+            })
+            .expect("recover the placed member's owner");
+        authority
+            .apply_signal(MobMachineSignal::RecoverHostBinding {
+                host_id: host_id.clone(),
+                pubkey: PeerSigningKey([8; 32]),
+                endpoint: PeerAddress("tcp://exempt-placed-host.test:4100".to_string()),
+                epoch: 1,
+                binding_generation: 1,
+                protocol_min: 4,
+                protocol_max: 4,
+                engine_version: "exempt-placed-engine".to_string(),
+                durable_sessions: true,
+                autonomous_members: true,
+                hard_cancel_member: true,
+                tracked_input_cancel: true,
+                memory_store: true,
+                mcp: true,
+                resolvable_providers: std::collections::BTreeSet::from(["anthropic".to_string()]),
+                approval_forwarding: false,
+                live_endpoint: None,
+            })
+            .expect("recover the placed member's host");
+        authority
+            .apply_signal(MobMachineSignal::RecoverCommittedPlacedSpawn {
+                spawn_id: PlacedSpawnId("exempt-placed-spawn".to_string()),
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                generation: Generation(0),
+                fence_token: FenceToken(52),
+                host_id,
+                host_binding_generation: 1,
+                member_session_id: SessionId("exempt-placed-session".to_string()),
+                member_peer_endpoint: MemberPeerEndpoint::new(
+                    PeerName("mob/worker/exempt-placed".to_string()),
+                    PeerId("exempt-placed-peer".to_string()),
+                    PeerAddress("tcp://exempt-placed-member.test:4200".to_string()),
+                    PeerSigningKey([3; 32]),
+                ),
+                profile_name: "worker".to_string(),
+                runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                external_addressable: true,
+                provision_operation_id: "exempt-placed-operation".to_string(),
+                operation_owner_session_id: owner_session_id,
+            })
+            .expect("recover the placed member");
+        assert!(
+            authority
+                .apply_signal(exempt_signal(&identity, &runtime_id))
+                .is_err(),
+            "a placed member is not exempted"
+        );
+        assert!(authority.state().member_definition_wiring_exempt.is_empty());
+        let mut stale = authority.state().clone();
+        stale.member_definition_wiring_exempt.insert(identity);
+        assert!(
+            MobMachineAuthority::recover_from_state(stale).is_err(),
+            "an exemption of a placed member is refused at recovery"
+        );
+    }
+
+    /// R7: the subset invariant: an exemption names a seated member. A
+    /// state whose exemption names an identity that is not seated is refused
+    /// at recovery (`definition_wiring_exempt_member_is_seated`).
+    #[test]
+    fn an_exemption_of_an_unseated_identity_is_refused_at_recovery() {
+        let (mut authority, member) = dormant_member_authority("exempt-recovery");
+        authority
+            .apply_signal(exempt_signal(&member.identity, &member.runtime_id))
+            .expect("the seated incarnation is exempted");
+        assert!(
+            MobMachineAuthority::recover_from_state(authority.state().clone()).is_ok(),
+            "a seated member's exemption recovers"
+        );
+        let mut stale = authority.state().clone();
+        stale
+            .member_definition_wiring_exempt
+            .insert(AgentIdentity::from("never-seated"));
+        assert!(
+            MobMachineAuthority::recover_from_state(stale).is_err(),
+            "an exemption of an identity that is not seated is refused"
+        );
+    }
 }

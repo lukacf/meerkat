@@ -6983,6 +6983,9 @@ pub(super) struct PendingSpawn {
     /// Where a fork-derived member's seated overlay came from, persisted with
     /// its lineage.
     pub(super) fork_overlay: super::ForkOverlayOrigin,
+    /// Whether the definition's wiring rules apply to the member, recorded
+    /// with its membership commit and persisted with its spawn event.
+    pub(super) definition_wiring: crate::DefinitionWiring,
     /// Objective causality inherited from the spawning turn.
     pub(super) objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Per-spawn external-tool overlay carried to the finalize commit so the
@@ -7836,6 +7839,9 @@ struct RespawnSnapshot {
     spawned_by: Option<AgentIdentity>,
     creation_origin: crate::member_creation::MemberCreationOrigin,
     fork_job: Option<crate::runtime::ForkJobRecord>,
+    /// Whether the definition's wiring rules apply to the member, carried to
+    /// the replacement incarnation.
+    definition_wiring: crate::DefinitionWiring,
     /// The old member is already in a partial-retire state and respawn should
     /// retry cleanup instead of re-admitting the original Respawn transition.
     cleanup_retry: bool,
@@ -7892,6 +7898,10 @@ struct SpawnFinalizeCtx {
     /// Where a fork-derived member's seated overlay came from, persisted with
     /// its lineage (see `ForkOverlayOrigin`).
     fork_overlay: super::ForkOverlayOrigin,
+    /// Whether the definition's wiring rules apply to the member: an exempt
+    /// member is recorded in its membership commit's own step and persisted
+    /// with its spawn event and roster entry.
+    definition_wiring: crate::DefinitionWiring,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     authorized_profile_material: AuthorizedSpawnProfileMaterial,
@@ -7955,6 +7965,9 @@ struct SpawnActivateState {
     /// Where a fork-derived member's seated overlay came from, persisted with
     /// its lineage (see `ForkOverlayOrigin`).
     fork_overlay: super::ForkOverlayOrigin,
+    /// Whether the definition's wiring rules apply to the member, for its
+    /// roster entry (MobMachine's own fact decides its wiring).
+    definition_wiring: crate::DefinitionWiring,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     remote: Option<Box<RemoteSpawnFinalize>>,
@@ -8001,6 +8014,7 @@ impl SpawnActivateState {
             fork_job,
             fork_source,
             fork_overlay,
+            definition_wiring,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material: _,
@@ -8053,6 +8067,7 @@ impl SpawnActivateState {
             fork_job,
             fork_source,
             fork_overlay,
+            definition_wiring,
             objective_id,
             per_spawn_external_tools,
             remote,
@@ -16200,7 +16215,11 @@ impl MobActor {
             )
     }
 
-    fn active_machine_member_ids_for_profile(
+    /// The active members of `profile_name` the definition's wiring rules
+    /// may wire a spawned member to: every one but `excluded_identity` and
+    /// the members exempt from those rules
+    /// (MobMachine's `member_definition_wiring_exempt`).
+    fn definition_wiring_member_ids_for_profile(
         &self,
         profile_name: &ProfileName,
         excluded_identity: &AgentIdentity,
@@ -16210,6 +16229,7 @@ impl MobActor {
             .keys()
             .filter(|identity| {
                 identity.0.as_str() != excluded_identity.as_str()
+                    && !dsl.member_definition_wiring_exempt.contains(*identity)
                     && Self::machine_member_is_active_with_profile(dsl, identity, profile_name)
             })
             .map(|identity| AgentIdentity::from(identity.0.as_str()))
@@ -35345,6 +35365,7 @@ impl MobActor {
             fork_job: entry.fork_job,
             fork_source: entry.fork_source,
             fork_overlay: entry.fork_overlay,
+            definition_wiring: entry.definition_wiring,
             objective_id: None,
             per_spawn_external_tools: None,
             authorized_profile_material,
@@ -35702,6 +35723,7 @@ impl MobActor {
             application_tool_policy,
             budget_limits,
             auto_wire_parent,
+            definition_wiring,
             additional_instructions,
             shell_env,
             inherited_tool_filter,
@@ -35950,6 +35972,7 @@ impl MobActor {
             fork_job,
             fork_source: fork_source.clone(),
             fork_overlay,
+            definition_wiring,
             owner_bridge_session_id: owner_bridge_session_id.clone(),
             ops_registry: ops_registry.clone(),
             held,
@@ -36577,6 +36600,7 @@ impl MobActor {
             fork_job,
             fork_source,
             fork_overlay,
+            definition_wiring,
             owner_bridge_session_id,
             ops_registry,
             held,
@@ -36785,6 +36809,7 @@ impl MobActor {
                 fork_job: fork_job.clone(),
                 fork_source: fork_source.clone(),
                 fork_overlay,
+                definition_wiring,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -36985,6 +37010,7 @@ impl MobActor {
             fork_job,
             fork_source,
             fork_overlay,
+            definition_wiring,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material,
@@ -37973,6 +37999,7 @@ impl MobActor {
             application_tool_policy,
             budget_limits,
             auto_wire_parent,
+            definition_wiring,
             additional_instructions,
             shell_env,
             inherited_tool_filter,
@@ -38010,6 +38037,14 @@ impl MobActor {
                 "enqueue_spawn_remote invoked without placement".to_string()
             ));
         };
+        // The exemption from the definition's wiring rules is a fact of a
+        // local member: a placed member's records do not carry it.
+        if definition_wiring.is_exempt() {
+            fail!(MobError::WiringError(format!(
+                "'{identity}' cannot be placed on a member host: a member exempt from the mob \
+                 definition's wiring rules is local"
+            )));
+        }
         if tool_dispatch_admission.is_some() {
             fail!(MobError::WiringError(
                 "process-local tool dispatch admission cannot cross member-host placement"
@@ -38883,6 +38918,8 @@ impl MobActor {
             // source on it.
             fork_source: None,
             fork_overlay: super::ForkOverlayOrigin::default(),
+            // Refused above: a placed member is never exempt.
+            definition_wiring: crate::DefinitionWiring::Applies,
             objective_id,
             authorized_profile_material,
             continuity_intent,
@@ -39176,6 +39213,7 @@ impl MobActor {
                 fork_job,
                 fork_source,
                 fork_overlay,
+                definition_wiring,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -39378,6 +39416,7 @@ impl MobActor {
                                 fork_job: fork_job.clone(),
                                 fork_source: fork_source.clone(),
                                 fork_overlay,
+                                definition_wiring,
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -39460,6 +39499,7 @@ impl MobActor {
                                 fork_job: fork_job.clone(),
                                 fork_source: fork_source.clone(),
                                 fork_overlay,
+                                definition_wiring,
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -39577,6 +39617,9 @@ impl MobActor {
             application_tool_policy,
             budget_limits,
             auto_wire_parent: _,
+            // A policy auto-spawn is built from the definition:
+            // `SpawnMemberSpec::new` leaves the definition's wiring rules on.
+            definition_wiring: _,
             additional_instructions,
             shell_env,
             inherited_tool_filter,
@@ -39816,6 +39859,8 @@ impl MobActor {
             // A policy auto-spawn is fresh, never a fork seating.
             fork_source: None,
             fork_overlay: super::ForkOverlayOrigin::default(),
+            // Built from the definition: its wiring rules apply.
+            definition_wiring: crate::DefinitionWiring::Applies,
             objective_id: None,
             per_spawn_external_tools: per_spawn_external_tools.clone(),
             authorized_profile_material: authorized_profile_material.clone(),
@@ -40445,7 +40490,7 @@ impl MobActor {
         // `MemberSpawned` lifecycle journal emit. Prepared (not committed) here
         // so the journal effect is validated before the expensive trust /
         // overlay / append work; committed once those succeed.
-        let prepared_spawn = match self.prepare_dsl_input_transition(
+        let mut prepared_spawn = match self.prepare_dsl_input_transition(
             mob_dsl::MobMachineInput::CommitSpawnMembership {
                 agent_identity: dsl_identity.clone(),
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
@@ -40584,6 +40629,35 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_admit validated lifecycle journal"
         );
+        // A member exempt from the definition's wiring rules is recorded in
+        // its membership commit's own step, so no seat, spawn or rotation
+        // committed after it can be wired to it by those rules. A placed
+        // member is never exempt (refused at its enqueue).
+        if ctx.definition_wiring.is_exempt()
+            && let Err(error) = prepared_spawn.authority.apply_signal(
+                mob_dsl::MobMachineSignal::ExemptMemberFromDefinitionWiring {
+                    agent_identity: dsl_identity.clone(),
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
+                },
+            )
+        {
+            self.consume_spawn_provision_failure(
+                provision,
+                false,
+                &ctx.operation_id,
+                "definition wiring exemption rejected",
+            )
+            .await;
+            return Err(self.fold_spawn_exec_abort(
+                &dsl_identity,
+                agent_identity,
+                MobError::MobMachineRejected {
+                    context: "finalize_spawn_admit_definition_wiring_exempt",
+                    reason: error.to_string(),
+                },
+                "finalize_spawn_admit_definition_wiring_exempt",
+            ));
+        }
 
         if let Some(remote) = ctx.remote.as_ref() {
             let persist_result = boxed_arm_future(|| {
@@ -40680,6 +40754,7 @@ impl MobActor {
             spawned.fork_job = ctx.fork_job.clone();
             spawned.fork_source = ctx.fork_source.clone();
             spawned.fork_overlay = ctx.fork_overlay;
+            spawned.definition_wiring = ctx.definition_wiring;
             boxed_arm_future(|| {
                 self.append_committed_placed_event_exact(MobEventKind::MemberSpawned(spawned))
             })
@@ -40834,6 +40909,9 @@ impl MobActor {
         // carries it (see `ForkBuildInheritance`).
         spawned_event.fork_source = ctx.fork_source.clone();
         spawned_event.fork_overlay = ctx.fork_overlay;
+        // Durable: replay records an exempt member in MobMachine again, and
+        // its roster entry keeps it for its respawn.
+        spawned_event.definition_wiring = ctx.definition_wiring;
         spawned_event = spawned_event.with_placed_spawn_id(None);
         if let Err(append_error) = boxed_arm_future(|| {
             self.append_member_spawned_with_identity_fence(
@@ -41010,7 +41088,7 @@ impl MobActor {
             profile_name,
             OrchestratorAutoWire::ToOrchestrator,
             |target_profile| {
-                self.active_machine_member_ids_for_profile(target_profile, agent_identity)
+                self.definition_wiring_member_ids_for_profile(target_profile, agent_identity)
             },
         )
     }
@@ -50480,6 +50558,7 @@ impl MobActor {
                     creation_witness,
                 ),
                 fork_job: entry.fork_job,
+                definition_wiring: entry.definition_wiring,
                 cleanup_retry,
             }
         };
@@ -50538,6 +50617,10 @@ impl MobActor {
                 // A successor starts fresh and carries none, so a later
                 // re-link can never apply the old job's limit to it.
                 replacement_spec.fork_job = None;
+                // The member's exemption from the definition's wiring rules
+                // belongs to the identity, as its spawner does: the successor
+                // keeps the one its predecessor recorded.
+                replacement_spec.definition_wiring = snapshot.definition_wiring;
                 // A placed member's successor keeps the operator authority
                 // its predecessor recorded, unless the request sets a ceiling
                 // of its own. It is read before the customizer, which sees it

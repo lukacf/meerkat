@@ -156,6 +156,12 @@ pub struct RosterEntry {
         skip_serializing_if = "crate::runtime::ForkOverlayOrigin::is_source"
     )]
     pub fork_overlay: crate::runtime::ForkOverlayOrigin,
+    /// Whether the mob definition's wiring rules apply to this member, from
+    /// its `MemberSpawned` row (see [`crate::DefinitionWiring`]). Read-only:
+    /// MobMachine holds the exempt members, and a respawn of the member keeps
+    /// it. The default (`applies`) is omitted from the serialized entry.
+    #[serde(default, skip_serializing_if = "crate::DefinitionWiring::is_applies")]
+    pub definition_wiring: crate::DefinitionWiring,
 }
 
 /// Directed projection presence state for an undirected peer edge.
@@ -179,6 +185,7 @@ pub(crate) struct RosterAddEntry {
     pub(crate) fork_job: Option<crate::runtime::ForkJobRecord>,
     pub(crate) fork_source: Option<meerkat_core::ForkBuildSource>,
     pub(crate) fork_overlay: crate::runtime::ForkOverlayOrigin,
+    pub(crate) definition_wiring: crate::DefinitionWiring,
 }
 
 /// Tracks active members and their wiring in a mob.
@@ -284,6 +291,7 @@ impl Roster {
                     fork_job: member_spawned.fork_job.clone(),
                     fork_source: member_spawned.fork_source.clone(),
                     fork_overlay: member_spawned.fork_overlay,
+                    definition_wiring: member_spawned.definition_wiring,
                 });
                 match member_spawned.kickoff_prompt() {
                     Some(prompt) => {
@@ -509,6 +517,7 @@ impl Roster {
                     fork_job: entry.fork_job,
                     fork_source: entry.fork_source,
                     fork_overlay: entry.fork_overlay,
+                    definition_wiring: entry.definition_wiring,
                 },
             )
             .is_none()
@@ -970,6 +979,7 @@ mod tests {
             fork_job: None,
             fork_source: None,
             fork_overlay: Default::default(),
+            definition_wiring: crate::DefinitionWiring::Applies,
         }
     }
 
@@ -1552,12 +1562,31 @@ mod tests {
             fork_job: None,
             fork_source: None,
             fork_overlay: Default::default(),
+            definition_wiring: crate::DefinitionWiring::Applies,
             direct_member_fence: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: RosterEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.agent_identity, entry.agent_identity);
         assert_eq!(parsed.wired_to.len(), 1);
+
+        // R6: an entry the definition's wiring rules apply to keeps the
+        // pre-existing serialized shape, and an entry serialized before the
+        // field existed reads `applies`; an exempt entry round-trips.
+        assert!(
+            !json.contains("definition_wiring"),
+            "the default is omitted: {json}"
+        );
+        assert_eq!(parsed.definition_wiring, crate::DefinitionWiring::Applies);
+        let mut exempt = entry;
+        exempt.definition_wiring = crate::DefinitionWiring::Exempt;
+        let exempt_json = serde_json::to_value(&exempt).unwrap();
+        assert_eq!(
+            exempt_json["definition_wiring"],
+            serde_json::json!("exempt")
+        );
+        let parsed: RosterEntry = serde_json::from_value(exempt_json).unwrap();
+        assert_eq!(parsed.definition_wiring, crate::DefinitionWiring::Exempt);
     }
 
     #[test]

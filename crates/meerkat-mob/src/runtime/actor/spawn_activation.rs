@@ -2346,6 +2346,7 @@ impl MobActor {
                 fork_job: state.fork_job.clone(),
                 fork_source: state.fork_source.clone(),
                 fork_overlay: state.fork_overlay,
+                definition_wiring: state.definition_wiring,
             });
         }
         {
@@ -2414,12 +2415,21 @@ impl MobActor {
     async fn plan_spawn_wiring(&mut self, state: &mut SpawnActivateState) {
         let profile_name = state.profile_name.clone();
         let agent_identity = state.agent_identity.clone();
-        state.planned_wiring_targets =
-            if state.identity_fenced_member || agent_identity.is_flow_member_namespace() {
-                Vec::new()
-            } else {
-                Box::pin(self.spawn_wiring_targets(&profile_name, &agent_identity)).await
-            };
+        // A member exempt from the definition's wiring rules, as MobMachine
+        // recorded it with its membership commit, takes no edge they declare.
+        let definition_wiring_exempt = self
+            .dsl_authority
+            .state()
+            .member_definition_wiring_exempt
+            .contains(&state.dsl_identity);
+        state.planned_wiring_targets = if state.identity_fenced_member
+            || agent_identity.is_flow_member_namespace()
+            || definition_wiring_exempt
+        {
+            Vec::new()
+        } else {
+            Box::pin(self.spawn_wiring_targets(&profile_name, &agent_identity)).await
+        };
         if state.auto_wire_parent
             && let Some(parent_target) = self
                 .resolve_auto_wire_parent_target(

@@ -3,9 +3,11 @@
 //! the members seated before it, without waking anyone; the members trust
 //! each other once woken; a member on network comms is joined by the machine
 //! edge alone until its boot wake registers its endpoint and installs the
-//! trust of both ends; and a rotation's next incarnation is wired again.
-//! These rows run on the combined candidate: the machine, the wake path and
-//! the boot path together.
+//! trust of both ends; and a rotation's next incarnation is wired again. A
+//! member exempt from the definition's wiring rules (`DefinitionWiring::Exempt`)
+//! takes none of those edges, and no other member's seat, spawn or rotation
+//! is wired to it by them. These rows run on the combined candidate: the
+//! machine, the wake path and the boot path together.
 
 use super::*;
 use crate::machines::mob_machine as dsl;
@@ -53,10 +55,11 @@ fn pair(a: &AgentIdentity, b: &AgentIdentity) -> (String, String) {
 /// each member's endpoint from its session-scoped comms key, or, on network
 /// comms, record none.
 struct WiringMob {
-    _keys: tempfile::TempDir,
+    keys: tempfile::TempDir,
     handle: MobHandle,
     service: Arc<MockSessionService>,
     events: Arc<dyn MobEventStore>,
+    runtime_metadata: Arc<dyn MobRuntimeMetadataStore>,
 }
 
 impl WiringMob {
@@ -85,6 +88,7 @@ impl WiringMob {
         let _adapter = service.enable_runtime_adapter();
         let storage = MobStorage::in_memory();
         let events = storage.events.clone();
+        let runtime_metadata = storage.runtime_metadata.clone();
         let builder = MobBuilder::new(definition, storage).with_session_service(service.clone());
         let builder = if network_comms {
             builder.with_network_member_comms()
@@ -97,11 +101,37 @@ impl WiringMob {
         };
         let handle = builder.create().await.expect("create the mob");
         Self {
-            _keys: keys,
+            keys,
             handle,
             service,
             events,
+            runtime_metadata,
         }
+    }
+
+    /// Crash the mob, restart its session service and resume it from its
+    /// journal and runtime metadata, on session-scoped comms keys.
+    async fn restart(&mut self) {
+        crash_stop_and_release_routes(self.handle.clone()).await;
+        let restarted = Arc::new(self.service.cold_restart_preserving_durable_state().await);
+        let _ = restarted.enable_runtime_adapter();
+        self.service = restarted;
+        self.handle = tokio::time::timeout(
+            STEP,
+            Box::pin(
+                MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+                    self.events.clone(),
+                    self.runtime_metadata.clone(),
+                ))
+                .with_session_service(self.service.clone())
+                .with_member_comms_identity_root(self.keys.path())
+                .notify_orchestrator_on_resume(false)
+                .resume(),
+            ),
+        )
+        .await
+        .expect("the restart answers")
+        .expect("the restart succeeds");
     }
 
     /// Seat `specs` in one call; every one is seated.
@@ -885,4 +915,454 @@ async fn a_woken_members_edge_ended_during_its_topology_step_is_not_restored() {
         !trusted.contains(&second_peer),
         "the woken member does not trust the rotated neighbour: {trusted:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Members exempt from the definition's wiring rules
+// (`DefinitionWiring::Exempt`): neither wired by those rules when they are
+// seated, nor a target of another member's seat, spawn or rotation.
+// ---------------------------------------------------------------------------
+
+/// The sample definition under `auto_wire_orchestrator` (orchestrator
+/// `lead`) with a `reviewer` profile (a worker otherwise) that a
+/// `role_wiring` rule pairs with `worker`.
+fn orchestrated_reviewer_definition() -> MobDefinition {
+    let mut definition = sample_definition_with_auto_wire();
+    let worker = definition
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .cloned()
+        .expect("the worker profile");
+    definition
+        .profiles
+        .insert(ProfileName::from("reviewer"), worker);
+    definition.wiring.role_wiring = vec![RoleWiringRule {
+        a: ProfileName::from("worker"),
+        b: ProfileName::from("reviewer"),
+    }];
+    definition
+}
+
+/// `spec`, exempt from the definition's wiring rules.
+fn exempt(spec: SpawnMemberSpec) -> SpawnMemberSpec {
+    spec.with_definition_wiring(crate::DefinitionWiring::Exempt)
+}
+
+impl WiringMob {
+    /// Whether MobMachine records `identity` exempt from the definition's
+    /// wiring rules.
+    fn machine_exempt(&self, identity: &AgentIdentity) -> bool {
+        self.handle
+            .machine_state_watch_rx
+            .borrow()
+            .member_definition_wiring_exempt
+            .contains(&dsl::AgentIdentity::from_domain(identity))
+    }
+
+    /// The definition wiring `identity`'s roster entry records.
+    async fn roster_definition_wiring(&self, identity: &AgentIdentity) -> crate::DefinitionWiring {
+        self.handle
+            .get_member(identity)
+            .await
+            .expect("read the roster")
+            .expect("a member")
+            .definition_wiring
+    }
+
+    /// The `mob.peer_added` notices `members` sent, counted together.
+    async fn peer_added_notices(&self, members: &[&AgentIdentity]) -> usize {
+        let mut count = 0;
+        for member in members {
+            if let Some(session) = self.handle.resolve_bridge_session_id(member).await {
+                count += self
+                    .service
+                    .sent_intents(&session)
+                    .await
+                    .iter()
+                    .filter(|intent| intent.as_str() == "mob.peer_added")
+                    .count();
+            }
+        }
+        count
+    }
+
+    /// Fork `source` into `child` with `spec`, retried while the runtime
+    /// still settles the source's last turn (a typed busy refusal).
+    async fn fork_when_idle(&self, source: &AgentIdentity, child_spec: SpawnMemberSpec) {
+        for _ in 0..50 {
+            match tokio::time::timeout(
+                STEP,
+                self.handle.fork_member(source, child_spec.clone(), None),
+            )
+            .await
+            .expect("the fork answers")
+            {
+                Ok(_) => return,
+                Err(MobError::ForkSourceUnavailable {
+                    cause: crate::error::ForkSourceUnavailableCause::Running,
+                    ..
+                }) => tokio::time::sleep(Duration::from_millis(100)).await,
+                Err(error) => panic!("the fork of {source} is seated: {error}"),
+            }
+        }
+        panic!("the source {source} never settled for its fork");
+    }
+}
+
+/// Spawn `identity` of `profile` with a first turn, turn-driven, and wait
+/// until its session holds no admitted input, so it can be forked.
+async fn spawn_settled(handle: &MobHandle, profile: &str, identity: &AgentIdentity) {
+    let source = handle
+        .spawn_with_options(
+            ProfileName::from(profile),
+            identity.clone(),
+            Some(ContentInput::Text("source context".to_string())),
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn a fork source");
+    let session = source
+        .bridge_session_id()
+        .expect("a session-backed fork source")
+        .clone();
+    wait_for_fork_source_settled(handle, &session).await;
+}
+
+/// R1: a member spawned or seated exempt from the definition's wiring rules
+/// takes none of the edges they declare for its role (the orchestrator's
+/// auto-wire and the worker-reviewer rule): no edge, no MembersWired row and
+/// no `mob.peer_added` notice, and its roster entry and MobMachine record
+/// the exemption.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exempt_member_takes_no_declared_edge_when_it_is_spawned_or_seated() {
+    let mob = WiringMob::new("exempt-seated", orchestrated_reviewer_definition(), false).await;
+    let lead = AgentIdentity::from("exempt-lead");
+    let reviewer = AgentIdentity::from("exempt-reviewer");
+    let spawned = AgentIdentity::from("exempt-spawned-worker");
+    let seated = AgentIdentity::from("exempt-seated-worker");
+    for (profile, identity) in [("lead", &lead), ("reviewer", &reviewer)] {
+        mob.handle
+            .spawn_spec(spec(profile, identity))
+            .await
+            .expect("spawn a member");
+    }
+    let edges = BTreeSet::from([pair(&reviewer, &lead)]);
+    assert_eq!(
+        mob.edges(),
+        edges,
+        "the reviewer auto-wires to the orchestrator"
+    );
+    let rows = mob.wired_rows().await;
+    let notices = mob.peer_added_notices(&[&lead, &reviewer]).await;
+
+    mob.handle
+        .spawn_spec(exempt(spec("worker", &spawned)))
+        .await
+        .expect("spawn an exempt worker");
+    mob.seat(vec![exempt(spec("worker", &seated))]).await;
+
+    assert_eq!(
+        mob.edges(),
+        edges,
+        "neither exempt worker takes a declared edge"
+    );
+    assert_eq!(
+        mob.wired_rows().await,
+        rows,
+        "no MembersWired row names them"
+    );
+    assert_eq!(
+        mob.peer_added_notices(&[&lead, &reviewer, &spawned]).await,
+        notices,
+        "no mob.peer_added notice is sent for them"
+    );
+    for identity in [&spawned, &seated] {
+        assert!(mob.wired_to(identity).await.is_empty(), "{identity}");
+        assert!(mob.machine_exempt(identity), "{identity}");
+        assert_eq!(
+            mob.roster_definition_wiring(identity).await,
+            crate::DefinitionWiring::Exempt,
+            "{identity}"
+        );
+    }
+    for identity in [&lead, &reviewer] {
+        assert!(!mob.machine_exempt(identity), "{identity}");
+        assert_eq!(
+            mob.roster_definition_wiring(identity).await,
+            crate::DefinitionWiring::Applies,
+            "{identity}"
+        );
+    }
+}
+
+/// R2: an exempt member is no target of a later member's declared edges. A
+/// worker spawned after an exempt member of the orchestrator's role is
+/// wired to the real orchestrator only, and a reviewer spawned after an
+/// exempt worker is wired to the bound worker only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn later_members_are_not_wired_to_an_exempt_member() {
+    let mob = WiringMob::new("exempt-later", orchestrated_reviewer_definition(), false).await;
+    let lead = AgentIdentity::from("exempt-lead");
+    let side_lead = AgentIdentity::from("exempt-lead-side");
+    let exempt_worker = AgentIdentity::from("exempt-worker");
+    let worker = AgentIdentity::from("bound-worker");
+    let reviewer = AgentIdentity::from("bound-reviewer");
+    for member in [
+        spec("lead", &lead),
+        exempt(spec("lead", &side_lead)),
+        exempt(spec("worker", &exempt_worker)),
+        spec("worker", &worker),
+        spec("reviewer", &reviewer),
+    ] {
+        mob.handle.spawn_spec(member).await.expect("spawn a member");
+    }
+    assert_eq!(
+        mob.edges(),
+        BTreeSet::from([
+            pair(&worker, &lead),
+            pair(&reviewer, &lead),
+            pair(&reviewer, &worker),
+        ]),
+        "the later members are wired to the real orchestrator and the bound worker only"
+    );
+    assert!(mob.wired_to(&side_lead).await.is_empty());
+    assert!(mob.wired_to(&exempt_worker).await.is_empty());
+}
+
+/// Core 0.9.7 seat wiring: an identity seated after an exempt member of the
+/// orchestrator's role is wired to the real orchestrator only. The seat's
+/// active index (`seated_declared_pairs`) leaves the exempt member out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_after_an_exempt_orchestrator_member_is_not_wired_to_it() {
+    let mob = WiringMob::new(
+        "exempt-seat-after",
+        sample_definition_with_auto_wire(),
+        false,
+    )
+    .await;
+    let lead = AgentIdentity::from("exempt-lead");
+    let side_lead = AgentIdentity::from("exempt-lead-side");
+    let seated = AgentIdentity::from("seat-worker");
+    mob.handle
+        .spawn_spec(spec("lead", &lead))
+        .await
+        .expect("spawn the orchestrator");
+    mob.handle
+        .spawn_spec(exempt(spec("lead", &side_lead)))
+        .await
+        .expect("spawn an exempt member of the orchestrator's role");
+
+    mob.seat(vec![spec("worker", &seated)]).await;
+    assert_eq!(
+        mob.edges(),
+        BTreeSet::from([pair(&seated, &lead)]),
+        "the seated worker is wired to the real orchestrator only"
+    );
+    assert!(mob.wired_to(&side_lead).await.is_empty());
+}
+
+/// Core 0.9.7 rotation wiring: the next incarnation of a rotated worker is
+/// wired to the real orchestrator only, never to an exempt member of the
+/// orchestrator's role; and an exempt member rotated with an exempt spec
+/// stays exempt and unwired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rotation_is_not_wired_to_an_exempt_orchestrator_member() {
+    let mob = WiringMob::new("exempt-rotation", sample_definition_with_auto_wire(), false).await;
+    let lead = AgentIdentity::from("exempt-lead");
+    let side_lead = AgentIdentity::from("exempt-lead-side");
+    let worker = AgentIdentity::from("rotated-worker");
+    for member in [
+        spec("lead", &lead),
+        exempt(spec("lead", &side_lead)),
+        spec("worker", &worker),
+    ] {
+        mob.handle.spawn_spec(member).await.expect("spawn a member");
+    }
+    let edges = BTreeSet::from([pair(&worker, &lead)]);
+    assert_eq!(mob.edges(), edges);
+
+    tokio::time::timeout(STEP, mob.handle.rotate_member(spec("worker", &worker)))
+        .await
+        .expect("the rotation answers")
+        .expect("the rotation succeeds");
+    assert_eq!(
+        mob.edges(),
+        edges,
+        "the next incarnation is wired to the real orchestrator only"
+    );
+
+    tokio::time::timeout(
+        STEP,
+        mob.handle.rotate_member(exempt(spec("lead", &side_lead))),
+    )
+    .await
+    .expect("the rotation answers")
+    .expect("the rotation succeeds");
+    assert!(
+        mob.machine_exempt(&side_lead),
+        "the exempt next incarnation is exempt"
+    );
+    assert!(mob.wired_to(&side_lead).await.is_empty());
+    assert_eq!(mob.edges(), edges);
+}
+
+/// Core 0.9.7 seat wiring, both ways: an orchestrator seated after the
+/// workers that auto-wire to it is wired to every one of them except an
+/// exempt worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_orchestrator_seat_is_not_wired_to_an_exempt_member_of_another_profile() {
+    let mob = WiringMob::new(
+        "exempt-orchestrator-seat",
+        sample_definition_with_auto_wire(),
+        false,
+    )
+    .await;
+    let lead = AgentIdentity::from("seat-lead");
+    let worker = AgentIdentity::from("seat-worker");
+    let exempt_worker = AgentIdentity::from("seat-exempt-worker");
+    mob.seat(vec![
+        spec("worker", &worker),
+        exempt(spec("worker", &exempt_worker)),
+    ])
+    .await;
+    assert!(mob.edges().is_empty(), "no orchestrator is seated yet");
+
+    mob.seat(vec![spec("lead", &lead)]).await;
+    assert_eq!(
+        mob.edges(),
+        BTreeSet::from([pair(&worker, &lead)]),
+        "the orchestrator's seat wires it to the bound worker only"
+    );
+    assert!(mob.wired_to(&exempt_worker).await.is_empty());
+}
+
+/// R3: a durable fork seated exempt (as a console side chat is) is unwired
+/// whatever its source's role, its source keeps its edges, and a worker
+/// seated after it is not wired to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exempt_fork_of_any_role_is_unwired_and_no_later_seat_targets_it() {
+    let mob = WiringMob::new("exempt-fork", sample_definition_with_auto_wire(), false).await;
+    let lead = AgentIdentity::from("fork-lead");
+    let worker = AgentIdentity::from("fork-worker");
+    spawn_settled(&mob.handle, "lead", &lead).await;
+    spawn_settled(&mob.handle, "worker", &worker).await;
+    let before = mob.edges();
+    assert_eq!(before, BTreeSet::from([pair(&worker, &lead)]));
+
+    let lead_child = AgentIdentity::from("fork-lead-side");
+    let worker_child = AgentIdentity::from("fork-worker-side");
+    for (source, child, profile) in [
+        (&lead, &lead_child, "lead"),
+        (&worker, &worker_child, "worker"),
+    ] {
+        mob.fork_when_idle(source, exempt(spec(profile, child)))
+            .await;
+        assert!(mob.wired_to(child).await.is_empty(), "{child} has no peer");
+        assert!(mob.machine_exempt(child), "{child}");
+        assert_eq!(
+            mob.roster_definition_wiring(child).await,
+            crate::DefinitionWiring::Exempt,
+            "{child}"
+        );
+    }
+    assert_eq!(
+        mob.edges(),
+        before,
+        "neither fork changes its source's edges"
+    );
+
+    let seated = AgentIdentity::from("fork-later-worker");
+    mob.seat(vec![spec("worker", &seated)]).await;
+    assert_eq!(
+        mob.edges(),
+        BTreeSet::from([pair(&worker, &lead), pair(&seated, &lead)]),
+        "the later worker is wired to the real orchestrator only"
+    );
+}
+
+/// R4: the exemption is durable. A respawn of an exempt member keeps it,
+/// unwired; after a restart the member is still exempt (its roster entry
+/// from its `MemberSpawned` row, MobMachine from the row's replay), and a
+/// worker seated after the restart is not wired to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exempt_member_stays_exempt_across_a_respawn_and_a_restart() {
+    let mut mob = WiringMob::new("exempt-durable", sample_definition_with_auto_wire(), false).await;
+    let lead = AgentIdentity::from("durable-lead");
+    let side_lead = AgentIdentity::from("durable-lead-side");
+    mob.handle
+        .spawn_spec(spec("lead", &lead))
+        .await
+        .expect("spawn the orchestrator");
+    mob.handle
+        .spawn_spec(exempt(spec("lead", &side_lead)))
+        .await
+        .expect("spawn an exempt member of the orchestrator's role");
+
+    tokio::time::timeout(STEP, mob.handle.respawn(side_lead.clone(), None))
+        .await
+        .expect("the respawn answers")
+        .expect("the respawn succeeds");
+    assert!(mob.machine_exempt(&side_lead), "the successor is exempt");
+    assert_eq!(
+        mob.roster_definition_wiring(&side_lead).await,
+        crate::DefinitionWiring::Exempt
+    );
+    assert!(mob.wired_to(&side_lead).await.is_empty());
+
+    mob.restart().await;
+    assert!(
+        mob.machine_exempt(&side_lead),
+        "the replay of its row records the member exempt again"
+    );
+    assert!(!mob.machine_exempt(&lead));
+    assert_eq!(
+        mob.roster_definition_wiring(&side_lead).await,
+        crate::DefinitionWiring::Exempt
+    );
+
+    let seated = AgentIdentity::from("durable-seat-worker");
+    mob.seat(vec![spec("worker", &seated)]).await;
+    assert_eq!(
+        mob.edges(),
+        BTreeSet::from([pair(&seated, &lead)]),
+        "a worker seated after the restart is wired to the real orchestrator only"
+    );
+    assert!(mob.wired_to(&side_lead).await.is_empty());
+}
+
+/// R5: explicit wiring is unaffected. The host wires an exempt member with
+/// `MobHandle::wire`, and its respawn restores that edge, as for any member,
+/// while the member stays exempt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exempt_member_takes_explicit_wiring_and_its_respawn_restores_it() {
+    let mob = WiringMob::new("exempt-explicit", sample_definition_with_auto_wire(), false).await;
+    let lead = AgentIdentity::from("explicit-lead");
+    let side_worker = AgentIdentity::from("explicit-exempt-worker");
+    mob.handle
+        .spawn_spec(spec("lead", &lead))
+        .await
+        .expect("spawn the orchestrator");
+    mob.handle
+        .spawn_spec(exempt(spec("worker", &side_worker)))
+        .await
+        .expect("spawn an exempt worker");
+    assert!(
+        mob.edges().is_empty(),
+        "the exempt worker takes no declared edge"
+    );
+
+    mob.handle
+        .wire(side_worker.clone(), lead.clone())
+        .await
+        .expect("the host wires the exempt worker explicitly");
+    let edges = BTreeSet::from([pair(&side_worker, &lead)]);
+    assert_eq!(mob.edges(), edges);
+
+    tokio::time::timeout(STEP, mob.handle.respawn(side_worker.clone(), None))
+        .await
+        .expect("the respawn answers")
+        .expect("the respawn succeeds");
+    assert_eq!(mob.edges(), edges, "the respawn restores the explicit edge");
+    assert!(mob.machine_exempt(&side_worker), "the successor is exempt");
 }

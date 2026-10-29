@@ -123,9 +123,11 @@ import {
   findSideChatAgent,
   inactiveInstructionNotice,
   parseSideChatForkResult,
+  restartOffered,
   sideChatAlias,
   sideChatForkBlockedReason,
   sideChatForkErrorMessage,
+  sideChatForkOffered,
   sideChatSource,
   sideChatSourceMemberId,
 } from "./lib/side-chat";
@@ -5161,12 +5163,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         ) ?? null
       : null;
     // Forking needs `agent.view` and `agent.send` on the agent (and
-    // `agent.spawn` on the side chat's name): under enforced access, an
-    // agent the viewer may not send to offers no fork. Without enforcement
-    // `can_send_message` only says whether the agent is addressable, which
-    // the fork does not need.
-    const canForkSideChat = !consoleReadOnly && sideChatsOffered && canSpawnMembers && agent !== null
-      && !(accessEnforcing && agent.affordances?.can_send_message === false);
+    // `agent.spawn` on the side chat's name): see `sideChatForkOffered`.
+    const canForkSideChat = sideChatForkOffered({
+      readOnly: consoleReadOnly,
+      offered: sideChatsOffered,
+      canSpawnMembers,
+      accessEnforcing,
+      agent,
+    });
     const forkSideChatBlocked = forkingPanels.has(panel.id)
       ? "Forking the conversation"
       : sideChatForkBlockedReason({
@@ -5302,7 +5306,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             : undefined
         }
         onRespawn={
-          canRespawn
+          // A side chat is closed and forked again, never respawned.
+          canRespawn && restartOffered(agent)
             ? () => void onLifecycleAction(identity, "meta/respawn")
             : undefined
         }
@@ -5383,10 +5388,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         candidate.identity === target.identity ||
         candidate.member_id === target.identity,
     );
+    // A side chat is closed and forked again, never respawned or reset.
     const canRespawn =
       !consoleReadOnly &&
       configuredActionVisibility.respawn &&
-      agent?.affordances?.can_respawn === true;
+      agent?.affordances?.can_respawn === true &&
+      restartOffered(agent);
     const canRetire =
       !consoleReadOnly &&
       configuredActionVisibility.retire &&
@@ -5394,7 +5401,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const canReset =
       !consoleReadOnly &&
       configuredActionVisibility.reset &&
-      experience?.runtime_capabilities?.can_retire_members === true;
+      experience?.runtime_capabilities?.can_retire_members === true &&
+      restartOffered(agent);
     return (
       <div
         className="console-panel"

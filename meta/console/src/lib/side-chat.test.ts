@@ -8,9 +8,11 @@ import {
   findSideChatAgent,
   inactiveInstructionNotice,
   parseSideChatForkResult,
+  restartOffered,
   sideChatAlias,
   sideChatForkBlockedReason,
   sideChatForkErrorMessage,
+  sideChatForkOffered,
   sideChatSourceMemberId,
   sideChatsOf,
 } from "./side-chat";
@@ -119,8 +121,52 @@ test("typed fork refusals read as what the operator can do", () => {
     })),
     /could not be closed/,
   );
+  assert.match(
+    sideChatForkErrorMessage(rpcError(SIDE_CHAT_FORK_REFUSED_CODE, {
+      kind: "fork_source_changed",
+      agent_identity: "alpha-side",
+      source_member_id: "alpha",
+      retired: true,
+    })),
+    /closed again\. Fork it again/,
+  );
+  assert.match(
+    sideChatForkErrorMessage(rpcError(SIDE_CHAT_FORK_REFUSED_CODE, {
+      kind: "fork_source_changed",
+      retired: false,
+    })),
+    /could not be closed/,
+  );
   assert.match(sideChatForkErrorMessage(rpcError(FORK_INSTRUCTION_REFUSED_CODE)), /instructions/);
   assert.equal(sideChatForkErrorMessage(new Error("network down")), "network down");
+});
+
+test("a pane offers the fork only where the viewer may fork the agent", () => {
+  const sendable = agent("alpha", { affordances: { can_send_message: true } });
+  const unsendable = agent("alpha", { affordances: { can_send_message: false } });
+  const offered = { readOnly: false, offered: true, canSpawnMembers: true, accessEnforcing: true };
+  assert.equal(sideChatForkOffered({ ...offered, agent: sendable }), true);
+  assert.equal(
+    sideChatForkOffered({ ...offered, agent: unsendable }),
+    false,
+    "under enforced access a viewer who may not send to the agent may not fork it",
+  );
+  assert.equal(
+    sideChatForkOffered({ ...offered, accessEnforcing: false, agent: unsendable }),
+    true,
+    "without enforcement can_send_message only says the agent is not addressable",
+  );
+  assert.equal(sideChatForkOffered({ ...offered, agent: agent("alpha") }), true);
+  assert.equal(sideChatForkOffered({ ...offered, readOnly: true, agent: sendable }), false);
+  assert.equal(sideChatForkOffered({ ...offered, offered: false, agent: sendable }), false);
+  assert.equal(sideChatForkOffered({ ...offered, canSpawnMembers: false, agent: sendable }), false);
+  assert.equal(sideChatForkOffered({ ...offered, agent: null }), false);
+});
+
+test("a side chat offers no respawn or reset", () => {
+  assert.equal(restartOffered(agent("alpha")), true);
+  assert.equal(restartOffered(agent("alpha-side-ab12", { side_chat_of: "alpha" })), false);
+  assert.equal(restartOffered(null), true);
 });
 
 test("side chats are found by alias and listed under their source", () => {

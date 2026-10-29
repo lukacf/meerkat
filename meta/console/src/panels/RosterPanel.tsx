@@ -1,5 +1,6 @@
 import React from "react";
 import type { ConsoleAgent } from "../types";
+import { restartOffered } from "../lib/side-chat";
 
 interface RosterPanelProps {
   agents: ConsoleAgent[];
@@ -190,10 +191,10 @@ export function RosterPanel({
               <div className="rd__actions">
                 {actionVisibility?.inspect !== false ? <button onClick={() => onDetails(active)}>{actionLabels?.inspect || "Details"}</button> : null}
                 {actionVisibility?.chat !== false ? <button onClick={() => onChat(active)}>{actionLabels?.chat || "Open chat"}</button> : null}
-                {actionVisibility?.respawn !== false && active.affordances?.can_respawn ? (
+                {actionVisibility?.respawn !== false && active.affordances?.can_respawn && restartOffered(active) ? (
                   <button onClick={() => onLifecycle(activeIdentity, "meta/respawn")}>{actionLabels?.respawn || "Respawn"}</button>
                 ) : null}
-                {actionVisibility?.reset !== false && canResetLifecycle ? (
+                {actionVisibility?.reset !== false && canResetLifecycle && restartOffered(active) ? (
                   <button onClick={() => onLifecycle(activeIdentity, "meta/reset")}>{actionLabels?.reset || "Reset"}</button>
                 ) : null}
                 {actionVisibility?.retire !== false && active.affordances?.can_retire ? (

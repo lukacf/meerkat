@@ -67,6 +67,35 @@ export function sideChatAlias(sourceIdentity: string, nonce: string): string {
   return `${base || "agent"}-side-${suffix || "0"}`;
 }
 
+/**
+ * Whether a pane offers "Fork to side chat" for `agent`: the console is
+ * writable, the runtime offers side chats, the viewer may spawn members, and,
+ * under enforced access, the viewer may send to the agent (a fork needs
+ * `agent.view` and `agent.send` on it). Without enforcement
+ * `can_send_message` only says whether the agent is addressable, which the
+ * fork does not need.
+ */
+export function sideChatForkOffered(input: {
+  readOnly: boolean;
+  offered: boolean;
+  canSpawnMembers: boolean;
+  accessEnforcing: boolean;
+  agent: ConsoleAgent | null | undefined;
+}): boolean {
+  const agent = input.agent;
+  if (input.readOnly || !input.offered || !input.canSpawnMembers || !agent) return false;
+  return !(input.accessEnforcing && agent.affordances?.can_send_message === false);
+}
+
+/**
+ * Whether the console offers Respawn and Reset for `agent`: never for a side
+ * chat, which is closed and forked again. The runtime refuses to respawn or
+ * reset one: its successor would be no fork of its agent.
+ */
+export function restartOffered(agent: ConsoleAgent | null | undefined): boolean {
+  return sideChatSource(agent) === null;
+}
+
 /** The `source_member_id` a fork of `agent` names: its identity, else its member id. */
 export function sideChatSourceMemberId(agent: ConsoleAgent): string {
   return (agent.identity || agent.member_id).trim();
@@ -163,6 +192,11 @@ export function sideChatForkErrorMessage(error: unknown): string {
       return data.retired === false
         ? "The side chat was seated with peers and could not be closed again. Close it from the agent list."
         : "The side chat was seated with peers, so it was closed again: a side chat must stay private.";
+    }
+    if (data.kind === "fork_source_changed") {
+      return data.retired === false
+        ? "The agent was reset or respawned while it was forked, and the side chat could not be closed again. Close it from the agent list."
+        : "The agent was reset or respawned while it was forked, so the side chat was closed again. Fork it again.";
     }
   }
   if (rpc?.code === FORK_INSTRUCTION_REFUSED_CODE) {

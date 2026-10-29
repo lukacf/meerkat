@@ -7392,7 +7392,12 @@ enum ResumedRunAdmissionLap {
 /// machine holds for its controller (a kept resume of retained work whose
 /// host cannot say yet) waits, marked, with its inputs bound: the loop parks
 /// and the controller re-ask brings it back, which releases the hold or ends
-/// the run as refused. Its admission is not asked before.
+/// the run as refused. A governed run on a document that requires a
+/// destination waits the same way until the registration owner binds its
+/// destination again (the machine's `resumed_run_destination_attached`); the
+/// owner's bind and the wake that follows it bring the loop back, and the
+/// run then resumes under that destination. Its admission is not asked
+/// before.
 async fn admit_resumed_run(
     driver: &crate::meerkat_machine::SharedDriver,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
@@ -7400,11 +7405,12 @@ async fn admit_resumed_run(
     authority_binding: &RuntimeLoopAuthorityBinding,
     run_id: RunId,
 ) -> ResumedRunAdmissionLap {
-    let (lacks_controller, held) = {
+    let (lacks_controller, held, waits_for_destination) = {
         let d = driver.lock().await;
         (
             d.resumed_run_first_input_lacks_controller(&run_id),
             d.run_inputs_controller_held(&run_id),
+            d.resumed_run_waits_for_destination(&run_id),
         )
     };
     if lacks_controller {
@@ -7419,7 +7425,7 @@ async fn admit_resumed_run(
         )
         .await;
     }
-    if held {
+    if held || waits_for_destination {
         return ResumedRunAdmissionLap::Exit(false);
     }
     let Some(machine) = authority_binding.machine.upgrade() else {

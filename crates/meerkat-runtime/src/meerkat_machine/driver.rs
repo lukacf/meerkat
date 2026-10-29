@@ -6976,7 +6976,11 @@ pub(crate) enum ResumedRunStart {
     /// Run starts are held (#1500): nothing changed and the run stays marked.
     RunStartsHeld,
     /// No run with this id is marked resumable, a run is current, or no
-    /// input is bound to it: nothing changed.
+    /// input is bound to it: nothing changed. The plan also refuses a run
+    /// with an input held for its controller, or a governed run whose
+    /// destination is not attached; the runtime loop's resumed-run
+    /// admission waits for both before it begins the run, so a lap that
+    /// meets this goes round to that wait.
     NotResumable,
 }
 

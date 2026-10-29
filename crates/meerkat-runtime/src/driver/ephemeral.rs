@@ -814,6 +814,19 @@ impl EphemeralRuntimeDriver {
         })
     }
 
+    /// Whether the run `run_id` marked resumable waits for its destination:
+    /// a governed run on a document that requires one, before the
+    /// registration owner binds it again. The machine decides
+    /// (`resumed_run_destination_attached`, the `ResumeRun` guard and the
+    /// resumed-run plan mirror it); the run stays marked, with its inputs
+    /// bound, and resumes under that destination once it is bound.
+    pub(crate) fn resumed_run_waits_for_destination(&self, run_id: &RunId) -> bool {
+        let run = mm_dsl::RunId::from_domain(run_id);
+        self.with_dsl_state(|state| {
+            !mm_dsl::command_capabilities::resumed_run_destination_attached(state, &run)
+        })
+    }
+
     /// Whether the pause since the held rows were last asked is over.
     fn controller_hold_ask_due(&self, now: meerkat_core::time_compat::Instant) -> bool {
         self.controller_hold_clock.last_asked.is_none_or(|last| {

@@ -261,6 +261,17 @@ impl DriverEntry {
         self.shell_driver().run_inputs_controller_held(run_id)
     }
 
+    /// Whether the run `run_id` marked resumable waits for its destination
+    /// (see
+    /// [`crate::driver::ephemeral::EphemeralRuntimeDriver::resumed_run_waits_for_destination`]).
+    pub(crate) fn resumed_run_waits_for_destination(
+        &self,
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> bool {
+        self.shell_driver()
+            .resumed_run_waits_for_destination(run_id)
+    }
+
     /// Whether `input_id` is a kept resume of retained work that holds no
     /// controller client (yet).
     pub(crate) fn kept_retained_resume_without_client(&self, input_id: &InputId) -> bool {

@@ -257,8 +257,11 @@ pub enum ToolError {
         kind: crate::approval::review::ReviewUnavailableKind,
     },
 
-    /// Application consequence policy denied an otherwise statically admitted call.
-    #[error("Tool call denied by application policy: {denial:?}")]
+    /// A consequence denial refused an otherwise statically admitted call:
+    /// the application's consequence policy, or a scoped tool grant gate
+    /// (`tool_grant_*` codes). The message names the denial's code and its
+    /// own model-facing text.
+    #[error("Tool call denied ({}): {}", denial.code, denial.message)]
     PolicyDenied {
         denial: crate::ToolConsequenceDenial,
     },

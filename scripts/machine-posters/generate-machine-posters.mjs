@@ -220,7 +220,7 @@ const MACHINE_SPECS = [
         {
           id: "visibility",
           title: "Visibility Revision Pipeline",
-          note: "Filter staging, deferred tools, boundary promotion, and surface delta handling.",
+          note: "Filter staging, deferred tools, boundary promotion, the scoped tool grant gate, and surface delta handling.",
           x: 1420,
           y: 42,
           w: 500,
@@ -230,6 +230,8 @@ const MACHINE_SPECS = [
             "StagePersistentFilter",
             "RequestDeferredTools",
             "PublishCommittedVisibleSet",
+            "ReplaceToolGrantGate",
+            "ApplyToolGrantOpenSet",
             "SurfaceStageAdd",
             "SurfaceStageRemove",
             "SurfaceStageReload",
@@ -817,7 +819,7 @@ const MACHINE_SPECS = [
         {
           id: "deadline",
           title: "Deadline Drivers",
-          note: "Timer, boundary and read observations apply Expire; an early fire is a byte-identical no-op.",
+          note: "The deadline timer and list or audit reads apply Expire; an early fire is a byte-identical no-op. Boundaries and dispatches apply AdmitUse.",
           x: 40,
           y: 470,
           w: 340,

@@ -3104,9 +3104,10 @@ CREATE TABLE runtime_tool_grant_audit (
     /// [`RUNTIME_STORE_DOMAIN`] in the runtime store's file.
     ///
     /// Like [`RUNTIME_SERVICE_CALL_AUDIT_DOMAIN`], it is NOT applied by
-    /// [`open_runtime_connection`]: the first grant write provisions it
+    /// [`open_runtime_connection`]: the first write of a grant or audit row
+    /// (a refused call's audit row is one) provisions it
     /// ([`open_runtime_tool_grants_write_connection`]), so only a file where
-    /// a grant was written carries the domain row and its tables. A binary
+    /// such a row was written carries the domain row and its tables. A binary
     /// that does not know the domain leaves it alone as a foreign co-tenant:
     /// the runtime store's own domain is unchanged, and such a binary still
     /// opens the file.

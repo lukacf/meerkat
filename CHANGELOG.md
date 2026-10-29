@@ -136,14 +136,31 @@ them.
   `put_tool_grant_if_absent`, `compare_and_put_tool_grant`,
   `append_tool_grant_audit` and `read_tool_grant_audit`, whose defaults answer
   `Unsupported`. The SQLite store keeps grants and their audit rows in the
-  schema domain `runtime-tool-grants`, created by the first grant write and
-  left alone by binaries that do not know it; the in-memory store keeps them
+  schema domain `runtime-tool-grants`, created by the first write of a grant
+  or audit row (a refused call's audit row is one) and left alone by binaries
+  that do not know it; the in-memory store keeps them
   for the process; the host store SPI keeps them in the record scope families
   `tg` and `tga`. Lifecycle audit rows (`granted`, `expired`, `revoked`)
   commit with the grant's change, and `refused` rows append. The storage
   doctor knows the new domain. `ToolVisibilityOwner` gains
   `replace_tool_grant_gate` and `apply_tool_grant_open_set`, whose defaults
   accept only an empty gate.
+
+### Changed
+
+- `meerkat-core`: a `policy_denied` tool error's model-facing message now
+  reads `Tool call denied (<code>): <message>` from the denial itself, for an
+  application consequence policy and a scoped tool grant gate alike, instead
+  of naming the application policy over a debug rendering of the denial.
+
+### Upgrade notes
+
+- A session's grant gate is recorded in its tooling metadata, which a binary
+  older than scoped tool grants does not read: such a binary resumes a gated
+  session with its gated tools ungated. Upgrade every host that serves gated
+  sessions before relying on a gate, and do not roll a host that served gated
+  sessions back to an older binary. Grant rows and their audit log live in the
+  `runtime-tool-grants` schema domain, which an older binary leaves alone.
 
 ## [0.9.7] - 2026-10-28
 

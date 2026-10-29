@@ -264,12 +264,24 @@ confinement all still apply to every call it opens.
   list or audit read settles the due grants of any session without loading
   it; nothing about a grant wakes a dormant member. Grants live in the runtime
   store, on SQLite in the `runtime-tool-grants` schema domain that the first
-  grant write creates. With the in-memory store, Web/WASM included, they last
-  only for the process.
+  write of a grant or audit row creates (a refused call's audit row is one).
+  With the in-memory store, Web/WASM included, they last only for the
+  process.
 - **Audit.** Each subject's grants append to one audit log: `granted`,
   `expired` (with the driver that observed the expiry), `revoked` and
   `refused` rows. A lifecycle row commits with the grant's change; a failed
   refusal row never admits the call.
+- **Limits.** The dispatch gate is the authority; what the model is shown
+  follows it at the next model-request boundary. A live session keeps the
+  tool surface its live bridge opened with, so a name a grant opened stays
+  visible there after the grant ends, and the dispatch gate refuses each call. A control-plane
+  tool, such as the deferred catalog's search and load tools, is never hidden
+  by a gate; a gated one is refused at dispatch until a grant opens it. A
+  grant row this binary cannot read (written by a newer binary, or damaged)
+  opens nothing and blocks none of its subject's other grants; a list reports
+  it. A binary older than scoped tool grants does not know a session's gate:
+  it resumes a gated session with its gated tools ungated, so upgrade every
+  host that serves gated sessions before relying on a gate.
 
 A scoped tool grant confers no authority of its own: it only opens, for a
 bounded time, names the build gated. Governed authority grants

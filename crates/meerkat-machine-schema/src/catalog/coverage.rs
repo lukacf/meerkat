@@ -3035,7 +3035,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "tool_grant_deadline_driver",
-                    "tool_grant_lifecycle_machine.rs::expire_before_the_deadline_is_a_byte_identical_noop leaves an early timer fire byte-identical and expires the grant at its deadline; settled grants ignore later expiry observations",
+                    "tool_grant_lifecycle_machine.rs::expire_before_the_deadline_is_a_byte_identical_noop leaves an early timer fire byte-identical and expires the grant at its deadline, and settled expired grants ignore later expiry observations; every_command_class_in_every_phase_is_total_and_only_mutates_where_intended drives Expire into a revoked grant as a byte-identical self-loop",
                     CoverageClaims::none()
                         .transitions(&[
                             "ExpireDue",
@@ -3051,7 +3051,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "tool_grant_revocation",
-                    "tool_grant_lifecycle_machine.rs::revoke_after_the_deadline_records_expiry_not_revocation revokes a live grant before its deadline, records expiry for a revoke at or after the deadline, and leaves settled grants unchanged",
+                    "tool_grant_lifecycle_machine.rs::revoke_after_the_deadline_records_expiry_not_revocation revokes a live grant before its deadline, records expiry for a revoke at or after the deadline, and leaves settled grants unchanged; every_command_class_in_every_phase_is_total_and_only_mutates_where_intended refuses a use of the revoked grant",
                     CoverageClaims::none()
                         .transitions(&[
                             "RevokeActive",

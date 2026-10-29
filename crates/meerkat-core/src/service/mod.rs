@@ -676,6 +676,11 @@ impl SessionError {
     /// and keys.
     pub const FORK_INSTRUCTION_REFUSED_KIND: &'static str = "fork_instruction_refused";
 
+    /// Structured-data `kind` of a refused scoped tool grant gate
+    /// ([`crate::error::AgentError::ToolGrantGateRefused`]) on the wire. The
+    /// `tool_grant_gate_refusal` member carries the typed refusal.
+    pub const TOOL_GRANT_GATE_REFUSED_KIND: &'static str = "tool_grant_gate_refused";
+
     /// Return a stable error code string for wire formats.
     pub fn code(&self) -> &'static str {
         match self {
@@ -745,6 +750,12 @@ impl SessionError {
                 "kind": Self::FORK_INSTRUCTION_REFUSED_KIND,
                 "fork_instruction_refusal": refusal,
             })),
+            Self::Agent(crate::error::AgentError::ToolGrantGateRefused(refusal)) => {
+                Some(serde_json::json!({
+                    "kind": Self::TOOL_GRANT_GATE_REFUSED_KIND,
+                    "tool_grant_gate_refusal": refusal,
+                }))
+            }
             _ => None,
         }
     }

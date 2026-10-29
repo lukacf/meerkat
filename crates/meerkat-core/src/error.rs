@@ -753,6 +753,12 @@ pub enum AgentError {
     #[error(transparent)]
     ToolArtifactRefused(Box<crate::types::ToolArtifactRefusal>),
 
+    /// A build's scoped tool grant gate was refused: no grant could honour
+    /// it, so nothing of the build was published. Boxed to keep `AgentError`
+    /// small.
+    #[error("scoped tool grant gate refused: {0}")]
+    ToolGrantGateRefused(Box<crate::tool_grant::GrantGateRefusal>),
+
     /// MeerkatMachine DSL observed an auth lease in `reauth_required`
     /// state at a CallingLlm boundary; the lease cannot proceed
     /// until the user re-authenticates (`rkat auth login`). This is a

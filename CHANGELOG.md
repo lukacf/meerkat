@@ -46,8 +46,12 @@ them.
   requires a dispatcher whose `adjudicates_tool_grants` answers true.
 
 - `meerkat`: `AgentBuildConfig` gains `grant_gated_tools`, and
-  `BuildAgentError` gains `GrantGate(GrantGateBuildError)`. `BuildAgentError`
-  is exhaustive, so a downstream exhaustive match needs the arm.
+  `BuildAgentError` gains `GrantGate(GrantGateBuildError)`, where
+  `GrantGateBuildError` is core's `tool_grant::GrantGateRefusal`.
+  `BuildAgentError` is exhaustive, so a downstream exhaustive match needs the
+  arm. A session service surfaces the refusal as the typed
+  `AgentError::ToolGrantGateRefused`: an invalid-params error whose data is
+  `{"kind": "tool_grant_gate_refused", "tool_grant_gate_refusal": ...}`.
 
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
   MeerkatMachine gains the scoped tool grant gate (see Added).

@@ -111,6 +111,9 @@ fn build_agent_error_to_session_error(
         BuildAgentError::DeclaredToolUnknown(unknown) => SessionError::Agent(
             meerkat_core::error::AgentError::DeclaredToolUnknown(unknown),
         ),
+        BuildAgentError::GrantGate(refusal) => SessionError::Agent(
+            meerkat_core::error::AgentError::ToolGrantGateRefused(Box::new(refusal)),
+        ),
         other => SessionError::Agent(meerkat_core::error::AgentError::BuildError(
             other.to_string(),
         )),
@@ -2254,6 +2257,39 @@ mod tests {
         );
 
         assert!(error.is_build_llm_identity_unresolvable());
+    }
+
+    /// A refused grant gate stays typed on the session error path: the agent
+    /// error carries the refusal, and the error's structured data names it.
+    #[test]
+    fn grant_gate_build_failure_keeps_its_typed_refusal() {
+        let error = build_agent_error_to_session_error(
+            BuildAgentError::GrantGate(crate::GrantGateBuildError::FamilyNotMounted {
+                family: "comms".to_string(),
+            }),
+            Some(Provider::OpenAI),
+            None,
+        );
+
+        assert!(
+            matches!(
+                &error,
+                SessionError::Agent(meerkat_core::error::AgentError::ToolGrantGateRefused(refusal))
+                    if matches!(
+                        refusal.as_ref(),
+                        meerkat_core::tool_grant::GrantGateRefusal::FamilyNotMounted { family }
+                            if family == "comms"
+                    )
+            ),
+            "got: {error:?}"
+        );
+        assert_eq!(
+            error.structured_data(),
+            Some(serde_json::json!({
+                "kind": "tool_grant_gate_refused",
+                "tool_grant_gate_refusal": {"kind": "family_not_mounted", "family": "comms"},
+            }))
+        );
     }
 
     #[test]

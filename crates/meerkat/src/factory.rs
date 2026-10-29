@@ -1697,39 +1697,10 @@ pub fn tool_family_names(family: &str) -> Option<Vec<&'static str>> {
         })
 }
 
-/// Why a build's scoped tool grant gate was refused.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum GrantGateBuildError {
-    /// A gated family is not a built-in tool family.
-    #[error("'{family}' is not a built-in tool family, so it cannot be grant-gated")]
-    UnknownFamily { family: String },
-    /// A gated family is disabled by this build; a gated family is mounted
-    /// closed, never disabled.
-    #[error("the tool family '{family}' is both disabled and grant-gated")]
-    FamilyDisabled { family: String },
-    /// A gated family none of whose names this build's final dispatcher
-    /// mounts: no grant could ever open it.
-    #[error("the tool family '{family}' is grant-gated, but this build mounts none of its tools")]
-    FamilyNotMounted { family: String },
-    /// A gated name a known tool source can provide, that this build's final
-    /// dispatcher does not mount and no pending source could provide once it
-    /// connects.
-    #[error("'{tool}' is grant-gated, but this build does not mount it")]
-    ToolNotMounted { tool: String },
-    /// A gated tool name that no tool source of this build provides, and no
-    /// pending source could provide once it connects.
-    #[error("'{tool}' is grant-gated, but no tool source of this build provides it")]
-    UnknownTool { tool: String },
-    /// The build's tool policy refuses a gated name, so no grant could ever
-    /// open it.
-    #[error("'{tool}' is grant-gated, but the build's tool policy refuses it")]
-    PolicyRefused { tool: String },
-    /// The build has no grant service: a gate needs the runtime's, carried
-    /// on the session's runtime bindings.
-    #[error("a grant gate needs the runtime's tool grant service, and this build has none")]
-    NoGrantService,
-}
+/// Why a build's scoped tool grant gate was refused: core's
+/// [`meerkat_core::tool_grant::GrantGateRefusal`], which a session service
+/// surfaces as the typed `AgentError::ToolGrantGateRefused`.
+pub use meerkat_core::tool_grant::GrantGateRefusal as GrantGateBuildError;
 
 /// Whether a build's gate covers web search, by name or through its family.
 /// Such a build disables every provider-native tool, so the gated `web_search`

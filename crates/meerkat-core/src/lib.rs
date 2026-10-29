@@ -659,7 +659,7 @@ pub use tool_execution_policy::{
     ToolExecutionPolicyError, ToolMutationClass,
 };
 pub use tool_grant::{
-    GatedToolTable, GrantGatedTools, SessionToolGrants, TOOL_GRANT_EXPIRED_CODE,
+    GatedToolTable, GrantGateRefusal, GrantGatedTools, SessionToolGrants, TOOL_GRANT_EXPIRED_CODE,
     TOOL_GRANT_REQUIRED_CODE, TOOL_GRANT_REVOKED_CODE, TOOL_GRANT_UNAVAILABLE_CODE, ToolGrantCall,
     ToolGrantGate, ToolGrantId, ToolGrantIdError, ToolGrantIssuer, ToolGrantRecord,
     ToolGrantRefusal, ToolGrantSubject, ToolGrantSubjectKey, ToolGrantTarget,

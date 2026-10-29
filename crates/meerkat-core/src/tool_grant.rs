@@ -32,6 +32,44 @@ pub const TOOL_GRANT_REVOKED_CODE: &str = "tool_grant_revoked";
 /// Refusal code: the grants could not be read, so the gated name stays closed.
 pub const TOOL_GRANT_UNAVAILABLE_CODE: &str = "tool_grant_unavailable";
 
+/// Why a build's scoped tool grant gate was refused: a gate no grant could
+/// honour. The agent factory answers it, and a session service surfaces it as
+/// [`crate::error::AgentError::ToolGrantGateRefused`], whose wire form is an
+/// invalid-params error carrying this refusal, tagged by `kind`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum GrantGateRefusal {
+    /// A gated family is not a built-in tool family.
+    #[error("'{family}' is not a built-in tool family, so it cannot be grant-gated")]
+    UnknownFamily { family: String },
+    /// A gated family is disabled by this build; a gated family is mounted
+    /// closed, never disabled.
+    #[error("the tool family '{family}' is both disabled and grant-gated")]
+    FamilyDisabled { family: String },
+    /// A gated family none of whose names this build's final dispatcher
+    /// mounts: no grant could ever open it.
+    #[error("the tool family '{family}' is grant-gated, but this build mounts none of its tools")]
+    FamilyNotMounted { family: String },
+    /// A gated name a known tool source can provide, that this build's final
+    /// dispatcher does not mount and no pending source could provide once it
+    /// connects.
+    #[error("'{tool}' is grant-gated, but this build does not mount it")]
+    ToolNotMounted { tool: String },
+    /// A gated tool name that no tool source of this build provides, and no
+    /// pending source could provide once it connects.
+    #[error("'{tool}' is grant-gated, but no tool source of this build provides it")]
+    UnknownTool { tool: String },
+    /// The build's tool policy refuses a gated name, so no grant could ever
+    /// open it.
+    #[error("'{tool}' is grant-gated, but the build's tool policy refuses it")]
+    PolicyRefused { tool: String },
+    /// The build has no grant service: a gate needs the runtime's, carried
+    /// on the session's runtime bindings.
+    #[error("a grant gate needs the runtime's tool grant service, and this build has none")]
+    NoGrantService,
+}
+
 /// The built-in tool families and tool names a build marks grant-gated.
 ///
 /// A gated family is mounted as if enabled; its names, like the gated tool

@@ -2330,18 +2330,21 @@ impl CopilotAuthorizer {
     /// Claim a read of the route's source while the lease withdraws the
     /// token it gave (GitHub refused it, or a logout released it). Returns
     /// the error the request gets instead of the read while the read must
-    /// wait: the source runs something, the lease is still at the
-    /// withdrawing generation, the AuthMachine still answers
-    /// `reauth_required` or `lease_absent`, and the paced instant has not
-    /// come. A read that takes the paced instant pushes it a pause further
-    /// before the source runs, so a read that fails (a command that exits
-    /// non-zero, a resolver error, an empty or a classic token) is paced as a
-    /// read that gives the withdrawn token again is. A new publication on the
-    /// lease ends the pause at once, so a value another session, machine or
-    /// login published heals this account state on its next request. The
-    /// pause belongs to the lease's AuthMachine registry, and is checked and
-    /// moved under its own lock, so of concurrent account states over one
-    /// registry only one reads at each paced instant.
+    /// wait: the source runs something, the AuthMachine answers
+    /// `reauth_required` or `lease_absent` for a token that was published
+    /// (generation above 0), and a pause at that generation has not reached
+    /// its instant. Otherwise, while the lease withdraws the token, this read
+    /// starts the pause (or, at the paced instant, moves it a pause further)
+    /// before the source runs, so the first read after a withdrawal this
+    /// runtime did not see (a logout, another runtime's refusal) is paced
+    /// too, and a read that fails (a command that exits non-zero or hangs to
+    /// its timeout, a resolver error, an empty or a classic token) is paced
+    /// as a read that gives the withdrawn token again is. A new publication
+    /// on the lease ends the pause at once, so a value another session,
+    /// machine or login published heals this account state on its next
+    /// request. The pause belongs to the lease's AuthMachine registry, and is
+    /// checked and moved under its own lock, so of concurrent account states
+    /// over one registry only one reads at each paced instant.
     fn claim_withdrawn_source_reread(
         &self,
     ) -> Result<Option<ProviderAuthError>, ProviderAuthError> {
@@ -2350,23 +2353,24 @@ impl CopilotAuthorizer {
         }
         let auth_lease = self.auth_lease()?;
         let registry = auth_lease.auth_lifecycle_restore_instance_id();
-        let mut pauses = self.state.pacing.withdrawn_source_rereads.lock();
-        let Some(paced) = pauses.get(&registry).copied() else {
-            return Ok(None);
-        };
         let lease_key = self.lease_key();
+        let mut pauses = self.state.pacing.withdrawn_source_rereads.lock();
         let generation = auth_lease.snapshot(&lease_key).generation;
         let withdrawn = withdrawn_token_error(
             auth_lease
                 .resolve_credential_use_admission(&lease_key, CredentialUseIntent::UseCredential)
                 .map_err(credential_use_admission_error)?,
-        );
-        let Some(withdrawn) = withdrawn.filter(|_| generation == paced.generation) else {
+        )
+        .filter(|_| generation > 0);
+        let Some(withdrawn) = withdrawn else {
             pauses.remove(&registry);
             return Ok(None);
         };
         let now = (self.env.now)();
-        if now < paced.at {
+        if pauses
+            .get(&registry)
+            .is_some_and(|paced| paced.generation == generation && now < paced.at)
+        {
             return Ok(Some(withdrawn));
         }
         pauses.insert(
@@ -6050,6 +6054,52 @@ mod tests {
 
             harness.operator.advance(2);
             assert_eq!(resolve().await.err(), absent);
+            assert_eq!(command_runs(directory.path()), 3);
+            assert_eq!(harness.transport.request_count(), 2);
+        }
+
+        /// After a logout this runtime did not see coming, the first read of
+        /// a command source starts the pause even when it fails: requests
+        /// within the minute then fail as `lease_absent` without running the
+        /// failing command, instead of each running it and returning its
+        /// error.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_failing_source_after_a_logout_is_paced_from_the_first_read() {
+            let directory = tempfile::tempdir().expect("command directory");
+            std::fs::write(
+                directory.path().join("token"),
+                user_token("logged-out-then-failing"),
+            )
+            .expect("write the token");
+            let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
+            let source = token_file_command(directory.path());
+            let resolve = || harness.resolve_from(CopilotProviderRoute::OpenAi, source.clone());
+            resolve().await.expect("the token resolves");
+            harness
+                .operator
+                .auth_lease
+                .release_lease(&lease_key())
+                .expect("log out");
+            std::fs::remove_file(directory.path().join("token")).expect("remove the token");
+
+            let absent = Some(ProviderAuthError::Auth(AuthError::LeaseAbsent));
+            let failed = resolve().await.err().expect("the command fails");
+            assert_ne!(Some(failed), absent, "the first read after the logout ran");
+            assert_eq!(command_runs(directory.path()), 2);
+            for _ in 0..3 {
+                assert_eq!(resolve().await.err(), absent);
+            }
+            harness.operator.advance(59);
+            assert_eq!(resolve().await.err(), absent);
+            assert_eq!(
+                command_runs(directory.path()),
+                2,
+                "no read within the minute, though the first one failed"
+            );
+
+            harness.operator.advance(2);
+            resolve().await.err().expect("the command fails again");
             assert_eq!(command_runs(directory.path()), 3);
             assert_eq!(harness.transport.request_count(), 2);
         }

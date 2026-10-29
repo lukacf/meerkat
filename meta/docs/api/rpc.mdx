@@ -575,7 +575,7 @@ not establish that no identities are registered.
 | `meta/member_status` | `{member_id}` | `MobMemberSnapshot` (deep inspection) |
 | `meta/ensure_member` | see below | worker plane: `MobMemberListEntry` or `null`; identity plane: identity receipt |
 | `meta/retire_member` | `{member_id}` | acceptance acknowledgement; an identity member is released, as by `meta/retire`, and keeps its incarnation |
-| `meta/respawn_member` | `{member_id}` | acceptance acknowledgement; identity-first: resets the identity like `meta/reset` (a fresh session at a new generation); on the Console a side chat is refused (`-32602`, `side_chat_restart_refused`; see `meta/fork_member` below) |
+| `meta/respawn_member` | `{member_id}` | acceptance acknowledgement; identity-first: resets the identity like `meta/reset` (a fresh session at a new generation); a side chat is refused (`-32602`, `side_chat_restart_refused`; see `meta/fork_member` below) |
 | `meta/reload_member` | `{member_id}` | `{reloaded, disposition, session_id?, generation?, identity, identity_first}`; non-destructive cold reload, same bound session and generation (identity-first only) |
 | `meta/member_health` | `{member_id}` | `MemberHealthReport`: lifecycle state, materialization in flight, last delivery error class, actor-loop verdict and open `stall_id`; in-process reads only, so it answers during an actor stall |
 | `meta/reconcile_edges` | none | `UnifiedRuntimeReconcileEdgesReport`; the definition's wiring leaves out every member exempt from it, a Console side chat among them |
@@ -652,10 +652,10 @@ The side chat:
   while it is idle. `meta/reset_all` retires it with the other members that
   have no registered identity;
 - is never respawned or reset: `meta/respawn`, `meta/respawn_member` and
-  `meta/reset` refuse it with `-32602`, `data.kind`
-  `side_chat_restart_refused` (`operation`, `agent_identity`,
-  `source_member_id`), since its successor would be no fork of the agent.
-  Close it and fork the agent again;
+  `meta/reset` refuse it, on the Console and on the stdio gateway, with
+  `-32602`, `data.kind` `side_chat_restart_refused` (`operation`,
+  `agent_identity`, `source_member_id`), since its successor would be no
+  fork of the agent. Close it and fork the agent again;
 - names the agent in its console labels, `side_chat_of` (the agent's
   identity) and `side_chat_of_session` (the session it was forked from), and
   in its experience sidebar row's `side_chat_of`. They are read from

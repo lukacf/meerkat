@@ -1477,6 +1477,19 @@ pub(super) async fn handle_respawn_member(
             // `status_identity` returns, and encoding that directly yields a
             // well-formed roster id for a member that does not exist.
             let identity = crate::member_comms_id::roster_member_id_for_supplied_id(&mid);
+            // A side chat is closed and forked again, never respawned: its
+            // successor would be no fork of its agent. Refused as the Console
+            // refuses it.
+            if let Some(refusal) =
+                crate::side_chat::side_chat_restart_refusal(&handle, &identity, "respawn").await
+            {
+                return JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: None,
+                    error: Some(refusal),
+                };
+            }
             // Best-effort repair material: a faulted lookup degrades to None
             // (the respawn itself surfaces real faults).
             let entry_before_respawn = handle.get_member(&identity).await.ok().flatten();

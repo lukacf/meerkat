@@ -5450,7 +5450,7 @@ async fn handle_unified_rpc_json_inner(
                     if rpc_live_only_fallback_allowed(&target, identity_str)
                         && let Some(live) = target.live.as_ref()
                     {
-                        match Box::pin(respawn_rpc_live_identity(runtime, live)).await {
+                        match Box::pin(respawn_rpc_live_identity(runtime, live, "respawn")).await {
                             Ok(result) => {
                                 runtime
                                     .record_console_lifecycle(
@@ -5466,15 +5466,11 @@ async fn handle_unified_rpc_json_inner(
                                     error: None,
                                 }
                             }
-                            Err(err) => JsonRpcResponse {
+                            Err(error) => JsonRpcResponse {
                                 jsonrpc: JSONRPC_VERSION.to_string(),
                                 id: response_id,
                                 result: None,
-                                error: Some(JsonRpcError {
-                                    code: -32000,
-                                    message: format!("respawn failed: {err}"),
-                                    data: None,
-                                }),
+                                error: Some(error),
                             },
                         }
                     } else {
@@ -5653,7 +5649,8 @@ async fn handle_unified_rpc_json_inner(
                         && let Some(live) = target.live.as_ref()
                     {
                         let response =
-                            match Box::pin(respawn_rpc_live_identity(runtime, live)).await {
+                            match Box::pin(respawn_rpc_live_identity(runtime, live, "reset")).await
+                            {
                                 Ok(result) => {
                                     runtime
                                         .record_console_lifecycle(
@@ -5669,15 +5666,11 @@ async fn handle_unified_rpc_json_inner(
                                         error: None,
                                     }
                                 }
-                                Err(err) => JsonRpcResponse {
+                                Err(error) => JsonRpcResponse {
                                     jsonrpc: JSONRPC_VERSION.to_string(),
                                     id: response_id,
                                     result: None,
-                                    error: Some(JsonRpcError {
-                                        code: -32000,
-                                        message: format!("reset failed: {err}"),
-                                        data: None,
-                                    }),
+                                    error: Some(error),
                                 },
                             };
                         return if is_notification {
@@ -5752,7 +5745,7 @@ async fn handle_unified_rpc_json_inner(
                     if rpc_live_only_fallback_allowed(&target, identity_str)
                         && let Some(live) = target.live.as_ref()
                     {
-                        match Box::pin(respawn_rpc_live_identity(runtime, live)).await {
+                        match Box::pin(respawn_rpc_live_identity(runtime, live, "reset")).await {
                             Ok(result) => {
                                 runtime
                                     .record_console_lifecycle(
@@ -5768,15 +5761,11 @@ async fn handle_unified_rpc_json_inner(
                                     error: None,
                                 }
                             }
-                            Err(err) => JsonRpcResponse {
+                            Err(error) => JsonRpcResponse {
                                 jsonrpc: JSONRPC_VERSION.to_string(),
                                 id: response_id,
                                 result: None,
-                                error: Some(JsonRpcError {
-                                    code: -32000,
-                                    message: format!("reset failed: {err}"),
-                                    data: None,
-                                }),
+                                error: Some(error),
                             },
                         }
                     } else {
@@ -7089,15 +7078,34 @@ async fn retire_rpc_member_ids_with_handle(
     Ok(())
 }
 
+/// Respawn `alias`, a live member no registered identity backs, for
+/// `operation` (`respawn` or `reset`, the live fallbacks of `meta/respawn`
+/// and `meta/reset`). A side chat is refused as the Console refuses it
+/// ([`crate::side_chat::side_chat_restart_refusal`]): its successor would be
+/// no fork of its agent. A respawn that fails answers `-32000`
+/// (`{operation} failed: ...`).
 async fn respawn_rpc_live_identity(
     runtime: &UnifiedRuntime,
     alias: &RpcLiveIdentityAlias,
-) -> Result<Value, String> {
+    operation: &str,
+) -> Result<Value, JsonRpcError> {
+    let member_id = crate::member_comms_id::mob_member_id(alias.runtime_member_id.as_str());
+    if let Some(refusal) =
+        crate::side_chat::side_chat_restart_refusal(&runtime.mob_handle(), &member_id, operation)
+            .await
+    {
+        return Err(refusal);
+    }
     let mut result = Box::pin(respawn_rpc_runtime_member_id(
         runtime,
         alias.runtime_member_id.as_str(),
     ))
-    .await?;
+    .await
+    .map_err(|err| JsonRpcError {
+        code: -32000,
+        message: format!("{operation} failed: {err}"),
+        data: None,
+    })?;
     result["identity"] = serde_json::json!(alias.identity.as_str());
     Ok(result)
 }
@@ -15293,6 +15301,177 @@ comms = true
             "respawned member must be active, not wedged in retiring"
         );
 
+        Ok(())
+    }
+
+    /// A side chat is never respawned or reset through the stdio gateway
+    /// either: `meta/respawn`, `meta/respawn_member` and the live fallback of
+    /// `meta/reset` refuse it as the Console does (`-32602`,
+    /// `side_chat_restart_refused`, close it and fork again), and it keeps
+    /// its session and stays a fork of its agent.
+    #[tokio::test]
+    async fn the_stdio_gateway_never_respawns_or_resets_a_side_chat()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = Box::pin(
+            UnifiedRuntime::builder()
+                .mob_spec(rpc_test_store_backed_mob_spec(&temp_dir)?)
+                .module_config(MetaConfig {
+                    modules: Vec::new(),
+                    discovery: DiscoverySpec {
+                        namespace: "rpc-side-chat-restart-test".to_string(),
+                        modules: Vec::new(),
+                    },
+                    pre_spawn: Vec::new(),
+                })
+                .timeout(Duration::from_secs(5))
+                .build(),
+        )
+        .await?;
+        let source = meerkat_mob::AgentIdentity::from("alpha");
+        Box::pin(
+            runtime.mob_handle().spawn_spec(
+                SpawnMemberSpec::new("worker", source.clone())
+                    .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven),
+            ),
+        )
+        .await?;
+        let turn = runtime
+            .mob_handle()
+            .member(&source)
+            .await?
+            .start_turn(
+                meerkat_core::types::ContentInput::Text("The code word is heron.".to_string()),
+                meerkat_core::types::HandlingMode::Queue,
+                meerkat_mob::MemberTurnOptions::new(),
+                None,
+            )
+            .await?;
+        turn.wait().await?;
+        // Fork once the runtime has settled the source's turn.
+        let mut forked = false;
+        for _ in 0..50 {
+            match Box::pin(crate::side_chat::fork_side_chat(
+                runtime.mob_runtime(),
+                None,
+                "alpha",
+                "alpha-side",
+                None,
+            ))
+            .await
+            {
+                Ok(_) => {
+                    forked = true;
+                    break;
+                }
+                Err(crate::side_chat::SideChatError::Fork(crate::fork::ForkMemberError::Mob(
+                    meerkat_mob::MobError::ForkSourceUnavailable {
+                        cause: meerkat_mob::error::ForkSourceUnavailableCause::Running,
+                        ..
+                    },
+                ))) => tokio::time::sleep(Duration::from_millis(100)).await,
+                Err(error) => return Err(error.to_string().into()),
+            }
+        }
+        assert!(forked, "the source settled its turn and was forked");
+        let side_chat = meerkat_mob::AgentIdentity::from("alpha-side");
+        let session = runtime
+            .mob_handle()
+            .get_member(&side_chat)
+            .await?
+            .and_then(|entry| entry.bridge_session_id().cloned());
+        assert!(session.is_some(), "the side chat has a session");
+
+        // `meta/respawn` and `meta/reset` need the identity authority; the
+        // side chat is no identity of it, so both take their live fallback.
+        let identity_runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: "rpc-side-chat-restart-test".to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(Arc::new(CoreReadsBridge::default())),
+            default_timeout: None,
+        }));
+        let identity_ctx = IdentityFirstContext {
+            runtime: crate::identity_first::PublicIdentityRuntime::new(
+                identity_runtime,
+                runtime.mob_runtime().clone(),
+            ),
+            roster_provider: Arc::new(EmptyRosterProvider),
+            topology_provider: None,
+            customizer: None,
+            agent_memory_provider: None,
+            mob_definition: None,
+            transcript_edit_service: None,
+            compaction_floors: None,
+        };
+        for (method, params, ctx, operation) in [
+            (
+                "meta/respawn",
+                json!({ "identity": "alpha-side" }),
+                Some(&identity_ctx),
+                "respawn",
+            ),
+            (
+                "meta/respawn_member",
+                json!({ "member_id": "alpha-side" }),
+                None,
+                "respawn",
+            ),
+            (
+                "meta/reset",
+                json!({ "identity": "alpha-side" }),
+                Some(&identity_ctx),
+                "reset",
+            ),
+        ] {
+            let raw = handle_unified_rpc_json(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": method,
+                    "params": params,
+                })
+                .to_string(),
+                Duration::from_secs(10),
+                None,
+                ctx,
+            )
+            .await;
+            let response: Value = serde_json::from_str(&raw)?;
+            assert_eq!(
+                response["error"]["code"],
+                json!(crate::side_chat::SIDE_CHAT_RESTART_REFUSED_CODE),
+                "{method}: {response:#?}"
+            );
+            assert_eq!(
+                response["error"]["data"],
+                json!({
+                    "kind": "side_chat_restart_refused",
+                    "operation": operation,
+                    "agent_identity": "alpha-side",
+                    "source_member_id": "alpha",
+                }),
+                "{method}"
+            );
+        }
+        assert_eq!(
+            runtime
+                .mob_handle()
+                .get_member(&side_chat)
+                .await?
+                .and_then(|entry| entry.bridge_session_id().cloned()),
+            session,
+            "the side chat keeps its session"
+        );
+        assert!(
+            crate::side_chat::verified_side_chats(&runtime.mob_handle())
+                .await
+                .contains_key("alpha-side"),
+            "the side chat is still a fork of its agent"
+        );
         Ok(())
     }
 }

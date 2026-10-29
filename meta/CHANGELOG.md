@@ -22,26 +22,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (which needs `agent.retire` on the agent), across a console reload and a
   gateway restart, and never idle-retires; it is never respawned or reset (its
   pane offers neither, and `meta/respawn`, `meta/respawn_member` and
-  `meta/reset` refuse it, `-32602` `side_chat_restart_refused`: close it and
-  fork the agent again); and the sidebar lists it under the agent. Its console
-  labels name the agent (`side_chat_of`, and the forked session in
-  `side_chat_of_session`), as does `side_chat_of` on its experience sidebar
-  row, read from Meerkat's durable roster fork source and never from a
-  supplied label; the member and identity list calls, event streams and frame
-  lineage read it the same way. Every agent check on a side chat is the
-  agent's: a rule that matches the agent (or the agent's own lineage) covers
-  its side chats for every action, a deny on the agent hides them, and a rule
-  that matches only the side chat (its name, its role or a label only it
-  carries) grants nothing. The fork needs `agent.view` and `agent.send` for
-  the agent and `agent.spawn` for the side chat's name, is offered where
-  sessions persist (or the composition did not record whether they do) and the
-  viewer may send to the agent, and is refused typed (`-32055`,
-  `fork_source_unavailable`) while the agent works (the Console disables the
-  action until it is idle) and for a seat that was never woken (cause
-  `no_session`; the agent is not woken for it). It is refused for an agent the
-  console's visibility policy hides (`-32001`, as `meta/fork_helper` now
-  refuses one too) and for an agent whose lineage already fills the access
-  rules' walk (`-32030`, `lineage_too_deep`). Under
+  `meta/reset` refuse it on the Console and on the stdio gateway, `-32602`
+  `side_chat_restart_refused`: close it and fork the agent again); and the
+  sidebar lists it under the agent. Its console labels name the agent
+  (`side_chat_of`, and the forked session in `side_chat_of_session`), as does
+  `side_chat_of` on its experience sidebar row, read from Meerkat's durable
+  roster fork source and never from a supplied label; the member and identity
+  list calls, event streams and frame lineage read it the same way. Every
+  agent check on a side chat is the agent's: a rule that matches the agent (or
+  the agent's own lineage) covers its side chats for every action, a deny on
+  the agent hides them, and a rule that matches only the side chat (its name,
+  its role or a label only it carries) grants nothing. The fork needs
+  `agent.view` and `agent.send` for the agent and `agent.spawn` for the side
+  chat's name, is offered where sessions persist (or the composition did not
+  record whether they do) and the viewer may send to the agent, and is refused
+  typed (`-32055`, `fork_source_unavailable`) while the agent works (the
+  Console disables the action until it is idle) and for a seat that was never
+  woken (cause `no_session`; the agent is not woken for it). It is refused for
+  an agent the console's visibility policy hides (`-32001`, as
+  `meta/fork_helper` now refuses one too) and for an agent whose lineage
+  already fills the access rules' walk (`-32030`, `lineage_too_deep`). Under
   `runtime_options.member_auth_binding`, an agent whose session records
   another binding or none is refused before anything is forked
   (`member_auth_binding_uncarried`). A side chat forked from another session

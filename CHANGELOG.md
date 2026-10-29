@@ -118,6 +118,14 @@ them.
   `meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_URL` are new. The
   OpenAI, Anthropic and Gemini runtimes report the readiness of a
   `github_copilot_token` route from its source, without a network request.
+- Zero-config GitHub Copilot: while `[realm.global]` configures no Copilot
+  route, a request that names `global:copilot_openai`,
+  `global:copilot_anthropic` or `global:copilot_gemini` resolves it in token
+  mode from `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN`, with
+  no config, also for a provider switch on the shared account and for
+  `rkat auth test` and `rkat auth status`. Default selection never picks
+  these routes, and any configured Copilot route turns them off.
+  `RealmConnectionSet::copilot_token_default` returns them.
 
 ## [0.9.7] - 2026-10-28
 

@@ -320,6 +320,18 @@ credential_account = "github_copilot"
 default_model = "gemini-3.8-flash"
 ```
 
+Without any config, while `[realm.global]` configures no Copilot route, the
+three routes exist anyway: naming one, as in
+`--auth-binding global:copilot_anthropic`, resolves it in token mode from
+`COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN`, so a CI job needs
+only the variable. Nothing selects these routes by default, so an API-key
+variable such as `ANTHROPIC_API_KEY` keeps its role for requests that name no
+binding. Any Copilot route in `[realm.global]` turns them off: the device
+sign-in's routes, the routes above, a `copilot` backend under another name, or
+a binding on the `github_copilot` account. The zero-config Gemini route has no
+default model, so pass `--model` with it. `rkat auth test` and
+`rkat auth status` read these routes too.
+
 To store the token instead, as `copilot login --with-token` does, pipe it in
 (or pass `--secret`):
 

@@ -265,6 +265,11 @@ the token store. It sets `[realm.global] default_binding` if none is set.
   GitHub's `copilot_internal/user`, a classic `ghp_` token is refused, and a
   token GitHub refuses moves the account to `reauth_required`. The routes hold
   one method at a time: each login refuses routes set up for the other.
+- Zero-config: while `[realm.global]` configures no Copilot route, a request
+  that names `global:copilot_openai`, `global:copilot_anthropic` or
+  `global:copilot_gemini` resolves it in token mode from the same variables
+  without any config (no default model on the Gemini route); default
+  selection never picks it, and any configured Copilot route turns it off.
 
 Scripted API-key storage (the binding must exist first):
 

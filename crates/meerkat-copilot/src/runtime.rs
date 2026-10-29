@@ -7639,6 +7639,39 @@ mod tests {
             );
         }
 
+        /// Zero-config: the `global` routes Meerkat resolves while no Copilot
+        /// route is configured are this crate's three routes in token mode
+        /// on the shared account, and the provider catalog accepts each.
+        #[test]
+        fn zero_config_routes_are_the_copilot_token_routes() {
+            let config = meerkat_core::Config::default();
+            for route in CopilotProviderRoute::ALL {
+                let reference = AuthBindingRef {
+                    realm: RealmId::global(),
+                    binding: BindingId::parse(route.binding_id()).expect("valid binding"),
+                    profile: None,
+                    origin: BindingOrigin::Configured,
+                };
+                let target =
+                    meerkat_core::resolve_explicit_auth_binding_target(&config, &reference)
+                        .expect("a zero-config Copilot route");
+                assert_eq!(target.auth_binding, reference);
+                assert_eq!(target.backend.provider, route.provider());
+                assert_eq!(target.backend.backend_kind, route.backend_kind());
+                assert_eq!(target.auth_profile.auth_method, route.token_auth_method());
+                assert_eq!(target.auth_profile.source, env_source());
+                assert_eq!(target.credential_identity, account_identity());
+                ProviderRuntimeCatalog::validate_binding_with_credential_identity(
+                    &reference,
+                    account_identity(),
+                    &target.backend,
+                    &target.auth_profile,
+                    &target.binding.policy,
+                )
+                .expect("the provider catalog accepts the zero-config route");
+            }
+        }
+
         // Live probe rows P2-P5 of the operator-token design: real GitHub and
         // Copilot HTTP, ignored in every lane, run by hand before a release
         // with the token each row names. For example, P3 with the GitHub CLI

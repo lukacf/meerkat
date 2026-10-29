@@ -6329,6 +6329,34 @@ fn auth_config_realm_or_default(config_realm_override: Option<&str>) -> String {
         .to_string()
 }
 
+/// The connection set `rkat auth test` and `rkat auth status` read `id` (a
+/// binding or auth profile id) from: `realm` as configured, or, for a
+/// reserved GitHub Copilot route of `global` while `global` configures no
+/// Copilot route, the zero-config Copilot token routes a run resolves it to.
+/// A realm that does not load is reported first.
+fn cli_auth_realm_set(
+    config: &Config,
+    realm: &str,
+    id: &str,
+) -> anyhow::Result<meerkat_core::RealmConnectionSet> {
+    let zero_config = || {
+        meerkat_core::RealmId::parse(realm)
+            .ok()
+            .and_then(|realm_id| {
+                meerkat_core::RealmConnectionSet::copilot_token_default(config, &realm_id, id)
+            })
+    };
+    let Some(section) = config.realm.get(realm) else {
+        return zero_config().ok_or_else(|| anyhow::anyhow!("Unknown realm '{realm}'"));
+    };
+    let realm_set = meerkat_core::RealmConnectionSet::from_config(realm, section)
+        .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
+    if realm_set.bindings.contains_key(id) || realm_set.auth_profiles.contains_key(id) {
+        return Ok(realm_set);
+    }
+    Ok(zero_config().unwrap_or(realm_set))
+}
+
 async fn handle_auth_command(
     command: AuthCommands,
     scope: &RuntimeScope,
@@ -6452,12 +6480,7 @@ async fn handle_auth_command(
             use meerkat_providers::auth_store::TokenStoreBackend;
 
             let realm = auth_config_realm_or_default(config_realm_override);
-            let section = config
-                .realm
-                .get(&realm)
-                .ok_or_else(|| anyhow::anyhow!("Unknown realm '{realm}'"))?;
-            let realm_set = meerkat_core::RealmConnectionSet::from_config(&realm, section)
-                .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
+            let realm_set = cli_auth_realm_set(&config, &realm, &binding_id)?;
             let registry = cli_provider_registry(scope);
             let persistence = TokenStoreBackend::default_auto()
                 .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
@@ -6526,12 +6549,7 @@ async fn handle_auth_command(
         }
         AuthCommands::Status { profile_id } => {
             let realm = auth_config_realm_or_default(config_realm_override);
-            let section = config
-                .realm
-                .get(&realm)
-                .ok_or_else(|| anyhow::anyhow!("Unknown realm '{realm}'"))?;
-            let realm_set = meerkat_core::RealmConnectionSet::from_config(&realm, section)
-                .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
+            let realm_set = cli_auth_realm_set(&config, &realm, &profile_id)?;
             let Some(profile) = realm_set.auth_profiles.get(&profile_id) else {
                 anyhow::bail!("Auth profile '{realm}:{profile_id}' not found in realm '{realm}'");
             };
@@ -25994,6 +26012,53 @@ default_model = "gemini-3.8-flash"
             }
             .label(),
             "github.com installation (server-to-server)"
+        );
+    }
+
+    /// Zero-config: while no Copilot route is configured, `rkat auth test`
+    /// and `rkat auth status` read a reserved Copilot route of `global` from
+    /// the zero-config token routes, which are the `--from-env` routes but
+    /// for the Gemini route's default model. Other ids keep their refusal,
+    /// and configured routes win.
+    #[cfg(feature = "copilot")]
+    #[test]
+    fn test_cli_zero_config_copilot_routes_are_the_from_env_routes() {
+        let zero = Config::default();
+        let mut written = Config::default();
+        ensure_cli_copilot_token_config(&mut written, CopilotTokenSource::Environment).unwrap();
+        let written =
+            meerkat_core::RealmConnectionSet::from_config("global", &written.realm["global"])
+                .unwrap();
+        for route in meerkat_copilot::CopilotProviderRoute::ALL {
+            let id = route.binding_id();
+            let zero_set = cli_auth_realm_set(&zero, "global", id).expect("zero-config routes");
+            assert_eq!(zero_set.backends.get(id), written.backends.get(id), "{id}");
+            assert_eq!(
+                zero_set.auth_profiles.get(id),
+                written.auth_profiles.get(id),
+                "{id}"
+            );
+            let binding = zero_set.bindings.get(id).expect("a zero-config binding");
+            assert_eq!(
+                binding.credential_account, written.bindings[id].credential_account,
+                "{id}"
+            );
+            assert_eq!(binding.default_model, None, "{id}");
+        }
+
+        let refused = cli_auth_realm_set(&zero, "global", "default_openai")
+            .expect_err("no global realm is configured");
+        assert!(
+            refused.to_string().contains("Unknown realm 'global'"),
+            "{refused}"
+        );
+
+        let mut device = Config::default();
+        ensure_cli_interactive_oauth_config(LoginProvider::Copilot, &mut device).unwrap();
+        let device = cli_auth_realm_set(&device, "global", "copilot_openai").unwrap();
+        assert_eq!(
+            device.auth_profiles["copilot_openai"].auth_method,
+            "github_copilot_oauth"
         );
     }
 

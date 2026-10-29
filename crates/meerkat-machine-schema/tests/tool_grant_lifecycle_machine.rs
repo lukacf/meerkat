@@ -545,6 +545,38 @@ fn terminal_grants_refuse_use_after_a_clock_rollback() {
 }
 
 // ===========================================================================
+// TLC model
+// ===========================================================================
+
+/// The machine's CI run is held to every arm: its explicit TLC model requires
+/// each to generate a state, the `IssueRefusedIssued*` arms of an ended grant
+/// included, within a step bound that reaches them (issue, end, issue again).
+#[test]
+fn the_explicit_tlc_model_requires_every_arm_in_ci() {
+    let schema = meerkat_machine_schema::catalog::dsl::dsl_tool_grant_lifecycle_machine();
+    let model = schema.tlc_model.as_ref().expect("an explicit TLC model");
+    assert!(model.require_ci_transition_coverage);
+    assert!(
+        model.ci_limits.step_limit >= 3,
+        "issue, end and issue again fit the CI step bound"
+    );
+    schema.validate().expect("the explicit model validates");
+    for arm in [
+        "IssueRefusedIssuedActive",
+        "IssueRefusedIssuedExpired",
+        "IssueRefusedIssuedRevoked",
+    ] {
+        assert!(
+            schema
+                .transitions
+                .iter()
+                .any(|transition| transition.name.as_str() == arm),
+            "{arm} is an arm the CI run must reach"
+        );
+    }
+}
+
+// ===========================================================================
 // Recovery
 // ===========================================================================
 

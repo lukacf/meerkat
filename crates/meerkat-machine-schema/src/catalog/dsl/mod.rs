@@ -5303,6 +5303,31 @@ pub fn tool_grant_lifecycle_schema_metadata() -> MachineSchemaMetadata {
         ],
         vec![],
     )
+    .with_tlc_model(tool_grant_lifecycle_tlc_model())
+}
+
+/// The scoped tool grant machine's explicit TLC model. Every input carries
+/// unsigned times, which the generated model explores over the three values
+/// `0..2`: a grant issued at 0 or 1 with a deadline of 1 or 2 is observed
+/// before, at and after its deadline. Every arm is reached within four
+/// steps (issue, end, issue again), so the CI run requires each of them,
+/// the `IssueRefusedIssued*` arms of an ended grant included, to generate a
+/// state.
+fn tool_grant_lifecycle_tlc_model() -> crate::MachineTlcModel {
+    let no_samples = || crate::MachineTlcProfile {
+        named_values: std::collections::BTreeMap::new(),
+    };
+    crate::MachineTlcModel {
+        ci: no_samples(),
+        deep: no_samples(),
+        ci_limits: crate::MachineTlcStateLimits {
+            step_limit: 4,
+            seq_limit: 1,
+            set_limit: 1,
+            map_limit: 1,
+        },
+        require_ci_transition_coverage: true,
+    }
 }
 
 pub fn dsl_work_execution_lifecycle_machine() -> MachineSchema {

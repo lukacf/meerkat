@@ -211,6 +211,32 @@ if run_part audits-b; then
   TLC_WORKERS="${tlc_workers}" "${live_steer_audit}" "${LIVE_STEER_AUDIT_MAX_STEPS:-16}"
 fi
 
+# The controller hold (a kept governed input that waits, held by the machine,
+# for its host to supply its controller client again) is model-checked by a
+# hand-written audit over the same generated model: one session recovers a
+# queued input and an input staged into the run its registration marked
+# resumable, both governed, and explores in Idle, Attached and Running every
+# hold and release, the start of the marked run and of a new one, the resume,
+# settlement and release of the marked run, staging, rollback, apply and the
+# abandon of either input as a refused resume, under every generated
+# invariant (input_controller_holds_are_kept_unstaged_governed_inputs among
+# them) plus three action properties (a held input is never staged or applied
+# and keeps its attempts; the marked run never resumes while its input is
+# held; a hold or release changes only the holds, by exactly its input). It
+# requires seven witnesses reached and refuses seven seeded defects
+# (--mutants): a stage, an apply and a resume that ignore the hold, a
+# settlement and an abandon that keep it, a hold that ignores the input's
+# phase and a release that clears every hold. 13 steps reach every witness.
+input_controller_hold_audit="${workspace_root}/specs/machines/meerkat_machine/input_controller_hold_audit.sh"
+if [[ ! -x "${input_controller_hold_audit}" ]]; then
+  echo "error: input controller hold audit runner is missing from workspace runfiles: ${input_controller_hold_audit}" >&2
+  exit 1
+fi
+if run_part audits-b; then
+  echo "running bounded input controller hold TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${input_controller_hold_audit}" "${INPUT_CONTROLLER_HOLD_AUDIT_MAX_STEPS:-13}" --mutants
+fi
+
 # The run-start hold (#1500: a mob Stop holds member run starts so an input
 # admitted before the stop runs only after Resume) is model-checked by a
 # hand-written audit over the same generated model: one session, one queued

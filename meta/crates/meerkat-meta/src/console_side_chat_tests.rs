@@ -45,14 +45,17 @@ pub(super) fn persistent_console_spec(
     mob_header: &str,
     tail: &str,
 ) -> Result<(tempfile::TempDir, MobBootstrapSpec), Box<dyn std::error::Error + Send + Sync>> {
+    use crate::storage_layout::MetaStorageLayout;
+
     let temp_dir = tempfile::tempdir()?;
     let state = temp_dir.path().join("state");
     std::fs::create_dir_all(&state)?;
+    let layout = MetaStorageLayout::with_injected_roots(state.clone(), None);
     let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(
-        meerkat_store::SqliteSessionStore::open(state.join("sessions.db"))?,
+        meerkat_store::SqliteSessionStore::open(layout.session_db()?.path)?,
     );
     let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
-        meerkat_runtime::store::SqliteRuntimeStore::new(state.join("runtime.sqlite"))?,
+        meerkat_runtime::store::SqliteRuntimeStore::new(layout.runtime_db())?,
     );
     let blob_store: Arc<dyn meerkat_core::BlobStore> =
         Arc::new(meerkat_store::MemoryBlobStore::new());
@@ -118,9 +121,11 @@ async fn persistent_gateway_runtime_in(
     mob_header: &str,
     tail: &str,
 ) -> Result<MobRuntime, Box<dyn std::error::Error + Send + Sync>> {
-    let (storage, provenance) = crate::mob_composition_manifest::persistent_mob_storage(
-        state.join(crate::storage_layout::EVENT_LOG_DB_FILE_NAME),
-    )?;
+    use crate::storage_layout::MetaStorageLayout;
+
+    let layout = MetaStorageLayout::with_injected_roots(state.to_path_buf(), None);
+    let (storage, provenance) =
+        crate::mob_composition_manifest::persistent_mob_storage(layout.event_log_db())?;
     let definition = MobDefinition::from_toml(&format!(
         "[mob]\nid = \"{mob_id}\"\n{mob_header}\n{WORKER_PROFILES}\n{tail}"
     ))?;

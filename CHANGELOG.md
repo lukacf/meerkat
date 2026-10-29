@@ -258,12 +258,17 @@ them.
   approval it carried was then withdrawn as `NoticeInputEnded`. The notice
   now waits in the queue lane for the session's next turn, and a requeue
   stop no longer ends it. Whether the run it resumes after the next start
-  can take the approval over follows the resume rules, unchanged (on a
-  stock governed realm, see the 0.9.7 known limitation below). Every other
-  notice (fork_off and council outcomes, and any other producer's) keeps
-  steering. A consent notice an earlier version admitted with steer
-  handling is still recognized as its delivery's admission, so an upgrade
-  that finds its admission reserved neither conflicts nor retries it.
+  can take the approval over follows the rules for a kept resume of retained
+  work in the `meerkat-runtime` entry below: the next registration asks the
+  installed host for the notice's controller client again, a definite
+  refusal ends the notice as a refused resume and withdraws the approval,
+  and a host that cannot say yet holds it for a bounded time. On a stock
+  governed realm a kept notice still cannot run after a registration change
+  and now ends refused at once (see also the 0.9.7 known limitation below).
+  Every other notice (fork_off and council outcomes, and any other
+  producer's) keeps steering. A consent notice an earlier version admitted
+  with steer handling is still recognized as its delivery's admission, so an
+  upgrade that finds its admission reserved neither conflicts nor retries it.
 
 - `meerkat-session`: the compaction summary request no longer presents
   omitted media in a form a summarizer reads as the agent having been unable

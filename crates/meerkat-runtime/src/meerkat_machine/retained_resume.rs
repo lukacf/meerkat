@@ -272,6 +272,23 @@ impl DriverEntry {
             .resumed_run_waits_for_destination(run_id)
     }
 
+    /// Whether a kept retained-resume row without its controller client is
+    /// not held by the machine yet.
+    pub(crate) fn has_unheld_kept_resume_without_client(&self) -> bool {
+        self.shell_driver().has_unheld_kept_resume_without_client()
+    }
+
+    /// Hold every kept retained-resume row without its controller client
+    /// that the machine does not hold yet, without asking its host (see
+    /// [`crate::driver::ephemeral::EphemeralRuntimeDriver::hold_kept_resumes_without_client`]).
+    pub(crate) fn hold_kept_resumes_without_client(
+        &mut self,
+        now: meerkat_core::time_compat::Instant,
+    ) -> Result<bool, RuntimeDriverError> {
+        self.shell_driver_mut()
+            .hold_kept_resumes_without_client(now)
+    }
+
     /// Whether `input_id` is a kept resume of retained work that holds no
     /// controller client (yet).
     pub(crate) fn kept_retained_resume_without_client(&self, input_id: &InputId) -> bool {

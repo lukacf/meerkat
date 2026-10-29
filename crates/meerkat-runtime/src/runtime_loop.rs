@@ -7830,13 +7830,54 @@ async fn process_queue(
         // resumable that it is bound to); a row the host cannot answer for
         // yet is held, with its attempts, and later work goes first. A
         // registration that drains for its unregister asks nothing: what it
-        // keeps, the next registration asks about again.
-        let ask_due = {
+        // keeps, the next registration asks about again. It holds each such
+        // row the machine does not hold yet instead, without asking, so no
+        // batch selects one.
+        let (draining, ask_due) = {
             let d = driver.lock().await;
-            !d.registration_draining()
-                && d.kept_resume_controller_ask_due(meerkat_core::time_compat::Instant::now())
+            if d.registration_draining() {
+                (true, d.has_unheld_kept_resume_without_client())
+            } else {
+                (
+                    false,
+                    d.kept_resume_controller_ask_due(meerkat_core::time_compat::Instant::now()),
+                )
+            }
         };
-        if ask_due {
+        if draining && ask_due {
+            let queue_authority_guard = match authority_binding
+                .lock_current_queue_driver_authority(driver, "kept resume controller hold")
+                .await
+            {
+                Ok(guard) => guard,
+                Err(_) => return true,
+            };
+            let held = driver
+                .lock()
+                .await
+                .hold_kept_resumes_without_client(meerkat_core::time_compat::Instant::now());
+            drop(queue_authority_guard);
+            match held {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    let reason = format!(
+                        "a draining registration could not hold its kept retained-work resumes: \
+                         {error}"
+                    );
+                    tracing::error!(%error, "failed closed holding kept resumes while draining");
+                    return stop_runtime_loop_executor_from_dsl_effect(
+                        driver,
+                        completions,
+                        executor,
+                        reason,
+                        handoff,
+                        turn_finalization_guard,
+                    )
+                    .await;
+                }
+            }
+        } else if ask_due {
             let mut refused_terminals = authority_binding.runless_terminal_announcement();
             let queue_authority_guard = match authority_binding
                 .lock_current_queue_driver_authority(driver, "kept resume controller re-ask")
@@ -8297,16 +8338,28 @@ async fn process_queue(
                     input_ids: superseded,
                 };
             }
-            // Only a registration draining for its unregister, whose loop asks
-            // nothing, can select a kept resume still without its client. It
-            // is never staged without one: it stays queued, with its
-            // attempts, for the next start, which asks its host again.
-            if batch
+            // No batch can select a kept resume of retained work still
+            // without its client, by construction: this lap's first step
+            // asked every such row the machine did not hold (a client pins
+            // it, a definite answer ends it, any other answer holds it), or,
+            // while the registration drains for its unregister, held each
+            // through the machine without asking; a released resumable run
+            // holds its requeued kept resumes again; and the machine's batch
+            // filter never selects a held input. One here means the shell
+            // and the machine disagree: fail closed instead of staging it
+            // without its client.
+            if let Some(unpinned) = batch
                 .input_ids()
                 .iter()
-                .any(|input_id| d.kept_retained_resume_without_client(input_id))
+                .find(|input_id| d.kept_retained_resume_without_client(input_id))
             {
-                return false;
+                break 'dequeue RuntimeLoopDequeueOutcome::AuthorityMismatch {
+                    input_ids: batch.input_ids().to_vec(),
+                    reason: format!(
+                        "the selected batch names kept retained-work resume {unpinned} without its \
+                         controller client"
+                    ),
+                };
             }
 
             let run_id = prebound_run_id.unwrap_or_else(RunId::new);

@@ -888,6 +888,34 @@ impl EphemeralRuntimeDriver {
         Ok(())
     }
 
+    /// Whether a kept retained-resume row without its controller client
+    /// waits unstaged and is not held by the machine yet.
+    pub(crate) fn has_unheld_kept_resume_without_client(&self) -> bool {
+        self.kept_retained_resumes_without_client()
+            .iter()
+            .any(|(_, held)| !held)
+    }
+
+    /// Hold, through the machine and without asking its host, every kept
+    /// retained-resume row without its controller client that the machine
+    /// does not hold yet, for a registration that drains for its unregister:
+    /// it asks nothing (what it keeps, the next registration asks about
+    /// again), and a held row is never selected or staged. Each budget starts
+    /// at `now`. Returns whether any row was held.
+    pub(crate) fn hold_kept_resumes_without_client(
+        &mut self,
+        now: meerkat_core::time_compat::Instant,
+    ) -> Result<bool, RuntimeDriverError> {
+        let mut held_any = false;
+        for (input_id, held) in self.kept_retained_resumes_without_client() {
+            if !held {
+                self.hold_input_controller(&input_id, now)?;
+                held_any = true;
+            }
+        }
+        Ok(held_any)
+    }
+
     /// Release `input_id`'s controller hold (`ReleaseInputController`): its
     /// host supplied the client, which the caller pinned. Returns whether
     /// the machine asked the runtime to plan again (`InputControllerReleased`).
@@ -6867,6 +6895,22 @@ impl EphemeralRuntimeDriver {
                 state.updated_at = now;
             }
             requeued.push(input_id);
+        }
+        // A kept resume of retained work still without its controller client
+        // returns to its lane held again (the release dropped its hold with
+        // the run's): the runtime loop asks its host at its next re-ask, and
+        // no batch selects it before.
+        let held_at = meerkat_core::time_compat::Instant::now();
+        for input_id in &requeued {
+            if self.kept_retained_resume_waits_unstaged(input_id)
+                && let Err(error) = self.hold_input_controller(input_id, held_at)
+            {
+                tracing::warn!(
+                    %input_id,
+                    %error,
+                    "the machine refused to hold a released kept retained-work resume for its controller"
+                );
+            }
         }
         Ok(requeued)
     }

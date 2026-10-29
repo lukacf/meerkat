@@ -6093,6 +6093,19 @@ pub(super) async fn handle_adopt_member_identity_declaration(
         Ok(request) => request,
         Err(error) => return declaration_invalid_params(response_id, error.to_string()),
     };
+    // A console side chat is never adopted as an identity: an adopted
+    // identity is rebuilt from its declaration, which no fork made, so its
+    // next incarnation would be no side chat of its agent.
+    if let Some(refusal) =
+        crate::side_chat::side_chat_adoption_refusal(handle, &request.agent_identity).await
+    {
+        return JsonRpcResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: response_id,
+            result: None,
+            error: Some(refusal),
+        };
+    }
     // Read from the machine state Core published, without a command. A member
     // Core does not hold is left to the adoption's own typed answer.
     if handle.member_unmaterialized(&request.agent_identity) {

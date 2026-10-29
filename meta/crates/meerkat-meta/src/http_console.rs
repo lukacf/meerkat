@@ -14623,15 +14623,23 @@ async fn reset_all_live_console_agents(
             continue;
         }
         if baseline_identities.contains(&identity) {
+            let member_id = crate::member_comms_id::mob_member_id(runtime_member_id);
+            // A side chat is never reset, under a baseline name either: a
+            // successor would be no fork of its agent. It is reported as a
+            // member reset_all could not reset, and the others still reset.
+            if let Some(refusal) =
+                crate::side_chat::side_chat_restart_refusal(&handle, &member_id, "reset").await
+            {
+                let mut failure = json!({ "identity": identity, "error": refusal.message });
+                if let Some(kind) = refusal.data.as_ref().and_then(|data| data.get("kind")) {
+                    failure["kind"] = kind.clone();
+                }
+                failures.push(failure);
+                continue;
+            }
             // A baseline member on a non-identity-first runtime: reset means a
             // fresh session under the same configuration.
-            match Box::pin(respawn_console_member(
-                &handle,
-                None,
-                &crate::member_comms_id::mob_member_id(runtime_member_id),
-            ))
-            .await
-            {
+            match Box::pin(respawn_console_member(&handle, None, &member_id)).await {
                 Ok(topology_restore_warning) => {
                     if let Some(store) = console_events {
                         store

@@ -2138,6 +2138,28 @@ struct AutoWireParentMobToolDispatcher {
     realm_profiles: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
 }
 
+/// Meta's agent mob tool wrapper around `inner` (standing in for meerkat's
+/// mob tools), with `overrides` resolving the mob handles: rows outside this
+/// module drive an agent's mob tool call through Meta's interception with
+/// it.
+#[cfg(test)]
+pub(crate) fn agent_mob_tool_wrapper_for_test(
+    inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
+    overrides: ImplicitDelegateRetirementOverrides,
+) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    Arc::new(AutoWireParentMobToolDispatcher {
+        inner,
+        implicit_delegate_retirement_overrides: overrides,
+        console_spawn_sink: new_console_spawn_sink_slot(),
+        identity_runtime: Arc::new(std::sync::RwLock::new(None)),
+        protected_mob_id: String::new(),
+        spawner_comms_name: None,
+        member_auth_binding: None,
+        member_auth_binding_recorded: None,
+        realm_profiles: None,
+    })
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
@@ -2532,6 +2554,11 @@ impl AutoWireParentMobToolDispatcher {
     /// `mob_respawn` keeps the member (a forker respawning its own child), so
     /// the child keeps its idle-retire opt-in: the respawn goes through the
     /// same carry as every other Meta respawn surface.
+    ///
+    /// A console side chat is never respawned, by an agent either: the tool
+    /// answers a typed policy denial with kind `side_chat_restart_refused`
+    /// ([`crate::side_chat::side_chat_restart_refusal`]) and leaves the side
+    /// chat as it is, since the successor would be no fork of its source.
     async fn dispatch_mob_respawn(
         &self,
         call: meerkat_core::types::ToolCallView<'_>,
@@ -2556,6 +2583,11 @@ impl AutoWireParentMobToolDispatcher {
         match (target, handle) {
             (Some((_, member_id)), Some(handle)) => {
                 let member = meerkat_mob::AgentIdentity::from(member_id.as_str());
+                if let Some(refusal) =
+                    crate::side_chat::side_chat_restart_refusal(&handle, &member, "respawn").await
+                {
+                    return Err(crate::side_chat::side_chat_refusal_tool_error(refusal));
+                }
                 respawn_carrying_idle_retire_opt_in(
                     Some(&self.implicit_delegate_retirement_overrides),
                     &handle,

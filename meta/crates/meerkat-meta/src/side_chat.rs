@@ -21,10 +21,11 @@
 //!   sets an explicit keep-until-retired idle override, so a side chat never
 //!   idle-retires. The runtime may still unload it while it is idle; that
 //!   keeps the member;
-//! - is never respawned or reset ([`side_chat_restart_refusal`]): Meerkat
-//!   records a fork source only for the fork itself, so a successor would
-//!   be no side chat of its source. The human closes it and forks the source
-//!   again;
+//! - is never respawned or reset ([`side_chat_restart_refusal`]), by an
+//!   agent's `mob_respawn` tool either, nor adopted as an identity
+//!   ([`side_chat_adoption_refusal`]): Meerkat records a fork source only for
+//!   the fork itself, so a successor would be no side chat of its source. The
+//!   human closes it and forks the source again;
 //! - is never wired. It has no peer edge, so no other agent can address it
 //!   and none lists it as a peer. The fork seats it exempt from the mob
 //!   definition's wiring rules (`meerkat_mob::DefinitionWiring::Exempt`):
@@ -804,6 +805,31 @@ pub const SIDE_CHAT_FORK_REFUSED_CODE: i64 = -32055;
 /// ([`side_chat_restart_refusal`]): `data.kind` `side_chat_restart_refused`.
 pub const SIDE_CHAT_RESTART_REFUSED_CODE: i64 = -32602;
 
+/// The verified source of `member_id`, a member of `handle`'s mob, when it
+/// is a side chat ([`verified_side_chat_source`]): `Ok(None)` for any other
+/// member and for one the roster does not hold. A roster entry that cannot be
+/// read answers `-32603` naming `operation`: whether the member is a side
+/// chat is not known, so the caller refuses.
+async fn side_chat_source_of(
+    handle: &meerkat_mob::MobHandle,
+    member_id: &meerkat_mob::AgentIdentity,
+    operation: &str,
+) -> Result<Option<String>, crate::rpc::JsonRpcError> {
+    match handle.get_member(member_id).await {
+        Ok(Some(entry)) => Ok(verified_side_chat_source(
+            &entry.labels,
+            entry.spawned_by.as_ref(),
+            entry.fork_source.as_ref(),
+        )),
+        Ok(None) => Ok(None),
+        Err(error) => Err(crate::rpc::JsonRpcError {
+            code: -32603,
+            message: format!("{operation} failed: the member could not be read: {error}"),
+            data: None,
+        }),
+    }
+}
+
 /// The refusal of `operation` (`respawn` or `reset`) on `member_id`, a
 /// member of `handle`'s mob, when it is a verified side chat
 /// ([`verified_side_chat_source`]). Either would seat a successor no fork
@@ -819,22 +845,10 @@ pub(crate) async fn side_chat_restart_refusal(
     member_id: &meerkat_mob::AgentIdentity,
     operation: &str,
 ) -> Option<crate::rpc::JsonRpcError> {
-    let entry = match handle.get_member(member_id).await {
-        Ok(Some(entry)) => entry,
-        Ok(None) => return None,
-        Err(error) => {
-            return Some(crate::rpc::JsonRpcError {
-                code: -32603,
-                message: format!("{operation} failed: the member could not be read: {error}"),
-                data: None,
-            });
-        }
+    let source = match side_chat_source_of(handle, member_id, operation).await {
+        Ok(source) => source?,
+        Err(refusal) => return Some(refusal),
     };
-    let source = verified_side_chat_source(
-        &entry.labels,
-        entry.spawned_by.as_ref(),
-        entry.fork_source.as_ref(),
-    )?;
     let alias = crate::member_comms_id::runtime_alias_str(member_id.as_str()).into_owned();
     let done = if operation == "reset" {
         "reset"
@@ -854,6 +868,62 @@ pub(crate) async fn side_chat_restart_refusal(
             "source_member_id": source,
         })),
     })
+}
+
+/// JSON-RPC code of a refused adoption of a side chat as an identity
+/// ([`side_chat_adoption_refusal`]): `data.kind`
+/// `side_chat_adoption_refused`.
+pub const SIDE_CHAT_ADOPTION_REFUSED_CODE: i64 = -32602;
+
+/// The refusal of adopting `member_id`, a member of `handle`'s mob, as an
+/// identity (`mob/adopt_member_identity_declaration`) when it is a verified
+/// side chat. An adopted identity is rebuilt from its declaration, which no
+/// fork made: its next incarnation would be no side chat of its agent, and
+/// the identity verbs would respawn and reset it. A member whose roster
+/// entry cannot be read is refused too. `None` for any other member and for
+/// one the roster does not hold, which the adoption answers itself.
+pub(crate) async fn side_chat_adoption_refusal(
+    handle: &meerkat_mob::MobHandle,
+    member_id: &meerkat_mob::AgentIdentity,
+) -> Option<crate::rpc::JsonRpcError> {
+    let source = match side_chat_source_of(handle, member_id, "adoption").await {
+        Ok(source) => source?,
+        Err(refusal) => return Some(refusal),
+    };
+    let alias = crate::member_comms_id::runtime_alias_str(member_id.as_str()).into_owned();
+    Some(crate::rpc::JsonRpcError {
+        code: SIDE_CHAT_ADOPTION_REFUSED_CODE,
+        message: format!(
+            "{alias} is a side chat of {source} and cannot be adopted as an identity: an \
+             identity is rebuilt from its declaration, which would be no fork of {source}"
+        ),
+        data: Some(serde_json::json!({
+            "kind": "side_chat_adoption_refused",
+            "agent_identity": alias,
+            "source_member_id": source,
+        })),
+    })
+}
+
+/// The typed tool error an agent's mob tool answers a side chat refusal
+/// with: a policy denial carrying the refusal's kind
+/// (`side_chat_restart_refused`), as an agent meets the tools' other typed
+/// refusals. A refusal without a kind (the member could not be read) is a
+/// plain tool failure.
+pub(crate) fn side_chat_refusal_tool_error(
+    refusal: crate::rpc::JsonRpcError,
+) -> meerkat_core::ToolError {
+    match refusal
+        .data
+        .as_ref()
+        .and_then(|data| data.get("kind"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(kind) => meerkat_core::ToolError::policy_denied(
+            meerkat_core::ToolConsequenceDenial::new(kind, refusal.message),
+        ),
+        None => meerkat_core::ToolError::other(refusal.message),
+    }
 }
 
 /// Whether `runtime` can hold a durable fork, and so offers side chats in its

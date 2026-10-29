@@ -1721,6 +1721,257 @@ async fn a_side_chat_is_never_respawned_or_reset() -> TestResult {
     Ok(())
 }
 
+/// An agent's `mob_respawn` tool never respawns a side chat either: Meta's
+/// interception of the agent's mob tools refuses it as a typed policy denial
+/// of kind `side_chat_restart_refused` before meerkat's tool runs, and the
+/// side chat keeps its session and its fork. The same tool still reaches
+/// meerkat's `mob_respawn` for the side chat's agent.
+#[tokio::test]
+async fn an_agent_mob_respawn_tool_never_respawns_a_side_chat() -> TestResult {
+    use meerkat_core::AgentToolDispatcher as _;
+
+    /// Stands in for meerkat's mob tools: records the member each call
+    /// names and answers it done.
+    #[derive(Default)]
+    struct RecordingTools(std::sync::Mutex<Vec<String>>);
+    impl RecordingTools {
+        fn calls(&self) -> Vec<String> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+    #[async_trait::async_trait]
+    impl meerkat_core::AgentToolDispatcher for RecordingTools {
+        fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
+            Arc::from(Vec::new())
+        }
+        async fn dispatch(
+            &self,
+            call: meerkat_core::types::ToolCallView<'_>,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+            let args: Value = serde_json::from_str(call.args.get()).map_err(|error| {
+                meerkat_core::ToolError::invalid_arguments(call.name, error.to_string())
+            })?;
+            let member = args["agent_identity"].as_str().unwrap_or_default();
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(member.to_string());
+            Ok(meerkat_core::ToolDispatchOutcome::sync_result(
+                meerkat_core::types::ToolResult::new(call.id.to_string(), "{}".to_string(), false),
+            ))
+        }
+    }
+
+    const MOB: &str = "console-side-chat-agent-respawn";
+    let (_temp_dir, runtime) = persistent_gateway_runtime(MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let forked = fork_when_idle(&runtime, "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+    let session = bridge_session(&runtime, "alpha-side").await;
+    assert!(session.is_some(), "the side chat has a session");
+
+    let tools = Arc::new(RecordingTools::default());
+    let overrides = runtime
+        .implicit_delegate_retirement_overrides()
+        .ok_or("the runtime installs the agent mob tools")?;
+    let dispatcher =
+        crate::mob_handle_runtime::agent_mob_tool_wrapper_for_test(tools.clone(), overrides);
+    let respawn_args = |member: &str| {
+        serde_json::value::RawValue::from_string(
+            json!({ "mob_id": MOB, "agent_identity": member }).to_string(),
+        )
+    };
+
+    let side_chat_args = respawn_args("alpha-side")?;
+    let refused = dispatcher
+        .dispatch_with_context(
+            meerkat_core::types::ToolCallView {
+                id: "respawn-side-chat",
+                name: "mob_respawn",
+                args: &side_chat_args,
+            },
+            &meerkat_core::ToolDispatchContext::default(),
+        )
+        .await;
+    match refused {
+        Err(meerkat_core::ToolError::PolicyDenied { denial }) => {
+            assert_eq!(denial.code, "side_chat_restart_refused");
+            assert!(
+                denial.message.contains("close it and fork alpha again"),
+                "{}",
+                denial.message
+            );
+        }
+        other => panic!("the side chat's respawn is refused as a policy denial: {other:?}"),
+    }
+    assert!(
+        tools.calls().is_empty(),
+        "meerkat's mob_respawn never ran for the side chat"
+    );
+    assert_eq!(
+        bridge_session(&runtime, "alpha-side").await,
+        session,
+        "the side chat keeps its session"
+    );
+    assert!(
+        crate::side_chat::verified_side_chats(&runtime.handle())
+            .await
+            .contains_key("alpha-side"),
+        "the side chat is still a fork of its agent"
+    );
+
+    let agent_args = respawn_args("alpha")?;
+    let outcome = dispatcher
+        .dispatch_with_context(
+            meerkat_core::types::ToolCallView {
+                id: "respawn-agent",
+                name: "mob_respawn",
+                args: &agent_args,
+            },
+            &meerkat_core::ToolDispatchContext::default(),
+        )
+        .await?;
+    assert!(!outcome.result.is_error, "the agent is respawned");
+    assert_eq!(
+        tools.calls(),
+        vec!["alpha".to_string()],
+        "the agent's respawn reaches meerkat's mob_respawn"
+    );
+    Ok(())
+}
+
+/// `meta/reset_all` never resets a side chat, under a name the runtime
+/// declares as a baseline member either: it reports the side chat as a
+/// member it could not reset (`side_chat_restart_refused`) and leaves it as
+/// it was, while it still acts on every other member.
+#[tokio::test]
+async fn reset_all_reports_a_side_chat_as_a_member_it_could_not_reset() -> TestResult {
+    let (_temp_dir, runtime) =
+        persistent_console_runtime("console-side-chat-reset-all", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let forked = fork_when_idle(&runtime, "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+    let session = bridge_session(&runtime, "alpha-side").await;
+    assert!(session.is_some(), "the side chat has a session");
+    let baseline = SpawnMemberSpec::new("worker", AgentIdentity::from("alpha-side"));
+    runtime.set_baseline_member_specs(vec![baseline]).await;
+
+    let answer = call(&runtime, "meta/reset_all", json!({})).await;
+    assert_eq!(answer["error"]["code"], json!(-32000), "{answer:#?}");
+    let body = &answer["error"]["data"];
+    let failed = body["failed"].as_array().cloned().unwrap_or_default();
+    assert_eq!(failed.len(), 1, "only the side chat fails: {failed:#?}");
+    assert_eq!(failed[0]["identity"], json!("alpha-side"));
+    assert_eq!(failed[0]["kind"], json!("side_chat_restart_refused"));
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("close it and fork alpha again")),
+        "{failed:#?}"
+    );
+    assert_eq!(
+        body["retired_delegates"],
+        json!([{ "identity": "alpha" }]),
+        "the other member is still acted on: {body:#?}"
+    );
+    assert_eq!(
+        bridge_session(&runtime, "alpha-side").await,
+        session,
+        "the side chat keeps its session"
+    );
+    assert!(
+        crate::side_chat::verified_side_chats(&runtime.handle())
+            .await
+            .contains_key("alpha-side"),
+        "the side chat is still a fork of its agent"
+    );
+    Ok(())
+}
+
+/// A side chat is never adopted as an identity
+/// (`mob/adopt_member_identity_declaration`): an adopted identity is rebuilt
+/// from its declaration, which no fork made. The adoption is refused typed
+/// (`side_chat_adoption_refused`) and Core records no identity intent for
+/// the side chat; its agent is no side chat and is not refused.
+#[tokio::test]
+async fn a_side_chat_is_never_adopted_as_an_identity() -> TestResult {
+    const MOB: &str = "console-side-chat-adopt";
+    let (_temp_dir, runtime) = persistent_console_runtime(MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let forked = fork_when_idle(&runtime, "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+    let session = bridge_session(&runtime, "alpha-side")
+        .await
+        .ok_or("the side chat has a session")?;
+
+    let refused = call(
+        &runtime,
+        crate::rpc::mob_methods::ADOPT_MEMBER_IDENTITY_DECLARATION,
+        json!({
+            "mob_id": MOB,
+            "agent_identity": "alpha-side",
+            "request_id": "adopt-side-chat-1",
+            "precondition": "expected_absent",
+            "declaration_scope": "side-chat-adoption",
+            "declaration_revision": 1,
+            "session": {
+                "session_id": session,
+                "lineage_id": format!("session:{session}"),
+                "lineage_generation": 0,
+                "authority_policy": "require_existing"
+            },
+            "member": {
+                "profile_name": "worker",
+                "runtime_mode": "turn_driven",
+                "execution": { "execution": "controlling_session" }
+            },
+            "owned_wiring": [],
+            "convergence": { "kind": "drain", "max_wait_ms": 5000 }
+        }),
+    )
+    .await;
+    assert_eq!(
+        refused["error"]["code"],
+        json!(crate::side_chat::SIDE_CHAT_ADOPTION_REFUSED_CODE),
+        "{refused:#?}"
+    );
+    assert_eq!(
+        refused["error"]["data"],
+        json!({
+            "kind": "side_chat_adoption_refused",
+            "agent_identity": "alpha-side",
+            "source_member_id": "alpha",
+        })
+    );
+    assert!(
+        matches!(
+            runtime
+                .handle()
+                .identity_intent(&AgentIdentity::from("alpha-side"))
+                .await,
+            Ok(meerkat_mob::identity::IdentityStoredObservation::Missing)
+        ),
+        "Core records no identity intent for the side chat"
+    );
+    assert!(
+        crate::side_chat::verified_side_chats(&runtime.handle())
+            .await
+            .contains_key("alpha-side"),
+        "the side chat is still a fork of its agent"
+    );
+    let agent = AgentIdentity::from("alpha");
+    assert!(
+        crate::side_chat::side_chat_adoption_refusal(&runtime.handle(), &agent)
+            .await
+            .is_none(),
+        "its agent is no side chat"
+    );
+    Ok(())
+}
+
 /// The definition's wiring never reaches a member exempt from it, a side
 /// chat or not: the definition-wiring reconcile and the topology's declared
 /// edges leave every exempt member out, while a bound worker keeps the edge

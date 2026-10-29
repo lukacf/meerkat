@@ -1144,10 +1144,17 @@ impl DriverEntry {
         }
     }
 
-    fn shell_driver_mut(&mut self) -> &mut EphemeralRuntimeDriver {
+    pub(crate) fn shell_driver_mut(&mut self) -> &mut EphemeralRuntimeDriver {
         match self {
             DriverEntry::Ephemeral(driver) => driver,
             DriverEntry::Persistent(driver) => driver.inner_mut(),
+        }
+    }
+
+    pub(crate) fn shell_driver(&self) -> &EphemeralRuntimeDriver {
+        match self {
+            DriverEntry::Ephemeral(driver) => driver,
+            DriverEntry::Persistent(driver) => driver.inner_ref(),
         }
     }
 
@@ -9455,6 +9462,10 @@ pub(crate) async fn machine_recover_persistent_inputs_from_observed(
     resumable_run: Option<&crate::recovery::ResumableRunObservation>,
 ) -> Result<RecoveryReport, RuntimeDriverError> {
     let mut recovered_payloads = Vec::new();
+    // Kept retained-resume rows whose host could not say yet whether it
+    // supplies their controller client: held once the recovered image is
+    // final.
+    let mut controller_holds = Vec::new();
 
     // Mark the run the stored cursor names on the live authority before any
     // input is normalized, so its inputs stay bound instead of requeueing.
@@ -9532,6 +9543,38 @@ pub(crate) async fn machine_recover_persistent_inputs_from_observed(
                 admission_sequence_recovery,
             )?;
 
+            // A kept retained-resume row (one a graceful requeue stop kept,
+            // or a restart found) lost its controller client in the store:
+            // one never survives persistence. Ask the installed host for it
+            // once now. A row whose host cannot say yet is held by the
+            // machine once recovery is done (it keeps its attempts, and its
+            // budget starts). A row the host refuses definitely keeps no
+            // client: the runtime loop asks again at its first pass and ends
+            // it as a refused resume
+            // (`EphemeralRuntimeDriver::ask_kept_resume_controllers`).
+            match driver.reacquire_retained_resume_client(&bundle.state) {
+                Some(crate::retained_work::RetainedClientReacquisition::Pinned(client)) => {
+                    bundle.state.controller_client = Some(client);
+                }
+                Some(crate::retained_work::RetainedClientReacquisition::NotReady(reason)) => {
+                    tracing::info!(
+                        %runtime_id,
+                        input_id = %bundle.state.input_id,
+                        ?reason,
+                        "a kept retained-work resume's host cannot say yet whether it supplies its controller client; the machine holds it"
+                    );
+                    controller_holds.push(bundle.state.input_id.clone());
+                }
+                Some(crate::retained_work::RetainedClientReacquisition::Refused) => {
+                    tracing::info!(
+                        %runtime_id,
+                        input_id = %bundle.state.input_id,
+                        "a kept retained-work resume's host supplies no controller client for it; the runtime loop ends it as a refused resume"
+                    );
+                }
+                None => {}
+            }
+
             bundle.state.authorization_audit = bundle
                 .state
                 .authorization_audit
@@ -9579,6 +9622,25 @@ pub(crate) async fn machine_recover_persistent_inputs_from_observed(
             return Err(RuntimeDriverError::Internal(format!(
                 "persistent recover left queued input '{input_id}' out of the machine-owned runtime lane"
             )));
+        }
+    }
+
+    // Hold the kept retained-resume rows whose host could not say yet, now
+    // that each is queued or bound to the run marked resumable as recovery
+    // left it. A row recovery normalized otherwise is asked again by the
+    // runtime loop instead.
+    let now = meerkat_core::time_compat::Instant::now();
+    for input_id in controller_holds {
+        if !driver.kept_retained_resume_waits_unstaged(&input_id) {
+            continue;
+        }
+        if let Err(error) = driver.hold_input_controller(&input_id, now) {
+            tracing::warn!(
+                %runtime_id,
+                %input_id,
+                %error,
+                "the machine refused to hold a kept retained-work resume for its controller; the runtime loop asks its host again"
+            );
         }
     }
 

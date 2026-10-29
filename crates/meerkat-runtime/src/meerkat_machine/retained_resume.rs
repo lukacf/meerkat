@@ -215,6 +215,131 @@ impl MeerkatMachine {
     }
 }
 
+/// The queued inputs [`DriverEntry::settle_refused_queued_resumes`] ended,
+/// each with the directed owner of its carrier when it is directed, and the
+/// error that stopped it before the rest, if one did. The ended ones are
+/// committed whatever came after: the caller publishes them either way.
+#[derive(Debug, Default)]
+pub(crate) struct SettledRefusedResumes {
+    pub(crate) settled: Vec<(InputId, Option<InputId>)>,
+    pub(crate) failure: Option<RuntimeDriverError>,
+}
+
+impl DriverEntry {
+    /// Ask the installed host again for the controller client of every kept
+    /// retained-resume row that holds none, and realize each answer on the
+    /// machine (see
+    /// [`crate::driver::ephemeral::EphemeralRuntimeDriver::ask_kept_resume_controllers`]).
+    pub(crate) fn ask_kept_resume_controllers(
+        &mut self,
+        now: meerkat_core::time_compat::Instant,
+    ) -> Result<crate::retained_work::KeptResumeControllerAsks, RuntimeDriverError> {
+        self.shell_driver_mut().ask_kept_resume_controllers(now)
+    }
+
+    /// Whether the runtime loop has an ask to make for kept retained-resume
+    /// rows without a controller client at `now`.
+    pub(crate) fn kept_resume_controller_ask_due(
+        &self,
+        now: meerkat_core::time_compat::Instant,
+    ) -> bool {
+        self.shell_driver().kept_resume_controller_ask_due(now)
+    }
+
+    /// When the runtime loop next asks again for the clients of the rows the
+    /// machine holds for their controller; `None` while it holds none.
+    pub(crate) fn controller_reask_due_at(&self) -> Option<meerkat_core::time_compat::Instant> {
+        self.shell_driver().controller_reask_due_at()
+    }
+
+    /// Whether the machine holds an input bound to `run_id` for its
+    /// controller.
+    pub(crate) fn run_inputs_controller_held(
+        &self,
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> bool {
+        self.shell_driver().run_inputs_controller_held(run_id)
+    }
+
+    /// Whether `input_id` is a kept resume of retained work.
+    pub(crate) fn is_kept_retained_resume(&self, input_id: &InputId) -> bool {
+        self.shell_driver().is_kept_retained_resume(input_id)
+    }
+
+    /// Whether `input_id` is a kept resume of retained work that holds no
+    /// controller client (yet).
+    pub(crate) fn kept_retained_resume_without_client(&self, input_id: &InputId) -> bool {
+        self.shell_driver()
+            .kept_retained_resume_without_client(input_id)
+    }
+
+    /// Whether `input_id` is a kept resume of retained work whose destination
+    /// its session has since superseded.
+    pub(crate) fn kept_retained_resume_destination_superseded(
+        &self,
+        input_id: &InputId,
+    ) -> Result<bool, RuntimeDriverError> {
+        self.shell_driver()
+            .kept_retained_resume_destination_superseded(input_id)
+    }
+
+    /// End each still queued input of `input_ids` as a refused resume
+    /// (`Abandoned { ResumeRefused }`) through the machine's `AbandonInput`,
+    /// before any of them stages: kept retained-resume rows whose installed
+    /// host answered definitely that it supplies no controller for the
+    /// retained work they resume (or did not answer within their budget),
+    /// and kept governed inputs with no way back to their controller client.
+    /// Each ends in its own durable commit with the runless
+    /// runtime-termination carrier it is owed (`reason`), as an exact
+    /// queued-input cancellation ends one, and `owe` runs as soon as each
+    /// one commits, before the next is tried, so an error after it never
+    /// loses the announcement of a committed one. An input that is no longer
+    /// queued is left as it is. The caller publishes and resolves the ended
+    /// inputs once it releases the driver.
+    pub(crate) async fn settle_refused_queued_resumes(
+        &mut self,
+        input_ids: &[InputId],
+        reason: &str,
+        mut owe: impl FnMut(),
+    ) -> SettledRefusedResumes {
+        let mut outcome = SettledRefusedResumes::default();
+        for input_id in input_ids {
+            if self.input_phase(input_id) != Some(crate::input_state::InputLifecycleState::Queued) {
+                continue;
+            }
+            let prepared =
+                match self.prepare_sole_runless_runtime_termination(input_id, reason.to_string()) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        outcome.failure = Some(error);
+                        return outcome;
+                    }
+                };
+            match self
+                .abandon_queued_input(
+                    input_id,
+                    crate::input_state::InputAbandonReason::ResumeRefused,
+                )
+                .await
+            {
+                Ok(true) => {
+                    let directed_owner =
+                        DriverEntry::commit_prepared_sole_runless_termination(prepared);
+                    owe();
+                    outcome.settled.push((input_id.clone(), directed_owner));
+                }
+                Ok(false) => self.rollback_prepared_sole_runless_termination(prepared),
+                Err(error) => {
+                    self.rollback_prepared_sole_runless_termination(prepared);
+                    outcome.failure = Some(error);
+                    return outcome;
+                }
+            }
+        }
+        outcome
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {

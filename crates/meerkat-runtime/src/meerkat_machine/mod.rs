@@ -1244,6 +1244,7 @@ pub use admitted_original::{
 };
 mod resumed_run;
 mod retained_resume;
+pub(crate) use retained_resume::SettledRefusedResumes;
 mod runtime_control;
 pub use agent_mandate::{
     AgentBindingUnavailable, AgentMandateError, SessionAgentBinding, SessionAgentMandate,

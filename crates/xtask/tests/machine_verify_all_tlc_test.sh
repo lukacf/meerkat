@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # usage: machine_verify_all_tlc_test.sh <xtask-bin> [--part <part>]
-#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-g
+#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-h
 # The canonical TLC lane, split into parts so each fits a CI job limit:
 #   machine-verify  the bounded adaptive witness plus `machine-verify --all`
 #   audits-a        hand-written audit shard A
@@ -12,19 +12,20 @@ set -euo pipefail
 #   audits-e        hand-written audit shard E
 #   audits-f        hand-written audit shard F
 #   audits-g        hand-written audit shard G
+#   audits-h        hand-written audit shard H
 #   all             every part (the default: `make machine-verify`, the
 #                   nightly bounded TLC job and the release gate)
-# Bazel runs the eight parts as separate targets (machine_verify_all_tlc_test,
+# Bazel runs the nine parts as separate targets (machine_verify_all_tlc_test,
 # machine_verify_audits_a_tlc_test, machine_verify_audits_b_tlc_test,
 # machine_verify_audits_c_tlc_test, machine_verify_audits_d_tlc_test,
 # machine_verify_audits_e_tlc_test, machine_verify_audits_f_tlc_test,
-# machine_verify_audits_g_tlc_test) so the BuildBuddy machine-authority lane
-# runs them in parallel; together they are exactly `all`. CI's tlc-audits job
-# runs the seven audit shards, one job each.
+# machine_verify_audits_g_tlc_test, machine_verify_audits_h_tlc_test) so the
+# BuildBuddy machine-authority lane runs them in parallel; together they are
+# exactly `all`. CI's tlc-audits job runs the eight audit shards, one job each.
 # The audit shards never execute xtask, so they alone may omit its path.
 audit_shard() {
   case "$1" in
-    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g) return 0 ;;
+    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-h) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -33,13 +34,13 @@ if [[ "${1:-}" == "--part" ]] && audit_shard "${2:-}"; then
   xtask_bin=""
   lane_part="$2"
 else
-  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-g may omit it)}"
+  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-h may omit it)}"
   if [[ "${2:-}" == "--part" ]]; then
-    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-g) or all}"
+    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-h) or all}"
   fi
 fi
 if [[ "${lane_part}" != "machine-verify" && "${lane_part}" != "all" ]] && ! audit_shard "${lane_part}"; then
-  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-g, all)" >&2
+  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-h, all)" >&2
   exit 2
 fi
 # run_part <part>: whether this invocation runs <part>.
@@ -227,12 +228,13 @@ fi
 # (--mutants): a stage, an apply and a resume that ignore the hold, a
 # settlement and an abandon that keep it, a hold that ignores the input's
 # phase and a release that clears every hold. 13 steps reach every witness.
+# It runs alone in shard audits-h.
 input_controller_hold_audit="${workspace_root}/specs/machines/meerkat_machine/input_controller_hold_audit.sh"
 if [[ ! -x "${input_controller_hold_audit}" ]]; then
   echo "error: input controller hold audit runner is missing from workspace runfiles: ${input_controller_hold_audit}" >&2
   exit 1
 fi
-if run_part audits-b; then
+if run_part audits-h; then
   echo "running bounded input controller hold TLC audit"
   TLC_WORKERS="${tlc_workers}" "${input_controller_hold_audit}" "${INPUT_CONTROLLER_HOLD_AUDIT_MAX_STEPS:-13}" --mutants
 fi
@@ -768,7 +770,10 @@ run_machine_verify() {
 # audits-g = member residency without its mutants, alone: on the push its
 # eight whole-space runs took 165 s and its first 23 of 32 witness runs 173 s
 # before the job timeout cut it off, about 430 s in all, and about 525 s on
-# the pull request's runner, 1.22x slower on the rest of its shard.
+# the pull request's runner, 1.22x slower on the rest of its shard;
+# audits-h = input controller hold with --mutants, alone: its safety run,
+# seven witness runs and seven single-worker mutant runs are measured at
+# validation.
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
 # inside the 1080 s execution budget even on a runner 1.6x slower than the
 # faster ones here. As three shards these audits ran 13-18 minutes (audits-a),

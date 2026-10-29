@@ -7895,6 +7895,14 @@ impl IdentityRuntime {
     /// under one lifecycle lock. Enumeration performed by `cleanup` therefore
     /// observes the generation actually retired, even when this request had
     /// waited behind a concurrent reset.
+    ///
+    /// An identity this runtime does not hold is refused
+    /// ([`IdentityRuntimeError::UnknownIdentity`]) before Core is read, as
+    /// respawn and delete refuse it: a member Core holds under the same name
+    /// (one a host or the console made directly, a console side chat among
+    /// them) is not the identity's, and releasing it would answer success
+    /// for a retire that retired nothing. The caller retires such a member
+    /// itself.
     pub(crate) async fn retire_and_cleanup_live_members_tracked<T, F, Fut>(
         self: &Arc<Self>,
         identity: &AgentIdentity,
@@ -7913,6 +7921,9 @@ impl IdentityRuntime {
             let (retired, cleaned) = {
                 let lifecycle_lock = runtime.lifecycle_lock_for(&identity).await;
                 let _lifecycle_guard = lifecycle_lock.lock().await;
+                if !runtime.entries.read().await.contains_key(&identity) {
+                    return Err(IdentityRuntimeError::UnknownIdentity(identity));
+                }
                 if let Some(expected_alias) = expected_alias.as_deref() {
                     runtime
                         .ensure_expected_member_alias_current(&identity, expected_alias)
@@ -13497,7 +13508,10 @@ impl IdentityRuntime {
 
     /// Retire an identity: Core releases its member's live materialization.
     /// The identity stays a member of Core's mob, on the same session at the
-    /// same generation, and its next delivery materializes it again.
+    /// same generation, and its next delivery materializes it again. An
+    /// identity this runtime does not hold is refused
+    /// ([`IdentityRuntimeError::UnknownIdentity`]) before Core is read: a
+    /// member Core holds under the same name is not the identity's.
     pub async fn retire(&self, identity: &AgentIdentity) -> Result<(), IdentityRuntimeError> {
         self.retire_with_expected_member_alias(identity, None).await
     }
@@ -13510,6 +13524,9 @@ impl IdentityRuntime {
         let retired = {
             let lifecycle_lock = self.lifecycle_lock_for(identity).await;
             let _lifecycle_guard = lifecycle_lock.lock().await;
+            if !self.entries.read().await.contains_key(identity) {
+                return Err(IdentityRuntimeError::UnknownIdentity(identity.clone()));
+            }
             if let Some(expected_alias) = expected_alias {
                 self.ensure_expected_member_alias_current(identity, expected_alias)
                     .await?;

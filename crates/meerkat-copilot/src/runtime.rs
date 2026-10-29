@@ -1303,6 +1303,9 @@ struct CopilotAccountPacing {
 }
 
 impl CopilotAccountState {
+    /// An account state with pacing of its own (tests; the runtime shares
+    /// its per-account pacing through `with_pacing`).
+    #[cfg(test)]
     fn new(config: CopilotBackendConfig, mode: CopilotCredentialMode) -> Self {
         Self::with_pacing(config, mode, Arc::default())
     }

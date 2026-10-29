@@ -237,9 +237,11 @@ confinement all still apply to every call it opens.
   disables, a gated family none of whose tools the build mounts (comms tools
   mount only with a comms runtime), a gated name the build does not mount (a
   name a still connecting MCP server may provide is gated from the moment it
-  appears), a name the build's tool policy refuses, a capability the provider
-  serves natively (such as provider-native web search), and a build without
-  the runtime's grant service.
+  appears), a name the build's tool policy refuses, and a build without the
+  runtime's grant service. A gate that covers `web_search`, by name or through
+  its family, disables the provider's native tools for the session, including
+  native search that the session's or a turn's provider params ask for, so the
+  gated tool is the only search path.
 - **Granting.** `MeerkatMachine::grant_tool` issues a grant for a subject (a
   session), a target (one tool name, or a built-in family with the names it
   provides, which `meerkat::tool_family_names` answers) and a window of at most

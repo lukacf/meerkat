@@ -1725,14 +1725,24 @@ pub enum GrantGateBuildError {
     /// open it.
     #[error("'{tool}' is grant-gated, but the build's tool policy refuses it")]
     PolicyRefused { tool: String },
-    /// A gated name is a capability the provider serves natively: its calls
-    /// never reach the dispatcher, so no gate could adjudicate them.
-    #[error("'{tool}' is served natively by the provider and cannot be grant-gated")]
-    ProviderNative { tool: String },
     /// The build has no grant service: a gate needs the runtime's, carried
     /// on the session's runtime bindings.
     #[error("a grant gate needs the runtime's tool grant service, and this build has none")]
     NoGrantService,
+}
+
+/// Whether a build's gate covers web search, by name or through its family.
+/// Such a build disables every provider-native tool, so the gated `web_search`
+/// tool is its only search path and the gate adjudicates every search.
+fn grant_gate_covers_web_search(gated: &meerkat_core::tool_grant::GrantGatedTools) -> bool {
+    meerkat_tools::builtin::WEB_SEARCH_TOOL_NAMES
+        .iter()
+        .any(|name| {
+            gated.tools.iter().any(|tool| tool.as_str() == *name)
+                || gated.families.iter().any(|family| {
+                    tool_family_names(family).is_some_and(|names| names.contains(name))
+                })
+        })
 }
 
 /// The category overrides a session's metadata records: the caller's own,
@@ -1806,13 +1816,14 @@ fn mount_grant_gated_families(
 /// it connects is gated from the moment it appears), the build's tool policy
 /// refuses no gated name, every gated family has a mounted name, and the
 /// runtime carries the session's grants. Answers the gate to install, or
-/// `None` for an empty gate.
+/// `None` for an empty gate. A gate that covers web search has already
+/// disabled every provider-native tool for the build
+/// (`grant_gate_covers_web_search`), so no gated name is served natively.
 fn grant_gate_for_build(
     gated: &meerkat_core::tool_grant::GrantGatedTools,
     tools: &Arc<dyn AgentToolDispatcher>,
     tool_execution_policy: Option<&meerkat_core::ToolExecutionPolicy>,
     declared_tool_restriction: Option<&meerkat_core::ops::DeclaredToolRestriction>,
-    provider_native_web_search: bool,
     session_grants: Option<Arc<dyn meerkat_core::tool_grant::SessionToolGrants>>,
 ) -> Result<Option<meerkat_core::tool_grant::ToolGrantGate>, GrantGateBuildError> {
     use meerkat_core::types::ToolName;
@@ -1906,16 +1917,6 @@ fn grant_gate_for_build(
         }
     }
 
-    if provider_native_web_search {
-        for name in meerkat_tools::builtin::WEB_SEARCH_TOOL_NAMES {
-            if table.is_gated(name) {
-                return Err(GrantGateBuildError::ProviderNative {
-                    tool: (*name).to_string(),
-                });
-            }
-        }
-    }
-
     // Every gated family reaches the final dispatcher: a family none of whose
     // names this build mounts (comms without a comms runtime, a builtin
     // family the build leaves off) could never open.
@@ -1931,19 +1932,6 @@ fn grant_gate_for_build(
     Ok(Some(meerkat_core::tool_grant::ToolGrantGate::new(
         grants, table,
     )))
-}
-
-/// Whether a provider request default carries the provider's own web search.
-fn provider_tag_offers_web_search(
-    tag: &meerkat_core::lifecycle::run_primitive::ProviderTag,
-) -> bool {
-    use meerkat_core::lifecycle::run_primitive::ProviderTag;
-    match tag {
-        ProviderTag::Anthropic(tag) => tag.web_search.is_some(),
-        ProviderTag::OpenAi(tag) => tag.web_search.is_some(),
-        ProviderTag::Gemini(tag) => tag.google_search.is_some(),
-        _ => false,
-    }
 }
 
 /// Errors that can occur when building an agent via [`AgentFactory::build_agent()`].
@@ -7786,12 +7774,17 @@ impl AgentFactory {
         // Every governed input to the provider-native tool policy is final
         // here: nothing below changes the effective restriction, consequence
         // binding or admission. The policy is derived once, from these inputs
-        // and the final model identity, before any helper is provisioned.
+        // and the final model identity, before any helper is provisioned. A
+        // grant gate that covers web search is one of them: provider-native
+        // search would bypass the gate on every request (session and turn
+        // provider params included), so the build disables it and the gated
+        // `web_search` tool is the only search path.
         let governed_tool_inputs_disable_native = tool_dispatch_admission.is_some()
             || consequence_policy.governs()
             || tool_execution_policy
                 .as_ref()
-                .is_some_and(|policy| !policy.is_unrestricted());
+                .is_some_and(|policy| !policy.is_unrestricted())
+            || grant_gate_covers_web_search(&grant_gated);
         // Refuse a fallback the browser profile cannot provision before any
         // credential is resolved. Governed inputs already disable native
         // search; the final identity is rechecked before helper provisioning.
@@ -10075,15 +10068,6 @@ impl AgentFactory {
         // 12i-gate. The scoped tool grant gate over the final dispatcher: the
         // agent opens the gated names a live grant admits at each boundary,
         // and the outermost dispatch gate adjudicates every gated call.
-        let provider_native_web_search = provider_request_defaults_for(
-            provider,
-            &model,
-            config,
-            model_profile.as_ref(),
-            build_config.override_web_search,
-            None,
-        )
-        .is_some_and(|tag| provider_tag_offers_web_search(&tag));
         let session_grants = match resolved_mode {
             RuntimeBuildMode::SessionOwned(bindings) => bindings.tool_grants().cloned(),
             RuntimeBuildMode::StandaloneEphemeral => None,
@@ -10093,7 +10077,6 @@ impl AgentFactory {
             &tools,
             tool_execution_policy.as_ref(),
             declared_tool_restriction.as_ref(),
-            provider_native_web_search,
             session_grants,
         )
         .map_err(BuildAgentError::GrantGate)?;

@@ -20077,6 +20077,115 @@ mod tests {
         }
     }
 
+    /// A build whose grant gate covers `web_search` disables provider-native
+    /// tools (the factory's rule). A turn's provider params reach the agent as
+    /// the request policy of its LLM reconfigure; when they ask for native
+    /// search again, the narrow-only policy keeps it disabled. Native search
+    /// never rides a request, from the session's params or a turn's, so the
+    /// gated `web_search` tool stays the only search path.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_turns_native_search_params_are_stripped_under_a_grant_gated_web_search() {
+        use crate::lifecycle::run_primitive::{
+            OpaqueProviderBody, OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+        };
+
+        /// A session with no live grant.
+        struct NoLiveGrant;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
+            async fn open_names(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn admit_call(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+                _call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+        }
+
+        let native_search = || ProviderParamsOverride {
+            provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                web_search: Some(OpaqueProviderBody::from_value(
+                    &serde_json::json!({"type": "web_search"}),
+                )),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let gate = crate::tool_grant::ToolGrantGate::new(
+            Arc::new(NoLiveGrant) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            crate::tool_grant::GatedToolTable::new(
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::from([crate::types::ToolName::from("web_search")]),
+            ),
+        );
+        let dispatcher = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(NoTools),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        let client = Arc::new(RecordingLlmClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate)
+            .provider_native_tool_policy(crate::ProviderNativeToolPolicy::DisableAll)
+            .provider_params(native_search())
+            .build_standalone(client.clone(), dispatcher, Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(1);
+
+        agent
+            .run(
+                "the session's params ask for native search"
+                    .to_string()
+                    .into(),
+            )
+            .await
+            .expect("the request reaches the LLM");
+
+        agent
+            .replace_client_with_request_policy(
+                client.clone(),
+                crate::SessionLlmRequestPolicy {
+                    model: "turn-model".to_string(),
+                    credential_identity: None,
+                    provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    provider_params: Some(native_search()),
+                    provider_tool_defaults: None,
+                },
+            )
+            .expect("the turn's request policy is admitted");
+        agent
+            .run("a turn's params ask for it again".to_string().into())
+            .await
+            .expect("the request reaches the LLM");
+
+        let seen_params = client.seen_params();
+        assert_eq!(seen_params.len(), 2);
+        for params in seen_params {
+            let Some(ProviderTag::OpenAi(openai)) = params.and_then(|params| params.provider_tag)
+            else {
+                panic!("expected typed OpenAI provider parameters");
+            };
+            assert!(
+                openai.web_search.is_none(),
+                "native search never rides a request under a gated web_search"
+            );
+        }
+    }
+
     fn explicit_hot_swap_identity(model: &str) -> crate::SessionLlmIdentity {
         crate::SessionLlmIdentity {
             model: model.to_string(),

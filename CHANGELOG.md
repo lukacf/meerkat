@@ -101,8 +101,11 @@ them.
   family the build disables, a gated family none of whose tools the build
   mounts, a gated name the build does not mount and no pending source could
   provide, a gated name no tool source provides, a name the build's tool
-  policy refuses, a capability the provider serves natively, a build without
-  the runtime's grant service). `meerkat::tool_family_names`
+  policy refuses, a build without the runtime's grant service). A gate that
+  covers `web_search` disables the provider's native tools for the session,
+  so provider-native search that session or turn provider params ask for is
+  stripped from every request and the gated tool is the only search path.
+  `meerkat::tool_family_names`
   answers the names a built-in family can provide.
   `meerkat_runtime::tool_grant::ToolGrantService` issues, revokes, lists and
   audits grants over a `RuntimeStore`, reachable on the runtime as

@@ -6167,32 +6167,51 @@ mod scoped_tool_grants {
     }
 
     #[tokio::test]
-    async fn a_provider_native_capability_cannot_be_grant_gated() {
+    async fn a_gated_web_search_disables_provider_native_search() {
+        // gpt-5.4 serves web search natively, and the session's provider
+        // params ask for it. A gate that covers web search disables every
+        // provider-native tool for the build, so the session's (and every
+        // later turn's) native search is stripped from each request and the
+        // gated `web_search` tool is the only search path: mounted, and
+        // closed until a grant opens it.
         let temp = tempfile::tempdir().unwrap();
-        // gpt-5.4 serves web search natively under an unrestricted policy.
-        let err = temp_factory(&temp)
-            .build_agent(
-                AgentBuildConfig {
-                    llm_client_override: Some(Arc::new(MockLlmClient)),
-                    web_search_executor_override: Some(Arc::new(NoopWebSearchExecutor)),
-                    grant_gated_tools: Some(
-                        GrantGatedTools::default().with_tool(WEB_SEARCH_TOOL_NAME),
-                    ),
-                    override_web_search: ToolCategoryOverride::Enable,
-                    ..AgentBuildConfig::new("gpt-5.4")
-                },
-                &Config::default(),
-            )
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let mut build = gated_runtime_build(
+            &machine,
+            Session::new(),
+            meerkat_core::SessionBuildIntent::Mint,
+            Some(GrantGatedTools::default().with_family("web_search")),
+        )
+        .await;
+        build.model = "gpt-5.4".to_string();
+        build.web_search_executor_override = Some(Arc::new(NoopWebSearchExecutor));
+        build.provider_params = Some(
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(
+                    meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+                        web_search: Some(
+                            meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                                &serde_json::json!({"type": "web_search"}),
+                            ),
+                        ),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+        );
+        let agent = temp_factory(&temp)
+            .build_agent(build, &Config::default())
             .await
-            .err()
-            .expect("a natively served capability cannot be gated");
+            .expect("a gated web search builds on a native-search model");
+        let (base, visible) = names(&agent);
         assert!(
-            matches!(
-                &err,
-                BuildAgentError::GrantGate(GrantGateBuildError::ProviderNative { tool })
-                    if tool == WEB_SEARCH_TOOL_NAME
-            ),
-            "got: {err:?}"
+            base.iter().any(|name| name == WEB_SEARCH_TOOL_NAME),
+            "the gated tool is the search path, so native search is off: {base:?}"
+        );
+        assert!(
+            !visible.contains(WEB_SEARCH_TOOL_NAME),
+            "and it starts closed: {visible:?}"
         );
     }
 

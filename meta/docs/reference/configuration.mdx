@@ -496,6 +496,24 @@ A launch whose members build from a native realm or with a member auth
 binding refuses it the same way, since that process would carry neither.
 Deploy plans still answer.
 
+### GitHub Copilot with a service-account token
+
+From Meerkat 0.9.8, Meerkat's Copilot routes can authenticate with a GitHub
+token the operator supplies instead of a device sign-in (`auth_method =
+"github_copilot_token"`; see "GitHub Copilot with a service-account token" in
+the Meerkat
+[auth guide](https://github.com/lukacf/meerkat/blob/main/docs/guides/auth.mdx)).
+Meta adds nothing to it. The routes are `[realm]` tables, so they go in the
+host config (`meerkat_config_path`, or a native realm's documents), and every
+member resolves them like any other binding. With the guide's
+`source = { kind = "env", ... }`, the token comes from the gateway process's
+environment: `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN`.
+With `source = { kind = "managed_store" }`, it comes from the credential store
+above, where `rkat auth login copilot --non-interactive` stores it when the
+gateway uses the process default store. Name the route for every member with
+`member_auth_binding`, for example
+`{"realm": "global", "binding": "copilot_anthropic"}`.
+
 ## Native realm and member auth binding
 
 A host whose provider setup lives in a native realm (a realm a native

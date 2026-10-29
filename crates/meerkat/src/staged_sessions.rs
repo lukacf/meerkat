@@ -513,6 +513,23 @@ impl StagedSessionRegistry {
         slot.authority.keep_alive()
     }
 
+    /// The scoped tool grant gate the slot's staged build config names, read
+    /// without promoting it: empty when the build gates nothing. `None` when
+    /// no slot for `id` holds a build config (none staged, or its payload is
+    /// with a promotion).
+    pub async fn grant_gated_tools(
+        &self,
+        id: &SessionId,
+    ) -> Option<meerkat_core::tool_grant::GrantGatedTools> {
+        let slots = self.slots.read().await;
+        match &slots.get(id)?.payload {
+            StagedPayload::Staged { build_config } | StagedPayload::Closing { build_config } => {
+                Some(build_config.grant_gated_tools.clone().unwrap_or_default())
+            }
+            StagedPayload::Promoting => None,
+        }
+    }
+
     /// Apply a keep-alive override to a staged session before its first turn
     /// materializes it in the session service.
     pub async fn update_keep_alive(

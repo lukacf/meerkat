@@ -19,6 +19,8 @@
 //! - [`deadlines`]: [`ToolGrantDeadlines`], the deadline driver of one
 //!   runtime owner's served sessions.
 //! - [`audit`]: the audit rows each subject's grants append.
+//! - [`wire`]: the projection of grants, listings and audit rows onto their
+//!   wire contracts.
 //!
 //! Nothing caches whether a grant is live, nothing scans at boot, and
 //! nothing here wakes a dormant member or registers a session: a grant,
@@ -40,6 +42,7 @@ pub mod deadlines;
 pub mod dsl;
 pub mod gate;
 pub mod service;
+pub mod wire;
 
 pub use audit::{
     ToolGrantAuditEvent, ToolGrantAuditRecord, ToolGrantAuditRow, ToolGrantExpiryDriver,

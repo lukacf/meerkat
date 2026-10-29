@@ -12573,6 +12573,41 @@ impl SessionRuntime {
         Ok(Some(session))
     }
 
+    /// The scoped tool grant gate `session_id` records, read without
+    /// loading, registering or waking it: its persisted metadata's (no
+    /// transcript is read), else its staged build config's when its first
+    /// turn has not materialized it yet. `None` when no persisted or staged
+    /// session has the id; an archived session reads as absent.
+    pub(crate) async fn session_grant_gate(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::tool_grant::GrantGatedTools>, RpcError> {
+        if let Some(view) = self
+            .service
+            .load_authoritative_session_metadata(session_id)
+            .await
+            .map_err(session_error_to_rpc)?
+        {
+            if self
+                .service
+                .session_archived_by_authority_with_terminal(
+                    session_id,
+                    view.lifecycle_terminal.as_ref(),
+                )
+                .await
+                .map_err(session_error_to_rpc)?
+            {
+                return Ok(None);
+            }
+            return Ok(Some(
+                view.session_metadata
+                    .map(|metadata| metadata.tooling.grant_gated)
+                    .unwrap_or_default(),
+            ));
+        }
+        Ok(self.staged_sessions.grant_gated_tools(session_id).await)
+    }
+
     /// Whether the RuntimeStore holds an absorbing archive terminal for the
     /// session. It reads no body, so an interrupt or a stop of a running
     /// durable run is not refused by the run's provisional tail.

@@ -1800,14 +1800,17 @@ impl CopilotAuthorizer {
                 ))
             })?;
         if !(200..=299).contains(&response.status) {
-            let body = String::from_utf8_lossy(&response.body);
             if token_exchange_requires_account_action(response.status, &response.body) {
                 self.mark_account_reauth_required()?;
                 return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired));
             }
+            // The status and GitHub's bounded message only, never the body: a
+            // proxy or gateway page can echo the request's headers, the
+            // GitHub token included.
+            let status = response.status;
+            let message = github_error_message(&response.body);
             return Err(ProviderAuthError::SourceResolutionFailed(format!(
-                "Copilot token exchange returned {}: {body}",
-                response.status
+                "Copilot token exchange returned {status}: {message}"
             )));
         }
         let token: CopilotTokenEnvelope =
@@ -6734,7 +6737,9 @@ mod tests {
 
         /// T10: a canary token never reaches an error (`Display`, `Debug`,
         /// the `AuthError` and its JSON), the cached account state's `Debug`,
-        /// the resolved metadata's JSON or a log line, on any path.
+        /// the resolved metadata's JSON or a log line, on any path, nor does
+        /// a device sign-in's GitHub token when its token exchange fails
+        /// with a page that echoes the request.
         #[tokio::test]
         async fn operator_token_is_never_rendered() {
             let log = LogCapture::default();
@@ -6857,6 +6862,23 @@ mod tests {
             .await
             .expect_err("the model listing failed");
             rendered.push_str(&format!("check: {checked} {checked:?}"));
+            // The device sign-in's token exchange, failing with a page that
+            // echoes the request: the account's stored GitHub token (carrying
+            // the canary here) stays out of the error and the log lines.
+            let (auth_binding, device_binding) = validated_binding();
+            let (device_env, _device_lease) =
+                resolver_environment_with_token(&auth_binding, &token).await;
+            let device = CopilotAuthorizer {
+                state: Arc::new(CopilotAccountState::new(
+                    CopilotBackendConfig::default(),
+                    CopilotCredentialMode::DeviceSignIn,
+                )),
+                binding: device_binding,
+                env: device_env,
+                transport: Arc::new(ScriptedTransport::new([echoing_failure(&token)])),
+            };
+            let exchanged = device.prime().await.expect_err("the token exchange failed");
+            rendered.push_str(&format!("device: {exchanged} {exchanged:?}"));
             rendered.push_str(&log.0.lock());
 
             assert!(
@@ -6866,6 +6888,10 @@ mod tests {
             assert!(
                 rendered.contains("model discovery returned HTTP 500"),
                 "the capture saw the model listing failure: {rendered}"
+            );
+            assert!(
+                rendered.contains("token exchange returned 500"),
+                "the capture saw the token exchange failure: {rendered}"
             );
             assert!(!rendered.contains(CANARY), "{rendered}");
         }

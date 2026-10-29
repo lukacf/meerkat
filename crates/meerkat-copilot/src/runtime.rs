@@ -1864,8 +1864,10 @@ impl CopilotAuthorizer {
     /// published or restored the account lease, so without one the flight
     /// reads the source. With one the AuthMachine decides: `Authorized` uses
     /// the cache built for the current lease generation, `ReauthRequired`
-    /// fails at once, and any other verdict (a declared freshness window ran
-    /// out, the lease was released) has the flight read the source again.
+    /// fails at once when the cache was built for the refused publication,
+    /// and any other verdict (a declared freshness window ran out, the lease
+    /// was released, a publication of another token was refused) has the
+    /// flight read the source again.
     fn observe_operator_lease(&self) -> Result<OperatorObservation, ProviderAuthError> {
         let auth_lease = self.auth_lease()?;
         let lease_key = self.lease_key();
@@ -1887,7 +1889,13 @@ impl CopilotAuthorizer {
                 None => OperatorFlight::Reload,
             },
             CredentialUseDisposition::ReauthRequired => {
-                return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired));
+                if self.fresh_cached(generation, now).is_some() {
+                    return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired));
+                }
+                // Another publication was refused (another machine read a
+                // newer token): the source is read again, which fails fast
+                // for that refused value and publishes a new one.
+                OperatorFlight::Reload
             }
             CredentialUseDisposition::RefreshRequired
             | CredentialUseDisposition::RefreshDisallowed
@@ -2164,8 +2172,9 @@ impl CopilotAuthorizer {
     }
 
     /// Apply a refusal: a token GitHub refused is published to the account
-    /// lease (`MarkReauthRequired`), and a rate limit pauses the identity
-    /// lookup until GitHub's stated time. Logged without the token.
+    /// lease (`MarkReauthRequired`) and the account state built for an
+    /// earlier token is dropped, and a rate limit pauses the identity lookup
+    /// until GitHub's stated time. Logged without the token.
     fn operator_refusal(&self, refusal: OperatorRefusal) -> ProviderAuthError {
         tracing::warn!(
             credential_identity = %self.binding.credential_identity(),
@@ -2174,6 +2183,12 @@ impl CopilotAuthorizer {
         );
         match &refusal {
             OperatorRefusal::TokenRejected { .. } => {
+                // The cached account belongs to a token the lease no longer
+                // carries. Without it the next call reads the source again:
+                // the same value fails fast (the AuthMachine records it as
+                // refused) and a new value, such as the next token a command
+                // mints, is published and heals the account.
+                *self.state.cache.write() = None;
                 if let Err(error) = self.mark_account_reauth_required() {
                     return error;
                 }
@@ -5289,6 +5304,140 @@ mod tests {
             );
             assert_eq!(harness.transport.request_count(), 4);
             assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+        }
+
+        /// A command source that mints `github_pat_<canary>_command_<n>`, `n`
+        /// counting its runs in `directory`.
+        #[cfg(unix)]
+        fn counter_command(
+            directory: &std::path::Path,
+            refresh_interval_ms: Option<u64>,
+        ) -> CredentialSourceSpec {
+            CredentialSourceSpec::Command {
+                program: "/bin/sh".into(),
+                args: vec![
+                    "-c".to_string(),
+                    format!(
+                        "n=0; [ -f count ] && read n < count; n=$((n + 1)); echo \"$n\" > count; printf 'github_pat_{CANARY}_command_%s' \"$n\""
+                    ),
+                ],
+                cwd: Some(directory.to_path_buf()),
+                env: BTreeMap::new(),
+                timeout_ms: 10_000,
+                refresh_interval_ms,
+            }
+        }
+
+        /// A command source whose refreshed token GitHub refuses heals with
+        /// the next token it mints: the refusal drops the account state built
+        /// for the earlier token, so the next request runs the command again
+        /// instead of failing on that state, and its new token is published.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn command_source_heals_after_a_refusal_at_the_refresh() {
+            let directory = tempfile::tempdir().expect("command directory");
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(models_response()),
+                Ok(json_response(
+                    401,
+                    serde_json::json!({"message": "Bad credentials"}),
+                )),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            let resolved = harness
+                .resolve_from(
+                    CopilotProviderRoute::OpenAi,
+                    counter_command(directory.path(), Some(600_000)),
+                )
+                .await
+                .expect("the first token resolves");
+            let authorizer = resolved.concrete_authorizer();
+            let url = format!("{BUSINESS_API}/responses");
+            let (_, bearer) = authorize_once(&authorizer, &url).await;
+            assert_eq!(bearer, format!("Bearer github_pat_{CANARY}_command_1"));
+
+            // Inside the refresh window the command mints a token GitHub
+            // refuses.
+            harness.operator.advance(545);
+            assert_eq!(
+                authorizer.prepare_request().await,
+                Err(AuthError::UserReauthRequired)
+            );
+            assert_eq!(
+                harness.operator.lease().phase,
+                Some(AuthLeasePhase::ReauthRequired)
+            );
+            assert_eq!(harness.transport.request_count(), 3);
+
+            // The next request runs the command again, and its token heals
+            // the account.
+            let (_, bearer) = authorize_once(&authorizer, &url).await;
+            assert_eq!(
+                bearer,
+                format!("Bearer github_pat_{CANARY}_command_3"),
+                "the command ran again after the refusal"
+            );
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+            assert_eq!(harness.transport.request_count(), 5);
+        }
+
+        /// A refusal of another account state's publication (another runtime
+        /// read a newer token from the shared source) does not strand an
+        /// account state cached for an earlier token: its next request reads
+        /// the source again and publishes the newest token.
+        #[tokio::test]
+        async fn a_refusal_of_another_publication_rereads_the_source() {
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(models_response()),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            let other_transport = OutcomeTransport::new([Ok(json_response(
+                401,
+                serde_json::json!({"message": "Bad credentials"}),
+            ))]);
+            let other = CopilotRuntime {
+                accounts: Mutex::new(BTreeMap::new()),
+                transport: other_transport.clone(),
+            };
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("cached"));
+            let resolved = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the first token resolves");
+
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("refused-elsewhere"));
+            assert_eq!(
+                other
+                    .resolve(
+                        &token_binding(CopilotProviderRoute::Anthropic, env_source()),
+                        &harness.operator.env,
+                    )
+                    .await
+                    .err(),
+                Some(ProviderAuthError::Auth(AuthError::UserReauthRequired))
+            );
+            assert_eq!(
+                harness.operator.lease().phase,
+                Some(AuthLeasePhase::ReauthRequired)
+            );
+
+            let newest = user_token("newest");
+            harness.operator.set("COPILOT_GITHUB_TOKEN", &newest);
+            let authorizer = resolved.concrete_authorizer();
+            let (_, bearer) =
+                authorize_once(&authorizer, &format!("{BUSINESS_API}/responses")).await;
+            assert_eq!(bearer, format!("Bearer {newest}"));
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+            assert_eq!(harness.transport.request_count(), 4);
+            assert_eq!(other_transport.request_count(), 1);
         }
 
         /// T4: GitHub refusing the token itself moves the shared account to

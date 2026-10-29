@@ -386,6 +386,9 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # actions (of module entered_step_audit) generated a state, its three
 # witnesses violated, and with --mutants each seeded defect's invariant or
 # property violated.
+# tool_grant_expiry_audit.sh (tool_grant_lifecycle) requires its seven
+# witnesses violated, and with --mutants each seeded defect's invariant or
+# action property violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -629,6 +632,18 @@ printf '%s\n' \
   'echo "Error: Invariant AuditReleaseWaitsForSteps is violated."' \
   'echo "Error: Invariant AuditEnteredStateMatchesHistory is violated."' \
   'echo "Error: Action property AuditStepsNeverSpendOrSettle is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExpiredByTimer is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExpiredAtDispatch is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExpiredWhileDownSettledOnRead is violated."' \
+  'echo "Error: Invariant NotAuditWitnessAdmittedOneTickBeforeDeadline is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRollbackAfterExpiryStillRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRevokedThenRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRevokeAfterDeadlineRecordsExpiry is violated."' \
+  'echo "Error: Invariant AuditExpiryNotEarly is violated."' \
+  'echo "Error: Invariant AuditNoAdmitAtOrAfterDeadline is violated."' \
+  'echo "Error: Action property AuditTerminalLatched is violated."' \
+  'echo "Error: Invariant AuditTerminalNeverAdmits is violated."' \
+  'echo "Error: Invariant AuditVisibleOnlyWhileLive is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

@@ -99,6 +99,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   on the prefixed spawner (`b/ops-lead`) reaches the rows of the members it
   spawned, and a rule on the bare name (`ops-lead`) no longer reaches the
   members another runtime's agent of that name spawned.
+- Docs: the Python and TypeScript `register_tool` docstrings, the SDK
+  dispatchers' scope comments and the Rust `AgentCustomizer` docs still said
+  `customize_build` runs at a restore or a reconcile. Since 0.9.6 a restart
+  over members the mob already holds calls it for none of them: it runs when
+  an identity is seated or starts a fresh life, and right before each build
+  of its member, the first build after a restart (its first wake) included,
+  and `after_create` follows a seat, a create or a fresh life, never a
+  wake's build. A new test row pins this for a governed input after a clean
+  restart: no `customize_build` before the input, exactly one at its wake
+  with the context of the member's last build, no `after_create`, and the
+  member's next tool call served by the handler that build registered.
 
 ### Known limitations
 

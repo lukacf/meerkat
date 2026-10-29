@@ -43,8 +43,53 @@ them.
   `GoogleAuthMethod::GitHubCopilotToken` (wire `github_copilot_token`). An
   exhaustive match on these enums needs the new arm. The Web SDK's generated
   `WIRE_AUTH_METHODS` and `WIRE_PROVIDER_AUTH_METHODS` list it too.
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`: the
+  AuthMachine records which credential value a source-read publication
+  carries, so a value that was refused or logged out is not published again
+  (see Added). `AuthMachineState` gains `credential_material_fingerprint`,
+  and `AuthMachineInput::Acquire` gains the field
+  `credential_material_fingerprint` (`None` for every existing publisher);
+  `AuthMachineInput` and `AuthMachineInputVariant` gain
+  `ResolveSourceCredentialPublication`, `AuthMachineEffect` gains
+  `SourceCredentialPublicationResolved`, and the enum
+  `SourceCredentialPublicationDisposition` (`Publish`, `AlreadyPublished`) is
+  new, in the `auth_machine::dsl` bridge copies (meerkat-runtime) and the
+  catalog types (meerkat-machine-schema `catalog::dsl::auth_machine`). The
+  kernel's `generated::auth` `State` and `inputs::Acquire` gain the field
+  `credential_material_fingerprint`; `inputs::ResolveSourceCredentialPublication`,
+  `effects::SourceCredentialPublicationResolved` and
+  `SourceCredentialPublicationDisposition` are new; `Input` and `InputKind`
+  gain `ResolveSourceCredentialPublication`; `Effect` and `EffectKind` gain
+  `SourceCredentialPublicationResolved`; and `TransitionId` gains, appended
+  last, `ResolveSourceCredentialPublicationNewMaterialValid`,
+  `ResolveSourceCredentialPublicationNewMaterialExpiring`,
+  `ResolveSourceCredentialPublicationNewMaterialExpired`,
+  `ResolveSourceCredentialPublicationNewMaterialRefreshing`,
+  `ResolveSourceCredentialPublicationNewMaterialReauthRequired`,
+  `ResolveSourceCredentialPublicationNewMaterialReleased`,
+  `ResolveSourceCredentialPublicationRenewalExpiring`,
+  `ResolveSourceCredentialPublicationRenewalExpired`,
+  `ResolveSourceCredentialPublicationAlreadyPublishedValid`,
+  `ResolveSourceCredentialPublicationAlreadyPublishedRefreshing`,
+  `ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired` and
+  `ResolveSourceCredentialPublicationAlreadyPublishedReleased`. An `Acquire`
+  that names a value has the new guard `credential_material_publishable`: it
+  refuses the value the lease records unless the lease's declared freshness
+  window ran out. Code that builds `Acquire` sets the new field.
 
 ### Added
+
+- `meerkat-core`: `AuthLeaseHandle::publish_source_credential` publishes a
+  credential value its caller re-reads from a source (an environment
+  variable, a command, an external resolver) only when the AuthMachine says
+  the lease does not already carry it, as one step with the machine's
+  `Acquire`. A value that was refused (`reauth_required`) or logged out
+  (`released`) stays so until a different value appears, also for every
+  machine that shares the lease's durable store; a declared freshness window
+  that ran out republishes the same value. `CredentialFingerprint` (an opaque
+  SHA-256 fingerprint with a redacted `Debug` and no `Display`) and
+  `SourceCredentialPublication` are new. The method's default fails closed,
+  so other `AuthLeaseHandle` implementations are unaffected.
 
 - GitHub Copilot with a service-account token: `auth_method =
   "github_copilot_token"` authenticates the `copilot` backends with a GitHub

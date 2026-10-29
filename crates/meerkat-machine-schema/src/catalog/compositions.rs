@@ -3277,6 +3277,7 @@ fn auth_freshness_expiry_witness() -> CompositionWitness {
                 vec![
                     witness_field("expires_at_ts", some_u64(1)),
                     witness_field("credential_published_at_millis", Expr::U64(1)),
+                    witness_field("credential_material_fingerprint", Expr::None),
                 ],
             ),
             observe(0),
@@ -3317,6 +3318,7 @@ fn auth_expiring_refresh_witness() -> CompositionWitness {
                 vec![
                     witness_field("expires_at_ts", some_u64(2)),
                     witness_field("credential_published_at_millis", Expr::U64(1)),
+                    witness_field("credential_material_fingerprint", Expr::None),
                 ],
             ),
             witness_input(
@@ -3417,6 +3419,7 @@ fn auth_release_drains_oauth_flow_witness(kind: OAuthFlowKind) -> CompositionWit
                 vec![
                     witness_field("expires_at_ts", some_u64(2)),
                     witness_field("credential_published_at_millis", Expr::U64(1)),
+                    witness_field("credential_material_fingerprint", Expr::None),
                 ],
             ),
             witness_input("auth_machine", admit_input, admit_fields),

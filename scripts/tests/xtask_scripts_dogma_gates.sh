@@ -377,6 +377,8 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # actions (of module entered_step_audit) generated a state, its three
 # witnesses violated, and with --mutants each seeded defect's invariant or
 # property violated.
+# source_credential_publication_audit.sh (auth) requires each of its five
+# reachability witnesses violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -620,6 +622,11 @@ printf '%s\n' \
   'echo "Error: Invariant AuditReleaseWaitsForSteps is violated."' \
   'echo "Error: Invariant AuditEnteredStateMatchesHistory is violated."' \
   'echo "Error: Action property AuditStepsNeverSpendOrSettle is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRefusalHealed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessLogoutHealed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessWindowRenewed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRefusedValueBlocked is violated."' \
+  'echo "Error: Invariant NotAuditWitnessLoggedOutValueBlocked is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- A host's own `MobSessionService` wrapper (around the session service it
+  passes to `MobBootstrapSpec::new`) or `SessionAgentBuilder` wrapper must
+  implement `session_comms_identity_root`, which Meerkat 0.9.8 makes a
+  required method with no default: forward it to the service or builder it
+  wraps, since the mob seats dormant members under the root it reports (see
+  Changed). A wrapper without it no longer compiles.
+
 ### Added
 
 - The Console offers side chats. **Fork to side chat** in a conversation's
@@ -96,10 +105,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   materialization. A session service that reports no durable root (one that
   builds no comms of its own) has every dormant seat refused typed unless a
   root is declared. A host's own `MobSessionService` or `SessionAgentBuilder`
-  wrapper forwards the new required method to the service or builder it
-  wraps. The refusal of `UnifiedRuntimeBuilder::session_identity_config_root`
-  with `mob_spec()` now says that the supplied spec's session service
-  reports its factory's root.
+  wrapper forwards the new required method (see Breaking). The refusal of
+  `UnifiedRuntimeBuilder::session_identity_config_root` with `mob_spec()` now
+  says that the supplied spec's session service reports the root its agent
+  builds use.
 
 ### Fixed
 

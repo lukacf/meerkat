@@ -10401,8 +10401,7 @@ impl MobRuntime {
         if network_member_comms {
             builder = builder.with_network_member_comms();
         } else if let Some(declared) = spec.session_identity_config_root.as_deref() {
-            let root = meerkat::canonical_session_comms_identity_root(Some(declared))
-                .map_err(MobRuntimeError::InvalidConfig)?;
+            let root = meerkat::session_comms_identity_root_in(declared);
             let reported = session_service.session_comms_identity_root();
             if let Some(overridden) = reported_root_overridden(&root, &reported) {
                 tracing::warn!(

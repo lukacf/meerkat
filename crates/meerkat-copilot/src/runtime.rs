@@ -1934,11 +1934,13 @@ impl CopilotAuthorizer {
     /// The fast path, with no I/O. A cache exists only after a flight
     /// published or restored the account lease, so without one the flight
     /// reads the source. With one the AuthMachine decides: `Authorized` uses
-    /// the cache built for the current lease generation, `ReauthRequired`
-    /// fails at once when the cache was built for the refused publication,
-    /// and any other verdict (a declared freshness window ran out, the lease
-    /// was released, a publication of another token was refused) has the
-    /// flight read the source again.
+    /// the cache built for the current lease generation, and any other
+    /// verdict has the flight read the source again (through the paced check
+    /// for a source that runs something). `ReauthRequired` first drops the
+    /// cache built for the refused publication: the refusal may have come
+    /// from another account state on the same lease (another provider
+    /// registry, another credential store), and this one must still read its
+    /// source to heal when that source does.
     fn observe_operator_lease(&self) -> Result<OperatorObservation, ProviderAuthError> {
         let auth_lease = self.auth_lease()?;
         let lease_key = self.lease_key();
@@ -1960,12 +1962,7 @@ impl CopilotAuthorizer {
                 None => OperatorFlight::Reload,
             },
             CredentialUseDisposition::ReauthRequired => {
-                if self.fresh_cached(generation, now).is_some() {
-                    return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired));
-                }
-                // Another publication was refused (another machine read a
-                // newer token): the source is read again, which fails fast
-                // for that refused value and publishes a new one.
+                self.drop_cache_for_source_generation(generation);
                 OperatorFlight::Reload
             }
             CredentialUseDisposition::RefreshRequired
@@ -1974,6 +1971,18 @@ impl CopilotAuthorizer {
             | CredentialUseDisposition::AlreadyRefreshing => OperatorFlight::Reload,
         };
         Ok(OperatorObservation::Flight { generation, flight })
+    }
+
+    /// Drop the cached account built for the lease's publication
+    /// `source_generation`, when that is what the cache holds.
+    fn drop_cache_for_source_generation(&self, source_generation: u64) {
+        let mut cache = self.state.cache.write();
+        if cache
+            .as_ref()
+            .is_some_and(|cached| cached.source_generation == source_generation)
+        {
+            *cache = None;
+        }
     }
 
     async fn refresh_operator_token_as_leader(
@@ -5866,6 +5875,83 @@ mod tests {
             assert_eq!(resolve().await.err(), reauth);
             assert_eq!(command_runs(directory.path()), 3);
             assert_eq!(harness.transport.request_count(), 1);
+        }
+
+        /// An account state whose cache was built for a publication that
+        /// another account state on the same lease saw refused (another
+        /// provider registry, here another runtime) is not stuck on that
+        /// cache: it drops it and reads its own source through the paced
+        /// check, so once its pause is over it reads the healed source and
+        /// heals, with no other publication on the lease.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_refusal_seen_by_another_account_state_lets_this_one_heal() {
+            let directory = tempfile::tempdir().expect("command directory");
+            std::fs::write(directory.path().join("token"), user_token("revoked"))
+                .expect("write the token");
+            // This runtime only sees GitHub refuse the token.
+            let harness = Harness::new([Ok(json_response(
+                401,
+                serde_json::json!({"message": "Bad credentials"}),
+            ))]);
+            let other_transport = OutcomeTransport::new([
+                Ok(svc_bot()),
+                Ok(models_response()),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            let other = CopilotRuntime::with_transport(other_transport.clone());
+            let source = token_file_command(directory.path());
+            let cached = other
+                .resolve(
+                    &token_binding(CopilotProviderRoute::Anthropic, source.clone()),
+                    &harness.operator.env,
+                )
+                .await
+                .expect("the token resolves before GitHub revokes it");
+            let authorizer = cached.concrete_authorizer();
+
+            let reauth = Some(ProviderAuthError::Auth(AuthError::UserReauthRequired));
+            assert_eq!(
+                harness
+                    .resolve_from(CopilotProviderRoute::OpenAi, source.clone())
+                    .await
+                    .err(),
+                reauth
+            );
+            assert_eq!(
+                harness.operator.lease().phase,
+                Some(AuthLeasePhase::ReauthRequired)
+            );
+            assert_eq!(command_runs(directory.path()), 2);
+
+            // The cached account state reads its source again: the same
+            // refused token, which starts its own pause.
+            assert_eq!(
+                authorizer.prepare_request().await,
+                Err(AuthError::UserReauthRequired)
+            );
+            assert_eq!(command_runs(directory.path()), 3);
+
+            // The source heals; the account state reads it once the pause is
+            // over, and nothing else publishes in between.
+            let healed = user_token("healed");
+            std::fs::write(directory.path().join("token"), &healed).expect("heal the token");
+            harness.operator.advance(30);
+            assert_eq!(
+                authorizer.prepare_request().await,
+                Err(AuthError::UserReauthRequired)
+            );
+            assert_eq!(command_runs(directory.path()), 3);
+            harness.operator.advance(31);
+            authorizer
+                .prepare_request()
+                .await
+                .expect("the healed token heals the account state");
+            assert_eq!(command_runs(directory.path()), 4);
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+            assert_eq!(other_transport.request_count(), 4);
+            assert_eq!(other_transport.bearer(2), Some(format!("Bearer {healed}")));
         }
 
         /// A refusal of another account state's publication (another runtime

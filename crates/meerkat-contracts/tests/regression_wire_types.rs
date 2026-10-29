@@ -1318,3 +1318,158 @@ fn external_event_and_member_send_schemas_name_the_optional_key() {
         "mob/member_send result names its continuation receipt: {result}"
     );
 }
+
+/// Scoped tool grant results pin their field names: a family target carries
+/// the names the server took, an absent end time and an empty unreadable
+/// list are omitted, and an audit page names its next cursor.
+#[test]
+fn tool_grant_results_pin_their_field_names() {
+    use meerkat_contracts::{
+        ListToolGrantsResult, RevokeToolGrantResult, ToolGrantAuditResult, WireToolGrant,
+        WireToolGrantAuditEvent, WireToolGrantAuditRow, WireToolGrantIssuer, WireToolGrantStatus,
+        WireToolGrantSubject, WireToolGrantTarget,
+    };
+    let grant = WireToolGrant {
+        grant_id: "0b6f9f5e-8f3d-4a51-9a52-3c1f6d1e2a10".to_string(),
+        subject: WireToolGrantSubject::Session {
+            session_id: "session-1".to_string(),
+        },
+        target: WireToolGrantTarget::Family {
+            family: "shell".to_string(),
+            names: vec!["shell".to_string()],
+        },
+        issuer: WireToolGrantIssuer::Operator { caller: None },
+        reason: None,
+        status: WireToolGrantStatus::Active,
+        issued_at_ms: 1_000,
+        expires_at_ms: 61_000,
+        ended_at_ms: None,
+    };
+    let revoked = serde_json::to_value(RevokeToolGrantResult {
+        grant: grant.clone(),
+        changed: true,
+    })
+    .expect("serialize");
+    assert_eq!(
+        revoked,
+        serde_json::json!({
+            "grant": {
+                "grant_id": "0b6f9f5e-8f3d-4a51-9a52-3c1f6d1e2a10",
+                "subject": {"kind": "session", "session_id": "session-1"},
+                "target": {"kind": "family", "family": "shell", "names": ["shell"]},
+                "issuer": {"kind": "operator"},
+                "status": "active",
+                "issued_at_ms": 1000,
+                "expires_at_ms": 61000,
+            },
+            "changed": true,
+        })
+    );
+
+    let listed = serde_json::to_value(ListToolGrantsResult {
+        grants: vec![grant],
+        unreadable: Vec::new(),
+    })
+    .expect("serialize");
+    assert_eq!(listed["grants"].as_array().map(Vec::len), Some(1));
+    assert!(listed.get("unreadable").is_none(), "{listed}");
+
+    let page = serde_json::to_value(ToolGrantAuditResult {
+        rows: vec![WireToolGrantAuditRow {
+            sequence: 0,
+            at_ms: 2_000,
+            event: WireToolGrantAuditEvent::Revoked {
+                grant_id: "0b6f9f5e-8f3d-4a51-9a52-3c1f6d1e2a10".to_string(),
+                observed_at_ms: 2_000,
+                actor: None,
+                reason: Some("done".to_string()),
+            },
+        }],
+        next_sequence: Some(0),
+    })
+    .expect("serialize");
+    assert_eq!(
+        page,
+        serde_json::json!({
+            "rows": [{
+                "sequence": 0,
+                "at_ms": 2000,
+                "event": {
+                    "kind": "revoked",
+                    "grant_id": "0b6f9f5e-8f3d-4a51-9a52-3c1f6d1e2a10",
+                    "observed_at_ms": 2000,
+                    "reason": "done",
+                },
+            }],
+            "next_sequence": 0,
+        })
+    );
+}
+
+/// A `session/create` grant gate converts to the build's gate, and a field
+/// the gate does not know is refused rather than read as an empty gate.
+#[test]
+fn a_session_create_grant_gate_refuses_an_unknown_field() {
+    let gate: meerkat_contracts::WireGrantGatedTools = serde_json::from_value(serde_json::json!({
+        "families": ["shell"],
+        "tools": ["deploy"],
+    }))
+    .expect("a gate parses");
+    let gate: meerkat_core::tool_grant::GrantGatedTools = gate.into();
+    assert_eq!(
+        gate,
+        meerkat_core::tool_grant::GrantGatedTools::default()
+            .with_family("shell")
+            .with_tool("deploy")
+    );
+    assert!(
+        serde_json::from_value::<meerkat_contracts::WireGrantGatedTools>(serde_json::json!({
+            "family": ["shell"],
+        }))
+        .is_err(),
+        "a misspelled gate field must not yield an empty gate"
+    );
+}
+
+/// The `tool_grants/*` params schemas require only what a request must
+/// carry: the window, the reason and the paging fields stay optional.
+#[cfg(feature = "schema")]
+#[test]
+fn tool_grant_params_schemas_require_only_their_subject_target_or_id() {
+    fn required(schema: schemars::Schema) -> Vec<String> {
+        let value = serde_json::to_value(schema).expect("schema json");
+        let mut names: Vec<String> = value["required"]
+            .as_array()
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|name| name.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+    assert_eq!(
+        required(schemars::schema_for!(meerkat_contracts::GrantToolParams)),
+        ["subject", "target"]
+    );
+    assert_eq!(
+        required(schemars::schema_for!(
+            meerkat_contracts::RevokeToolGrantParams
+        )),
+        ["grant_id"]
+    );
+    assert_eq!(
+        required(schemars::schema_for!(
+            meerkat_contracts::ListToolGrantsParams
+        )),
+        ["subject"]
+    );
+    assert_eq!(
+        required(schemars::schema_for!(
+            meerkat_contracts::ToolGrantAuditParams
+        )),
+        ["subject"]
+    );
+}

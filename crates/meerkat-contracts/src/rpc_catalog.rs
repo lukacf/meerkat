@@ -477,6 +477,37 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         );
     }
 
+    // Scoped tool grants: served by the runtime's grant service, over grant
+    // rows only (a method never loads, registers or wakes a session).
+    if options.runtime_available {
+        methods.extend([
+            RpcMethodDescriptor::typed(
+                "tool_grants/grant",
+                "Grant a session's grant-gated tool name or built-in tool family for a bounded window",
+                "GrantToolParams",
+                "GrantToolResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "tool_grants/revoke",
+                "Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it",
+                "RevokeToolGrantParams",
+                "RevokeToolGrantResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "tool_grants/list",
+                "List a session's scoped tool grants, each due grant settled as expired first",
+                "ListToolGrantsParams",
+                "ListToolGrantsResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "tool_grants/audit",
+                "Read a page of the audit log of a session's scoped tool grants",
+                "ToolGrantAuditParams",
+                "ToolGrantAuditResult",
+            ),
+        ]);
+    }
+
     if options.blob_enabled {
         methods.extend([
             RpcMethodDescriptor::typed(
@@ -1680,6 +1711,62 @@ mod tests {
                 "{name} must advertise its concrete result type"
             );
         }
+    }
+
+    #[test]
+    fn tool_grant_methods_advertise_concrete_contracts() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        for (name, expected_params_type, expected_result_type) in [
+            ("tool_grants/grant", "GrantToolParams", "GrantToolResult"),
+            (
+                "tool_grants/revoke",
+                "RevokeToolGrantParams",
+                "RevokeToolGrantResult",
+            ),
+            (
+                "tool_grants/list",
+                "ListToolGrantsParams",
+                "ListToolGrantsResult",
+            ),
+            (
+                "tool_grants/audit",
+                "ToolGrantAuditParams",
+                "ToolGrantAuditResult",
+            ),
+        ] {
+            let descriptor = methods
+                .iter()
+                .find(|method| method.name == name)
+                .unwrap_or_else(|| panic!("missing descriptor for {name}"));
+            assert_eq!(
+                descriptor.params_type,
+                Some(expected_params_type),
+                "{name} must advertise its concrete params type"
+            );
+            assert_eq!(
+                descriptor.result_type,
+                Some(expected_result_type),
+                "{name} must advertise its concrete result type"
+            );
+            assert_eq!(
+                descriptor.request_lifecycle.resolve(None),
+                RequestLifecycle::InlineObservation,
+                "{name} is an inline call"
+            );
+        }
+
+        // The grant service is the runtime's: a surface without a runtime
+        // advertises none of them.
+        let without_runtime = rpc_method_names(RpcMethodCatalogOptions {
+            runtime_available: false,
+            ..RpcMethodCatalogOptions::documented_surface()
+        });
+        assert!(
+            !without_runtime
+                .iter()
+                .any(|method| method.starts_with("tool_grants/")),
+            "{without_runtime:?}"
+        );
     }
 
     #[test]

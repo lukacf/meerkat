@@ -52,6 +52,10 @@ const MAX_COPILOT_HTTP_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 /// minute (GitHub's rule for a limit that states no wait), at most an hour.
 const GITHUB_RATE_LIMIT_MIN_SECONDS: u64 = 60;
 const GITHUB_RATE_LIMIT_MAX_SECONDS: u64 = 3600;
+/// After GitHub refused the operator token, a source that runs something to
+/// give the token (a command, a host resolver) is read again at most this
+/// often while the refusal stands.
+const REFUSED_TOKEN_SOURCE_REREAD_SECONDS: u64 = 60;
 /// The floor of a command source's `refresh_interval_ms` on an operator-token
 /// route: the AuthMachine's refresh window, which starts that long before a
 /// declared lifetime ends.
@@ -1307,6 +1311,20 @@ struct CopilotAccountPacing {
     /// No identity lookup before this instant: GitHub rate limited the last
     /// one.
     identity_retry_at: Mutex<Option<DateTime<Utc>>>,
+    /// While GitHub's refusal of the token stands, a source that runs
+    /// something is not read again before this instant.
+    refused_source_reread: Mutex<Option<RefusedSourceReread>>,
+}
+
+/// When the source of a token GitHub refused may be read again.
+#[derive(Clone, Copy)]
+struct RefusedSourceReread {
+    /// The lease generation whose token GitHub refused. Any later
+    /// publication (another session or machine published a value, a login
+    /// stored one) ends the pause at once.
+    generation: u64,
+    /// The source is read again from this instant on.
+    at: DateTime<Utc>,
 }
 
 impl CopilotAccountState {
@@ -2002,8 +2020,13 @@ impl CopilotAuthorizer {
     /// Read the operator's GitHub token from the route's source, refuse a
     /// classic personal access token before any request, publish the token
     /// to the account lease when this account state is the lease's
-    /// publisher, and take the AuthMachine's admission.
+    /// publisher, and take the AuthMachine's admission. While GitHub's
+    /// refusal of the token stands, a source that runs something is read
+    /// again only at its paced instant ([`Self::refused_source_reread_pending`]).
     async fn load_operator_token(&self) -> Result<OperatorTokenMaterial, ProviderAuthError> {
+        if self.refused_source_reread_pending()? {
+            return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired));
+        }
         let source = &self.binding.auth_profile().source;
         let resolved = resolve_simple_secret(source, &self.env, &self.binding).await?;
         let token = resolved.trim_matches(|character: char| character.is_ascii_whitespace());
@@ -2025,6 +2048,9 @@ impl CopilotAuthorizer {
         {
             CredentialUseDisposition::Authorized => {}
             CredentialUseDisposition::ReauthRequired => {
+                // The source still gives a token the lease records as
+                // refused: it is read again at the next paced instant.
+                self.pace_refused_source(auth_lease.snapshot(&lease_key).generation);
                 return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired));
             }
             CredentialUseDisposition::RefreshRequired
@@ -2232,40 +2258,84 @@ impl CopilotAuthorizer {
         Err(self.operator_refusal(refusal))
     }
 
-    /// Publish GitHub's refusal of the operator token to the account lease.
+    /// Publish GitHub's refusal of the operator token to the account lease,
+    /// and return the lease generation the refusal applies to.
     /// The mark has nothing to do when the lease already left `valid`
     /// another way while the request was in flight: another account state
     /// published the same refusal (`reauth_required`), or a logout released
     /// the lease. The AuthMachine's credential-use verdict says which, and
     /// the refusal then surfaces as `user_reauth_required` all the same.
-    fn mark_operator_token_refused(&self) -> Result<(), ProviderAuthError> {
+    fn mark_operator_token_refused(&self) -> Result<u64, ProviderAuthError> {
         let auth_lease = self.auth_lease()?;
         let lease_key = self.lease_key();
-        let Err(error) = auth_lease.mark_reauth_required(&lease_key) else {
-            return Ok(());
-        };
-        match auth_lease
-            .resolve_credential_use_admission(&lease_key, CredentialUseIntent::UseCredential)
-            .map_err(credential_use_admission_error)?
-        {
-            CredentialUseDisposition::ReauthRequired | CredentialUseDisposition::LeaseAbsent => {
-                Ok(())
+        if let Err(error) = auth_lease.mark_reauth_required(&lease_key) {
+            match auth_lease
+                .resolve_credential_use_admission(&lease_key, CredentialUseIntent::UseCredential)
+                .map_err(credential_use_admission_error)?
+            {
+                CredentialUseDisposition::ReauthRequired
+                | CredentialUseDisposition::LeaseAbsent => {}
+                CredentialUseDisposition::Authorized
+                | CredentialUseDisposition::RefreshRequired
+                | CredentialUseDisposition::RefreshDisallowed
+                | CredentialUseDisposition::AlreadyRefreshing => {
+                    return Err(ProviderAuthError::SourceResolutionFailed(format!(
+                        "Copilot token refusal could not be published to AuthMachine: {error}"
+                    )));
+                }
             }
-            CredentialUseDisposition::Authorized
-            | CredentialUseDisposition::RefreshRequired
-            | CredentialUseDisposition::RefreshDisallowed
-            | CredentialUseDisposition::AlreadyRefreshing => {
-                Err(ProviderAuthError::SourceResolutionFailed(format!(
-                    "Copilot token refusal could not be published to AuthMachine: {error}"
-                )))
-            }
+        }
+        Ok(auth_lease.snapshot(&lease_key).generation)
+    }
+
+    /// Pace the next read of the source of a token GitHub refused at lease
+    /// `generation`. A source that runs something to give the token (a
+    /// command, a host resolver) is read again at most once per
+    /// [`REFUSED_TOKEN_SOURCE_REREAD_SECONDS`] while the refusal stands. An
+    /// environment variable or an inline secret is read on every request:
+    /// reading it costs nothing, and a new value heals at once.
+    fn pace_refused_source(&self, generation: u64) {
+        if source_reread_is_paced(&self.binding.auth_profile().source) {
+            *self.state.pacing.refused_source_reread.lock() = Some(RefusedSourceReread {
+                generation,
+                at: refused_source_reread_at((self.env.now)()),
+            });
         }
     }
 
+    /// Whether the route's source must not be read yet: it runs something,
+    /// GitHub refused the token the lease's publication carries, the paced
+    /// instant has not come, and nothing was published since (the lease is
+    /// at the refused generation and the AuthMachine still answers
+    /// `reauth_required`). A new publication on the lease ends the pause at
+    /// once, so a value another session, machine or login published heals
+    /// this account state on its next request.
+    fn refused_source_reread_pending(&self) -> Result<bool, ProviderAuthError> {
+        if !source_reread_is_paced(&self.binding.auth_profile().source) {
+            return Ok(false);
+        }
+        let Some(paced) = *self.state.pacing.refused_source_reread.lock() else {
+            return Ok(false);
+        };
+        if (self.env.now)() >= paced.at {
+            return Ok(false);
+        }
+        let auth_lease = self.auth_lease()?;
+        let lease_key = self.lease_key();
+        if auth_lease.snapshot(&lease_key).generation != paced.generation {
+            return Ok(false);
+        }
+        let disposition = auth_lease
+            .resolve_credential_use_admission(&lease_key, CredentialUseIntent::UseCredential)
+            .map_err(credential_use_admission_error)?;
+        Ok(disposition == CredentialUseDisposition::ReauthRequired)
+    }
+
     /// Apply a refusal: a token GitHub refused is published to the account
-    /// lease (`MarkReauthRequired`) and the account state built for an
-    /// earlier token is dropped, and a rate limit pauses the identity lookup
-    /// until GitHub's stated time. Logged without the token.
+    /// lease (`MarkReauthRequired`), the account state built for an earlier
+    /// token is dropped and a source that runs something is paced, and a
+    /// rate limit pauses the identity lookup until GitHub's stated time.
+    /// Logged without the token.
     fn operator_refusal(&self, refusal: OperatorRefusal) -> ProviderAuthError {
         tracing::warn!(
             credential_identity = %self.binding.credential_identity(),
@@ -2275,13 +2345,15 @@ impl CopilotAuthorizer {
         match &refusal {
             OperatorRefusal::TokenRejected { .. } => {
                 // The cached account belongs to a token the lease no longer
-                // carries. Without it the next call reads the source again:
-                // the same value fails fast (the AuthMachine records it as
-                // refused) and a new value, such as the next token a command
-                // mints, is published and heals the account.
+                // carries. Without it the next call reads the source again
+                // (a command or a resolver at its paced instant): the same
+                // value fails fast (the AuthMachine records it as refused)
+                // and a new value, such as the next token a command mints, is
+                // published and heals the account.
                 *self.state.cache.write() = None;
-                if let Err(error) = self.mark_operator_token_refused() {
-                    return error;
+                match self.mark_operator_token_refused() {
+                    Ok(generation) => self.pace_refused_source(generation),
+                    Err(error) => return error,
                 }
             }
             OperatorRefusal::RateLimited { until } => {
@@ -2722,6 +2794,24 @@ fn operator_models_retry_at(
         } => rate_limit_until(*retry_after, *rate_limit_reset, now),
         _ => model_discovery_deadline(now, error.retry_delay()),
     }
+}
+
+/// Whether reading `source` runs something to give the token (a command, a
+/// host resolver), so its re-reads after GitHub refused the token are paced.
+fn source_reread_is_paced(source: &CredentialSourceSpec) -> bool {
+    matches!(
+        source,
+        CredentialSourceSpec::Command { .. } | CredentialSourceSpec::ExternalResolver { .. }
+    )
+}
+
+/// The instant a refused token's paced source is read again.
+fn refused_source_reread_at(now: DateTime<Utc>) -> DateTime<Utc> {
+    i64::try_from(REFUSED_TOKEN_SOURCE_REREAD_SECONDS)
+        .ok()
+        .and_then(Duration::try_seconds)
+        .and_then(|delay| now.checked_add_signed(delay))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
 }
 
 /// A classic personal access token is refused before any request: Copilot
@@ -5537,8 +5627,9 @@ mod tests {
 
         /// A command source whose refreshed token GitHub refuses heals with
         /// the next token it mints: the refusal drops the account state built
-        /// for the earlier token, so the next request runs the command again
-        /// instead of failing on that state, and its new token is published.
+        /// for the earlier token, so once the paced minute is over the next
+        /// request runs the command again instead of failing on that state,
+        /// and its new token is published.
         #[cfg(unix)]
         #[tokio::test]
         async fn command_source_heals_after_a_refusal_at_the_refresh() {
@@ -5578,8 +5669,17 @@ mod tests {
             );
             assert_eq!(harness.transport.request_count(), 3);
 
-            // The next request runs the command again, and its token heals
-            // the account.
+            // Until the paced instant the command is not run again.
+            harness.operator.advance(30);
+            assert_eq!(
+                authorizer.prepare_request().await,
+                Err(AuthError::UserReauthRequired)
+            );
+            assert_eq!(command_runs(directory.path()), 2);
+
+            // Then the next request runs the command again, and its token
+            // heals the account.
+            harness.operator.advance(31);
             let (_, bearer) = authorize_once(&authorizer, &url).await;
             assert_eq!(
                 bearer,
@@ -5588,6 +5688,106 @@ mod tests {
             );
             assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
             assert_eq!(harness.transport.request_count(), 5);
+        }
+
+        /// A command source that counts its runs in `directory` and prints
+        /// the token the row writes to `directory/token`.
+        #[cfg(unix)]
+        fn token_file_command(directory: &std::path::Path) -> CredentialSourceSpec {
+            CredentialSourceSpec::Command {
+                program: "/bin/sh".into(),
+                args: vec![
+                    "-c".to_string(),
+                    "n=0; [ -f count ] && read n < count; n=$((n + 1)); echo \"$n\" > count; cat token"
+                        .to_string(),
+                ],
+                cwd: Some(directory.to_path_buf()),
+                env: BTreeMap::new(),
+                timeout_ms: 10_000,
+                refresh_interval_ms: None,
+            }
+        }
+
+        /// How many times a counting command ran in `directory`.
+        #[cfg(unix)]
+        fn command_runs(directory: &std::path::Path) -> u32 {
+            std::fs::read_to_string(directory.join("count"))
+                .map_or(0, |count| count.trim().parse().expect("a run count"))
+        }
+
+        /// After GitHub refuses a token from a source that runs something, the
+        /// source is read again at most once a minute while the refusal
+        /// stands: requests in between fail as `user_reauth_required` without
+        /// running the command, a read that gives the refused token again
+        /// waits another minute, and a new publication on the lease (another
+        /// session, machine or login published a value) ends the pause at
+        /// once.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn refused_command_token_rereads_are_paced() {
+            let directory = tempfile::tempdir().expect("command directory");
+            let refused = user_token("refused-command");
+            std::fs::write(directory.path().join("token"), &refused).expect("write the token");
+            let harness = Harness::new([
+                Ok(json_response(
+                    401,
+                    serde_json::json!({"message": "Bad credentials"}),
+                )),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            let source = token_file_command(directory.path());
+            let resolve = || harness.resolve_from(CopilotProviderRoute::OpenAi, source.clone());
+            let reauth = Some(ProviderAuthError::Auth(AuthError::UserReauthRequired));
+            assert_eq!(resolve().await.err(), reauth);
+            assert_eq!(command_runs(directory.path()), 1);
+            assert_eq!(harness.transport.request_count(), 1);
+
+            // Within the minute no request runs the command.
+            assert_eq!(resolve().await.err(), reauth);
+            harness.operator.advance(59);
+            assert_eq!(resolve().await.err(), reauth);
+            assert_eq!(
+                command_runs(directory.path()),
+                1,
+                "no read before the paced instant"
+            );
+
+            // At the paced instant the command runs. It gives the refused
+            // token again, which fails fast and waits another minute.
+            harness.operator.advance(2);
+            assert_eq!(resolve().await.err(), reauth);
+            assert_eq!(command_runs(directory.path()), 2);
+            harness.operator.advance(30);
+            assert_eq!(resolve().await.err(), reauth);
+            assert_eq!(command_runs(directory.path()), 2);
+            assert_eq!(
+                harness.transport.request_count(),
+                1,
+                "the refused token is never sent again"
+            );
+
+            // Another session publishes a new token on the lease: the pause
+            // ends at once, and the command's new token heals the account.
+            let rotated = user_token("rotated-command");
+            std::fs::write(directory.path().join("token"), &rotated).expect("rotate the token");
+            harness
+                .operator
+                .auth_lease
+                .publish_source_credential(
+                    &lease_key(),
+                    &CredentialFingerprint::of_secret(&rotated),
+                    u64::MAX,
+                )
+                .expect("another session publishes the new token");
+            resolve().await.expect("the new token heals the account");
+            assert_eq!(command_runs(directory.path()), 3);
+            assert_eq!(harness.transport.request_count(), 3);
+            assert_eq!(
+                harness.transport.bearer(1),
+                Some(format!("Bearer {rotated}"))
+            );
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
         }
 
         /// A refusal of another account state's publication (another runtime

@@ -375,7 +375,7 @@ What each refusal looks like:
 | No token in any of the variables (one that is set but empty counts as unset) | `missing_secret` | none |
 | A classic personal access token | `unsupported_combination` (`auth = "classic_personal_access_token"`) | none |
 | A command source whose `refresh_interval_ms` is `60000` or less | `unsupported_combination` | none: the command does not run |
-| GitHub refused the token itself: revoked, expired or invalid | `user_reauth_required` | the `github_copilot` account is `reauth_required` until a different token value appears or the process restarts: each request reads the source again, so a command or resolver that mints a new token heals it; replace the token rather than signing in again |
+| GitHub refused the token itself: revoked, expired or invalid | `user_reauth_required` | the `github_copilot` account is `reauth_required` until a different token value appears or the process restarts: an environment variable is read again on every request and a command or resolver at most once a minute, and a new token heals the account as soon as it is read; replace the token rather than signing in again |
 | Copilot refused the account: no seat, no Copilot Requests permission, an organization policy, chat disabled | `refresh_failed`, with GitHub's message | none: the same token works once that is fixed |
 | Rate limited, or GitHub unavailable | `refresh_failed` | the identity lookup waits for the time GitHub states, for every session of the account; a rate-limited model listing fails nothing and is asked again after that time |
 | Logged out (`rkat auth logout global:copilot_openai`) | `lease_absent` | until a different token value appears or the process restarts |

@@ -7346,7 +7346,8 @@ fn fork_source_access_violation(view: Option<&AccessView>, source: &str) -> Opti
 /// A side chat's lineage is its source's and one link more, so a source whose
 /// lineage already fills the access rules' walk (the agent and seven
 /// ancestors) is refused too: its side chat's lineage would go past the walk,
-/// and no one but an admin could open it.
+/// and no one but an admin could open it. The bound is one for every caller,
+/// an admin included: no fork makes a side chat past the walk.
 fn side_chat_source_access_violation(
     view: Option<&AccessView>,
     source: &str,

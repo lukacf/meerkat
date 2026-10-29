@@ -2377,7 +2377,9 @@ async fn send_gate_without_runtime(
 /// A source whose lineage already fills the access rules' walk (the agent
 /// and seven ancestors) is refused for a fork: its side chat's lineage would
 /// go one link past the walk, and no one but an admin could open it. A source
-/// one link shorter forks.
+/// one link shorter forks. The bound is one for every caller, an admin
+/// included, and a source named by its current runtime alias is counted as
+/// the source.
 #[test]
 fn a_source_whose_lineage_fills_the_walk_is_refused_for_a_fork() -> TestResult {
     let controller = enforced(vec![grant(
@@ -2419,6 +2421,33 @@ fn a_source_whose_lineage_fills_the_walk_is_refused_for_a_fork() -> TestResult {
     assert!(
         side_chat_source_access_violation(Some(&view), "a1").is_none(),
         "a side chat of a source with six ancestors fits the walk"
+    );
+    // One bound for every caller: an admin, whose own decisions pass the
+    // bound, is refused that fork too.
+    let admin = controller.view_for_subject(Some("root@example.test"));
+    assert_eq!(
+        side_chat_source_access_violation(Some(&admin), "a0").and_then(|refused| refused.data),
+        Some(json!({
+            "kind": "access_denied",
+            "action": ACTION_AGENT_SPAWN,
+            "resource": "a0",
+            "reason": "lineage_too_deep",
+        })),
+        "an admin is refused a fork past the walk"
+    );
+    // A source's current runtime alias counts the source's lineage, as
+    // every access decision on the alias judges it as the source.
+    controller.record_current_runtime_aliases([("a0".to_string(), Some("rt:a0:2".to_string()))]);
+    assert!(
+        view.allows_agent(ACTION_AGENT_SEND, "rt:a0:2"),
+        "the current alias is decided as the source"
+    );
+    assert_eq!(
+        side_chat_source_access_violation(Some(&view), "rt:a0:2")
+            .and_then(|refused| refused.data)
+            .map(|data| data["reason"].clone()),
+        Some(json!("lineage_too_deep")),
+        "the source's current runtime alias is refused as the source"
     );
     Ok(())
 }

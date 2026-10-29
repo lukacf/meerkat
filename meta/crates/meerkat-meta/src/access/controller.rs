@@ -1020,9 +1020,16 @@ impl AccessView {
 
     /// How many links an access decision on `identity` walks: the agent and
     /// the ancestors the cached attributes name, at most
-    /// [`MAX_LINEAGE_DEPTH`]; 0 for an identity the cache does not know.
+    /// [`MAX_LINEAGE_DEPTH`]; 0 for an identity the cache does not know. A
+    /// runtime alias counts as the member it names while it is that
+    /// identity's current incarnation, as [`Self::decide_agent`] judges it,
+    /// and as unknown otherwise.
     pub(crate) fn lineage_links(&self, identity: &str) -> usize {
-        self.lineage_for(identity).len()
+        match self.runtime_alias_member(identity) {
+            RuntimeAliasMember::NotAnAlias => self.lineage_for(identity).len(),
+            RuntimeAliasMember::Current(member_key) => self.lineage_for(&member_key).len(),
+            RuntimeAliasMember::NotCurrent => 0,
+        }
     }
 
     /// Resolve the agent's cached attributes followed by its ancestors (the

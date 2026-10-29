@@ -550,6 +550,9 @@ impl FirstFixture {
                 .unwrap()
                 .unwrap();
             assert_eq!(member.bridge_session_id(), Some(&session));
+            // The restore seats the identity without building it, so the
+            // member is woken first for its actor to exist.
+            runtime.materialize(&identity).await.unwrap();
             let actor = service.live_session_actor_witness(&session).await.unwrap();
             let pin = service
                 .pin_controller_client_for_actor(&actor)

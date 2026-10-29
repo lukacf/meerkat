@@ -838,6 +838,14 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             if let Some(fault) = &fault {
                 assert!(fault.helper_session.set(sessions[1].clone()).is_ok());
             }
+            // The roster pass seats each identity without building it, so the
+            // first member is woken for its actor to exist.
+            native
+                .identity_runtime()
+                .unwrap()
+                .materialize(&roster[0].identity)
+                .await
+                .unwrap();
             Self::publish_fixture_controller(&service, &machine, &sessions[0]).await;
             (sessions[0].clone(), sessions)
         } else {

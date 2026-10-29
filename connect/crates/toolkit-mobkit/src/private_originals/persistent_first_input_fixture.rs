@@ -704,6 +704,14 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             }
             // Each activation publishes the current actor's actual pin. No
             // controller witness is retained across the joined close/reopen.
+            // The roster pass seats the identity without building it, so the
+            // member is woken first for its actor to exist.
+            native
+                .identity_runtime()
+                .unwrap()
+                .materialize(&identity)
+                .await
+                .unwrap();
             Self::publish_fixture_controller(&service, &machine, &session).await;
             session
         } else {

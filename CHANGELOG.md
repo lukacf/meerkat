@@ -50,8 +50,9 @@ them.
   and `AuthMachineInput::Acquire` gains the field
   `credential_material_fingerprint` (`None` for every existing publisher);
   `AuthMachineInput` and `AuthMachineInputVariant` gain
-  `ResolveSourceCredentialPublication`, `AuthMachineEffect` gains
-  `SourceCredentialPublicationResolved`, and the enum
+  `ResolveSourceCredentialPublication`, `AuthMachineEffect` and
+  `AuthMachineEffectVariant` gain `SourceCredentialPublicationResolved`, each
+  appended last, and the enum
   `SourceCredentialPublicationDisposition` (`Publish`, `AlreadyPublished`) is
   new, in the `auth_machine::dsl` bridge copies (meerkat-runtime) and the
   catalog types (meerkat-machine-schema `catalog::dsl::auth_machine`). The

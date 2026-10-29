@@ -1359,15 +1359,18 @@ jobs:
     # lld-link, the Windows SDK). The native windows-latest build ran 190 to
     # 275 minutes on every release from v0.8.11 to v0.8.39 and lost its runner
     # at 162 minutes on v0.8.40, because Windows has no memory overcommit and
-    # the generated machine crates peak above 13 GB. The same build takes
-    # about 20 minutes at four jobs on Linux; verify_windows_binaries then
-    # proves the result on a real Windows runner.
+    # the generated machine crates peak above 13 GB. On Linux at four jobs the
+    # same build took 72 to 81 minutes on the v0.9.4 to v0.9.6 prebuilds, and
+    # the v0.9.7 prebuild was cancelled at the former 90-minute cap during
+    # Build and package, so the cap is 150 minutes. The cross-compiled build
+    # still needs verification on a real Windows runner:
+    # verify_windows_binaries runs the binaries there.
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
       attestations: write
-    timeout-minutes: 90
+    timeout-minutes: 150
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:

@@ -775,9 +775,11 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         Provider::OpenAI
     }
 
-    /// API-key and static-bearer credentials are observed read-only through
-    /// the same source table [`resolve_simple_secret`] resolves. OAuth,
-    /// Copilot, and external-authorizer credentials are resolved at open.
+    /// API-key and static-bearer credentials, and the operator GitHub token of
+    /// a Copilot route, are observed read-only through the same source table
+    /// [`resolve_simple_secret`] resolves, without a network request. OAuth,
+    /// the Copilot device sign-in, and external-authorizer credentials are
+    /// resolved at open.
     async fn observe_credential_readiness(
         &self,
         binding: &ValidatedBinding,
@@ -792,7 +794,8 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             NormalizedAuthMethod::OpenAi(
                 OpenAiAuthMethod::ApiKey
                 | OpenAiAuthMethod::AzureApiKey
-                | OpenAiAuthMethod::StaticBearer,
+                | OpenAiAuthMethod::StaticBearer
+                | OpenAiAuthMethod::GitHubCopilotToken,
             ) => Ok(
                 observe_simple_secret_readiness(&binding.auth_profile().source, env, binding).await,
             ),
@@ -1283,6 +1286,43 @@ mod tests {
     #[test]
     fn provider_id_is_openai() {
         assert_eq!(OpenAiProviderRuntime.provider_id(), Provider::OpenAI);
+    }
+
+    /// T16: the operator GitHub token of a Copilot route reports readiness
+    /// from its source, with no network request: missing without any of its
+    /// variables, ready with one.
+    #[tokio::test]
+    async fn github_copilot_token_readiness_reads_its_source() {
+        let binding = ProviderRuntimeCatalog::validate_binding(
+            &auth_binding(),
+            &backend("copilot"),
+            &AuthProfile {
+                source: meerkat_core::CredentialSourceSpec::Env {
+                    env: "COPILOT_GITHUB_TOKEN".into(),
+                    fallback: vec!["GH_TOKEN".into(), "GITHUB_TOKEN".into()],
+                },
+                ..auth("github_copilot_token")
+            },
+            &BindingPolicy::default(),
+        )
+        .expect("a valid Copilot token route");
+
+        assert_eq!(
+            OpenAiProviderRuntime
+                .observe_credential_readiness(&binding, &ResolverEnvironment::testing())
+                .await
+                .expect("readiness"),
+            CredentialReadiness::Missing
+        );
+        let present = ResolverEnvironment::testing()
+            .with_env_lookup(|name| (name == "GH_TOKEN").then(|| "github_pat_ready".to_string()));
+        assert_eq!(
+            OpenAiProviderRuntime
+                .observe_credential_readiness(&binding, &present)
+                .await
+                .expect("readiness"),
+            CredentialReadiness::Ready
+        );
     }
 
     #[test]

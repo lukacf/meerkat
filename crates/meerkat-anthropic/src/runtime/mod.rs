@@ -26,7 +26,8 @@ use meerkat_auth_core::resolver::{
     prepare_managed_store_oauth_refresh_under_lock, resolve_oauth_login_credential_disposition,
 };
 use meerkat_auth_core::resolver::{
-    finalize_auth_metadata, resolve_external_authorizer, resolve_simple_secret,
+    finalize_auth_metadata, observe_simple_secret_readiness, resolve_external_authorizer,
+    resolve_simple_secret,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::{
@@ -49,7 +50,7 @@ use meerkat_llm_core::provider_runtime::errors::{
     ProviderAuthError, ProviderBindingError, ProviderClientError,
 };
 use meerkat_llm_core::provider_runtime::registry::ResolverEnvironment;
-use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
+use meerkat_llm_core::provider_runtime::runtime::{CredentialReadiness, ProviderRuntime};
 
 use meerkat_core::lifecycle::run_primitive::AnthropicCacheControlPolicy;
 
@@ -432,6 +433,25 @@ impl AnthropicProviderRuntime {
 impl ProviderRuntime for AnthropicProviderRuntime {
     fn provider_id(&self) -> Provider {
         Provider::Anthropic
+    }
+
+    /// The operator GitHub token of a Copilot route is observed read-only
+    /// through the source table [`resolve_simple_secret`] resolves, without a
+    /// network request. Every other method is resolved at open.
+    async fn observe_credential_readiness(
+        &self,
+        binding: &ValidatedBinding,
+        env: &ResolverEnvironment,
+    ) -> Result<CredentialReadiness, ProviderAuthError> {
+        match binding.auth() {
+            NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::GitHubCopilotToken) => Ok(
+                observe_simple_secret_readiness(&binding.auth_profile().source, env, binding).await,
+            ),
+            NormalizedAuthMethod::Anthropic(_) => Ok(CredentialReadiness::MaterializedAtOpen),
+            _ => Err(ProviderAuthError::Binding(
+                ProviderBindingError::ProviderMismatch,
+            )),
+        }
     }
 
     async fn resolve_binding(
@@ -1138,6 +1158,62 @@ mod tests {
     use super::*;
     #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
     use meerkat_core::{AuthProfile, BackendProfile, BindingPolicy};
+
+    /// T16: the operator GitHub token of a Copilot route reports readiness
+    /// from its source, with no network request: missing without any of its
+    /// variables, ready with one.
+    #[tokio::test]
+    async fn github_copilot_token_readiness_reads_its_source() {
+        let auth_binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::global(),
+            binding: meerkat_core::BindingId::parse("copilot_anthropic").expect("valid binding"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        let binding = ProviderRuntimeCatalog::validate_binding(
+            &auth_binding,
+            &meerkat_core::BackendProfile {
+                id: "copilot_anthropic".into(),
+                provider: Provider::Anthropic,
+                backend_kind: "copilot".into(),
+                base_url: None,
+                options: serde_json::Value::Null,
+                server: None,
+            },
+            &meerkat_core::AuthProfile {
+                id: "copilot_anthropic".into(),
+                provider: Provider::Anthropic,
+                auth_method: "github_copilot_token".into(),
+                source: meerkat_core::CredentialSourceSpec::Env {
+                    env: "COPILOT_GITHUB_TOKEN".into(),
+                    fallback: vec!["GH_TOKEN".into(), "GITHUB_TOKEN".into()],
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+            &meerkat_core::BindingPolicy::default(),
+        )
+        .expect("a valid Copilot token route");
+        let runtime = AnthropicProviderRuntime::default();
+
+        assert_eq!(
+            runtime
+                .observe_credential_readiness(&binding, &ResolverEnvironment::testing())
+                .await
+                .expect("readiness"),
+            CredentialReadiness::Missing
+        );
+        let present = ResolverEnvironment::testing().with_env_lookup(|name| {
+            (name == "COPILOT_GITHUB_TOKEN").then(|| "github_pat_ready".to_string())
+        });
+        assert_eq!(
+            runtime
+                .observe_credential_readiness(&binding, &present)
+                .await
+                .expect("readiness"),
+            CredentialReadiness::Ready
+        );
+    }
     use meerkat_llm_core::provider_runtime::ProviderRuntimeCatalog;
     #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
     use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;

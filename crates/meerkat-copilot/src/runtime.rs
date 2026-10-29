@@ -8,18 +8,24 @@ use chrono::{DateTime, Duration, Utc};
 use futures::StreamExt;
 use meerkat_auth_core::auth_oauth::{exchange_refresh_token, oauth_refresh_error};
 use meerkat_auth_core::resolver::{
-    LockedManagedStoreOAuthRefresh, ManagedStoreOAuthRefreshPreparationSlot,
-    OAuthLoginCredentialAdmission, load_managed_store_tokens_with_lifecycle,
-    prepare_managed_store_oauth_refresh_under_lock, resolve_oauth_login_credential_disposition,
+    CredentialFingerprint, LockedManagedStoreOAuthRefresh, ManagedStoreOAuthRefreshPreparationSlot,
+    OAuthLoginCredentialAdmission, credential_fingerprint,
+    load_managed_store_tokens_with_lifecycle, prepare_managed_store_oauth_refresh_under_lock,
+    resolve_oauth_login_credential_disposition, resolve_simple_secret,
+    simple_secret_source_publishes_lifecycle,
 };
 use meerkat_core::auth::{
     PersistedAuthMode, PersistedTokens, ProviderAuthPersistence, RefreshError, RefreshFn,
     TokenStoreAccess,
 };
+use meerkat_core::handles::{
+    AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, CredentialUseDisposition, CredentialUseIntent,
+    DslTransitionError, GeneratedAuthLeaseHandle, LeaseKey,
+};
 use meerkat_core::{
-    AuthCredentialIdentity, AuthError, AuthMetadata, HttpAuthorizationReceipt,
-    HttpAuthorizationRequest, HttpAuthorizationResponse, HttpAuthorizationResponseAction,
-    HttpAuthorizer, Provider,
+    AuthCredentialIdentity, AuthError, AuthMetadata, CredentialSourceSpec,
+    HttpAuthorizationReceipt, HttpAuthorizationRequest, HttpAuthorizationResponse,
+    HttpAuthorizationResponseAction, HttpAuthorizer, Provider,
 };
 use meerkat_llm_core::provider_runtime::{
     ProviderAuthError, ProviderClientError, ResolverEnvironment, ValidatedBinding,
@@ -28,8 +34,10 @@ use parking_lot::{Mutex, RwLock};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::protocol::{
-    CopilotBackendConfig, CopilotEndpoint, CopilotModelSnapshot, CopilotModelsEnvelope,
-    CopilotTokenEnvelope, CopilotTokenErrorEnvelope, DEFAULT_COPILOT_API_BASE,
+    CopilotAccountIdentity, CopilotBackendConfig, CopilotCredentialMode, CopilotEndpoint,
+    CopilotModelSnapshot, CopilotModelsEnvelope, CopilotTokenEnvelope, CopilotTokenErrorEnvelope,
+    CopilotUserEnvelope, DEFAULT_COPILOT_API_BASE, GitHubErrorEnvelope, GitHubTokenKind,
+    copilot_user_url,
 };
 
 const CAPI_EXPIRY_SKEW_SECONDS: i64 = 300;
@@ -39,6 +47,17 @@ const MODEL_DISCOVERY_MAX_RETRY_SECONDS: u64 = 3600;
 const BEARER_SCHEME: &str = "Bearer";
 const COPILOT_HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 const MAX_COPILOT_HTTP_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+/// The pause after GitHub rate limits the operator-token identity lookup: at
+/// least a minute (GitHub's rule for a limit that states no wait), at most an
+/// hour.
+const IDENTITY_RATE_LIMIT_MIN_SECONDS: u64 = 60;
+const IDENTITY_RATE_LIMIT_MAX_SECONDS: u64 = 3600;
+/// GitHub's error `message` is quoted in errors with control characters
+/// removed and at most this many characters.
+const GITHUB_ERROR_MESSAGE_MAX_CHARS: usize = 200;
+/// The operator token goes to no Copilot API host outside this domain.
+const COPILOT_API_DOMAIN: &str = "githubcopilot.com";
+const COPILOT_API_HOST_SUFFIX: &str = ".githubcopilot.com";
 
 #[derive(Clone, Copy)]
 enum CopilotRequestIntent {
@@ -59,6 +78,10 @@ struct CopilotHttpResponse {
     status: u16,
     body: Vec<u8>,
     retry_after: Option<StdDuration>,
+    /// Whether GitHub rate limited the request ([`github_rate_limited`]).
+    rate_limited: bool,
+    /// `x-ratelimit-reset`: the epoch second the primary rate limit resets.
+    rate_limit_reset: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -181,6 +204,13 @@ impl CopilotHttpTransport for ReqwestCopilotHttpTransport {
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.parse::<u64>().ok())
                 .map(StdDuration::from_secs);
+            let rate_limit_reset = header_text(response.headers(), "x-ratelimit-reset")
+                .and_then(|value| value.parse::<u64>().ok());
+            let rate_limited = github_rate_limited(
+                status,
+                header_text(response.headers(), "x-ratelimit-remaining"),
+                retry_after.is_some(),
+            );
             let mut stream = response.bytes_stream();
             let mut body = Vec::new();
             while let Some(chunk) = stream.next().await {
@@ -194,11 +224,27 @@ impl CopilotHttpTransport for ReqwestCopilotHttpTransport {
                 status,
                 body,
                 retry_after,
+                rate_limited,
+                rate_limit_reset,
             })
         })
         .await
         .map_err(|_| CopilotHttpTransportError::Timeout)?
     }
+}
+
+fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+}
+
+/// GitHub's REST rate-limit rule: a 429, or a 403 whose primary limit is
+/// exhausted (`x-ratelimit-remaining: 0`) or that carries `Retry-After` (a
+/// secondary limit).
+fn github_rate_limited(status: u16, remaining: Option<&str>, has_retry_after: bool) -> bool {
+    status == 429 || (status == 403 && (remaining == Some("0") || has_retry_after))
 }
 
 pub struct CopilotRuntime {
@@ -233,17 +279,27 @@ impl CopilotRuntime {
                 "Copilot backend requires an account-scoped credential identity".to_string(),
             ));
         }
-        if binding.auth().persisted_auth_mode() != Some(PersistedAuthMode::GithubCopilotOauth) {
+        let Some(mode) = CopilotCredentialMode::for_auth_method(binding.auth()).filter(|mode| {
+            binding.auth().persisted_auth_mode() == Some(mode.persisted_auth_mode())
+        }) else {
             return Err(ProviderAuthError::SourceResolutionFailed(
-                "Copilot backend requires github_copilot_oauth".to_string(),
+                "Copilot backend requires github_copilot_oauth or github_copilot_token".to_string(),
             ));
-        }
-        if !matches!(
-            binding.auth_profile().source,
-            meerkat_core::CredentialSourceSpec::ManagedStore
-        ) {
+        };
+        // The device sign-in reads only the token its login stored. The
+        // operator token comes from any simple-secret source; the resolver
+        // refuses the ones it cannot read (`platform_default`,
+        // `file_descriptor`).
+        if mode == CopilotCredentialMode::DeviceSignIn
+            && !matches!(
+                binding.auth_profile().source,
+                CredentialSourceSpec::ManagedStore
+            )
+        {
             return Err(ProviderAuthError::SourceResolutionFailed(
-                "github_copilot_oauth requires source.kind = managed_store".to_string(),
+                "github_copilot_oauth requires source.kind = managed_store; for an \
+                 operator-supplied GitHub token use auth_method = \"github_copilot_token\""
+                    .to_string(),
             ));
         }
         let Some(persistence) = env.provider_auth_persistence() else {
@@ -263,6 +319,7 @@ impl CopilotRuntime {
             persistence.authority_id(),
             binding.credential_identity(),
             config,
+            mode,
         )?;
         let authorizer = Arc::new(CopilotAuthorizer {
             state,
@@ -270,9 +327,19 @@ impl CopilotRuntime {
             env: env.clone(),
             transport: Arc::clone(&self.transport),
         });
-        authorizer.prime().await?;
-        let metadata =
-            meerkat_auth_core::resolver::finalize_auth_metadata(binding, AuthMetadata::default())?;
+        let primed = authorizer.ensure_token().await?;
+        // An operator token names its account: the login and plan GitHub
+        // reported (none for an installation token). The device sign-in
+        // reports none.
+        let metadata = primed
+            .identity
+            .as_deref()
+            .map_or_else(AuthMetadata::default, |identity| AuthMetadata {
+                account_id: identity.login.clone(),
+                plan: identity.plan.clone(),
+                ..AuthMetadata::default()
+            });
+        let metadata = meerkat_auth_core::resolver::finalize_auth_metadata(binding, metadata)?;
         Ok(CopilotResolvedAuth {
             authorizer,
             metadata,
@@ -284,6 +351,7 @@ impl CopilotRuntime {
         persistence_id: meerkat_core::auth::ProviderAuthPersistenceId,
         identity: &AuthCredentialIdentity,
         config: CopilotBackendConfig,
+        mode: CopilotCredentialMode,
     ) -> Result<Arc<CopilotAccountState>, ProviderAuthError> {
         let key = CopilotAccountCacheKey {
             persistence_id,
@@ -292,6 +360,14 @@ impl CopilotRuntime {
         let mut accounts = self.accounts.lock();
         accounts.retain(|_, state| state.strong_count() > 0);
         if let Some(existing) = accounts.get(&key).and_then(Weak::upgrade) {
+            if existing.mode != mode {
+                return Err(ProviderAuthError::SourceResolutionFailed(format!(
+                    "Copilot routes sharing credential identity '{identity}' mix {} and {}; \
+                     one credential account holds one Copilot auth method",
+                    existing.mode.auth_method(),
+                    mode.auth_method()
+                )));
+            }
             if existing.config != config {
                 return Err(ProviderAuthError::SourceResolutionFailed(format!(
                     "Copilot routes sharing credential identity '{identity}' disagree on backend options"
@@ -299,15 +375,7 @@ impl CopilotRuntime {
             }
             return Ok(existing);
         }
-        let state = Arc::new(CopilotAccountState {
-            config,
-            cache: RwLock::new(None),
-            refresh_in_flight: AtomicBool::new(false),
-            refresh_notify: tokio::sync::Notify::new(),
-            next_refresh_flight: AtomicU64::new(1),
-            last_refresh_outcome: Mutex::new(None),
-            next_generation: AtomicU64::new(1),
-        });
+        let state = Arc::new(CopilotAccountState::new(config, mode));
         accounts.insert(key, Arc::downgrade(&state));
         Ok(state)
     }
@@ -1168,12 +1236,54 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
 
 struct CopilotAccountState {
     config: CopilotBackendConfig,
+    mode: CopilotCredentialMode,
     cache: RwLock<Option<CachedCopilotToken>>,
     refresh_in_flight: AtomicBool,
     refresh_notify: tokio::sync::Notify,
     next_refresh_flight: AtomicU64,
     last_refresh_outcome: Mutex<Option<CopilotRefreshOutcome>>,
     next_generation: AtomicU64,
+    /// Operator-token mode: no identity lookup before this instant, because
+    /// GitHub rate limited the last one.
+    identity_retry_at: Mutex<Option<DateTime<Utc>>>,
+}
+
+impl CopilotAccountState {
+    fn new(config: CopilotBackendConfig, mode: CopilotCredentialMode) -> Self {
+        Self {
+            config,
+            mode,
+            cache: RwLock::new(None),
+            refresh_in_flight: AtomicBool::new(false),
+            refresh_notify: tokio::sync::Notify::new(),
+            next_refresh_flight: AtomicU64::new(1),
+            last_refresh_outcome: Mutex::new(None),
+            next_generation: AtomicU64::new(1),
+            identity_retry_at: Mutex::new(None),
+        }
+    }
+}
+
+/// One operator token this process published to an AuthMachine lease: the
+/// lease registry (by owner), the lease, and the fingerprint of the token.
+struct PublishedOperatorToken {
+    lease_owner: Weak<dyn meerkat_core::handles::AuthLeaseHandle>,
+    lease_key: LeaseKey,
+    fingerprint: CredentialFingerprint,
+}
+
+/// The operator tokens this process published, per lease registry and lease.
+///
+/// It is the publisher's memory, not lifecycle state (the AuthMachine owns
+/// that), and it outlives the account states that read it: a token GitHub
+/// refused stays refused, and a logout stays in force, for every later
+/// session of the process until the token value changes or the process
+/// restarts. Entries of a dropped lease registry are pruned. Never holds a
+/// `managed_store` token, whose own writers publish its lease.
+fn published_operator_tokens() -> &'static Mutex<Vec<PublishedOperatorToken>> {
+    static PUBLISHED: std::sync::OnceLock<Mutex<Vec<PublishedOperatorToken>>> =
+        std::sync::OnceLock::new();
+    PUBLISHED.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 struct CopilotRefreshOutcome {
@@ -1200,6 +1310,8 @@ struct CachedCopilotToken {
     api_base: String,
     models: Option<Arc<CopilotModelSnapshot>>,
     model_discovery_refresh_at: Option<DateTime<Utc>>,
+    /// Operator-token mode: the identity the token resolved to.
+    identity: Option<Arc<CopilotAccountIdentity>>,
 }
 
 impl std::fmt::Debug for CachedCopilotToken {
@@ -1217,6 +1329,7 @@ impl std::fmt::Debug for CachedCopilotToken {
                 "model_discovery_refresh_at",
                 &self.model_discovery_refresh_at,
             )
+            .field("identity", &self.identity)
             .finish()
     }
 }
@@ -1253,6 +1366,17 @@ impl CopilotAuthorizer {
             .map(|cached| cached.api_base.clone())
     }
 
+    /// The GitHub identity the operator token of a `github_copilot_token`
+    /// route resolved to, once its account state is built. `None` for the
+    /// device sign-in.
+    pub fn account_identity(&self) -> Option<CopilotAccountIdentity> {
+        self.state
+            .cache
+            .read()
+            .as_ref()
+            .and_then(|cached| cached.identity.as_deref().cloned())
+    }
+
     fn invalidate_derived_token_generation(&self, generation: u64) {
         let mut cache = self.state.cache.write();
         if cache
@@ -1271,20 +1395,33 @@ impl CopilotAuthorizer {
             .as_ref()
             .map_or(0, |outcome| outcome.flight_id);
         loop {
-            let source = self.load_source_tokens().await?;
-            let source_generation = meerkat_core::tokens_lifecycle_published_generation(&source)
-                .ok_or_else(|| {
-                    ProviderAuthError::SourceResolutionFailed(
-                        "Copilot source credential has no AuthMachine publication generation"
-                            .to_string(),
+            let (source_generation, task) = match self.state.mode {
+                CopilotCredentialMode::DeviceSignIn => {
+                    let source = self.load_source_tokens().await?;
+                    let source_generation = meerkat_core::tokens_lifecycle_published_generation(
+                        &source,
                     )
-                })?;
-            let now = (self.env.now)();
-            if let Some(cached) = self.fresh_cached(source_generation, now)
-                && !cached.model_discovery_due
-            {
-                return Ok(cached);
-            }
+                    .ok_or_else(|| {
+                        ProviderAuthError::SourceResolutionFailed(
+                            "Copilot source credential has no AuthMachine publication generation"
+                                .to_string(),
+                        )
+                    })?;
+                    let now = (self.env.now)();
+                    if let Some(cached) = self.fresh_cached(source_generation, now)
+                        && !cached.model_discovery_due
+                    {
+                        return Ok(cached);
+                    }
+                    (source_generation, LeaderTask::Device(source))
+                }
+                CopilotCredentialMode::OperatorToken => match self.observe_operator_lease()? {
+                    OperatorObservation::Cached(cached) => return Ok(cached),
+                    OperatorObservation::Flight { generation, flight } => {
+                        (generation, LeaderTask::Operator(flight))
+                    }
+                },
+            };
             if let Some(outcome) = self.state.last_refresh_outcome.lock().as_ref()
                 && outcome.flight_id != entry_flight_id
                 && outcome.source_generation == source_generation
@@ -1317,12 +1454,30 @@ impl CopilotAuthorizer {
                 .next_refresh_flight
                 .fetch_add(1, Ordering::Relaxed);
             let _flight = CopilotRefreshFlight(self.state.as_ref());
-            let result = self
-                .refresh_token_as_leader(&source, source_generation)
-                .await;
+            let result = match &task {
+                LeaderTask::Device(source) => {
+                    self.refresh_token_as_leader(source, source_generation)
+                        .await
+                }
+                LeaderTask::Operator(flight) => {
+                    self.refresh_operator_token_as_leader(*flight, source_generation)
+                        .await
+                }
+            };
+            // An operator-token flight publishes the token it read, which can
+            // advance the lease generation: its outcome belongs to the
+            // generation it ended on, the one its waiters observe next.
+            let outcome_generation = match task {
+                LeaderTask::Device(_) => source_generation,
+                LeaderTask::Operator(_) => {
+                    self.auth_lease().map_or(source_generation, |auth_lease| {
+                        auth_lease.snapshot(&self.lease_key()).generation
+                    })
+                }
+            };
             *self.state.last_refresh_outcome.lock() = Some(CopilotRefreshOutcome {
                 flight_id,
-                source_generation,
+                source_generation: outcome_generation,
                 error: result.as_ref().err().cloned(),
             });
             return result;
@@ -1446,6 +1601,7 @@ impl CopilotAuthorizer {
             token: token.token.clone(),
             api_base: api_base.clone(),
             model_discovery_due: false,
+            identity: None,
         };
         *self.state.cache.write() = Some(CachedCopilotToken {
             generation,
@@ -1456,6 +1612,7 @@ impl CopilotAuthorizer {
             api_base,
             models,
             model_discovery_refresh_at,
+            identity: None,
         });
         Ok(view)
     }
@@ -1471,6 +1628,7 @@ impl CopilotAuthorizer {
                 model_discovery_due: cached
                     .model_discovery_refresh_at
                     .is_some_and(|refresh_at| now >= refresh_at),
+                identity: cached.identity.clone(),
             }
         })
     }
@@ -1629,26 +1787,7 @@ impl CopilotAuthorizer {
         api_base: &str,
         token: &str,
     ) -> Result<CopilotModelSnapshot, CopilotModelDiscoveryError> {
-        let url = format!("{}/models", api_base.trim_end_matches('/'));
-        let headers = self
-            .inference_headers(token, CopilotRequestIntent::ModelAccess)
-            .map_err(CopilotModelDiscoveryError::Header)?;
-        let response = self
-            .transport
-            .get(&url, headers)
-            .await
-            .map_err(CopilotModelDiscoveryError::Transport)?;
-        if !(200..=299).contains(&response.status) {
-            let body = String::from_utf8_lossy(&response.body);
-            return Err(CopilotModelDiscoveryError::Http {
-                status: response.status,
-                body: body.into_owned(),
-                retry_after: response.retry_after,
-            });
-        }
-        let body: CopilotModelsEnvelope =
-            serde_json::from_slice(&response.body).map_err(CopilotModelDiscoveryError::Decode)?;
-        CopilotModelSnapshot::from_models(body.data).map_err(CopilotModelDiscoveryError::Protocol)
+        fetch_copilot_models(self.transport.as_ref(), &self.state.config, api_base, token).await
     }
 
     fn inference_headers(
@@ -1656,37 +1795,433 @@ impl CopilotAuthorizer {
         token: &str,
         intent: CopilotRequestIntent,
     ) -> Result<HeaderMap, ProviderAuthError> {
-        let config = &self.state.config;
-        let mut headers = HeaderMap::new();
-        insert_header(
-            &mut headers,
-            "Authorization",
-            &format!("{BEARER_SCHEME} {token}"),
-        )?;
-        insert_header(
-            &mut headers,
-            "X-GitHub-Api-Version",
-            &config.inference_api_version,
-        )?;
-        insert_header(&mut headers, "User-Agent", &config.user_agent)?;
-        insert_header(&mut headers, "Editor-Version", &config.editor_version)?;
-        insert_header(
-            &mut headers,
-            "Editor-Plugin-Version",
-            &config.editor_plugin_version,
-        )?;
-        insert_header(
-            &mut headers,
-            "Copilot-Integration-Id",
-            &config.integration_id,
-        )?;
-        insert_header(&mut headers, "OpenAI-Intent", intent.as_str())?;
-        insert_header(
-            &mut headers,
-            "X-Request-Id",
-            &meerkat_core::time_compat::new_uuid_v7().to_string(),
-        )?;
-        Ok(headers)
+        copilot_inference_headers(&self.state.config, token, intent)
+    }
+}
+
+/// The account's model list: `GET {api_base}/models` with `token` as the
+/// Copilot API bearer.
+async fn fetch_copilot_models(
+    transport: &dyn CopilotHttpTransport,
+    config: &CopilotBackendConfig,
+    api_base: &str,
+    token: &str,
+) -> Result<CopilotModelSnapshot, CopilotModelDiscoveryError> {
+    let url = format!("{}/models", api_base.trim_end_matches('/'));
+    let headers = copilot_inference_headers(config, token, CopilotRequestIntent::ModelAccess)
+        .map_err(CopilotModelDiscoveryError::Header)?;
+    let response = transport
+        .get(&url, headers)
+        .await
+        .map_err(CopilotModelDiscoveryError::Transport)?;
+    if !(200..=299).contains(&response.status) {
+        let body = String::from_utf8_lossy(&response.body);
+        return Err(CopilotModelDiscoveryError::Http {
+            status: response.status,
+            body: body.into_owned(),
+            retry_after: response.retry_after,
+        });
+    }
+    let body: CopilotModelsEnvelope =
+        serde_json::from_slice(&response.body).map_err(CopilotModelDiscoveryError::Decode)?;
+    CopilotModelSnapshot::from_models(body.data).map_err(CopilotModelDiscoveryError::Protocol)
+}
+
+/// The Copilot API request headers: `token` as the bearer plus the
+/// configured client identity.
+fn copilot_inference_headers(
+    config: &CopilotBackendConfig,
+    token: &str,
+    intent: CopilotRequestIntent,
+) -> Result<HeaderMap, ProviderAuthError> {
+    let mut headers = HeaderMap::new();
+    insert_header(
+        &mut headers,
+        "Authorization",
+        &format!("{BEARER_SCHEME} {token}"),
+    )?;
+    insert_header(
+        &mut headers,
+        "X-GitHub-Api-Version",
+        &config.inference_api_version,
+    )?;
+    insert_header(&mut headers, "User-Agent", &config.user_agent)?;
+    insert_header(&mut headers, "Editor-Version", &config.editor_version)?;
+    insert_header(
+        &mut headers,
+        "Editor-Plugin-Version",
+        &config.editor_plugin_version,
+    )?;
+    insert_header(
+        &mut headers,
+        "Copilot-Integration-Id",
+        &config.integration_id,
+    )?;
+    insert_header(&mut headers, "OpenAI-Intent", intent.as_str())?;
+    insert_header(
+        &mut headers,
+        "X-Request-Id",
+        &meerkat_core::time_compat::new_uuid_v7().to_string(),
+    )?;
+    Ok(headers)
+}
+
+/// The operator-token mode (`github_copilot_token`): the operator's GitHub
+/// token is the Copilot API bearer. Its lifecycle lives in the account's
+/// AuthMachine lease; GitHub's identity lookup names the account, its plan
+/// and its API host.
+impl CopilotAuthorizer {
+    fn lease_key(&self) -> LeaseKey {
+        LeaseKey::from_credential_identity(self.binding.credential_identity())
+    }
+
+    fn auth_lease(&self) -> Result<&GeneratedAuthLeaseHandle, ProviderAuthError> {
+        self.env.auth_lease_handle.as_ref().ok_or_else(|| {
+            ProviderAuthError::SourceResolutionFailed(
+                "Copilot requires provider-auth persistence and AuthMachine authority".to_string(),
+            )
+        })
+    }
+
+    /// The fast path, with no I/O. A cache exists only after a flight
+    /// published or restored the account lease, so without one the flight
+    /// reads the source. With one the AuthMachine decides: `Authorized` uses
+    /// the cache built for the current lease generation, `ReauthRequired`
+    /// fails at once, and any other verdict (a declared freshness window ran
+    /// out, the lease was released) has the flight read the source again.
+    fn observe_operator_lease(&self) -> Result<OperatorObservation, ProviderAuthError> {
+        let auth_lease = self.auth_lease()?;
+        let lease_key = self.lease_key();
+        if self.state.cache.read().is_none() {
+            return Ok(OperatorObservation::Flight {
+                generation: auth_lease.snapshot(&lease_key).generation,
+                flight: OperatorFlight::Reload,
+            });
+        }
+        let now = (self.env.now)();
+        let disposition = observe_credential_use(auth_lease, &lease_key, now)?;
+        let generation = auth_lease.snapshot(&lease_key).generation;
+        let flight = match disposition {
+            CredentialUseDisposition::Authorized => match self.fresh_cached(generation, now) {
+                Some(cached) if !cached.model_discovery_due => {
+                    return Ok(OperatorObservation::Cached(cached));
+                }
+                Some(_) => OperatorFlight::Rediscover,
+                None => OperatorFlight::Reload,
+            },
+            CredentialUseDisposition::ReauthRequired => {
+                return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired));
+            }
+            CredentialUseDisposition::RefreshRequired
+            | CredentialUseDisposition::RefreshDisallowed
+            | CredentialUseDisposition::LeaseAbsent
+            | CredentialUseDisposition::AlreadyRefreshing => OperatorFlight::Reload,
+        };
+        Ok(OperatorObservation::Flight { generation, flight })
+    }
+
+    async fn refresh_operator_token_as_leader(
+        &self,
+        flight: OperatorFlight,
+        generation: u64,
+    ) -> Result<CachedTokenView, ProviderAuthError> {
+        if flight == OperatorFlight::Rediscover
+            && let Some(cached) = self.fresh_cached(generation, (self.env.now)())
+        {
+            if !cached.model_discovery_due {
+                return Ok(cached);
+            }
+            return self.rediscover_operator_models(cached, generation).await;
+        }
+        let material = self.load_operator_token().await?;
+        if let Some(cached) = self.fresh_cached(material.generation, (self.env.now)())
+            && cached.token == material.token
+        {
+            // Another flight already built the account for this token.
+            if !cached.model_discovery_due {
+                return Ok(cached);
+            }
+            return self
+                .rediscover_operator_models(cached, material.generation)
+                .await;
+        }
+        self.discover_operator_account(material).await
+    }
+
+    /// Read the operator's GitHub token from the route's source, refuse a
+    /// classic personal access token before any request, publish the token
+    /// to the account lease when this account state is the lease's
+    /// publisher, and take the AuthMachine's admission.
+    async fn load_operator_token(&self) -> Result<OperatorTokenMaterial, ProviderAuthError> {
+        let source = &self.binding.auth_profile().source;
+        let resolved = resolve_simple_secret(source, &self.env, &self.binding).await?;
+        let token = resolved.trim_matches(|character: char| character.is_ascii_whitespace());
+        if token.is_empty() {
+            return Err(ProviderAuthError::Auth(AuthError::MissingSecret));
+        }
+        let kind = GitHubTokenKind::classify(token);
+        if kind == GitHubTokenKind::ClassicPersonalAccessToken {
+            return Err(classic_personal_access_token_refusal());
+        }
+        let auth_lease = self.auth_lease()?;
+        let lease_key = self.lease_key();
+        if !simple_secret_source_publishes_lifecycle(source) {
+            self.publish_operator_token(auth_lease, &lease_key, token, (self.env.now)())?;
+        }
+        match auth_lease
+            .resolve_credential_use_admission(&lease_key, CredentialUseIntent::UseCredential)
+            .map_err(credential_use_admission_error)?
+        {
+            CredentialUseDisposition::Authorized => {}
+            CredentialUseDisposition::ReauthRequired => {
+                return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired));
+            }
+            CredentialUseDisposition::RefreshRequired
+            | CredentialUseDisposition::RefreshDisallowed => {
+                return Err(ProviderAuthError::Auth(AuthError::RefreshRequired));
+            }
+            CredentialUseDisposition::LeaseAbsent | CredentialUseDisposition::AlreadyRefreshing => {
+                return Err(ProviderAuthError::Auth(AuthError::LeaseAbsent));
+            }
+        }
+        Ok(OperatorTokenMaterial {
+            token: token.to_string(),
+            kind,
+            generation: auth_lease.snapshot(&lease_key).generation,
+        })
+    }
+
+    /// Publish `token` to the account lease when it is not the value this
+    /// process last published to that lease, or again when the machine asks
+    /// for a refresh (the lease's declared freshness window ran out and the
+    /// source re-asserted the token). The same value otherwise publishes
+    /// nothing, so a token GitHub refused stays refused and a logout is not
+    /// undone. The ledger lock is held across the synchronous acquire, so the
+    /// routes sharing the account never acquire twice for one token.
+    fn publish_operator_token(
+        &self,
+        auth_lease: &GeneratedAuthLeaseHandle,
+        lease_key: &LeaseKey,
+        token: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), ProviderAuthError> {
+        let fingerprint = credential_fingerprint(token);
+        let lease_owner = Arc::downgrade(&auth_lease.clone_handle());
+        let mut published = published_operator_tokens().lock();
+        published.retain(|entry| entry.lease_owner.strong_count() > 0);
+        let entry = published.iter().position(|entry| {
+            Weak::ptr_eq(&entry.lease_owner, &lease_owner) && entry.lease_key == *lease_key
+        });
+        let unchanged = entry.is_some_and(|index| published[index].fingerprint == fingerprint);
+        let republish = !unchanged
+            || observe_credential_use(auth_lease, lease_key, now)?
+                == CredentialUseDisposition::RefreshRequired;
+        if republish {
+            auth_lease
+                .acquire_lease(lease_key, self.operator_lease_expiry(now))
+                .map_err(|error| {
+                    ProviderAuthError::SourceResolutionFailed(format!(
+                        "AuthMachine lifecycle acquire failed: {error}"
+                    ))
+                })?;
+            match entry {
+                Some(index) => published[index].fingerprint = fingerprint,
+                None => published.push(PublishedOperatorToken {
+                    lease_owner,
+                    lease_key: lease_key.clone(),
+                    fingerprint,
+                }),
+            }
+        }
+        Ok(())
+    }
+
+    /// The expiry an operator token is published with: `now` plus a `command`
+    /// source's declared `refresh_interval_ms`, so the AuthMachine asks for a
+    /// re-run before it; otherwise none (`u64::MAX`, the lease's encoding of
+    /// no expiry), since GitHub states no expiry for these tokens.
+    fn operator_lease_expiry(&self, now: DateTime<Utc>) -> u64 {
+        match &self.binding.auth_profile().source {
+            CredentialSourceSpec::Command {
+                refresh_interval_ms: Some(interval_ms),
+                ..
+            } => epoch_secs(now).saturating_add(interval_ms / 1000),
+            _ => u64::MAX,
+        }
+    }
+
+    /// Build the account state for an admitted token: the identity lookup
+    /// (skipped for an installation token), then the model list with the
+    /// token as the Copilot API bearer.
+    async fn discover_operator_account(
+        &self,
+        material: OperatorTokenMaterial,
+    ) -> Result<CachedTokenView, ProviderAuthError> {
+        let now = (self.env.now)();
+        if material.kind != GitHubTokenKind::Installation {
+            let retry_at = *self.state.identity_retry_at.lock();
+            if let Some(until) = retry_at
+                && now < until
+            {
+                return Err(OperatorRefusal::RateLimited { until }.into_provider_error());
+            }
+        }
+        let identity = match lookup_operator_identity(
+            self.transport.as_ref(),
+            &self.state.config,
+            &material.token,
+            material.kind,
+            now,
+        )
+        .await
+        {
+            Ok(identity) => identity,
+            Err(refusal) => return Err(self.operator_refusal(refusal)),
+        };
+        *self.state.identity_retry_at.lock() = None;
+        let models_result = self.fetch_models(&identity.api_base, &material.token).await;
+        if let Err(error) = &models_result
+            && let Some(refusal) = models_refusal(error, identity.installation)
+        {
+            return Err(self.operator_refusal(refusal));
+        }
+        let discovery_now = (self.env.now)();
+        let (models, model_discovery_refresh_at) = match models_result {
+            Ok(snapshot) => (
+                Some(Arc::new(snapshot)),
+                Some(model_discovery_deadline(
+                    discovery_now,
+                    StdDuration::from_secs(MODEL_DISCOVERY_REFRESH_SECONDS),
+                )),
+            ),
+            Err(error) => {
+                let retry_delay = error.retry_delay();
+                tracing::warn!(
+                    credential_identity = %self.binding.credential_identity(),
+                    error = %error,
+                    "GitHub Copilot accepted the operator token but account model discovery failed"
+                );
+                (
+                    None,
+                    Some(model_discovery_deadline(discovery_now, retry_delay)),
+                )
+            }
+        };
+        tracing::info!(
+            credential_identity = %self.binding.credential_identity(),
+            login = identity.login.as_deref().unwrap_or("none"),
+            plan = identity.plan.as_deref().unwrap_or("none"),
+            token_kind = material.kind.as_str(),
+            source_kind = credential_source_kind(&self.binding.auth_profile().source),
+            "GitHub Copilot accepted the operator token"
+        );
+        let identity = Arc::new(identity);
+        let generation = self.state.next_generation.fetch_add(1, Ordering::Relaxed);
+        let view = CachedTokenView {
+            generation,
+            token: material.token.clone(),
+            api_base: identity.api_base.clone(),
+            model_discovery_due: false,
+            identity: Some(Arc::clone(&identity)),
+        };
+        *self.state.cache.write() = Some(CachedCopilotToken {
+            generation,
+            token: material.token,
+            source_generation: material.generation,
+            source_expires_at: None,
+            refresh_at: DateTime::<Utc>::MAX_UTC,
+            api_base: identity.api_base.clone(),
+            models,
+            model_discovery_refresh_at,
+            identity: Some(identity),
+        });
+        Ok(view)
+    }
+
+    /// Refresh the cached account's model list. A 401 or 403 drops the cache:
+    /// for an installation token a 401 is GitHub refusing the token itself;
+    /// for a user token the account is rebuilt through the identity lookup,
+    /// which tells a revoked token from a Copilot refusal.
+    async fn rediscover_operator_models(
+        &self,
+        cached: CachedTokenView,
+        generation: u64,
+    ) -> Result<CachedTokenView, ProviderAuthError> {
+        let installation = cached
+            .identity
+            .as_deref()
+            .is_some_and(|identity| identity.installation);
+        let models = self.fetch_models(&cached.api_base, &cached.token).await;
+        let discovery_now = (self.env.now)();
+        let status = models
+            .as_ref()
+            .err()
+            .and_then(CopilotModelDiscoveryError::status);
+        let refusal = models
+            .as_ref()
+            .err()
+            .and_then(|error| models_refusal(error, installation));
+        {
+            let mut cache = self.state.cache.write();
+            if let Some(current) = cache.as_mut()
+                && current.source_generation == generation
+                && current.token == cached.token
+            {
+                match models {
+                    Ok(snapshot) => {
+                        current.models = Some(Arc::new(snapshot));
+                        current.model_discovery_refresh_at = Some(model_discovery_deadline(
+                            discovery_now,
+                            StdDuration::from_secs(MODEL_DISCOVERY_REFRESH_SECONDS),
+                        ));
+                    }
+                    Err(error) if refusal.is_none() => {
+                        let retry_delay = error.retry_delay();
+                        tracing::warn!(
+                            credential_identity = %self.binding.credential_identity(),
+                            error = %error,
+                            "Copilot account model discovery retry failed"
+                        );
+                        current.model_discovery_refresh_at =
+                            Some(model_discovery_deadline(discovery_now, retry_delay));
+                    }
+                    Err(_) => {
+                        *cache = None;
+                    }
+                }
+            }
+        }
+        let Some(refusal) = refusal else {
+            return Ok(cached);
+        };
+        if status == Some(401) && !installation {
+            let material = self.load_operator_token().await?;
+            return self.discover_operator_account(material).await;
+        }
+        Err(self.operator_refusal(refusal))
+    }
+
+    /// Apply a refusal: a token GitHub refused is published to the account
+    /// lease (`MarkReauthRequired`), and a rate limit pauses the identity
+    /// lookup until GitHub's stated time. Logged without the token.
+    fn operator_refusal(&self, refusal: OperatorRefusal) -> ProviderAuthError {
+        tracing::warn!(
+            credential_identity = %self.binding.credential_identity(),
+            refusal = %refusal.detail(),
+            "GitHub Copilot did not accept the operator token"
+        );
+        match &refusal {
+            OperatorRefusal::TokenRejected { .. } => {
+                if let Err(error) = self.mark_account_reauth_required() {
+                    return error;
+                }
+            }
+            OperatorRefusal::RateLimited { until } => {
+                *self.state.identity_retry_at.lock() = Some(*until);
+            }
+            OperatorRefusal::Refused(_) => {}
+        }
+        refusal.into_provider_error()
     }
 }
 
@@ -1836,6 +2371,389 @@ struct CachedTokenView {
     token: String,
     api_base: String,
     model_discovery_due: bool,
+    identity: Option<Arc<CopilotAccountIdentity>>,
+}
+
+/// The work an elected leader runs, by the account's credential mode.
+enum LeaderTask {
+    /// Device sign-in: derive a Copilot token from this stored GitHub token.
+    Device(PersistedTokens),
+    /// Operator token: the flight the fast path asked for.
+    Operator(OperatorFlight),
+}
+
+/// The operator-token flight the fast path asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperatorFlight {
+    /// The cache is admitted for the current lease generation and only its
+    /// model list is due.
+    Rediscover,
+    /// Read the source token again: there is no cache for the current lease
+    /// generation, or the AuthMachine did not admit the lease as it is.
+    Reload,
+}
+
+/// What one pass of the operator-token fast path decided.
+enum OperatorObservation {
+    /// The cache is admitted for the current lease generation and current.
+    Cached(CachedTokenView),
+    /// A flight must run for the lease generation observed.
+    Flight {
+        generation: u64,
+        flight: OperatorFlight,
+    },
+}
+
+/// An operator token read from its source and admitted by the AuthMachine.
+/// Deliberately not `Debug`: it holds the token.
+struct OperatorTokenMaterial {
+    token: String,
+    kind: GitHubTokenKind,
+    /// The account lease generation the token was admitted under.
+    generation: u64,
+}
+
+/// Why GitHub or Copilot did not accept an operator token.
+enum OperatorRefusal {
+    /// GitHub refused the token itself: revoked, expired or not a valid
+    /// token. A credential fact, published to the AuthMachine lease.
+    TokenRejected { status: u16, message: String },
+    /// GitHub or Copilot refused this identity (no seat, no Copilot Requests
+    /// permission, an organization policy), or answered unusably. Not a
+    /// credential fact: the same token can work once that is fixed.
+    Refused(String),
+    /// GitHub rate limited the identity lookup until `until`.
+    RateLimited { until: DateTime<Utc> },
+}
+
+impl OperatorRefusal {
+    fn detail(&self) -> String {
+        match self {
+            Self::TokenRejected { status, message } => {
+                format!("GitHub refused this token ({status}): {message}")
+            }
+            Self::Refused(detail) => detail.clone(),
+            Self::RateLimited { until } => format!(
+                "GitHub rate limited the Copilot identity lookup until {}",
+                until.to_rfc3339()
+            ),
+        }
+    }
+
+    fn into_provider_error(self) -> ProviderAuthError {
+        match self {
+            Self::TokenRejected { .. } => ProviderAuthError::Auth(AuthError::UserReauthRequired),
+            Self::Refused(detail) => ProviderAuthError::Auth(AuthError::RefreshFailed(detail)),
+            refusal @ Self::RateLimited { .. } => {
+                ProviderAuthError::Auth(AuthError::RefreshFailed(refusal.detail()))
+            }
+        }
+    }
+}
+
+/// Look up the Copilot identity of an operator token: `GET
+/// copilot_internal/user` with the token as the bearer. An installation token
+/// has no user, so it skips the lookup and uses the default Copilot API host.
+async fn lookup_operator_identity(
+    transport: &dyn CopilotHttpTransport,
+    config: &CopilotBackendConfig,
+    token: &str,
+    kind: GitHubTokenKind,
+    now: DateTime<Utc>,
+) -> Result<CopilotAccountIdentity, OperatorRefusal> {
+    if kind == GitHubTokenKind::Installation {
+        return Ok(CopilotAccountIdentity {
+            login: None,
+            plan: None,
+            api_base: operator_api_base(None)?,
+            installation: true,
+        });
+    }
+    let url = copilot_user_url().map_err(|error| OperatorRefusal::Refused(error.to_string()))?;
+    let headers = copilot_user_headers(config, token)
+        .map_err(|error| OperatorRefusal::Refused(error.to_string()))?;
+    let response = transport
+        .get(url.as_str(), headers)
+        .await
+        .map_err(|error| {
+            OperatorRefusal::Refused(format!("GitHub Copilot identity lookup failed: {error}"))
+        })?;
+    if response.rate_limited {
+        return Err(OperatorRefusal::RateLimited {
+            until: rate_limit_until(&response, now),
+        });
+    }
+    match response.status {
+        200..=299 => {}
+        401 => {
+            return Err(OperatorRefusal::TokenRejected {
+                status: 401,
+                message: github_error_message(&response.body),
+            });
+        }
+        status @ 400..=499 => {
+            return Err(OperatorRefusal::Refused(format!(
+                "GitHub Copilot refused this token ({status}): {}",
+                github_error_message(&response.body)
+            )));
+        }
+        status => {
+            return Err(OperatorRefusal::Refused(format!(
+                "GitHub Copilot identity lookup failed ({status}): {}",
+                github_error_message(&response.body)
+            )));
+        }
+    }
+    let user: CopilotUserEnvelope = serde_json::from_slice(&response.body).map_err(|error| {
+        OperatorRefusal::Refused(format!("invalid GitHub Copilot identity response: {error}"))
+    })?;
+    if user.chat_enabled == Some(false) {
+        return Err(OperatorRefusal::Refused(
+            "GitHub Copilot refused this token: Copilot chat is not enabled for this account"
+                .to_string(),
+        ));
+    }
+    let api_base = operator_api_base(
+        user.endpoints
+            .as_ref()
+            .and_then(|endpoints| endpoints.api.as_deref()),
+    )?;
+    Ok(CopilotAccountIdentity {
+        login: user.login,
+        plan: user.copilot_plan,
+        api_base,
+        installation: false,
+    })
+}
+
+/// Headers of the identity lookup: the GitHub token as the bearer, GitHub's
+/// API version and the configured User-Agent.
+fn copilot_user_headers(
+    config: &CopilotBackendConfig,
+    token: &str,
+) -> Result<HeaderMap, ProviderAuthError> {
+    let mut headers = HeaderMap::new();
+    insert_header(
+        &mut headers,
+        "Authorization",
+        &format!("{BEARER_SCHEME} {token}"),
+    )?;
+    insert_header(&mut headers, "Accept", "application/json")?;
+    insert_header(
+        &mut headers,
+        "X-GitHub-Api-Version",
+        &config.token_api_version,
+    )?;
+    insert_header(&mut headers, "User-Agent", &config.user_agent)?;
+    Ok(headers)
+}
+
+/// The refusal a model listing answer is for an operator token: a 401 or 403
+/// is Copilot refusing the token, and for an installation token, which has no
+/// identity lookup, a 401 is GitHub refusing the token itself. Any other
+/// failure is transient and the listing is retried later.
+fn models_refusal(
+    error: &CopilotModelDiscoveryError,
+    installation: bool,
+) -> Option<OperatorRefusal> {
+    let CopilotModelDiscoveryError::Http { status, body, .. } = error else {
+        return None;
+    };
+    let message = github_error_message(body.as_bytes());
+    match *status {
+        401 if installation => Some(OperatorRefusal::TokenRejected {
+            status: 401,
+            message,
+        }),
+        401 | 403 => Some(OperatorRefusal::Refused(format!(
+            "GitHub Copilot refused this token ({status}): {message}"
+        ))),
+        _ => None,
+    }
+}
+
+/// The Copilot API host an operator token is sent to: GitHub's per-plan
+/// `endpoints.api`, else the default host. It must be an `https`
+/// `githubcopilot.com` host without user information, since the bearer is a
+/// long-lived GitHub credential.
+fn operator_api_base(endpoint: Option<&str>) -> Result<String, OperatorRefusal> {
+    let candidate = endpoint
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .unwrap_or(DEFAULT_COPILOT_API_BASE);
+    let url = parse_api_base(candidate).map_err(OperatorRefusal::Refused)?;
+    let host = url.host_str().unwrap_or_default();
+    if host != COPILOT_API_DOMAIN && !host.ends_with(COPILOT_API_HOST_SUFFIX) {
+        return Err(OperatorRefusal::Refused(format!(
+            "GitHub Copilot named the API host '{host}', which is outside \
+             {COPILOT_API_DOMAIN}; the GitHub token is not sent there"
+        )));
+    }
+    Ok(candidate.trim_end_matches('/').to_string())
+}
+
+/// GitHub's error `message` from a response body, with control characters
+/// removed and at most [`GITHUB_ERROR_MESSAGE_MAX_CHARS`] characters. Never
+/// the raw body.
+fn github_error_message(body: &[u8]) -> String {
+    let message: String = serde_json::from_slice::<GitHubErrorEnvelope>(body)
+        .ok()
+        .and_then(|envelope| envelope.message)
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(GITHUB_ERROR_MESSAGE_MAX_CHARS)
+        .collect();
+    let message = message.trim();
+    if message.is_empty() {
+        "no message".to_string()
+    } else {
+        message.to_string()
+    }
+}
+
+/// When a rate-limited GitHub request may be retried: `Retry-After`, else the
+/// primary limit's `x-ratelimit-reset`, else a minute, clamped to between a
+/// minute and an hour.
+fn rate_limit_until(response: &CopilotHttpResponse, now: DateTime<Utc>) -> DateTime<Utc> {
+    let delay = response
+        .retry_after
+        .map(|delay| delay.as_secs())
+        .or_else(|| {
+            response
+                .rate_limit_reset
+                .map(|reset| reset.saturating_sub(epoch_secs(now)))
+        })
+        .unwrap_or(IDENTITY_RATE_LIMIT_MIN_SECONDS)
+        .clamp(
+            IDENTITY_RATE_LIMIT_MIN_SECONDS,
+            IDENTITY_RATE_LIMIT_MAX_SECONDS,
+        );
+    i64::try_from(delay)
+        .ok()
+        .and_then(Duration::try_seconds)
+        .and_then(|delay| now.checked_add_signed(delay))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
+}
+
+/// A classic personal access token is refused before any request: Copilot
+/// does not accept it.
+fn classic_personal_access_token_refusal() -> ProviderAuthError {
+    ProviderAuthError::Auth(AuthError::UnsupportedCombination {
+        backend: meerkat_core::provider_matrix::OpenAiBackendKind::Copilot
+            .as_str()
+            .to_string(),
+        auth: GitHubTokenKind::ClassicPersonalAccessToken
+            .as_str()
+            .to_string(),
+    })
+}
+
+/// Feed the AuthMachine the current time, then take its credential-use
+/// verdict. The machine decides; this never inspects the lease phase.
+fn observe_credential_use(
+    auth_lease: &GeneratedAuthLeaseHandle,
+    lease_key: &LeaseKey,
+    now: DateTime<Utc>,
+) -> Result<CredentialUseDisposition, ProviderAuthError> {
+    auth_lease
+        .observe_credential_freshness(
+            lease_key,
+            epoch_secs(now),
+            AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
+        )
+        .map_err(|error| {
+            ProviderAuthError::SourceResolutionFailed(format!(
+                "AuthMachine lifecycle freshness observation failed: {error}"
+            ))
+        })?;
+    auth_lease
+        .resolve_credential_use_admission(lease_key, CredentialUseIntent::UseCredential)
+        .map_err(credential_use_admission_error)
+}
+
+fn credential_use_admission_error(error: DslTransitionError) -> ProviderAuthError {
+    ProviderAuthError::SourceResolutionFailed(format!(
+        "AuthMachine credential-use admission classification failed: {error}"
+    ))
+}
+
+fn epoch_secs(now: DateTime<Utc>) -> u64 {
+    now.timestamp().max(0) as u64
+}
+
+/// The kind label of a credential source, for logs.
+fn credential_source_kind(source: &CredentialSourceSpec) -> &'static str {
+    match source {
+        CredentialSourceSpec::InlineSecret { .. } => "inline_secret",
+        CredentialSourceSpec::ManagedStore => "managed_store",
+        CredentialSourceSpec::Env { .. } => "env",
+        CredentialSourceSpec::ExternalResolver { .. } => "external_resolver",
+        CredentialSourceSpec::PlatformDefault => "platform_default",
+        CredentialSourceSpec::Command { .. } => "command",
+        CredentialSourceSpec::FileDescriptor { .. } => "file_descriptor",
+    }
+}
+
+/// Check a GitHub token the way a `github_copilot_token` route uses it,
+/// without AuthMachine, token-store or cache effects: refuse a classic
+/// personal access token, look up the Copilot identity (an installation token
+/// has none and uses the default API host), and list the account's models
+/// with the token as the Copilot API bearer. A host calls it before it stores
+/// a token, so a token GitHub or Copilot refuses is never stored. The token
+/// goes only to `api.github.com` and a `githubcopilot.com` API host, and no
+/// error carries it.
+pub async fn verify_operator_token(
+    token: &str,
+    config: &CopilotBackendConfig,
+) -> Result<CopilotAccountIdentity, ProviderAuthError> {
+    verify_operator_token_with(
+        &ReqwestCopilotHttpTransport::new(),
+        token,
+        config,
+        Utc::now(),
+    )
+    .await
+}
+
+async fn verify_operator_token_with(
+    transport: &dyn CopilotHttpTransport,
+    token: &str,
+    config: &CopilotBackendConfig,
+    now: DateTime<Utc>,
+) -> Result<CopilotAccountIdentity, ProviderAuthError> {
+    let token = token.trim_matches(|character: char| character.is_ascii_whitespace());
+    if token.is_empty() {
+        return Err(ProviderAuthError::Auth(AuthError::MissingSecret));
+    }
+    let kind = GitHubTokenKind::classify(token);
+    if kind == GitHubTokenKind::ClassicPersonalAccessToken {
+        return Err(classic_personal_access_token_refusal());
+    }
+    let identity = lookup_operator_identity(transport, config, token, kind, now)
+        .await
+        .map_err(OperatorRefusal::into_provider_error)?;
+    match fetch_copilot_models(transport, config, &identity.api_base, token).await {
+        Ok(_) => Ok(identity),
+        Err(error) => Err(models_refusal(&error, identity.installation).map_or_else(
+            || {
+                ProviderAuthError::Auth(AuthError::RefreshFailed(format!(
+                    "GitHub Copilot model listing failed: {error}"
+                )))
+            },
+            OperatorRefusal::into_provider_error,
+        )),
+    }
+}
+
+/// A Copilot API base: an `https` URL without user information.
+fn parse_api_base(candidate: &str) -> Result<url::Url, String> {
+    let url = url::Url::parse(candidate)
+        .map_err(|error| format!("invalid Copilot API endpoint: {error}"))?;
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return Err("Copilot API endpoint must be HTTPS without user information".to_string());
+    }
+    Ok(url)
 }
 
 fn resolve_api_base(token: &CopilotTokenEnvelope) -> Result<String, ProviderAuthError> {
@@ -1845,15 +2763,7 @@ fn resolve_api_base(token: &CopilotTokenEnvelope) -> Result<String, ProviderAuth
         .clone()
         .or_else(|| api_base_from_proxy_token(&token.token))
         .unwrap_or_else(|| DEFAULT_COPILOT_API_BASE.to_string());
-    let url = url::Url::parse(&candidate).map_err(|error| {
-        ProviderAuthError::SourceResolutionFailed(format!("invalid Copilot API endpoint: {error}"))
-    })?;
-    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
-        return Err(ProviderAuthError::SourceResolutionFailed(
-            "Copilot API endpoint must be HTTPS without user information".to_string(),
-        ));
-    }
-
+    parse_api_base(&candidate).map_err(ProviderAuthError::SourceResolutionFailed)?;
     Ok(candidate.trim_end_matches('/').to_string())
 }
 
@@ -2389,6 +3299,8 @@ mod tests {
             status,
             body: serde_json::to_vec(&body).expect("serialize scripted response"),
             retry_after: None,
+            rate_limited: false,
+            rate_limit_reset: None,
         }
     }
 
@@ -2646,10 +3558,20 @@ mod tests {
         let identity = account_identity();
         let persistence_id = persistence_id();
         let first = runtime
-            .account_state(persistence_id, &identity, CopilotBackendConfig::default())
+            .account_state(
+                persistence_id,
+                &identity,
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )
             .expect("first route");
         let second = runtime
-            .account_state(persistence_id, &identity, CopilotBackendConfig::default())
+            .account_state(
+                persistence_id,
+                &identity,
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )
             .expect("second route");
         assert!(Arc::ptr_eq(&first, &second));
     }
@@ -2659,10 +3581,20 @@ mod tests {
         let runtime = CopilotRuntime::new();
         let identity = account_identity();
         let first = runtime
-            .account_state(persistence_id(), &identity, CopilotBackendConfig::default())
+            .account_state(
+                persistence_id(),
+                &identity,
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )
             .expect("first persistence authority");
         let second = runtime
-            .account_state(persistence_id(), &identity, CopilotBackendConfig::default())
+            .account_state(
+                persistence_id(),
+                &identity,
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )
             .expect("second persistence authority");
 
         assert!(!Arc::ptr_eq(&first, &second));
@@ -2682,6 +3614,7 @@ mod tests {
                 persistence_id,
                 binding.credential_identity(),
                 CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
             )
             .expect("account state");
         let snapshot = CopilotModelSnapshot::from_models(vec![crate::CopilotModel {
@@ -2704,6 +3637,7 @@ mod tests {
             api_base: "https://first.example.test".to_string(),
             models: Some(Arc::new(snapshot)),
             model_discovery_refresh_at: None,
+            identity: None,
         });
         let authorizer = Arc::new(CopilotAuthorizer {
             state: Arc::clone(&state),
@@ -2872,6 +3806,7 @@ mod tests {
                 persistence_id,
                 binding.credential_identity(),
                 CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
             )
             .expect("account state");
         let snapshot = CopilotModelSnapshot::from_models(vec![crate::CopilotModel {
@@ -2902,6 +3837,7 @@ mod tests {
             api_base: "https://copilot.example.test".to_string(),
             models: Some(Arc::new(snapshot)),
             model_discovery_refresh_at: None,
+            identity: None,
         });
         let authorizer = Arc::new(CopilotAuthorizer {
             state: Arc::clone(&state),
@@ -3049,7 +3985,12 @@ mod tests {
         let identity = account_identity();
         let persistence_id = persistence_id();
         let _first = runtime
-            .account_state(persistence_id, &identity, CopilotBackendConfig::default())
+            .account_state(
+                persistence_id,
+                &identity,
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )
             .expect("first route");
         let conflicting = CopilotBackendConfig {
             integration_id: "different-client".to_string(),
@@ -3057,7 +3998,12 @@ mod tests {
         };
         assert!(
             runtime
-                .account_state(persistence_id, &identity, conflicting)
+                .account_state(
+                    persistence_id,
+                    &identity,
+                    conflicting,
+                    CopilotCredentialMode::DeviceSignIn,
+                )
                 .is_err()
         );
     }
@@ -3108,15 +4054,10 @@ mod tests {
             token_response("derived-two"),
             models_response(),
         ]));
-        let state = Arc::new(CopilotAccountState {
-            config: CopilotBackendConfig::default(),
-            cache: RwLock::new(None),
-            refresh_in_flight: AtomicBool::new(false),
-            refresh_notify: tokio::sync::Notify::new(),
-            next_refresh_flight: AtomicU64::new(1),
-            last_refresh_outcome: Mutex::new(None),
-            next_generation: AtomicU64::new(1),
-        });
+        let state = Arc::new(CopilotAccountState::new(
+            CopilotBackendConfig::default(),
+            CopilotCredentialMode::DeviceSignIn,
+        ));
         let authorizer = CopilotAuthorizer {
             state: Arc::clone(&state),
             binding,
@@ -3144,15 +4085,10 @@ mod tests {
         let transport = Arc::new(DelayedTransport {
             inner: ScriptedTransport::new([token_response("derived"), models_response()]),
         });
-        let state = Arc::new(CopilotAccountState {
-            config: CopilotBackendConfig::default(),
-            cache: RwLock::new(None),
-            refresh_in_flight: AtomicBool::new(false),
-            refresh_notify: tokio::sync::Notify::new(),
-            next_refresh_flight: AtomicU64::new(1),
-            last_refresh_outcome: Mutex::new(None),
-            next_generation: AtomicU64::new(1),
-        });
+        let state = Arc::new(CopilotAccountState::new(
+            CopilotBackendConfig::default(),
+            CopilotCredentialMode::DeviceSignIn,
+        ));
         let first = CopilotAuthorizer {
             state: Arc::clone(&state),
             binding: binding.clone(),
@@ -3183,15 +4119,10 @@ mod tests {
                 serde_json::json!({"message": "temporary failure"}),
             )]),
         });
-        let state = Arc::new(CopilotAccountState {
-            config: CopilotBackendConfig::default(),
-            cache: RwLock::new(None),
-            refresh_in_flight: AtomicBool::new(false),
-            refresh_notify: tokio::sync::Notify::new(),
-            next_refresh_flight: AtomicU64::new(1),
-            last_refresh_outcome: Mutex::new(None),
-            next_generation: AtomicU64::new(1),
-        });
+        let state = Arc::new(CopilotAccountState::new(
+            CopilotBackendConfig::default(),
+            CopilotCredentialMode::DeviceSignIn,
+        ));
         let first = CopilotAuthorizer {
             state: Arc::clone(&state),
             binding: binding.clone(),
@@ -3225,15 +4156,10 @@ mod tests {
             calls: AtomicU64::new(0),
             first_started: tokio::sync::Notify::new(),
         });
-        let state = Arc::new(CopilotAccountState {
-            config: CopilotBackendConfig::default(),
-            cache: RwLock::new(None),
-            refresh_in_flight: AtomicBool::new(false),
-            refresh_notify: tokio::sync::Notify::new(),
-            next_refresh_flight: AtomicU64::new(1),
-            last_refresh_outcome: Mutex::new(None),
-            next_generation: AtomicU64::new(1),
-        });
+        let state = Arc::new(CopilotAccountState::new(
+            CopilotBackendConfig::default(),
+            CopilotCredentialMode::DeviceSignIn,
+        ));
         let first = CopilotAuthorizer {
             state: Arc::clone(&state),
             binding: binding.clone(),
@@ -3276,15 +4202,10 @@ mod tests {
             models_response(),
         ]));
         let authorizer = CopilotAuthorizer {
-            state: Arc::new(CopilotAccountState {
-                config: CopilotBackendConfig::default(),
-                cache: RwLock::new(None),
-                refresh_in_flight: AtomicBool::new(false),
-                refresh_notify: tokio::sync::Notify::new(),
-                next_refresh_flight: AtomicU64::new(1),
-                last_refresh_outcome: Mutex::new(None),
-                next_generation: AtomicU64::new(1),
-            }),
+            state: Arc::new(CopilotAccountState::new(
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )),
             binding,
             env,
             transport: transport.clone(),
@@ -3411,15 +4332,10 @@ mod tests {
             json_response(503, serde_json::json!({"message": "temporary"})),
             models_response(),
         ]));
-        let state = Arc::new(CopilotAccountState {
-            config: CopilotBackendConfig::default(),
-            cache: RwLock::new(None),
-            refresh_in_flight: AtomicBool::new(false),
-            refresh_notify: tokio::sync::Notify::new(),
-            next_refresh_flight: AtomicU64::new(1),
-            last_refresh_outcome: Mutex::new(None),
-            next_generation: AtomicU64::new(1),
-        });
+        let state = Arc::new(CopilotAccountState::new(
+            CopilotBackendConfig::default(),
+            CopilotCredentialMode::DeviceSignIn,
+        ));
         let authorizer = CopilotAuthorizer {
             state: Arc::clone(&state),
             binding,
@@ -3468,15 +4384,10 @@ mod tests {
         let (auth_binding, binding) = validated_binding();
         let (env, _) = resolver_environment_with_token(&auth_binding, &github_token).await;
         let authorizer = CopilotAuthorizer {
-            state: Arc::new(CopilotAccountState {
-                config: CopilotBackendConfig::default(),
-                cache: RwLock::new(None),
-                refresh_in_flight: AtomicBool::new(false),
-                refresh_notify: tokio::sync::Notify::new(),
-                next_refresh_flight: AtomicU64::new(1),
-                last_refresh_outcome: Mutex::new(None),
-                next_generation: AtomicU64::new(1),
-            }),
+            state: Arc::new(CopilotAccountState::new(
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )),
             binding,
             env,
             transport: Arc::new(ReqwestCopilotHttpTransport::new()),
@@ -3774,6 +4685,1340 @@ mod tests {
         #[tokio::test]
         async fn capability_maintenance_preserves_typed_reauth() {
             reauth(true).await;
+        }
+    }
+
+    /// Rows of the operator-token mode (`github_copilot_token`): the
+    /// operator's GitHub token is the Copilot API bearer, its lifecycle lives
+    /// in the shared account's AuthMachine lease, and it reaches no error, log
+    /// line or debug rendering. The transports replace only GitHub's and
+    /// Copilot's HTTP; the runtime, the credential resolver and a real
+    /// generated AuthMachine run as in production.
+    mod operator_token {
+        use super::*;
+        use crate::CopilotProviderRoute;
+        use meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_URL;
+        use meerkat_core::handles::{AuthLeasePhase, AuthLeaseSnapshot};
+
+        /// Every operator token in these rows carries this canary.
+        const CANARY: &str = "c4n4ry0perat0rS3cret";
+        const BUSINESS_API: &str = "https://api.business.githubcopilot.com";
+
+        fn user_token(label: &str) -> String {
+            format!("github_pat_{CANARY}_{label}")
+        }
+
+        fn user_response(login: &str, plan: &str, api: &str) -> CopilotHttpResponse {
+            json_response(
+                200,
+                serde_json::json!({
+                    "login": login,
+                    "copilot_plan": plan,
+                    "chat_enabled": true,
+                    "endpoints": {"api": api}
+                }),
+            )
+        }
+
+        fn svc_bot() -> CopilotHttpResponse {
+            user_response("svc-bot", "business", BUSINESS_API)
+        }
+
+        fn rate_limited(status: u16, retry_after_seconds: u64) -> CopilotHttpResponse {
+            CopilotHttpResponse {
+                status,
+                body: br#"{"message":"API rate limit exceeded for user"}"#.to_vec(),
+                retry_after: Some(StdDuration::from_secs(retry_after_seconds)),
+                rate_limited: true,
+                rate_limit_reset: None,
+            }
+        }
+
+        fn env_source() -> CredentialSourceSpec {
+            CredentialSourceSpec::Env {
+                env: "COPILOT_GITHUB_TOKEN".to_string(),
+                fallback: vec!["GH_TOKEN".to_string(), "GITHUB_TOKEN".to_string()],
+            }
+        }
+
+        /// A token route of the shared `github_copilot` account, written with
+        /// wire strings.
+        fn token_binding(
+            route: CopilotProviderRoute,
+            source: CredentialSourceSpec,
+        ) -> ValidatedBinding {
+            let auth_binding = AuthBindingRef {
+                realm: RealmId::global(),
+                binding: BindingId::parse(route.binding_id()).expect("valid binding"),
+                profile: None,
+                origin: BindingOrigin::Configured,
+            };
+            let backend = BackendProfile {
+                id: route.binding_id().to_string(),
+                provider: route.provider(),
+                backend_kind: "copilot".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+                server: None,
+            };
+            let auth = AuthProfile {
+                id: route.binding_id().to_string(),
+                provider: route.provider(),
+                auth_method: "github_copilot_token".to_string(),
+                source,
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            };
+            ProviderRuntimeCatalog::validate_binding_with_credential_identity(
+                &auth_binding,
+                account_identity(),
+                &backend,
+                &auth,
+                &BindingPolicy::default(),
+            )
+            .expect("valid Copilot token route")
+        }
+
+        type Outcome = Result<CopilotHttpResponse, CopilotHttpTransportError>;
+
+        /// Answers each request with the next scripted outcome and records
+        /// the request.
+        struct OutcomeTransport {
+            outcomes: Mutex<VecDeque<Outcome>>,
+            requests: Mutex<Vec<(String, HeaderMap)>>,
+        }
+
+        impl OutcomeTransport {
+            fn new(outcomes: impl IntoIterator<Item = Outcome>) -> Arc<Self> {
+                Arc::new(Self {
+                    outcomes: Mutex::new(outcomes.into_iter().collect()),
+                    requests: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn request_count(&self) -> usize {
+                self.requests.lock().len()
+            }
+
+            fn urls(&self) -> Vec<String> {
+                self.requests
+                    .lock()
+                    .iter()
+                    .map(|(url, _)| url.clone())
+                    .collect()
+            }
+
+            fn bearer(&self, index: usize) -> Option<String> {
+                self.requests
+                    .lock()
+                    .get(index)
+                    .and_then(|(_, headers)| headers.get("authorization"))
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string)
+            }
+        }
+
+        #[async_trait]
+        impl CopilotHttpTransport for OutcomeTransport {
+            async fn get(
+                &self,
+                url: &str,
+                headers: HeaderMap,
+            ) -> Result<CopilotHttpResponse, CopilotHttpTransportError> {
+                self.requests.lock().push((url.to_string(), headers));
+                self.outcomes.lock().pop_front().unwrap_or_else(|| {
+                    Err(CopilotHttpTransportError::Scripted(
+                        "unexpected Copilot HTTP request".to_string(),
+                    ))
+                })
+            }
+        }
+
+        /// A resolver environment like a host's: provider-auth persistence, a
+        /// real generated AuthMachine lease handle, environment variables the
+        /// row sets, and a clock the row moves.
+        struct OperatorEnv {
+            env: ResolverEnvironment,
+            auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
+            vars: Arc<Mutex<BTreeMap<String, String>>>,
+            clock: Arc<Mutex<DateTime<Utc>>>,
+        }
+
+        impl OperatorEnv {
+            fn new() -> Self {
+                Self::configured(|env| env)
+            }
+
+            fn configured(
+                configure: impl FnOnce(ResolverEnvironment) -> ResolverEnvironment,
+            ) -> Self {
+                let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+                let auth_lease = machine.generated_auth_lease_handle();
+                let persistence = ProviderAuthPersistence::new(
+                    Arc::new(meerkat_auth_core::auth_store::EphemeralTokenStore::new()),
+                    Arc::new(meerkat_auth_core::auth_store::InMemoryCoordinator::new()),
+                );
+                let vars = Arc::new(Mutex::new(BTreeMap::<String, String>::new()));
+                let clock = Arc::new(Mutex::new(Utc::now()));
+                let lookup = Arc::clone(&vars);
+                let now = Arc::clone(&clock);
+                let mut env = configure(
+                    ResolverEnvironment::testing()
+                        .with_provider_auth_persistence(persistence)
+                        .with_auth_lease_handle(auth_lease.clone())
+                        .with_env_lookup(move |name| lookup.lock().get(name).cloned()),
+                );
+                env.now = Arc::new(move || *now.lock());
+                Self {
+                    env,
+                    auth_lease,
+                    vars,
+                    clock,
+                }
+            }
+
+            fn set(&self, name: &str, value: &str) {
+                self.vars.lock().insert(name.to_string(), value.to_string());
+            }
+
+            fn advance(&self, seconds: i64) {
+                let mut clock = self.clock.lock();
+                *clock += Duration::seconds(seconds);
+            }
+
+            fn lease(&self) -> AuthLeaseSnapshot {
+                self.auth_lease
+                    .snapshot(&LeaseKey::from_credential_identity(&account_identity()))
+            }
+        }
+
+        /// A runtime whose GitHub and Copilot HTTP is scripted.
+        struct Harness {
+            runtime: CopilotRuntime,
+            transport: Arc<OutcomeTransport>,
+            operator: OperatorEnv,
+        }
+
+        impl Harness {
+            fn new(outcomes: impl IntoIterator<Item = Outcome>) -> Self {
+                Self::with_env(outcomes, OperatorEnv::new())
+            }
+
+            fn with_env(
+                outcomes: impl IntoIterator<Item = Outcome>,
+                operator: OperatorEnv,
+            ) -> Self {
+                let transport = OutcomeTransport::new(outcomes);
+                let runtime = CopilotRuntime {
+                    accounts: Mutex::new(BTreeMap::new()),
+                    transport: transport.clone(),
+                };
+                Self {
+                    runtime,
+                    transport,
+                    operator,
+                }
+            }
+
+            /// Resolve a route that reads `COPILOT_GITHUB_TOKEN`, then
+            /// `GH_TOKEN`, then `GITHUB_TOKEN`.
+            async fn resolve(
+                &self,
+                route: CopilotProviderRoute,
+            ) -> Result<CopilotResolvedAuth, ProviderAuthError> {
+                self.resolve_from(route, env_source()).await
+            }
+
+            async fn resolve_from(
+                &self,
+                route: CopilotProviderRoute,
+                source: CredentialSourceSpec,
+            ) -> Result<CopilotResolvedAuth, ProviderAuthError> {
+                self.runtime
+                    .resolve(&token_binding(route, source), &self.operator.env)
+                    .await
+            }
+        }
+
+        /// Authorize one Copilot request; return its receipt and bearer.
+        async fn authorize_once(
+            authorizer: &CopilotAuthorizer,
+            url: &str,
+        ) -> (HttpAuthorizationReceipt, String) {
+            let mut headers = Vec::new();
+            let receipt = authorizer
+                .authorize_with_receipt(&mut HttpAuthorizationRequest {
+                    method: "POST",
+                    url,
+                    headers: &mut headers,
+                })
+                .await
+                .expect("authorize a Copilot request");
+            let bearer = headers
+                .into_iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value)
+                .expect("an authorization header");
+            (receipt, bearer)
+        }
+
+        /// Report a 401 for `receipt`: that account state is dropped and the
+        /// request is retried with fresh authorization.
+        async fn refuse_with_401(
+            authorizer: &CopilotAuthorizer,
+            url: &str,
+            receipt: HttpAuthorizationReceipt,
+        ) {
+            assert_eq!(
+                authorizer
+                    .observe_response_with_receipt(
+                        receipt,
+                        &HttpAuthorizationResponse {
+                            method: "POST",
+                            url,
+                            status: 401,
+                        },
+                    )
+                    .await
+                    .expect("observe the 401"),
+                HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+            );
+        }
+
+        fn refresh_failure(error: ProviderAuthError) -> String {
+            match error {
+                ProviderAuthError::Auth(AuthError::RefreshFailed(detail)) => detail,
+                other => panic!("expected refresh_failed, got {other:?}"),
+            }
+        }
+
+        /// T1: the operator's token is the Copilot API bearer for the
+        /// identity lookup, the per-plan model listing and every request; the
+        /// device flow's token exchange is never called.
+        #[tokio::test]
+        async fn operator_token_is_the_copilot_bearer() {
+            let token = user_token("primary");
+            let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
+            harness.operator.set("COPILOT_GITHUB_TOKEN", &token);
+
+            let resolved = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the operator token resolves");
+
+            let bearer = format!("Bearer {token}");
+            assert_eq!(
+                harness.transport.urls(),
+                [
+                    GITHUB_COPILOT_USER_URL.to_string(),
+                    format!("{BUSINESS_API}/models")
+                ]
+            );
+            assert_eq!(harness.transport.bearer(0), Some(bearer.clone()));
+            assert_eq!(harness.transport.bearer(1), Some(bearer.clone()));
+            let authorizer = resolved.concrete_authorizer();
+            let (_, request_bearer) =
+                authorize_once(&authorizer, &format!("{BUSINESS_API}/responses")).await;
+            assert_eq!(request_bearer, bearer);
+            assert_eq!(
+                harness.transport.request_count(),
+                2,
+                "requests reuse the account state"
+            );
+            assert!(
+                harness
+                    .transport
+                    .urls()
+                    .iter()
+                    .all(|url| !url.contains("v2/token")),
+                "the operator token is never exchanged"
+            );
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+            assert_eq!(resolved.metadata().account_id.as_deref(), Some("svc-bot"));
+            assert_eq!(resolved.metadata().plan.as_deref(), Some("business"));
+            let identity = authorizer.account_identity().expect("account identity");
+            assert_eq!(identity.api_base, BUSINESS_API);
+            assert!(!identity.installation);
+        }
+
+        /// T2: the documented route reads `COPILOT_GITHUB_TOKEN`, then
+        /// `GH_TOKEN`, then `GITHUB_TOKEN`, each after its `RKAT_` form, as
+        /// GitHub Copilot CLI does.
+        #[tokio::test]
+        async fn env_fallback_order_matches_copilot_cli() {
+            let section: meerkat_core::RealmConfigSection =
+                serde_json::from_value(serde_json::json!({
+                    "backend": {
+                        "copilot_anthropic": {"provider": "anthropic", "backend_kind": "copilot"}
+                    },
+                    "auth": {
+                        "copilot_anthropic": {
+                            "provider": "anthropic",
+                            "auth_method": "github_copilot_token",
+                            "source": {
+                                "kind": "env",
+                                "env": "COPILOT_GITHUB_TOKEN",
+                                "fallback": ["GH_TOKEN", "GITHUB_TOKEN"]
+                            }
+                        }
+                    },
+                    "binding": {
+                        "copilot_anthropic": {
+                            "backend_profile": "copilot_anthropic",
+                            "auth_profile": "copilot_anthropic",
+                            "credential_account": "github_copilot"
+                        }
+                    }
+                }))
+                .expect("the documented token route");
+            let realm = meerkat_core::RealmConnectionSet::from_config("global", &section)
+                .expect("a valid realm");
+            let auth_binding = AuthBindingRef {
+                realm: RealmId::global(),
+                binding: BindingId::parse("copilot_anthropic").expect("valid binding"),
+                profile: None,
+                origin: BindingOrigin::Configured,
+            };
+            let (route, backend, auth) =
+                realm.lookup_auth_binding(&auth_binding).expect("the route");
+            let binding = ProviderRuntimeCatalog::validate_binding_with_credential_identity(
+                &auth_binding,
+                route.credential_identity(&auth_binding),
+                backend,
+                auth,
+                &route.policy,
+            )
+            .expect("a valid token route");
+
+            for (variables, expected) in [
+                (&[("GH_TOKEN", "gh"), ("GITHUB_TOKEN", "github")][..], "gh"),
+                (
+                    &[
+                        ("COPILOT_GITHUB_TOKEN", "copilot"),
+                        ("GH_TOKEN", "gh"),
+                        ("GITHUB_TOKEN", "github"),
+                    ][..],
+                    "copilot",
+                ),
+                (
+                    &[
+                        ("RKAT_COPILOT_GITHUB_TOKEN", "rkat"),
+                        ("COPILOT_GITHUB_TOKEN", "copilot"),
+                        ("GH_TOKEN", "gh"),
+                    ][..],
+                    "rkat",
+                ),
+            ] {
+                let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
+                for (name, label) in variables {
+                    harness.operator.set(name, &user_token(label));
+                }
+                harness
+                    .runtime
+                    .resolve(&binding, &harness.operator.env)
+                    .await
+                    .expect("an operator token resolves");
+                assert_eq!(
+                    harness.transport.bearer(0),
+                    Some(format!("Bearer {}", user_token(expected))),
+                    "{expected}"
+                );
+            }
+        }
+
+        /// T3a: a Copilot 401 on a request drops that account state; the retry
+        /// reads the source again, looks the identity and the models up once
+        /// more, and runs under a new receipt. The token stays valid.
+        #[tokio::test]
+        async fn inference_401_rediscovers_and_retries_once() {
+            let token = user_token("primary");
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(models_response()),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            harness.operator.set("COPILOT_GITHUB_TOKEN", &token);
+            let resolved = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the operator token resolves");
+            let authorizer = resolved.concrete_authorizer();
+            let url = format!("{BUSINESS_API}/responses");
+
+            let (first, _) = authorize_once(&authorizer, &url).await;
+            refuse_with_401(&authorizer, &url, first).await;
+            let (second, bearer) = authorize_once(&authorizer, &url).await;
+
+            assert_ne!(first, second, "the retry runs under a new receipt");
+            assert_eq!(bearer, format!("Bearer {token}"));
+            assert_eq!(
+                harness.transport.request_count(),
+                4,
+                "one identity and one model request more"
+            );
+            assert_eq!(harness.transport.urls()[2], GITHUB_COPILOT_USER_URL);
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+        }
+
+        /// An external resolver that hands out the next scripted token.
+        struct QueuedResolver(Mutex<VecDeque<String>>);
+
+        #[async_trait]
+        impl meerkat_llm_core::provider_runtime::ExternalAuthResolverHandle for QueuedResolver {
+            async fn resolve(
+                &self,
+                _binding: &ValidatedBinding,
+            ) -> Result<meerkat_core::ResolvedAuthEnvelope, AuthError> {
+                let secret = self.0.lock().pop_front().ok_or(AuthError::MissingSecret)?;
+                Ok(meerkat_core::ResolvedAuthEnvelope::InlineSecret {
+                    secret,
+                    metadata: AuthMetadata::default(),
+                    expires_at: None,
+                })
+            }
+        }
+
+        /// T3b: a rotated token from an external resolver heals the request
+        /// that met the 401, and the AuthMachine credential generation
+        /// advances once per distinct token, not per read of the source.
+        #[tokio::test]
+        async fn rotated_token_is_published_and_rediscovered() {
+            let first = user_token("first");
+            let rotated = user_token("rotated");
+            let resolver = Arc::new(QueuedResolver(Mutex::new(VecDeque::from([
+                first.clone(),
+                first.clone(),
+                rotated.clone(),
+            ]))));
+            let operator = OperatorEnv::configured(|env| {
+                env.with_external_resolver("copilot-token", resolver)
+            });
+            let harness = Harness::with_env(
+                [
+                    Ok(svc_bot()),
+                    Ok(models_response()),
+                    Ok(svc_bot()),
+                    Ok(models_response()),
+                    Ok(svc_bot()),
+                    Ok(models_response()),
+                ],
+                operator,
+            );
+            let source = CredentialSourceSpec::ExternalResolver {
+                handle: "copilot-token".into(),
+            };
+            let resolved = harness
+                .resolve_from(CopilotProviderRoute::Gemini, source)
+                .await
+                .expect("the first token resolves");
+            assert_eq!(harness.operator.lease().generation, 1);
+            let authorizer = resolved.concrete_authorizer();
+            let url = format!("{BUSINESS_API}/chat/completions");
+
+            let (receipt, bearer) = authorize_once(&authorizer, &url).await;
+            assert_eq!(bearer, format!("Bearer {first}"));
+            refuse_with_401(&authorizer, &url, receipt).await;
+            let (receipt, bearer) = authorize_once(&authorizer, &url).await;
+            assert_eq!(
+                bearer,
+                format!("Bearer {first}"),
+                "the resolver re-asserted the same token"
+            );
+            assert_eq!(
+                harness.operator.lease().generation,
+                1,
+                "the same token is not published again"
+            );
+            refuse_with_401(&authorizer, &url, receipt).await;
+            let (_, bearer) = authorize_once(&authorizer, &url).await;
+
+            assert_eq!(bearer, format!("Bearer {rotated}"));
+            assert_eq!(
+                harness.operator.lease().generation,
+                2,
+                "one publication per distinct token"
+            );
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+            assert_eq!(harness.transport.request_count(), 6);
+        }
+
+        /// T3c: a command source that declares `refresh_interval_ms` publishes
+        /// its token with that expiry; once the AuthMachine reports the
+        /// refresh window, the next request runs the command again and sends
+        /// its new token.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn command_source_rereads_when_authmachine_requires_refresh() {
+            let directory = tempfile::tempdir().expect("command directory");
+            let source = CredentialSourceSpec::Command {
+                program: "/bin/sh".into(),
+                args: vec![
+                    "-c".to_string(),
+                    format!(
+                        "n=0; [ -f count ] && read n < count; n=$((n + 1)); echo \"$n\" > count; printf 'github_pat_{CANARY}_command_%s' \"$n\""
+                    ),
+                ],
+                cwd: Some(directory.path().to_path_buf()),
+                env: BTreeMap::new(),
+                timeout_ms: 10_000,
+                refresh_interval_ms: Some(600_000),
+            };
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(models_response()),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            let resolved = harness
+                .resolve_from(CopilotProviderRoute::OpenAi, source)
+                .await
+                .expect("the command's token resolves");
+            let authorizer = resolved.concrete_authorizer();
+            let url = format!("{BUSINESS_API}/responses");
+            let (_, bearer) = authorize_once(&authorizer, &url).await;
+            assert_eq!(bearer, format!("Bearer github_pat_{CANARY}_command_1"));
+            assert_eq!(harness.transport.request_count(), 2);
+
+            // Inside the AuthMachine's refresh window: 60 s before the
+            // declared 600 s.
+            harness.operator.advance(545);
+            let (_, bearer) = authorize_once(&authorizer, &url).await;
+
+            assert_eq!(
+                bearer,
+                format!("Bearer github_pat_{CANARY}_command_2"),
+                "the command ran again"
+            );
+            assert_eq!(harness.transport.request_count(), 4);
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+        }
+
+        /// T4: GitHub refusing the token itself moves the shared account to
+        /// `reauth_required`; the same token then fails at once with no
+        /// request, and a new token value is accepted.
+        #[tokio::test]
+        async fn revoked_token_marks_reauth_and_fails_fast() {
+            let harness = Harness::new([
+                Ok(json_response(
+                    401,
+                    serde_json::json!({"message": "Bad credentials"}),
+                )),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("revoked"));
+
+            let refused = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .err()
+                .expect("GitHub refused the token");
+            assert_eq!(
+                refused,
+                ProviderAuthError::Auth(AuthError::UserReauthRequired)
+            );
+            assert_eq!(
+                harness.operator.lease().phase,
+                Some(AuthLeasePhase::ReauthRequired)
+            );
+
+            let again = harness
+                .resolve(CopilotProviderRoute::Anthropic)
+                .await
+                .err()
+                .expect("the same token stays refused");
+            assert_eq!(
+                again,
+                ProviderAuthError::Auth(AuthError::UserReauthRequired)
+            );
+            assert_eq!(
+                harness.transport.request_count(),
+                1,
+                "the refused token makes no request"
+            );
+
+            let replacement = user_token("replacement");
+            harness.operator.set("COPILOT_GITHUB_TOKEN", &replacement);
+            harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("a new token value is accepted");
+            assert_eq!(
+                harness.transport.bearer(1),
+                Some(format!("Bearer {replacement}"))
+            );
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+        }
+
+        /// T5: Copilot refusing this identity (403 or 404, chat disabled) is
+        /// a typed `refresh_failed` that does not touch the lease, and the
+        /// same token works once that is fixed. A rate limit pauses the
+        /// identity lookup until GitHub's stated time.
+        #[tokio::test]
+        async fn copilot_refusal_is_typed_and_not_sticky() {
+            let harness = Harness::new([
+                Ok(json_response(
+                    403,
+                    serde_json::json!({
+                        "message": "Resource not accessible by personal access token"
+                    }),
+                )),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("pending-seat"));
+            let detail = refresh_failure(
+                harness
+                    .resolve(CopilotProviderRoute::OpenAi)
+                    .await
+                    .err()
+                    .expect("Copilot refused the identity"),
+            );
+            assert!(detail.contains("403"), "{detail}");
+            assert!(
+                detail.contains("Resource not accessible by personal access token"),
+                "{detail}"
+            );
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+            harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the same token works once Copilot accepts it");
+            assert_eq!(harness.transport.request_count(), 3);
+
+            let chat_disabled = Harness::new([Ok(json_response(
+                200,
+                serde_json::json!({"login": "svc-bot", "chat_enabled": false}),
+            ))]);
+            chat_disabled
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("chat-disabled"));
+            let detail = refresh_failure(
+                chat_disabled
+                    .resolve(CopilotProviderRoute::OpenAi)
+                    .await
+                    .err()
+                    .expect("chat is not enabled"),
+            );
+            assert!(detail.contains("not enabled"), "{detail}");
+            assert_eq!(
+                chat_disabled.operator.lease().phase,
+                Some(AuthLeasePhase::Valid)
+            );
+
+            // The pause belongs to the account state, so one authorizer keeps
+            // it across calls.
+            let operator = OperatorEnv::new();
+            operator.set("COPILOT_GITHUB_TOKEN", &user_token("busy"));
+            let transport = OutcomeTransport::new([
+                Ok(rate_limited(403, 120)),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            let authorizer = CopilotAuthorizer {
+                state: Arc::new(CopilotAccountState::new(
+                    CopilotBackendConfig::default(),
+                    CopilotCredentialMode::OperatorToken,
+                )),
+                binding: token_binding(CopilotProviderRoute::OpenAi, env_source()),
+                env: operator.env.clone(),
+                transport: transport.clone(),
+            };
+            let detail = refresh_failure(
+                authorizer
+                    .prime()
+                    .await
+                    .expect_err("the identity lookup is rate limited"),
+            );
+            assert!(detail.contains("rate limited"), "{detail}");
+            operator.advance(119);
+            refresh_failure(
+                authorizer
+                    .prime()
+                    .await
+                    .expect_err("still inside GitHub's stated wait"),
+            );
+            assert_eq!(
+                transport.request_count(),
+                1,
+                "no request before GitHub's stated time"
+            );
+            operator.advance(2);
+            authorizer
+                .prime()
+                .await
+                .expect("the lookup runs again after the wait");
+            assert_eq!(transport.request_count(), 3);
+            assert_eq!(operator.lease().phase, Some(AuthLeasePhase::Valid));
+        }
+
+        /// Two authorizers of one operator-token account, as two routes or two
+        /// sessions hold them.
+        fn authorizer_pair(
+            transport: Arc<dyn CopilotHttpTransport>,
+        ) -> (CopilotAuthorizer, CopilotAuthorizer) {
+            let operator = OperatorEnv::new();
+            operator.set("COPILOT_GITHUB_TOKEN", &user_token("shared"));
+            let env = operator.env;
+            let state = Arc::new(CopilotAccountState::new(
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::OperatorToken,
+            ));
+            let binding = token_binding(CopilotProviderRoute::OpenAi, env_source());
+            let first = CopilotAuthorizer {
+                state: Arc::clone(&state),
+                binding: binding.clone(),
+                env: env.clone(),
+                transport: Arc::clone(&transport),
+            };
+            let second = CopilotAuthorizer {
+                state,
+                binding,
+                env,
+                transport,
+            };
+            (first, second)
+        }
+
+        /// T6: concurrent authorizations of one account share one discovery
+        /// flight, share its typed failure, and a cancelled leader releases
+        /// the waiter to a flight of its own.
+        #[tokio::test]
+        async fn concurrent_authorizations_share_one_discovery() {
+            let delayed = Arc::new(DelayedTransport {
+                inner: ScriptedTransport::new([svc_bot(), models_response()]),
+            });
+            let (first, second) = authorizer_pair(delayed.clone());
+            let (first_result, second_result) = tokio::join!(first.prime(), second.prime());
+            first_result.expect("first authorization");
+            second_result.expect("second authorization");
+            assert_eq!(delayed.inner.request_count(), 2);
+
+            let failing = Arc::new(DelayedTransport {
+                inner: ScriptedTransport::new([json_response(
+                    500,
+                    serde_json::json!({"message": "temporary failure"}),
+                )]),
+            });
+            let (first, second) = authorizer_pair(failing.clone());
+            let (first_result, second_result) = tokio::join!(first.prime(), second.prime());
+            assert!(first_result.is_err());
+            assert!(second_result.is_err());
+            assert_eq!(
+                failing.inner.request_count(),
+                1,
+                "the waiter observes the leader's typed failure"
+            );
+
+            let cancelling = Arc::new(CancelFirstTransport {
+                inner: ScriptedTransport::new([svc_bot(), models_response()]),
+                calls: AtomicU64::new(0),
+                first_started: tokio::sync::Notify::new(),
+            });
+            let (first, second) = authorizer_pair(cancelling.clone());
+            let first_started = cancelling.first_started.notified();
+            let leader = tokio::spawn(async move { first.prime().await });
+            first_started.await;
+            leader.abort();
+            assert!(
+                leader
+                    .await
+                    .expect_err("the leader is cancelled")
+                    .is_cancelled()
+            );
+            second
+                .prime()
+                .await
+                .expect("the waiter leads the replacement flight");
+            assert_eq!(cancelling.inner.request_count(), 2);
+        }
+
+        /// T7: a classic personal access token is refused as an unsupported
+        /// combination before any request, and no lease is acquired.
+        #[tokio::test]
+        async fn classic_pat_is_refused_before_any_request() {
+            let harness = Harness::new(std::iter::empty());
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &format!("ghp_{CANARY}"));
+
+            let refused = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .err()
+                .expect("a classic token is refused");
+
+            assert_eq!(
+                refused,
+                ProviderAuthError::Auth(AuthError::UnsupportedCombination {
+                    backend: "copilot".to_string(),
+                    auth: "classic_personal_access_token".to_string(),
+                })
+            );
+            assert_eq!(harness.transport.request_count(), 0);
+            let lease = harness.operator.lease();
+            assert_eq!(lease.phase, None);
+            assert_eq!(lease.generation, 0, "no lease was acquired");
+        }
+
+        /// T8: a GitHub App installation token (server-to-server) has no
+        /// user: it skips the identity lookup and lists models on the default
+        /// host. A later 401 there is GitHub refusing the token itself.
+        #[tokio::test]
+        async fn installation_token_skips_identity_lookup() {
+            let installation = format!("ghs_{CANARY}{}", "x".repeat(500));
+            let harness = Harness::new([
+                Ok(models_response()),
+                Ok(json_response(
+                    401,
+                    serde_json::json!({"message": "Bad credentials"}),
+                )),
+            ]);
+            harness.operator.set("GITHUB_TOKEN", &installation);
+
+            let resolved = harness
+                .resolve(CopilotProviderRoute::Anthropic)
+                .await
+                .expect("the installation token resolves");
+
+            assert_eq!(
+                harness.transport.urls(),
+                [format!("{DEFAULT_COPILOT_API_BASE}/models")]
+            );
+            assert_eq!(
+                harness.transport.bearer(0),
+                Some(format!("Bearer {installation}"))
+            );
+            assert_eq!(resolved.metadata().account_id, None);
+            let authorizer = resolved.concrete_authorizer();
+            let identity = authorizer.account_identity().expect("account identity");
+            assert!(identity.installation);
+            assert_eq!(identity.login, None);
+
+            // The model list is due again after five minutes.
+            harness.operator.advance(301);
+            let refused = authorizer
+                .prepare_request()
+                .await
+                .expect_err("GitHub refused the installation token");
+            assert_eq!(refused, AuthError::UserReauthRequired);
+            assert_eq!(
+                harness.operator.lease().phase,
+                Some(AuthLeasePhase::ReauthRequired)
+            );
+        }
+
+        /// T9: the token never goes to an API host outside
+        /// `githubcopilot.com`, even when GitHub's identity answer names one.
+        #[tokio::test]
+        async fn api_host_outside_githubcopilot_is_refused() {
+            let harness = Harness::new([Ok(user_response(
+                "svc-bot",
+                "business",
+                "https://copilot.example.test",
+            ))]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("redirected"));
+
+            let detail = refresh_failure(
+                harness
+                    .resolve(CopilotProviderRoute::OpenAi)
+                    .await
+                    .err()
+                    .expect("a foreign API host is refused"),
+            );
+
+            assert!(detail.contains("copilot.example.test"), "{detail}");
+            assert_eq!(harness.transport.urls(), [GITHUB_COPILOT_USER_URL]);
+        }
+
+        #[derive(Clone, Default)]
+        struct LogCapture(Arc<Mutex<String>>);
+
+        struct CaptureVisitor<'a>(&'a mut String);
+
+        impl tracing::field::Visit for CaptureVisitor<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write as _;
+                let _ = write!(self.0, " {}={value:?}", field.name());
+            }
+        }
+
+        /// Records every event and span field as text.
+        struct CaptureSubscriber {
+            log: LogCapture,
+            next_span: AtomicU64,
+        }
+
+        impl CaptureSubscriber {
+            fn dispatch(log: LogCapture) -> tracing::Dispatch {
+                tracing::Dispatch::new(Self {
+                    log,
+                    next_span: AtomicU64::new(1),
+                })
+            }
+        }
+
+        impl tracing::Subscriber for CaptureSubscriber {
+            fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+
+            fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                span.record(&mut CaptureVisitor(&mut self.log.0.lock()));
+                tracing::span::Id::from_u64(self.next_span.fetch_add(1, Ordering::Relaxed))
+            }
+
+            fn record(&self, _span: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+                values.record(&mut CaptureVisitor(&mut self.log.0.lock()));
+            }
+
+            fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {
+            }
+
+            fn event(&self, event: &tracing::Event<'_>) {
+                let mut log = self.log.0.lock();
+                event.record(&mut CaptureVisitor(&mut log));
+                log.push('\n');
+            }
+
+            fn enter(&self, _span: &tracing::span::Id) {}
+
+            fn exit(&self, _span: &tracing::span::Id) {}
+        }
+
+        /// T10: a canary token never reaches an error (`Display`, `Debug`,
+        /// the `AuthError` and its JSON), the cached account state's `Debug`,
+        /// the resolved metadata's JSON or a log line, on any path.
+        #[tokio::test]
+        async fn operator_token_is_never_rendered() {
+            let log = LogCapture::default();
+            let capture = CaptureSubscriber::dispatch(log.clone());
+            // A second registered dispatcher makes callsite interest come from
+            // every dispatcher, so a callsite first reached under no
+            // subscriber still reaches this one.
+            let _anchor = CaptureSubscriber::dispatch(LogCapture::default());
+            let _guard = tracing::dispatcher::set_default(&capture);
+
+            let token = user_token("render");
+            let paths: Vec<(&str, Vec<Outcome>, String)> = vec![
+                (
+                    "success",
+                    vec![Ok(svc_bot()), Ok(models_response())],
+                    token.clone(),
+                ),
+                (
+                    "identity 401",
+                    vec![Ok(json_response(
+                        401,
+                        serde_json::json!({"message": "Bad credentials"}),
+                    ))],
+                    token.clone(),
+                ),
+                (
+                    "identity 403",
+                    vec![Ok(json_response(
+                        403,
+                        serde_json::json!({"message": "Forbidden"}),
+                    ))],
+                    token.clone(),
+                ),
+                (
+                    "identity 429",
+                    vec![Ok(rate_limited(429, 60))],
+                    token.clone(),
+                ),
+                (
+                    "identity 500",
+                    vec![Ok(json_response(
+                        500,
+                        serde_json::json!({"message": "Server error"}),
+                    ))],
+                    token.clone(),
+                ),
+                (
+                    "timeout",
+                    vec![Err(CopilotHttpTransportError::Timeout)],
+                    token.clone(),
+                ),
+                (
+                    "redirect",
+                    vec![Err(CopilotHttpTransportError::RedirectRefused {
+                        status: 302,
+                    })],
+                    token.clone(),
+                ),
+                (
+                    "bad json",
+                    vec![Ok(CopilotHttpResponse {
+                        status: 200,
+                        body: b"not json".to_vec(),
+                        retry_after: None,
+                        rate_limited: false,
+                        rate_limit_reset: None,
+                    })],
+                    token.clone(),
+                ),
+                (
+                    "models 401",
+                    vec![
+                        Ok(svc_bot()),
+                        Ok(json_response(
+                            401,
+                            serde_json::json!({"message": "Unauthorized"}),
+                        )),
+                    ],
+                    token,
+                ),
+                ("classic", Vec::new(), format!("ghp_{CANARY}")),
+            ];
+            let mut rendered = String::new();
+            for (path, outcomes, path_token) in paths {
+                let harness = Harness::new(outcomes);
+                harness.operator.set("COPILOT_GITHUB_TOKEN", &path_token);
+                match harness.resolve(CopilotProviderRoute::OpenAi).await {
+                    Ok(resolved) => {
+                        rendered.push_str(
+                            &serde_json::to_string(resolved.metadata()).expect("metadata JSON"),
+                        );
+                        let authorizer = resolved.concrete_authorizer();
+                        rendered.push_str(&format!("{:?}", authorizer.state.cache.read().as_ref()));
+                        rendered.push_str(&format!("{:?}", authorizer.account_identity()));
+                    }
+                    Err(error) => {
+                        rendered.push_str(&format!("{path}: {error} {error:?}"));
+                        let auth = auth_error_from_provider(error);
+                        rendered.push_str(&format!(
+                            " {auth} {auth:?} {}",
+                            serde_json::to_string(&auth).expect("AuthError JSON")
+                        ));
+                    }
+                }
+            }
+            rendered.push_str(&log.0.lock());
+
+            assert!(
+                rendered.contains("GitHub Copilot accepted the operator token"),
+                "the capture saw the runtime's log lines: {rendered}"
+            );
+            assert!(!rendered.contains(CANARY), "{rendered}");
+        }
+
+        /// T11: no token in any variable, or only whitespace, is
+        /// `missing_secret` with no request and no lease.
+        #[tokio::test]
+        async fn missing_token_is_missing_secret_without_lease() {
+            let harness = Harness::new(std::iter::empty());
+            let absent = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .err()
+                .expect("no variable is set");
+            assert_eq!(absent, ProviderAuthError::Auth(AuthError::MissingSecret));
+
+            harness.operator.set("COPILOT_GITHUB_TOKEN", " \t ");
+            let blank = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .err()
+                .expect("a blank variable is no token");
+            assert_eq!(blank, ProviderAuthError::Auth(AuthError::MissingSecret));
+
+            assert_eq!(harness.transport.request_count(), 0);
+            let lease = harness.operator.lease();
+            assert_eq!(lease.phase, None);
+            assert_eq!(lease.generation, 0, "no lease was acquired");
+        }
+
+        /// One credential account holds one Copilot auth method at a time,
+        /// in the runtime as at config load.
+        #[test]
+        fn shared_account_rejects_mixed_copilot_modes() {
+            let runtime = CopilotRuntime::new();
+            let identity = account_identity();
+            let persistence_id = persistence_id();
+            let _device = runtime
+                .account_state(
+                    persistence_id,
+                    &identity,
+                    CopilotBackendConfig::default(),
+                    CopilotCredentialMode::DeviceSignIn,
+                )
+                .expect("device route");
+            let Err(error) = runtime.account_state(
+                persistence_id,
+                &identity,
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::OperatorToken,
+            ) else {
+                panic!("a token route on a device account must be refused");
+            };
+            let message = error.to_string();
+            assert!(
+                message.contains("github_copilot_oauth")
+                    && message.contains("github_copilot_token"),
+                "{message}"
+            );
+        }
+
+        /// The device sign-in still requires its stored token, and names the
+        /// token method as the way to use an operator-supplied one.
+        #[tokio::test]
+        async fn device_route_with_env_source_points_to_the_token_method() {
+            let operator = OperatorEnv::new();
+            let auth_binding = AuthBindingRef {
+                realm: RealmId::global(),
+                binding: BindingId::parse("copilot_openai").expect("valid binding"),
+                profile: None,
+                origin: BindingOrigin::Configured,
+            };
+            let backend = BackendProfile {
+                id: "copilot_openai".to_string(),
+                provider: Provider::OpenAI,
+                backend_kind: "copilot".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+                server: None,
+            };
+            let auth = AuthProfile {
+                id: "copilot_openai".to_string(),
+                provider: Provider::OpenAI,
+                auth_method: "github_copilot_oauth".to_string(),
+                source: env_source(),
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            };
+            let binding = ProviderRuntimeCatalog::validate_binding_with_credential_identity(
+                &auth_binding,
+                account_identity(),
+                &backend,
+                &auth,
+                &BindingPolicy::default(),
+            )
+            .expect("valid device route");
+
+            let error = CopilotRuntime::new()
+                .resolve(&binding, &operator.env)
+                .await
+                .err()
+                .expect("the device route reads only its stored token");
+
+            assert!(
+                error.to_string().contains("github_copilot_token"),
+                "{error}"
+            );
+        }
+
+        #[test]
+        fn github_rate_limit_follows_the_rest_rules() {
+            assert!(github_rate_limited(429, None, false));
+            assert!(github_rate_limited(403, Some("0"), false));
+            assert!(github_rate_limited(403, None, true));
+            assert!(!github_rate_limited(403, Some("12"), false));
+            assert!(!github_rate_limited(403, None, false));
+            assert!(!github_rate_limited(500, Some("0"), true));
+        }
+
+        #[test]
+        fn operator_api_host_stays_on_githubcopilot() {
+            assert_eq!(
+                operator_api_base(None).ok().as_deref(),
+                Some(DEFAULT_COPILOT_API_BASE)
+            );
+            assert_eq!(
+                operator_api_base(Some("https://api.business.githubcopilot.com/"))
+                    .ok()
+                    .as_deref(),
+                Some(BUSINESS_API)
+            );
+            for refused in [
+                "http://api.githubcopilot.com",
+                "https://user@api.githubcopilot.com",
+                "https://api.githubcopilot.com.example.test",
+                "https://githubcopilot.example.test",
+                "https://example.test",
+                "not a url",
+            ] {
+                assert!(operator_api_base(Some(refused)).is_err(), "{refused}");
+            }
+        }
+
+        #[test]
+        fn github_error_message_is_bounded_and_printable() {
+            let long = "x".repeat(300);
+            let body = serde_json::to_vec(&serde_json::json!({
+                "message": format!("line\u{0007}one\n{long}")
+            }))
+            .expect("body");
+            let message = github_error_message(&body);
+            assert!(message.starts_with("lineone"), "{message}");
+            assert_eq!(message.chars().count(), GITHUB_ERROR_MESSAGE_MAX_CHARS);
+            assert!(!message.chars().any(char::is_control));
+            assert_eq!(github_error_message(b"<html>"), "no message");
+        }
+
+        /// The CLI's check: no lease, no store and no cache effects; the same
+        /// refusals as the runtime.
+        #[tokio::test]
+        async fn verify_operator_token_checks_without_effects() {
+            let transport = OutcomeTransport::new([Ok(svc_bot()), Ok(models_response())]);
+            let identity = verify_operator_token_with(
+                transport.as_ref(),
+                &format!("  {}  ", user_token("verify")),
+                &CopilotBackendConfig::default(),
+                Utc::now(),
+            )
+            .await
+            .expect("a usable token");
+            assert_eq!(identity.login.as_deref(), Some("svc-bot"));
+            assert_eq!(identity.plan.as_deref(), Some("business"));
+            assert_eq!(
+                transport.bearer(0),
+                Some(format!("Bearer {}", user_token("verify")))
+            );
+
+            let classic = OutcomeTransport::new(std::iter::empty());
+            assert!(matches!(
+                verify_operator_token_with(
+                    classic.as_ref(),
+                    "ghp_classic",
+                    &CopilotBackendConfig::default(),
+                    Utc::now(),
+                )
+                .await,
+                Err(ProviderAuthError::Auth(
+                    AuthError::UnsupportedCombination { .. }
+                ))
+            ));
+            assert_eq!(classic.request_count(), 0);
+
+            let forbidden = OutcomeTransport::new([
+                Ok(svc_bot()),
+                Ok(json_response(
+                    403,
+                    serde_json::json!({"message": "Copilot Requests permission required"}),
+                )),
+            ]);
+            let refused = verify_operator_token_with(
+                forbidden.as_ref(),
+                &user_token("no-permission"),
+                &CopilotBackendConfig::default(),
+                Utc::now(),
+            )
+            .await
+            .expect_err("a token without Copilot access is refused");
+            assert!(
+                refused
+                    .to_string()
+                    .contains("Copilot Requests permission required"),
+                "{refused}"
+            );
         }
     }
 }

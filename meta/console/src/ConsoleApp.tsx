@@ -5161,10 +5161,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         ) ?? null
       : null;
     // Forking needs `agent.view` and `agent.send` on the agent (and
-    // `agent.spawn` on the side chat's name): an agent the viewer may not
-    // send to offers no fork.
+    // `agent.spawn` on the side chat's name): under enforced access, an
+    // agent the viewer may not send to offers no fork. Without enforcement
+    // `can_send_message` only says whether the agent is addressable, which
+    // the fork does not need.
     const canForkSideChat = !consoleReadOnly && sideChatsOffered && canSpawnMembers && agent !== null
-      && agent.affordances?.can_send_message !== false;
+      && !(accessEnforcing && agent.affordances?.can_send_message === false);
     const forkSideChatBlocked = forkingPanels.has(panel.id)
       ? "Forking the conversation"
       : sideChatForkBlockedReason({

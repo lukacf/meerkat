@@ -4014,15 +4014,61 @@ fn listed_member_visible(
     .is_allow()
 }
 
+/// The verified side chat lineage of each of `entries`, members of
+/// `runtime`'s mob, that is a side chat, keyed by its public alias: from the
+/// runtime's per-incarnation cache, which the route's access priming fills,
+/// so the roster's fork facts are read at most once, and not at all for an
+/// incarnation read before.
+async fn listed_side_chat_lineages(
+    runtime: &MobRuntime,
+    entries: &[meerkat_mob::runtime::MobMemberListEntry],
+) -> BTreeMap<String, crate::side_chat::SideChatLineage> {
+    let handle = runtime.handle();
+    let cache = runtime.side_chat_lineages();
+    let mut lineages = BTreeMap::new();
+    let mut unbound = false;
+    for entry in entries {
+        if !entry
+            .labels
+            .contains_key(crate::side_chat::SIDE_CHAT_OF_LABEL)
+        {
+            continue;
+        }
+        let Some((runtime_id, fence_token)) = entry.binding_atoms() else {
+            unbound = true;
+            continue;
+        };
+        if let Some(lineage) = cache
+            .lineage(&handle, &runtime_id, fence_token, &entry.labels)
+            .await
+        {
+            lineages.insert(
+                crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str())
+                    .into_owned(),
+                lineage,
+            );
+        }
+    }
+    if unbound {
+        // A marked member with no runtime binding to key it by: one read,
+        // by alias.
+        for (alias, lineage) in cache.verified(&handle).await {
+            lineages.entry(alias).or_insert(lineage);
+        }
+    }
+    lineages
+}
+
 /// Filter serialized member rows (`meta/list_members`, `find_members`)
 /// down to the agents the caller may view, each by [`listed_member_visible`]
-/// with `runtime`'s spawn registry and the side chats its roster's fork
-/// facts verify (read once per call, and only when a row carries the side
-/// chat marker). Field names cover both the meerkat roster entry shape and
-/// the console projection shape.
+/// with `runtime`'s spawn registry and the side chat lineages of `entries`,
+/// the roster rows the rows were serialized from
+/// ([`listed_side_chat_lineages`]). Field names cover both the meerkat
+/// roster entry shape and the console projection shape.
 async fn retain_visible_member_rows(
     rows: &mut Vec<Value>,
     runtime: &MobRuntime,
+    entries: &[meerkat_mob::runtime::MobMemberListEntry],
     view: Option<&AccessView>,
 ) {
     let Some(view) = view.filter(|view| view.enforced()) else {
@@ -4031,19 +4077,7 @@ async fn retain_visible_member_rows(
     // Keyed by console identity, as the console's member projection reads it.
     let registered = runtime.console_identity_labels().await;
     // Keyed by the side chat's public alias.
-    let marked = rows.iter().any(|row| {
-        row.get("labels")
-            .and_then(|labels| labels.get(crate::side_chat::SIDE_CHAT_OF_LABEL))
-            .is_some()
-    });
-    let side_chats = if marked {
-        runtime
-            .side_chat_lineages()
-            .verified(&runtime.handle())
-            .await
-    } else {
-        BTreeMap::new()
-    };
+    let side_chats = listed_side_chat_lineages(runtime, entries).await;
     rows.retain(|row| {
         let labels: Option<std::collections::BTreeMap<String, String>> = row
             .get("labels")
@@ -9759,7 +9793,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     member_entry_to_console_json(runtime, model_registry.as_ref(), entry).await,
                 );
             }
-            retain_visible_member_rows(&mut members, runtime, access_view).await;
+            retain_visible_member_rows(&mut members, runtime, &entries, access_view).await;
             response_value(response_id, Some(Value::Array(members)), None)
         })
         .await,
@@ -9840,7 +9874,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     member_entry_to_console_json(runtime, model_registry.as_ref(), entry).await,
                 );
             }
-            retain_visible_member_rows(&mut matches, runtime, access_view).await;
+            retain_visible_member_rows(&mut matches, runtime, &entries, access_view).await;
             response_value(response_id, Some(Value::Array(matches)), None)
         })
         .await,
@@ -14772,9 +14806,15 @@ pub(crate) async fn prime_access_cache_from_handle(handle: &MobHandle, access: &
     }
     let registered = BTreeMap::new();
     let mut roster_identities = BTreeSet::new();
-    let members =
-        live_member_access_attributes(handle, None, None, &registered, &mut roster_identities)
-            .await;
+    let members = live_member_access_attributes(
+        handle,
+        None,
+        None,
+        &registered,
+        &mut roster_identities,
+        None,
+    )
+    .await;
     record_live_and_registered_attributes(access, members, &registered, &roster_identities, "");
 }
 
@@ -14822,6 +14862,7 @@ async fn prime_access_cache_from_runtime_in_namespace(
         None,
         &registered,
         &mut roster_identities,
+        Some(runtime.side_chat_lineages()),
     )
     .await;
     for (mob_id, delegate_handle, host_identity) in delegate_mobs_with_hosts(runtime).await {
@@ -14832,6 +14873,7 @@ async fn prime_access_cache_from_runtime_in_namespace(
                 Some(mob_id.as_str()),
                 &registered,
                 &mut roster_identities,
+                Some(runtime.side_chat_lineages()),
             )
             .await,
         );
@@ -14851,13 +14893,16 @@ async fn prime_access_cache_from_runtime_in_namespace(
 /// [`crate::runtime::console_member_access_attributes`]). Recording every row
 /// keeps cached attributes for an identity whose only rows have ended, also
 /// after a restart. Adds each row's console identity to `roster_identities`,
-/// which keeps the spawn registry's value off it.
+/// which keeps the spawn registry's value off it. The side chat lineages
+/// this listing verifies are kept in `lineage_cache` (the runtime's
+/// per-incarnation cache), so the route's later reads take them from there.
 async fn live_member_access_attributes(
     handle: &MobHandle,
     host_identity: Option<&str>,
     source_mob_id: Option<&str>,
     registered: &BTreeMap<String, BTreeMap<String, String>>,
     roster_identities: &mut BTreeSet<String>,
+    lineage_cache: Option<&crate::side_chat::SideChatLineageCache>,
 ) -> Vec<AgentResourceAttributes> {
     let entries = handle.list_all_members().await;
     for entry in &entries {
@@ -14889,6 +14934,27 @@ async fn live_member_access_attributes(
         } else {
             BTreeMap::new()
         };
+    if let Some(cache) = lineage_cache {
+        cache.keep_listed(
+            handle.mob_id().as_str(),
+            entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .labels
+                        .contains_key(crate::side_chat::SIDE_CHAT_OF_LABEL)
+                })
+                .map(|entry| {
+                    let alias =
+                        crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str());
+                    (
+                        entry.agent_runtime_id.clone(),
+                        entry.fence_token,
+                        side_chats.get(&*alias).cloned(),
+                    )
+                }),
+        );
+    }
     entries
         .into_iter()
         .map(|entry| {

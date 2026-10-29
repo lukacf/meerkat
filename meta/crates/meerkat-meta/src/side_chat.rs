@@ -300,11 +300,41 @@ impl SideChatLineageCache {
             return None;
         }
         let key = (handle.mob_id().to_string(), runtime_id.clone(), fence_token);
-        if let Some(kept) = self.kept(&key) {
+        let kept = self.locked().get(&key).cloned();
+        if let Some(kept) = kept {
             return kept;
         }
         self.verified(handle).await;
         self.kept_or_none(key)
+    }
+
+    /// Keep the lineages a caller read from `mob_id`'s roster itself, one
+    /// per marked incarnation it listed (its runtime id, fence token and
+    /// lineage, `None` for a marked member that is not a verified side chat):
+    /// a route's access priming lists the roster anyway, so a later read of
+    /// those incarnations reads nothing.
+    pub(crate) fn keep_listed(
+        &self,
+        mob_id: &str,
+        listed: impl IntoIterator<
+            Item = (
+                meerkat_mob::AgentRuntimeId,
+                meerkat_mob::FenceToken,
+                Option<SideChatLineage>,
+            ),
+        >,
+    ) {
+        self.keep(
+            mob_id,
+            listed
+                .into_iter()
+                .map(|(runtime_id, fence_token, lineage)| ListedSideChatMarker {
+                    runtime_id,
+                    fence_token,
+                    lineage,
+                })
+                .collect(),
+        );
     }
 
     /// How often the roster's fork facts were read.
@@ -319,10 +349,6 @@ impl SideChatLineageCache {
         self.lineages
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn kept(&self, key: &SideChatIncarnation) -> Option<Option<SideChatLineage>> {
-        self.locked().get(key).cloned()
     }
 
     /// The kept lineage of `key`, keeping none for an incarnation the last

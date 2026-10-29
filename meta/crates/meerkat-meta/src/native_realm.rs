@@ -410,7 +410,6 @@ impl MemberRouteRefusal {
         )
     }
 
-    /// The refusal as a JSON-RPC error: its code, message and data.
     /// The refusal of `method`'s fork of the session `source_session_id`
     /// under the launch binding: the fork would seat a member off the
     /// binding (see [`fork_binding_refusal`]).
@@ -441,6 +440,7 @@ impl MemberRouteRefusal {
         )
     }
 
+    /// The refusal as a JSON-RPC error: its code, message and data.
     pub(crate) fn json_rpc_error(&self) -> crate::rpc::JsonRpcError {
         crate::rpc::JsonRpcError {
             code: self.code(),

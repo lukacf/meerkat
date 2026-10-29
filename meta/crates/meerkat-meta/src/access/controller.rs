@@ -743,6 +743,20 @@ impl AccessDecisionFence<'_> {
 /// The console owner captures a frame's lineage to the same depth.
 pub(crate) const MAX_LINEAGE_DEPTH: usize = 8;
 
+/// Whether an allow rule that matches `resource`, one link of an agent's
+/// console lineage, allows the check: every link but a console side chat's
+/// (its labels name the source it was forked from,
+/// [`crate::console_spawn::names_side_chat_source`]). A side chat holds its
+/// source's audience exactly, so a grant that matches only the side chat
+/// grants nothing; a deny that matches it still refuses. The labels are the
+/// console's projection, where only Meerkat's fork record writes the side
+/// chat label.
+fn console_link_grants(resource: &AccessResource<'_>) -> bool {
+    !resource
+        .labels
+        .is_some_and(crate::console_spawn::names_side_chat_source)
+}
+
 /// Whether a lineage walk stopped at [`MAX_LINEAGE_DEPTH`] with an ancestor
 /// left: its last link, at the bound, still names a parent
 /// ([`crate::console_spawn::lineage_parent`]).
@@ -958,7 +972,13 @@ impl AccessView {
                 None => AccessResource::for_identity(link.identity.as_str()),
             })
             .collect::<Vec<_>>();
-        super::engine::evaluate_access_lineage(&self.config, &self.principal, action, &resources)
+        super::engine::evaluate_access_lineage(
+            &self.config,
+            &self.principal,
+            action,
+            &resources,
+            &console_link_grants,
+        )
     }
 
     /// Classify an agent spelling: not a runtime alias, the current alias of
@@ -1149,6 +1169,7 @@ impl AccessView {
             &self.principal,
             ACTION_AGENT_VIEW,
             &resources,
+            &console_link_grants,
         )
         .is_allow()
         {

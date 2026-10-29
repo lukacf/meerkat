@@ -153,36 +153,39 @@ fn resource_matches(rule: &AccessRule, resource: &AccessResource<'_>) -> bool {
 ///
 /// Deny-by-default with deny-overrides: a matching deny rule always wins,
 /// then a matching allow rule allows, otherwise the check denies. Admin
-/// subjects bypass rules entirely; a disabled config allows everything. A
-/// console side chat's resource alone is never allowed: an allow on a side
-/// chat comes from its source ([`evaluate_access_lineage`]).
+/// subjects bypass rules entirely; a disabled config allows everything.
 pub fn evaluate_access(
     config: &AccessControlConfig,
     principal: &AccessPrincipal,
     action: &str,
     resource: &AccessResource<'_>,
 ) -> AccessDecision {
-    evaluate_access_lineage(config, principal, action, std::slice::from_ref(resource))
+    evaluate_access_lineage(
+        config,
+        principal,
+        action,
+        std::slice::from_ref(resource),
+        &|_| true,
+    )
 }
 
 /// Evaluate one access check against an agent and its lineage.
 ///
 /// `resources` is the agent followed by its lineage ancestors (parent,
-/// grandparent, ...): the agents that spawned it, and through a console
-/// side chat the source it was forked from. A deny rule applies when it
-/// matches *any* resource in the chain, so a deny anywhere in the lineage
-/// denies the descendant (deny-overrides is preserved across the chain). An
-/// allow rule applies when it matches any resource in the chain that grants
-/// its own access, so permissions granted on a spawning agent extend to the
-/// members it spawned. A side chat's resource (its labels name a side chat
-/// source) grants none: every decision on a side chat is its source's, and
-/// an allow that matches only the side chat itself (its name, its role or
-/// its own labels) never widens it.
+/// grandparent, ...). A deny rule applies when it matches *any* resource in
+/// the chain, so a deny anywhere in the lineage denies the descendant
+/// (deny-overrides is preserved across the chain). An allow rule applies
+/// when it matches a resource in the chain that `grants` lets grant, so
+/// permissions granted on a spawning agent extend to the members it spawned.
+/// A caller passes `&|_| true` unless a link of its chain takes no grant of
+/// its own (the console's side chats,
+/// `AccessView::decide_agent`).
 pub(crate) fn evaluate_access_lineage(
     config: &AccessControlConfig,
     principal: &AccessPrincipal,
     action: &str,
     resources: &[AccessResource<'_>],
+    grants: &dyn Fn(&AccessResource<'_>) -> bool,
 ) -> AccessDecision {
     if !config.enabled {
         return AccessDecision::Allow;
@@ -215,9 +218,10 @@ pub(crate) fn evaluate_access_lineage(
                 }
             }
             AccessEffect::Allow => {
-                if resources.iter().any(|resource| {
-                    grants_its_own_access(resource) && resource_matches(rule, resource)
-                }) {
+                if resources
+                    .iter()
+                    .any(|resource| grants(resource) && resource_matches(rule, resource))
+                {
                     allowed = true;
                 }
             }
@@ -230,15 +234,6 @@ pub(crate) fn evaluate_access_lineage(
             reason: format!("no rule allows {action}"),
         }
     }
-}
-
-/// Whether an allow rule that matches `resource` allows a check on it: every
-/// resource but a console side chat's, which holds its source's audience
-/// exactly ([`evaluate_access_lineage`]).
-fn grants_its_own_access(resource: &AccessResource<'_>) -> bool {
-    !resource
-        .labels
-        .is_some_and(crate::console_spawn::names_side_chat_source)
 }
 
 /// The first deny rule that matches `resource` for this principal and
@@ -404,6 +399,36 @@ mod tests {
             id: id.to_string(),
             ..AccessRule::default()
         }
+    }
+
+    /// The engine knows no side chats: a single resource that carries a
+    /// `side_chat_of` label is decided by the rules that match it, as any
+    /// resource is (extension state and announcement audiences decide that
+    /// way). Only the console's lineage decisions take no grant from a side
+    /// chat's own link (`AccessView::decide_agent`).
+    #[test]
+    fn a_side_chat_label_changes_nothing_in_a_single_resource_decision() {
+        let config = config_with_rules(vec![AccessRule {
+            agents: vec!["alpha-side".to_string()],
+            actions: vec!["extension.read".to_string()],
+            ..allow_rule("read-the-side-chat")
+        }]);
+        let labels = BTreeMap::from([("side_chat_of".to_string(), "alpha".to_string())]);
+        let resource = AccessResource {
+            identity: Some("alpha-side"),
+            agent_id: None,
+            role: None,
+            labels: Some(&labels),
+        };
+        assert!(
+            evaluate_access(
+                &config,
+                &principal("bob@example.test", &[]),
+                "extension.read",
+                &resource,
+            )
+            .is_allow()
+        );
     }
 
     #[test]

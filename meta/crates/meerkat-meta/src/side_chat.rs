@@ -16,10 +16,11 @@
 //!   it. The runtime may still unload it while it is idle; that keeps the
 //!   member;
 //! - is never wired. It has no peer edge, so no other agent can address it
-//!   and none lists it as a peer. Meerkat applies the mob definition's wiring
-//!   rules when it seats any member, so a source whose role those rules wire
-//!   is refused before anything is forked ([`definition_wiring_for_role`]),
-//!   and Meta's definition-wiring reconcile leaves side chats out;
+//!   and none lists it as a peer. The fork seats it exempt from the mob
+//!   definition's wiring rules (`meerkat_mob::DefinitionWiring::Exempt`):
+//!   they wire it to no member when it is seated, and no member seated,
+//!   spawned or rotated later to it, whatever the source's role. Meta's
+//!   definition-wiring reconcile leaves side chats out too;
 //! - names its source in the [`SIDE_CHAT_OF_LABEL`] roster label. The label
 //!   counts only where Meerkat's roster agrees ([`verified_side_chat_source`]):
 //!   the member's typed `fork_source` names that same source and no member's
@@ -186,10 +187,21 @@ pub(crate) fn side_chat_lineages(
 }
 
 /// Every verified side chat of `handle`'s mob, keyed by the side chat's
-/// public alias, with its lineage ([`side_chat_lineages`]).
+/// public alias, with its lineage ([`side_chat_lineages`]). One read of the
+/// roster's fork facts: a console read that has the member's runtime reads
+/// them through its [`SideChatLineageCache`].
 pub(crate) async fn verified_side_chats(
     handle: &meerkat_mob::MobHandle,
 ) -> BTreeMap<String, SideChatLineage> {
+    read_verified_side_chats(handle).await.0
+}
+
+/// [`verified_side_chats`], with each marked incarnation the roster lists:
+/// its runtime id, fence token and lineage (`None` for a marked member that
+/// is not a verified side chat).
+async fn read_verified_side_chats(
+    handle: &meerkat_mob::MobHandle,
+) -> (BTreeMap<String, SideChatLineage>, Vec<ListedSideChatMarker>) {
     let entries = handle.list_all_members().await;
     let rows = entries
         .iter()
@@ -201,12 +213,135 @@ pub(crate) async fn verified_side_chats(
             fork_source: entry.fork_source.as_ref(),
         })
         .collect::<Vec<_>>();
-    side_chat_lineages(&rows)
+    let lineages = side_chat_lineages(&rows);
+    let marked = entries
+        .iter()
+        .zip(&rows)
+        .filter(|(_, row)| row.labels.contains_key(SIDE_CHAT_OF_LABEL))
+        .map(|(entry, row)| ListedSideChatMarker {
+            runtime_id: entry.agent_runtime_id.clone(),
+            fence_token: entry.fence_token,
+            lineage: lineages.get(&row.alias).cloned(),
+        })
+        .collect();
+    (lineages, marked)
+}
+
+/// One incarnation a roster read listed with the side chat marker.
+struct ListedSideChatMarker {
+    runtime_id: meerkat_mob::AgentRuntimeId,
+    fence_token: meerkat_mob::FenceToken,
+    lineage: Option<SideChatLineage>,
+}
+
+/// One member incarnation of one mob, as [`SideChatLineageCache`] keys it:
+/// the mob, the incarnation's runtime id and its fence token.
+type SideChatIncarnation = (String, meerkat_mob::AgentRuntimeId, meerkat_mob::FenceToken);
+
+/// The most incarnations a [`SideChatLineageCache`] keeps; a full cache
+/// starts over.
+const SIDE_CHAT_LINEAGE_CACHE_LIMIT: usize = 4096;
+
+/// The verified side chat lineage of each member incarnation one runtime's
+/// console has read.
+///
+/// A member's fork facts (its side chat marker, its typed `fork_source` and
+/// its `spawned_by`) never change for an incarnation, so its lineage is read
+/// from Meerkat's roster once ([`meerkat_mob::MobHandle::list_all_members`],
+/// which clones the mob's machine state) and then kept: the events of a
+/// side chat's stream and the identity records of every console read take it
+/// from here. A read keeps the lineage of every marked incarnation the
+/// roster lists. An incarnation the roster no longer lists is kept without
+/// one: a later incarnation replaced it, and none of its fork facts can
+/// change.
+#[derive(Default)]
+pub(crate) struct SideChatLineageCache {
+    lineages: std::sync::Mutex<BTreeMap<SideChatIncarnation, Option<SideChatLineage>>>,
+    /// How often the roster's fork facts were read.
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl SideChatLineageCache {
+    /// Every verified side chat of `handle`'s mob ([`verified_side_chats`]),
+    /// read now, keeping the lineage of each marked incarnation the roster
+    /// lists.
+    pub(crate) async fn verified(
+        &self,
+        handle: &meerkat_mob::MobHandle,
+    ) -> BTreeMap<String, SideChatLineage> {
+        let (lineages, marked) = read_verified_side_chats(handle).await;
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.keep(&handle.mob_id().to_string(), marked);
+        lineages
+    }
+
+    /// The lineage of one incarnation of a member of `handle`'s mob (its
+    /// runtime id and fence token) whose roster labels are `labels`, when it
+    /// is a verified side chat. A member without the side chat marker has
+    /// none, and nothing is read; a marked incarnation's lineage is read from
+    /// the roster the first time it is asked for, then kept.
+    pub(crate) async fn lineage(
+        &self,
+        handle: &meerkat_mob::MobHandle,
+        runtime_id: &meerkat_mob::AgentRuntimeId,
+        fence_token: meerkat_mob::FenceToken,
+        labels: &BTreeMap<String, String>,
+    ) -> Option<SideChatLineage> {
+        if !labels.contains_key(SIDE_CHAT_OF_LABEL) {
+            return None;
+        }
+        let key = (handle.mob_id().to_string(), runtime_id.clone(), fence_token);
+        if let Some(kept) = self.kept(&key) {
+            return kept;
+        }
+        self.verified(handle).await;
+        self.kept_or_none(key)
+    }
+
+    /// How often the roster's fork facts were read.
+    #[cfg(test)]
+    pub(crate) fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn locked(
+        &self,
+    ) -> std::sync::MutexGuard<'_, BTreeMap<SideChatIncarnation, Option<SideChatLineage>>> {
+        self.lineages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn kept(&self, key: &SideChatIncarnation) -> Option<Option<SideChatLineage>> {
+        self.locked().get(key).cloned()
+    }
+
+    /// The kept lineage of `key`, keeping none for an incarnation the last
+    /// read did not list.
+    fn kept_or_none(&self, key: SideChatIncarnation) -> Option<SideChatLineage> {
+        self.locked().entry(key).or_insert(None).clone()
+    }
+
+    fn keep(&self, mob_id: &str, marked: Vec<ListedSideChatMarker>) {
+        let mut lineages = self.locked();
+        if lineages.len() >= SIDE_CHAT_LINEAGE_CACHE_LIMIT {
+            lineages.clear();
+        }
+        for listed in marked {
+            lineages.insert(
+                (mob_id.to_string(), listed.runtime_id, listed.fence_token),
+                listed.lineage,
+            );
+        }
+    }
 }
 
 /// The lineage of `member_id`, a member of `handle`'s mob whose roster labels
 /// are `labels`, when it is a verified side chat. Reads the roster's fork
-/// facts only when `labels` carry the marker.
+/// facts only when `labels` carry the marker, and keeps nothing: a caller
+/// with the member's runtime and incarnation asks its
+/// [`SideChatLineageCache`].
 pub(crate) async fn verified_side_chat_lineage(
     handle: &meerkat_mob::MobHandle,
     member_id: &meerkat_mob::AgentIdentity,
@@ -258,49 +393,6 @@ pub(crate) fn project_side_chat_lineage(
     );
 }
 
-/// A mob definition wiring rule that would wire a member of a role when
-/// Meerkat seats it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "rule", rename_all = "snake_case")]
-pub enum DefinitionWiring {
-    /// `auto_wire_orchestrator` wires every member whose role is not the
-    /// orchestrator's to the orchestrator.
-    AutoWireOrchestrator { orchestrator_role: String },
-    /// A `role_wiring` rule names the role.
-    RoleWiring { peer_role: String },
-}
-
-/// The definition wiring rule that would wire a member of `role` when
-/// Meerkat seats it, if any. Mirrors meerkat-mob's spawn wiring plan, and is
-/// conservative: a rule that names the role counts even while no member of
-/// the peer role is live, since one can be by the time the child is seated.
-pub(crate) fn definition_wiring_for_role(
-    definition: &meerkat_mob::MobDefinition,
-    role: &str,
-) -> Option<DefinitionWiring> {
-    if definition.wiring.auto_wire_orchestrator
-        && let Some(orchestrator) = definition.orchestrator.as_ref()
-        && orchestrator.profile.as_str() != role
-    {
-        return Some(DefinitionWiring::AutoWireOrchestrator {
-            orchestrator_role: orchestrator.profile.to_string(),
-        });
-    }
-    definition.wiring.role_wiring.iter().find_map(|rule| {
-        if rule.a.as_str() == role {
-            Some(DefinitionWiring::RoleWiring {
-                peer_role: rule.b.to_string(),
-            })
-        } else if rule.b.as_str() == role {
-            Some(DefinitionWiring::RoleWiring {
-                peer_role: rule.a.to_string(),
-            })
-        } else {
-            None
-        }
-    })
-}
-
 /// Why a side chat fork did not complete.
 #[derive(Debug)]
 pub enum SideChatError {
@@ -314,13 +406,6 @@ pub enum SideChatError {
     SourceUnreadable {
         source_member_id: String,
         message: String,
-    },
-    /// The mob definition wires the source's role, so Meerkat would wire the
-    /// child to peers when it seats it. Nothing was forked.
-    WiredRole {
-        source_member_id: String,
-        role: String,
-        wiring: DefinitionWiring,
     },
     /// The child was seated with peer edges after all. The caller retires it.
     WiredAtSeat {
@@ -344,15 +429,6 @@ impl std::fmt::Display for SideChatError {
             } => write!(
                 f,
                 "the fork source {source_member_id} could not be read: {message}"
-            ),
-            Self::WiredRole {
-                source_member_id,
-                role,
-                ..
-            } => write!(
-                f,
-                "a side chat of {source_member_id} cannot stay unwired: the mob definition \
-                 wires members of role {role} to peers when they are seated"
             ),
             Self::WiredAtSeat {
                 member_alias,
@@ -427,8 +503,11 @@ pub struct SideChatFork {
 /// Fork `source_member_alias` into a side chat seated as `child_alias`.
 ///
 /// Refuses, before anything is forked, a source the roster does not hold and
-/// a source whose role the mob definition wires; the durable fork refuses a
-/// source that is running (`ForkSourceUnavailable`, cause `running`), typed.
+/// a source whose session was never born (seated and never woken: there is
+/// no conversation to fork, and the fork does not wake it), typed as a
+/// source without a session (`ForkSourceUnavailable`, cause `no_session`).
+/// The durable fork refuses a source that is running (cause `running`),
+/// typed. A dormant source forks from its stored session without waking.
 pub async fn fork_side_chat(
     mob_runtime: &MobRuntime,
     identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
@@ -471,12 +550,17 @@ pub async fn fork_side_chat(
             });
         }
     };
-    if let Some(wiring) = definition_wiring_for_role(handle.definition(), source.role.as_str()) {
-        return Err(SideChatError::WiredRole {
-            source_member_id: source_alias,
-            role: source.role.to_string(),
-            wiring,
-        });
+    // The session the fork reads, as the roster names it now; the child's
+    // durable fork source names the exact one once it is seated.
+    let source_session_before_fork = source.bridge_session_id().cloned();
+    // A seat that was never woken has no session in any store: nothing to
+    // fork, and waking it would run its first build (and any kickoff) only
+    // to fork an empty conversation.
+    if source_session_before_fork
+        .as_ref()
+        .is_some_and(|session| handle.session_unborn(session))
+    {
+        return Err(source_without_session(&source_alias));
     }
     let source_console_identity = crate::member_comms_id::durable_identity_label(&source.labels)
         .map_or_else(|| source_alias.clone(), str::to_string);
@@ -495,7 +579,7 @@ pub async fn fork_side_chat(
     // side chat apart from the agent it branched from, and the source's own
     // console flags do not follow it.
     let mut labels = BTreeMap::from([
-        (SIDE_CHAT_OF_LABEL.to_string(), source_alias),
+        (SIDE_CHAT_OF_LABEL.to_string(), source_alias.clone()),
         (DISPLAY_NAME_LABEL.to_string(), display_name.clone()),
     ]);
     for (key, value) in SOURCE_ONLY_LABELS {
@@ -503,18 +587,18 @@ pub async fn fork_side_chat(
             labels.insert(key.to_string(), value.to_string());
         }
     }
-    // The session the fork reads, as the roster names it now; the child's
-    // durable fork source names the exact one once it is seated.
-    let source_session_before_fork = source.bridge_session_id().cloned();
     // The source's role, profile and model overrides and runtime mode, as a
     // `fork_off` child gets them: the side chat runs with the source's tools.
+    // It is exempt from the mob definition's wiring rules, so it is seated
+    // with no peer edge, and no member seated after it is wired to it.
     let mut spec = SpawnMemberSpec::new(source.role, meerkat_mob::AgentIdentity::from(child_alias))
         .with_runtime_mode(source.runtime_mode)
-        .with_labels(labels);
+        .with_labels(labels)
+        .with_definition_wiring(meerkat_mob::DefinitionWiring::Exempt);
     spec.override_profile = source.effective_profile_override;
     spec.model_override = source.effective_model_override;
 
-    let outcome = crate::fork::fork_member_on_runtime(
+    let outcome = match crate::fork::fork_member_on_runtime(
         mob_runtime,
         identity_runtime,
         source_member_alias,
@@ -524,7 +608,17 @@ pub async fn fork_side_chat(
         None,
     )
     .await
-    .map_err(SideChatError::Fork)?;
+    {
+        Ok(outcome) => outcome,
+        // The store holds no session the roster names for the source (it
+        // was never born after all): the same refusal, nothing was forked.
+        Err(ForkMemberError::Mob(meerkat_mob::MobError::SessionError(
+            meerkat_core::service::SessionError::NotFound { id },
+        ))) if source_session_before_fork.as_ref() == Some(&id) => {
+            return Err(source_without_session(&source_alias));
+        }
+        Err(error) => return Err(SideChatError::Fork(error)),
+    };
 
     let child_id = outcome.result.agent_identity.clone();
     // The seated child as the roster holds it. The fork has committed, so a
@@ -574,11 +668,23 @@ pub async fn fork_side_chat(
     })
 }
 
+/// The typed refusal of a source with no session to fork: Meerkat's own
+/// `ForkSourceUnavailable` with cause `no_session`, so the console answers it
+/// as it answers that refusal.
+fn source_without_session(source_member_id: &str) -> SideChatError {
+    SideChatError::Fork(ForkMemberError::Mob(
+        meerkat_mob::MobError::ForkSourceUnavailable {
+            source_member_id: source_member_id.to_string(),
+            cause: meerkat_mob::error::ForkSourceUnavailableCause::NoSession,
+        },
+    ))
+}
+
 /// JSON-RPC code of a typed `meta/fork_member` refusal. `data.kind` is
 /// `fork_source_unavailable` (with `source_member_id` and `cause`: `running`,
-/// `no_session`, `remote_read_unavailable` or `authority_unavailable`) or
-/// `unwired_seat_unavailable` (with `wiring`); nothing was forked, except for
-/// a child seated with peer edges (`wiring.rule` `seated_with_peers`), whose
+/// `no_session`, `remote_read_unavailable` or `authority_unavailable`), and
+/// nothing was forked; or `unwired_seat_unavailable` (`wiring.rule`
+/// `seated_with_peers`), a child seated with peer edges after all, whose
 /// `retired` says whether it was retired again.
 pub const SIDE_CHAT_FORK_REFUSED_CODE: i64 = -32055;
 
@@ -694,19 +800,6 @@ pub(crate) fn fork_member_error(error: &SideChatError) -> crate::rpc::JsonRpcErr
             message: error.to_string(),
             data: None,
         },
-        SideChatError::WiredRole {
-            source_member_id,
-            role,
-            wiring,
-        } => fork_refusal(
-            error.to_string(),
-            serde_json::json!({
-                "kind": "unwired_seat_unavailable",
-                "source_member_id": source_member_id,
-                "role": role,
-                "wiring": wiring,
-            }),
-        ),
         SideChatError::WiredAtSeat {
             member_alias,
             peers,
@@ -1105,53 +1198,6 @@ mod tests {
         );
     }
 
-    fn definition(toml: &str) -> meerkat_mob::MobDefinition {
-        meerkat_mob::MobDefinition::from_toml(toml).expect("definition parses")
-    }
-
-    const PROFILES: &str = r#"
-[profiles.lead]
-model = "gpt-5.5"
-
-[profiles.worker]
-model = "gpt-5.5"
-
-[profiles.analyst]
-model = "gpt-5.5"
-"#;
-
-    #[test]
-    fn definition_wiring_names_the_rule_that_would_wire_a_role() {
-        let unwired = definition(&format!("[mob]\nid = \"m\"\n{PROFILES}"));
-        assert_eq!(definition_wiring_for_role(&unwired, "worker"), None);
-
-        let orchestrated = definition(&format!(
-            "[mob]\nid = \"m\"\norchestrator = \"lead\"\n{PROFILES}\n[wiring]\nauto_wire_orchestrator = true\n"
-        ));
-        assert_eq!(
-            definition_wiring_for_role(&orchestrated, "worker"),
-            Some(DefinitionWiring::AutoWireOrchestrator {
-                orchestrator_role: "lead".to_string()
-            })
-        );
-        assert_eq!(
-            definition_wiring_for_role(&orchestrated, "lead"),
-            None,
-            "the orchestrator itself is not wired to itself"
-        );
-
-        let role_wired = definition(&format!(
-            "[mob]\nid = \"m\"\n{PROFILES}\n[[wiring.role_wiring]]\na = \"worker\"\nb = \"analyst\"\n"
-        ));
-        assert_eq!(
-            definition_wiring_for_role(&role_wired, "analyst"),
-            Some(DefinitionWiring::RoleWiring {
-                peer_role: "worker".to_string()
-            })
-        );
-        assert_eq!(definition_wiring_for_role(&role_wired, "lead"), None);
-    }
-
     fn activation_identity(
         session: &SessionId,
         activation: &str,
@@ -1286,23 +1332,35 @@ model = "gpt-5.5"
         );
     }
 
+    /// A source with no session to fork is refused as Meerkat refuses it.
     #[test]
-    fn a_wired_role_and_a_committed_fork_keep_their_typed_data() {
-        let wired = fork_member_error(&SideChatError::WiredRole {
-            source_member_id: "beta".to_string(),
-            role: "worker".to_string(),
-            wiring: DefinitionWiring::RoleWiring {
-                peer_role: "analyst".to_string(),
-            },
+    fn a_source_without_a_session_is_refused_typed() {
+        let error = fork_member_error(&source_without_session("alpha"));
+        assert_eq!(error.code, SIDE_CHAT_FORK_REFUSED_CODE);
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "kind": "fork_source_unavailable",
+                "source_member_id": "alpha",
+                "cause": "no_session",
+            }))
+        );
+    }
+
+    #[test]
+    fn a_wired_seat_and_a_committed_fork_keep_their_typed_data() {
+        let wired = fork_member_error(&SideChatError::WiredAtSeat {
+            member_alias: "beta-side".to_string(),
+            member_id: meerkat_mob::AgentIdentity::from("beta-side"),
+            peers: vec!["lead".to_string()],
         });
         assert_eq!(wired.code, SIDE_CHAT_FORK_REFUSED_CODE);
         assert_eq!(
             wired.data,
             Some(serde_json::json!({
                 "kind": "unwired_seat_unavailable",
-                "source_member_id": "beta",
-                "role": "worker",
-                "wiring": { "rule": "role_wiring", "peer_role": "analyst" },
+                "agent_identity": "beta-side",
+                "wiring": { "rule": "seated_with_peers", "peers": ["lead"] },
             }))
         );
 

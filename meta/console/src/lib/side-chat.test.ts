@@ -106,9 +106,18 @@ test("typed fork refusals read as what the operator can do", () => {
   assert.match(
     sideChatForkErrorMessage(rpcError(SIDE_CHAT_FORK_REFUSED_CODE, {
       kind: "unwired_seat_unavailable",
-      wiring: { rule: "auto_wire_orchestrator", orchestrator_role: "lead" },
+      wiring: { rule: "seated_with_peers", peers: ["lead"] },
+      retired: true,
     })),
-    /wires its role to lead peers/,
+    /closed again/,
+  );
+  assert.match(
+    sideChatForkErrorMessage(rpcError(SIDE_CHAT_FORK_REFUSED_CODE, {
+      kind: "unwired_seat_unavailable",
+      wiring: { rule: "seated_with_peers", peers: ["lead"] },
+      retired: false,
+    })),
+    /could not be closed/,
   );
   assert.match(sideChatForkErrorMessage(rpcError(FORK_INSTRUCTION_REFUSED_CODE)), /instructions/);
   assert.equal(sideChatForkErrorMessage(new Error("network down")), "network down");

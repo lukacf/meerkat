@@ -3966,19 +3966,23 @@ fn timeline_event_visible_to(view: &AccessView, event: &ConsoleTimelineEvent) ->
 /// `agent.view` on one member row of a list call (`meta/list_members`,
 /// `meta/find_members`, `meta/console/list_identities` and
 /// `GET /console/identities`), decided as `/console/experience` decides its
-/// member rows: the row's own attributes, then its spawn ancestors, in one
-/// decision, so a deny on any ancestor wins. A row with no registered
-/// spawner is decided by its own attributes alone.
+/// member rows: the row's own attributes, then its lineage (its spawn
+/// ancestors, or a side chat's source), in one decision, so a deny on any
+/// ancestor wins. A row with neither is decided by its own attributes alone.
 ///
-/// Only the spawn registry asserts lineage: `registered` is the registry's
-/// labels for the row's identity, and the lineage labels the row carries
-/// itself (`spawned_by`, `spawned_by_session`, `via_tool`) give way to the
-/// registry's. List rows carry labels a caller can set, and a lineage claim
-/// no spawn made must neither list a member nor hide it.
+/// Only the spawn registry and Meerkat's fork record assert lineage:
+/// `registered` is the registry's labels for the row's identity,
+/// `side_chat` the row's side chat lineage as the roster's fork facts
+/// verify it, and the lineage labels the row carries itself (`spawned_by`,
+/// `spawned_by_session`, `via_tool`, `side_chat_of`, `side_chat_of_session`)
+/// give way to theirs. List rows carry labels a caller can set, and a
+/// lineage claim no spawn or fork made must neither list a member nor hide
+/// it.
 fn listed_member_visible(
     view: &AccessView,
     resource: &AccessResource<'_>,
     registered: Option<&BTreeMap<String, String>>,
+    side_chat: Option<&crate::side_chat::SideChatLineage>,
 ) -> bool {
     let Some(identity) = resource.identity else {
         // A row that names no agent has no lineage to follow.
@@ -3989,6 +3993,7 @@ fn listed_member_visible(
     if let Some(registered) = registered {
         crate::console_spawn::merge_registered_lineage_labels(&mut labels, registered);
     }
+    crate::side_chat::project_side_chat_lineage(&mut labels, side_chat);
     view.decide_agent_with_attributes(
         ACTION_AGENT_VIEW,
         &AgentResourceAttributes {
@@ -4003,8 +4008,10 @@ fn listed_member_visible(
 
 /// Filter serialized member rows (`meta/list_members`, `find_members`)
 /// down to the agents the caller may view, each by [`listed_member_visible`]
-/// with `runtime`'s spawn registry. Field names cover both the meerkat
-/// roster entry shape and the console projection shape.
+/// with `runtime`'s spawn registry and the side chats its roster's fork
+/// facts verify (read once per call, and only when a row carries the side
+/// chat marker). Field names cover both the meerkat roster entry shape and
+/// the console projection shape.
 async fn retain_visible_member_rows(
     rows: &mut Vec<Value>,
     runtime: &MobRuntime,
@@ -4015,6 +4022,20 @@ async fn retain_visible_member_rows(
     };
     // Keyed by console identity, as the console's member projection reads it.
     let registered = runtime.console_identity_labels().await;
+    // Keyed by the side chat's public alias.
+    let marked = rows.iter().any(|row| {
+        row.get("labels")
+            .and_then(|labels| labels.get(crate::side_chat::SIDE_CHAT_OF_LABEL))
+            .is_some()
+    });
+    let side_chats = if marked {
+        runtime
+            .side_chat_lineages()
+            .verified(&runtime.handle())
+            .await
+    } else {
+        BTreeMap::new()
+    };
     rows.retain(|row| {
         let labels: Option<std::collections::BTreeMap<String, String>> = row
             .get("labels")
@@ -4033,6 +4054,10 @@ async fn retain_visible_member_rows(
             .get("role")
             .or_else(|| row.get("profile"))
             .and_then(Value::as_str);
+        let side_chat = agent_id.and_then(|agent_id| {
+            let alias = crate::member_comms_id::runtime_alias_str(agent_id);
+            side_chats.get(&*alias)
+        });
         listed_member_visible(
             view,
             &AccessResource {
@@ -4042,6 +4067,7 @@ async fn retain_visible_member_rows(
                 labels: labels.as_ref(),
             },
             identity.and_then(|identity| registered.get(identity)),
+            side_chat,
         )
     });
 }
@@ -4057,8 +4083,9 @@ fn console_identity_record_role(labels: &BTreeMap<String, String>) -> &str {
 
 /// The console aggregator's identity records (`GET /console/identities`,
 /// `meta/console/list_identities`) the caller may view, each by
-/// [`listed_member_visible`] with the record's role and the spawn registry
-/// of the record's own runtime.
+/// [`listed_member_visible`] with the record's role, the spawn registry of
+/// the record's own runtime and the side chat lineage its roster's fork
+/// facts verify.
 async fn visible_identity_records(
     aggregator: &MetaConsoleAggregator,
     view: Option<&AccessView>,
@@ -4070,10 +4097,15 @@ async fn visible_identity_records(
     let registered = aggregator
         .spawn_registry_labels_for_identities(&identities)
         .await?;
+    let side_chats = aggregator
+        .side_chat_lineages_for_identities(&identities)
+        .await?;
     // In record order: `retain` visits each record once, in order.
     let mut registered = registered.into_iter();
+    let mut side_chats = side_chats.into_iter();
     identities.retain(|record| {
         let registry_labels = registered.next().flatten();
+        let side_chat = side_chats.next().flatten();
         listed_member_visible(
             view,
             &AccessResource {
@@ -4083,6 +4115,7 @@ async fn visible_identity_records(
                 labels: Some(&record.labels),
             },
             registry_labels.as_ref(),
+            side_chat.as_ref(),
         )
     });
     Ok(identities)
@@ -7431,12 +7464,29 @@ pub(crate) async fn sse_member_authorization_projection(
             crate::console_spawn::merge_registered_labels(&mut labels, spawn_labels);
         }
     }
-    let side_chat = crate::side_chat::verified_side_chat_lineage(
-        handle,
-        &alias.member.agent_identity,
-        &alias.member.labels,
-    )
-    .await;
+    // A side chat's source, as the roster's fork facts verify it: kept per
+    // incarnation, so a stream reads them once, not once per event.
+    let side_chat = match runtime {
+        Some(runtime) => {
+            runtime
+                .side_chat_lineages()
+                .lineage(
+                    handle,
+                    expected_runtime_id,
+                    expected_fence_token,
+                    &alias.member.labels,
+                )
+                .await
+        }
+        None => {
+            crate::side_chat::verified_side_chat_lineage(
+                handle,
+                &alias.member.agent_identity,
+                &alias.member.labels,
+            )
+            .await
+        }
+    };
     crate::side_chat::project_side_chat_lineage(&mut labels, side_chat.as_ref());
     let visible = runtime_alias_visible_to_console(handle, visibility_policy, &alias);
     Some(SseMemberAuthorizationProjection {
@@ -30995,6 +31045,8 @@ mod console_list_lineage_access_tests {
         /// runtime: it answers `meta/console/list_identities` on its own
         /// route.
         aggregator: MetaConsoleAggregator,
+        /// A persistent runtime's state directory, kept while it runs.
+        _state: Option<tempfile::TempDir>,
     }
 
     /// A runtime whose roster holds `ops-lead`, `ops-worker`, `secret-lead`,
@@ -31099,6 +31151,7 @@ comms = true
             controller,
             app,
             aggregator,
+            _state: None,
         }
     }
 
@@ -31440,6 +31493,142 @@ comms = true
                     "{surface:?}: {what}"
                 );
             }
+        }
+        fixture.stop().await;
+    }
+
+    /// A persistent runtime (a durable fork needs one) whose roster holds
+    /// `alpha`, its side chat `alpha-side` (forked through
+    /// `meta/fork_member`), `gamma`, and `forger`, which carries
+    /// `side_chat_of` and `side_chat_of_session` labels naming `alpha` that
+    /// no fork made. Every member carries [`TEAM`].
+    async fn side_chat_fixture(mob_id: &str) -> Fixture {
+        let (state, spec) = super::console_side_chat_tests::persistent_console_spec(mob_id, "", "")
+            .expect("a persistent console composition");
+        let mut runtime = Box::pin(crate::UnifiedRuntime::bootstrap(
+            spec,
+            crate::MetaConfig {
+                modules: vec![],
+                discovery: crate::DiscoverySpec {
+                    namespace: mob_id.to_string(),
+                    modules: vec![],
+                },
+                pre_spawn: vec![],
+            },
+            std::time::Duration::from_secs(2),
+        ))
+        .await
+        .expect("the persistent runtime bootstraps");
+        let mob_runtime = runtime.mob_runtime().clone();
+        Box::pin(super::console_side_chat_tests::seeded_member(
+            &mob_runtime,
+            "worker",
+            "alpha",
+            &[TEAM],
+        ))
+        .await
+        .expect("the source runs a turn");
+        for (member, labels) in [
+            ("gamma", vec![TEAM]),
+            (
+                "forger",
+                vec![
+                    TEAM,
+                    (crate::side_chat::SIDE_CHAT_OF_LABEL, "alpha"),
+                    (
+                        crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL,
+                        "forged-session",
+                    ),
+                ],
+            ),
+        ] {
+            let labels = labels
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect::<BTreeMap<_, _>>();
+            Box::pin(mob_runtime.handle().spawn_spec(
+                SpawnMemberSpec::new("worker", AgentIdentity::from(member)).with_labels(labels),
+            ))
+            .await
+            .expect("the member spawns");
+        }
+        let forked =
+            super::console_side_chat_tests::fork_when_idle(&mob_runtime, "alpha", "alpha-side")
+                .await;
+        assert!(
+            forked["error"].is_null(),
+            "the side chat forks: {forked:#?}"
+        );
+        let controller = AccessController::new(only_the_source()).expect("access controller");
+        runtime.set_access_controller(controller.clone());
+        // Both consoles are built over the complete roster, so their
+        // identity read models list every member.
+        let app = runtime.build_reference_app_router(RuntimeDecisionState::local_console(
+            crate::ConsolePolicy {
+                require_app_auth: false,
+                ..Default::default()
+            },
+            None,
+        ));
+        let aggregator = MetaConsoleAggregator::in_memory();
+        aggregator.register_runtime_handles_with_policy(
+            "list-side-chats",
+            "",
+            runtime.mob_runtime().clone(),
+            None,
+            runtime.console_events(),
+            Arc::new(AllowAllConsoleVisibilityPolicy),
+        );
+        Fixture {
+            runtime,
+            controller,
+            app,
+            aggregator,
+            _state: Some(state),
+        }
+    }
+
+    /// The viewer is granted the side chat's source `alpha` alone.
+    fn only_the_source() -> AccessControlConfig {
+        enforced_policy(vec![view_rule("view-the-source", "alpha")])
+    }
+
+    /// The viewer is granted every agent, and the source `alpha` is denied.
+    fn all_but_a_denied_source() -> AccessControlConfig {
+        enforced_policy(vec![
+            view_rule("view-every-agent", "*"),
+            AccessRule {
+                id: "hide-the-source".to_string(),
+                effect: AccessEffect::Deny,
+                actions: vec!["agent.*".to_string()],
+                agents: vec!["alpha".to_string()],
+                ..AccessRule::default()
+            },
+        ])
+    }
+
+    /// Every list surface decides a side chat along its source, as Meerkat's
+    /// fork record names it: a grant on the source alone lists its side
+    /// chat, and a deny on the source hides it under a grant on every agent.
+    /// A `side_chat_of` label on a member no fork made neither lists it nor
+    /// hides it: `forger` is decided by its own attributes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn side_chat_list_rows_follow_their_source() {
+        let fixture = Box::pin(side_chat_fixture("list-side-chats")).await;
+        for surface in SURFACES {
+            fixture.commit(only_the_source());
+            assert_eq!(
+                fixture.listed(surface).await,
+                ["alpha", "alpha-side"],
+                "{surface:?}: a grant on the source lists its side chat"
+            );
+            fixture.commit(all_but_a_denied_source());
+            assert_eq!(
+                fixture.listed(surface).await,
+                ["forger", "gamma"],
+                "{surface:?}: a deny on the source hides its side chat under a broad grant, \
+                 and a forged side chat label hides nothing"
+            );
         }
         fixture.stop().await;
     }

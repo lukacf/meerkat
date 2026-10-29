@@ -36,14 +36,15 @@ external_addressable = true
 comms = true
 "#;
 
-/// A console runtime whose sessions persist (SQLite session and runtime
-/// stores), which a durable fork needs. `mob_header` holds the `[mob]` table
-/// lines after `id`, and `tail` any `[wiring]` tables.
-async fn persistent_console_runtime(
+/// The composition of a console runtime whose sessions persist (SQLite
+/// session and runtime stores), which a durable fork needs. `mob_header`
+/// holds the `[mob]` table lines after `id`, and `tail` any `[wiring]`
+/// tables.
+pub(super) fn persistent_console_spec(
     mob_id: &str,
     mob_header: &str,
     tail: &str,
-) -> Result<(tempfile::TempDir, MobRuntime), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(tempfile::TempDir, MobBootstrapSpec), Box<dyn std::error::Error + Send + Sync>> {
     let temp_dir = tempfile::tempdir()?;
     let state = temp_dir.path().join("state");
     std::fs::create_dir_all(&state)?;
@@ -75,16 +76,48 @@ async fn persistent_console_runtime(
     let definition = MobDefinition::from_toml(&format!(
         "[mob]\nid = \"{mob_id}\"\n{mob_header}\n{WORKER_PROFILES}\n{tail}"
     ))?;
-    let runtime = MobRuntime::bootstrap(
-        MobBootstrapSpec::new(definition, MobStorage::in_memory(), session_service)
-            .with_session_runtime_adapter(machine)?
-            .with_options(MobBootstrapOptions {
-                allow_ephemeral_sessions: true,
-                notify_orchestrator_on_resume: true,
-                default_llm_client: Some(Arc::new(TestClient::default())),
-            }),
-    )
-    .await?;
+    let spec = MobBootstrapSpec::new(definition, MobStorage::in_memory(), session_service)
+        .with_session_runtime_adapter(machine)?
+        .with_options(MobBootstrapOptions {
+            allow_ephemeral_sessions: true,
+            notify_orchestrator_on_resume: true,
+            default_llm_client: Some(Arc::new(TestClient::default())),
+        });
+    Ok((temp_dir, spec))
+}
+
+/// A console runtime over [`persistent_console_spec`].
+async fn persistent_console_runtime(
+    mob_id: &str,
+    mob_header: &str,
+    tail: &str,
+) -> Result<(tempfile::TempDir, MobRuntime), Box<dyn std::error::Error + Send + Sync>> {
+    let (temp_dir, spec) = persistent_console_spec(mob_id, mob_header, tail)?;
+    let runtime = MobRuntime::bootstrap(spec).await?;
+    Ok((temp_dir, runtime))
+}
+
+/// A console runtime as a gateway composes one over a state directory
+/// (`MobBootstrapSpec::persistent`): its members can be seated dormant and
+/// released, and its sessions persist.
+async fn persistent_gateway_runtime(
+    mob_id: &str,
+    mob_header: &str,
+    tail: &str,
+) -> Result<(tempfile::TempDir, MobRuntime), Box<dyn std::error::Error + Send + Sync>> {
+    let temp_dir = tempfile::tempdir()?;
+    let state = temp_dir.path().to_path_buf();
+    let (storage, provenance) = crate::mob_composition_manifest::persistent_mob_storage(
+        state.join(crate::storage_layout::EVENT_LOG_DB_FILE_NAME),
+    )?;
+    let definition = MobDefinition::from_toml(&format!(
+        "[mob]\nid = \"{mob_id}\"\n{mob_header}\n{WORKER_PROFILES}\n{tail}"
+    ))?;
+    let mut spec = MobBootstrapSpec::persistent(definition, storage, provenance, state, 4)
+        .await
+        .map_err(|error| error.to_string())?;
+    spec.options.default_llm_client = Some(Arc::new(TestClient::default()));
+    let runtime = Box::pin(MobRuntime::bootstrap(spec)).await?;
     Ok((temp_dir, runtime))
 }
 
@@ -116,7 +149,7 @@ async fn call(runtime: &MobRuntime, method: &str, params: Value) -> Value {
 
 /// Spawn `alias` as a member of `role` with `labels` and run one committed
 /// turn on it, so its session holds a transcript to fork.
-async fn seeded_member(
+pub(super) async fn seeded_member(
     runtime: &MobRuntime,
     role: &str,
     alias: &str,
@@ -149,7 +182,7 @@ async fn seeded_member(
 /// `meta/fork_member` for `source`, retried while the runtime still settles
 /// the source's last turn (a typed busy refusal), as the console waits for an
 /// idle agent.
-async fn fork_when_idle(runtime: &MobRuntime, source: &str, side_chat: &str) -> Value {
+pub(super) async fn fork_when_idle(runtime: &MobRuntime, source: &str, side_chat: &str) -> Value {
     let params = json!({ "source_member_id": source, "agent_identity": side_chat });
     for _ in 0..50 {
         let answer = call(runtime, "meta/fork_member", params.clone()).await;
@@ -257,6 +290,11 @@ async fn a_side_chat_forks_the_source_unwired_and_closes_on_retire() -> TestResu
         .await?
         .expect("the side chat is seated");
     assert!(side.wired_to.is_empty(), "a side chat has no peer edge");
+    assert_eq!(
+        side.definition_wiring,
+        meerkat_mob::DefinitionWiring::Exempt,
+        "the side chat is seated exempt from the definition's wiring rules"
+    );
     assert!(side.spawned_by.is_none());
     assert_eq!(
         side.labels.get(crate::side_chat::SIDE_CHAT_OF_LABEL),
@@ -457,23 +495,146 @@ async fn a_grant_on_the_source_covers_its_side_chat_and_no_other_grant_does() ->
     Ok(())
 }
 
-/// A role the mob definition wires to peers cannot hold an unwired side
-/// chat: Meerkat would wire the child when it seats it. The fork is refused,
-/// typed, before anything is forked.
+/// The peers `alias` is wired to, as Meerkat's roster holds them, by public
+/// alias.
+async fn wired_to(
+    runtime: &MobRuntime,
+    alias: &str,
+) -> Result<std::collections::BTreeSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let entry = runtime
+        .handle()
+        .get_member(&AgentIdentity::from(alias))
+        .await?
+        .ok_or_else(|| format!("{alias} is seated"))?;
+    Ok(entry
+        .wired_to
+        .iter()
+        .map(|peer| crate::member_comms_id::runtime_alias_str(peer.as_str()).into_owned())
+        .collect())
+}
+
+fn peers(aliases: &[&str]) -> std::collections::BTreeSet<String> {
+    aliases.iter().map(|alias| (*alias).to_string()).collect()
+}
+
+/// The wiring rules of the mob definition never touch a side chat, whatever
+/// its source's role: a side chat of a role `auto_wire_orchestrator` wires to
+/// the orchestrator is seated with no peer edge, and its source keeps the
+/// edge the rule gave it.
 #[tokio::test]
-async fn a_side_chat_of_a_wired_role_is_refused_before_anything_is_forked() -> TestResult {
+async fn a_side_chat_of_a_wired_role_is_seated_unwired() -> TestResult {
     let (_temp_dir, runtime) = persistent_console_runtime(
         "console-side-chat-wired",
         "orchestrator = \"lead\"",
         "[wiring]\nauto_wire_orchestrator = true\n",
     )
     .await?;
+    seeded_member(&runtime, "lead", "lead", &[]).await?;
     seeded_member(&runtime, "worker", "beta", &[]).await?;
+    assert_eq!(
+        wired_to(&runtime, "beta").await?,
+        peers(&["lead"]),
+        "the definition wires the worker to the orchestrator"
+    );
+
+    let forked = fork_when_idle(&runtime, "beta", "beta-side").await;
+    assert!(
+        forked["error"].is_null(),
+        "a side chat of a wired role forks: {forked:#?}"
+    );
+    assert!(
+        wired_to(&runtime, "beta-side").await?.is_empty(),
+        "the side chat is seated with no peer edge"
+    );
+    assert_eq!(
+        wired_to(&runtime, "beta").await?,
+        peers(&["lead"]),
+        "the source keeps its edge"
+    );
+    assert_eq!(
+        wired_to(&runtime, "lead").await?,
+        peers(&["beta"]),
+        "the orchestrator gained no edge to the side chat"
+    );
+    Ok(())
+}
+
+/// A side chat of the orchestrator is no target of the definition's wiring
+/// rules either: a worker spawned after it, and a worker seated dormant after
+/// it, are wired to the orchestrator alone.
+#[tokio::test]
+async fn a_member_seated_after_an_orchestrator_side_chat_is_not_wired_to_it() -> TestResult {
+    let (_temp_dir, runtime) = persistent_gateway_runtime(
+        "console-side-chat-orchestrator",
+        "orchestrator = \"lead\"",
+        "[wiring]\nauto_wire_orchestrator = true\n",
+    )
+    .await?;
+    seeded_member(&runtime, "lead", "lead", &[]).await?;
+    let forked = fork_when_idle(&runtime, "lead", "lead-side").await;
+    assert!(
+        forked["error"].is_null(),
+        "the orchestrator forks a side chat: {forked:#?}"
+    );
+
+    Box::pin(
+        runtime
+            .handle()
+            .spawn_spec(SpawnMemberSpec::new("worker", AgentIdentity::from("gamma"))),
+    )
+    .await?;
+    let mut seat = SpawnMemberSpec::new("worker", AgentIdentity::from("delta"));
+    seat.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+    let outcomes = Box::pin(runtime.handle().seat_dormant_members(vec![seat])).await?;
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [meerkat_mob::DormantSeatOutcome::Seated { .. }]
+        ),
+        "the worker is seated dormant: {outcomes:?}"
+    );
+
+    assert_eq!(
+        wired_to(&runtime, "gamma").await?,
+        peers(&["lead"]),
+        "a worker spawned after the side chat is wired to the orchestrator alone"
+    );
+    assert_eq!(
+        wired_to(&runtime, "delta").await?,
+        peers(&["lead"]),
+        "a worker seated after the side chat is wired to the orchestrator alone"
+    );
+    assert!(
+        wired_to(&runtime, "lead-side").await?.is_empty(),
+        "no member is wired to the side chat"
+    );
+    Ok(())
+}
+
+/// A source seated and never woken has no conversation: its session was
+/// never born. The fork is refused as a source without a session, typed,
+/// before anything is forked, and the source is not woken for it.
+#[tokio::test]
+async fn an_unborn_source_is_refused_typed_and_nothing_is_forked() -> TestResult {
+    let (_temp_dir, runtime) =
+        persistent_gateway_runtime("console-side-chat-unborn", "", "").await?;
+    let source = AgentIdentity::from("alpha");
+    let mut seat = SpawnMemberSpec::new("worker", source.clone());
+    seat.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+    let outcomes = Box::pin(runtime.handle().seat_dormant_members(vec![seat])).await?;
+    let unborn = match outcomes.as_slice() {
+        [meerkat_mob::DormantSeatOutcome::Seated { session_id, .. }] => session_id.clone(),
+        other => panic!("the fresh spec is seated: {other:?}"),
+    };
+    assert!(
+        runtime.handle().session_unborn(&unborn),
+        "the seat built nothing"
+    );
 
     let refused = call(
         &runtime,
         "meta/fork_member",
-        json!({ "source_member_id": "beta", "agent_identity": "beta-side" }),
+        json!({ "source_member_id": "alpha", "agent_identity": "alpha-side" }),
     )
     .await;
     assert_eq!(
@@ -482,20 +643,284 @@ async fn a_side_chat_of_a_wired_role_is_refused_before_anything_is_forked() -> T
         "{refused:#?}"
     );
     assert_eq!(
-        refused["error"]["data"]["kind"],
-        json!("unwired_seat_unavailable")
-    );
-    assert_eq!(
-        refused["error"]["data"]["wiring"],
-        json!({ "rule": "auto_wire_orchestrator", "orchestrator_role": "lead" })
+        refused["error"]["data"],
+        json!({
+            "kind": "fork_source_unavailable",
+            "source_member_id": "alpha",
+            "cause": "no_session",
+        })
     );
     assert!(
         runtime
             .handle()
-            .get_member(&AgentIdentity::from("beta-side"))
+            .get_member(&AgentIdentity::from("alpha-side"))
             .await?
             .is_none(),
         "nothing was seated"
+    );
+    assert!(
+        runtime.handle().session_unborn(&unborn),
+        "the refusal did not wake the source"
+    );
+    assert!(runtime.handle().member_unmaterialized(&source));
+    Ok(())
+}
+
+/// Release `alias` to dormant, retried while the runtime still settles its
+/// last turn.
+async fn release_when_idle(runtime: &MobRuntime, alias: &str) -> TestResult {
+    let member = AgentIdentity::from(alias);
+    for _ in 0..50 {
+        match runtime.handle().release_member(&member).await {
+            Err(meerkat_mob::MobError::LifecycleOperationPending { .. }) => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            result => return Ok(result?),
+        }
+    }
+    Ok(runtime.handle().release_member(&member).await?)
+}
+
+/// A dormant source (released after its turn, its session stored) forks from
+/// its stored session: the fork reads the transcript without waking it.
+#[tokio::test]
+async fn a_dormant_source_forks_without_waking() -> TestResult {
+    let (_temp_dir, runtime) =
+        persistent_gateway_runtime("console-side-chat-dormant", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    release_when_idle(&runtime, "alpha").await?;
+    let source = AgentIdentity::from("alpha");
+    assert!(
+        runtime.handle().member_unmaterialized(&source),
+        "the released source is dormant"
+    );
+
+    let forked = fork_when_idle(&runtime, "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+    assert!(
+        runtime.handle().member_unmaterialized(&source),
+        "the fork read the stored session without waking the source"
+    );
+    assert!(
+        wired_to(&runtime, "alpha-side").await?.is_empty(),
+        "the side chat is seated unwired"
+    );
+    Ok(())
+}
+
+/// A side chat's frames are decided along its source, end to end: the
+/// console owner captures the side chat's lineage from the live roster
+/// through a read's member cut (the side chat, then the source incarnation it
+/// was forked from, with its attributes), and the captured lineage decides
+/// each frame. A grant on the source alone shows the side chat's frames, and
+/// a deny on the source hides them under a grant on every agent.
+#[tokio::test]
+async fn a_side_chat_frame_is_decided_along_its_source() -> TestResult {
+    use crate::console_aggregator::{
+        ConsoleFrameSource, ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleLogStore as _,
+        MetaConsoleAggregator, NewConsoleFrame,
+    };
+
+    let (_temp_dir, runtime) =
+        persistent_console_runtime("console-side-chat-frames", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let forked = fork_when_idle(&runtime, "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+    let side_session = forked["result"]["session_id"]
+        .as_str()
+        .expect("the side chat's session")
+        .to_string();
+    let source_session = bridge_session(&runtime, "alpha")
+        .await
+        .expect("the source's session");
+
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.register_runtime_handles_with_policy(
+        "side-chat-frames",
+        "",
+        runtime.clone(),
+        None,
+        ConsoleEventStore::new(),
+        Arc::new(AllowAllConsoleVisibilityPolicy),
+    );
+    let provenance = aggregator
+        .capture_member_provenance_for_test("side-chat-frames", "alpha-side", &side_session)
+        .await
+        .expect("the owner captures the live side chat");
+    assert_eq!(provenance.lineage.len(), 2, "{provenance:#?}");
+    assert_eq!(provenance.lineage[1].identity, "alpha");
+    assert!(
+        provenance.lineage[1].labels.is_some(),
+        "the source is captured from the incarnation the side chat was forked from: \
+         {provenance:#?}"
+    );
+    assert_eq!(
+        provenance.lineage[0]
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL)),
+        Some(&source_session)
+    );
+    let frame = aggregator
+        .store()
+        .append_if_absent(NewConsoleFrame {
+            id: None,
+            dedupe_key: "side-chat-frame".to_string(),
+            timestamp_ms: 2_000,
+            runtime_key: "side-chat-frames".to_string(),
+            identity: "alpha-side".to_string(),
+            conversation_id: Some("alpha-side".to_string()),
+            session_id: Some(side_session.clone()),
+            kind: "text_delta".to_string(),
+            status: ConsoleFrameStatus::Completed,
+            payload: json!({ "delta": "heron" }),
+            source: ConsoleFrameSource {
+                member_provenance: Some(provenance),
+                kind: ConsoleFrameSourceKind::ConsoleEvent,
+                source_cursor: None,
+            },
+            source_event_id: Some("side-chat-frame".to_string()),
+            interaction_id: None,
+            turn_id: None,
+            run_id: None,
+            parent_frame_id: None,
+            caused_by_frame_id: None,
+        })
+        .await
+        .expect("the frame is stored")
+        .frame;
+
+    let controller = AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec!["root@example.test".to_string()],
+        rules: vec![
+            AccessRule {
+                id: "the-source".to_string(),
+                subjects: vec!["source-reader@example.test".to_string()],
+                actions: vec![ACTION_AGENT_VIEW.to_string()],
+                agents: vec!["alpha".to_string()],
+                ..AccessRule::default()
+            },
+            AccessRule {
+                id: "every-agent".to_string(),
+                subjects: vec!["broad-reader@example.test".to_string()],
+                actions: vec![ACTION_AGENT_VIEW.to_string()],
+                agents: vec!["*".to_string()],
+                ..AccessRule::default()
+            },
+            AccessRule {
+                id: "not-the-source".to_string(),
+                effect: crate::access::AccessEffect::Deny,
+                subjects: vec!["broad-reader@example.test".to_string()],
+                actions: vec!["agent.*".to_string()],
+                agents: vec!["alpha".to_string()],
+                ..AccessRule::default()
+            },
+        ],
+        ..crate::access::AccessControlConfig::default()
+    })?;
+    assert!(
+        crate::console_aggregator::timeline_frame_visible_to(
+            &controller.view_for_subject(Some("source-reader@example.test")),
+            &frame,
+        ),
+        "a grant on the source shows the side chat's frame"
+    );
+    assert!(
+        !crate::console_aggregator::timeline_frame_visible_to(
+            &controller.view_for_subject(Some("broad-reader@example.test")),
+            &frame,
+        ),
+        "a deny on the source hides the side chat's frame under a broad grant"
+    );
+    Ok(())
+}
+
+/// A side chat's fork facts never change for its incarnation, so the console
+/// reads them from Meerkat's roster once and keeps them: one identity read
+/// that records two side chats reads them once, a later read and a side
+/// chat's stream events read them no more.
+#[tokio::test]
+async fn one_console_read_reads_the_fork_facts_once() -> TestResult {
+    use crate::console_aggregator::MetaConsoleAggregator;
+
+    let (_temp_dir, runtime) =
+        persistent_console_runtime("console-side-chat-reads", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    for side_chat in ["alpha-side", "alpha-draft"] {
+        let forked = fork_when_idle(&runtime, "alpha", side_chat).await;
+        assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+    }
+    let reads = || runtime.side_chat_lineages().reads();
+    let before = reads();
+
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.register_runtime_handles_with_policy(
+        "side-chat-reads",
+        "",
+        runtime.clone(),
+        None,
+        ConsoleEventStore::new(),
+        Arc::new(AllowAllConsoleVisibilityPolicy),
+    );
+    let identities = aggregator
+        .list_identities_fresh()
+        .await
+        .expect("an identity read");
+    for side_chat in ["alpha-side", "alpha-draft"] {
+        let record = identities
+            .iter()
+            .find(|record| record.identity == side_chat)
+            .unwrap_or_else(|| panic!("{side_chat} is listed: {identities:#?}"));
+        assert_eq!(
+            record
+                .labels
+                .get(crate::side_chat::SIDE_CHAT_OF_LABEL)
+                .map(String::as_str),
+            Some("alpha"),
+            "{side_chat} is recorded under its source"
+        );
+    }
+    assert_eq!(
+        reads() - before,
+        1,
+        "one identity read reads the fork facts once for every side chat it records"
+    );
+
+    aggregator
+        .list_identities_fresh()
+        .await
+        .expect("a later identity read");
+    let side = runtime
+        .handle()
+        .get_member(&AgentIdentity::from("alpha-side"))
+        .await?
+        .expect("the side chat is seated");
+    for _ in 0..3 {
+        let projection = sse_member_authorization_projection(
+            &runtime.handle(),
+            Some(&runtime),
+            &AllowAllConsoleVisibilityPolicy,
+            "alpha-side",
+            &side.agent_runtime_id,
+            side.fence_token,
+        )
+        .await
+        .expect("the side chat's events are authorized");
+        assert_eq!(
+            projection
+                .attributes
+                .labels
+                .get(crate::side_chat::SIDE_CHAT_OF_LABEL)
+                .map(String::as_str),
+            Some("alpha"),
+            "an event of the side chat is decided along its source"
+        );
+    }
+    assert_eq!(
+        reads() - before,
+        1,
+        "a later read and the side chat's stream events read no fork facts"
     );
     Ok(())
 }

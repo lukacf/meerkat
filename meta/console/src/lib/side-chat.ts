@@ -160,11 +160,9 @@ export function sideChatForkErrorMessage(error: unknown): string {
       }
     }
     if (data.kind === "unwired_seat_unavailable") {
-      const wiring = record(data.wiring);
-      const peer = nonEmptyString(wiring?.orchestrator_role) ?? nonEmptyString(wiring?.peer_role);
-      return peer
-        ? `Side chats are not available for this agent: the mob wires its role to ${peer} peers, and a side chat must stay private.`
-        : "Side chats are not available for this agent: the mob wires its role to peers, and a side chat must stay private.";
+      return data.retired === false
+        ? "The side chat was seated with peers and could not be closed again. Close it from the agent list."
+        : "The side chat was seated with peers, so it was closed again: a side chat must stay private.";
     }
   }
   if (rpc?.code === FORK_INSTRUCTION_REFUSED_CODE) {

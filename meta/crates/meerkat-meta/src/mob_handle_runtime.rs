@@ -9655,6 +9655,10 @@ pub struct MobRuntime {
     /// See [`MobBootstrapSpec::with_member_mcp_custody`].
     #[cfg(not(target_arch = "wasm32"))]
     member_mcp_custody: Option<Arc<crate::member_mcp_custody::MemberMcpCustody>>,
+    /// The verified side chat lineage of each member incarnation the console
+    /// has read, shared by every clone (see
+    /// [`crate::side_chat::SideChatLineageCache`]).
+    side_chat_lineages: Arc<crate::side_chat::SideChatLineageCache>,
 }
 
 /// How long a boot waits for the Stop an earlier process placed, which
@@ -10561,6 +10565,7 @@ impl MobRuntime {
                 ),
                 #[cfg(not(target_arch = "wasm32"))]
                 member_mcp_custody: spec.member_mcp_custody,
+                side_chat_lineages: Arc::default(),
             },
             pending_activation,
         ))
@@ -10613,6 +10618,7 @@ impl MobRuntime {
             child_mob_root: crate::child_mob_storage::ChildMobRootOwnership::default(),
             #[cfg(not(target_arch = "wasm32"))]
             member_mcp_custody: None,
+            side_chat_lineages: Arc::default(),
         }
     }
 
@@ -10620,6 +10626,13 @@ impl MobRuntime {
     /// [`MobBootstrapSpec::with_member_auth_binding`]).
     pub(crate) fn member_auth_binding(&self) -> Option<&meerkat_core::AuthBindingRef> {
         self.member_auth_binding.as_ref()
+    }
+
+    /// The verified side chat lineages of this runtime's member incarnations,
+    /// as the console reads them (see
+    /// [`crate::side_chat::SideChatLineageCache`]).
+    pub(crate) fn side_chat_lineages(&self) -> &crate::side_chat::SideChatLineageCache {
+        &self.side_chat_lineages
     }
 
     /// The typed refusal of `method`'s attach of `session_id` as a member's

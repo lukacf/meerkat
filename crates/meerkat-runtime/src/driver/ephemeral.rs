@@ -6899,17 +6899,20 @@ impl EphemeralRuntimeDriver {
         // A kept resume of retained work still without its controller client
         // returns to its lane held again (the release dropped its hold with
         // the run's): the runtime loop asks its host at its next re-ask, and
-        // no batch selects it before.
+        // no batch selects it before. A hold the machine refuses fails the
+        // release, which its caller rolls back (a persistent driver with
+        // durability health requires a reload from the store instead), so no
+        // such resume is ever requeued unheld.
         let held_at = meerkat_core::time_compat::Instant::now();
         for input_id in &requeued {
-            if self.kept_retained_resume_waits_unstaged(input_id)
-                && let Err(error) = self.hold_input_controller(input_id, held_at)
-            {
-                tracing::warn!(
-                    %input_id,
-                    %error,
-                    "the machine refused to hold a released kept retained-work resume for its controller"
-                );
+            if self.kept_retained_resume_waits_unstaged(input_id) {
+                self.hold_input_controller(input_id, held_at)
+                    .map_err(|error| {
+                        RuntimeDriverError::Internal(format!(
+                            "released kept retained-work resume '{input_id}' could not be held \
+                             for its controller: {error}"
+                        ))
+                    })?;
             }
         }
         Ok(requeued)

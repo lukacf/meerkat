@@ -4205,6 +4205,127 @@ mod tests {
         }
     }
 
+    /// A visibility owner whose grant opens or closes the gated `deploy`
+    /// between two reads of its state.
+    struct GrantFlippingOwner {
+        reads: std::sync::atomic::AtomicUsize,
+        open_on_next_read: std::sync::atomic::AtomicBool,
+    }
+
+    impl crate::tool_scope::ToolVisibilityOwner for GrantFlippingOwner {
+        fn visibility_state(
+            &self,
+        ) -> Result<crate::SessionToolVisibilityState, crate::tool_scope::ToolScopeApplyError>
+        {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let open = self
+                .open_on_next_read
+                .fetch_xor(true, std::sync::atomic::Ordering::SeqCst);
+            let deploy = BTreeSet::from([crate::types::ToolName::from("deploy")]);
+            Ok(crate::SessionToolVisibilityState {
+                tool_grant_open_names: if open {
+                    deploy.clone()
+                } else {
+                    BTreeSet::new()
+                },
+                tool_grant_gated_names: deploy,
+                ..Default::default()
+            })
+        }
+
+        fn replace_visibility_state(
+            &self,
+            _visibility_state: crate::SessionToolVisibilityState,
+        ) -> Result<(), crate::tool_scope::ToolScopeApplyError> {
+            Ok(())
+        }
+
+        fn stage_persistent_filter(
+            &self,
+            _filter: crate::tool_scope::ToolFilter,
+            _witnesses: BTreeMap<crate::types::ToolName, crate::ToolVisibilityWitness>,
+        ) -> Result<crate::tool_scope::ToolScopeRevision, crate::tool_scope::ToolScopeStageError>
+        {
+            Ok(crate::tool_scope::ToolScopeRevision(0))
+        }
+
+        fn stage_requested_deferred_names(
+            &self,
+            _names: BTreeSet<crate::types::ToolName>,
+        ) -> Result<crate::tool_scope::ToolScopeRevision, crate::tool_scope::ToolScopeStageError>
+        {
+            Ok(crate::tool_scope::ToolScopeRevision(0))
+        }
+
+        fn request_deferred_tools(
+            &self,
+            _authorities: Vec<crate::DeferredToolLoadAuthority>,
+        ) -> Result<crate::tool_scope::ToolScopeRevision, crate::tool_scope::ToolScopeStageError>
+        {
+            Ok(crate::tool_scope::ToolScopeRevision(0))
+        }
+
+        fn boundary_applied(
+            &self,
+        ) -> Result<crate::SessionToolVisibilityState, crate::tool_scope::ToolScopeApplyError>
+        {
+            self.visibility_state()
+        }
+    }
+
+    /// The parent snapshot an inheriting child's ceiling is taken from reads
+    /// the visibility state once, so a grant that opens or closes a gated
+    /// name between two reads can never leak the name into the snapshot.
+    #[test]
+    fn parent_snapshot_reads_the_visibility_state_once() {
+        let owner = Arc::new(GrantFlippingOwner {
+            reads: std::sync::atomic::AtomicUsize::new(0),
+            open_on_next_read: std::sync::atomic::AtomicBool::new(true),
+        });
+        let tools: Arc<[Arc<ToolDef>]> = ["read_file", "deploy"]
+            .into_iter()
+            .map(|name| {
+                Arc::new(ToolDef::new(
+                    name,
+                    format!("test tool {name}"),
+                    serde_json::json!({ "type": "object" }),
+                ))
+            })
+            .collect();
+        let visibility_owner: Arc<dyn crate::tool_scope::ToolVisibilityOwner> = Arc::clone(&owner);
+        let scope = crate::ToolScope::new_with_visibility_owner(
+            tools,
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+            crate::tool_scope::generated_test_tool_visibility_owner_from(visibility_owner),
+        )
+        .expect("tool scope");
+        let authority = ParentToolCompositionAuthority::new_from_agent_factory_composition(None);
+        authority.set_tool_scope_from_agent_factory_composition(&scope);
+
+        for open_first in [true, false] {
+            owner.reads.store(0, std::sync::atomic::Ordering::SeqCst);
+            owner
+                .open_on_next_read
+                .store(open_first, std::sync::atomic::Ordering::SeqCst);
+            let snapshot = authority
+                .snapshot_visible_tools()
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                snapshot,
+                ["read_file"],
+                "the gated name stays out of the snapshot (open on the first read: {open_first})"
+            );
+            assert_eq!(
+                owner.reads.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "one read of the visibility state (open on the first read: {open_first})"
+            );
+        }
+    }
+
     fn settlement_marker() -> crate::ToolDispatchSettlementFailure {
         crate::ToolDispatchSettlementFailure {
             admission_source: crate::ToolDispatchAdmissionSource::ConfiguredGate,

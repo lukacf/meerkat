@@ -7368,6 +7368,69 @@ mod tests {
             assert_eq!(error_code(&refused), error::INVALID_PARAMS);
         }
 
+        /// A full audit page that ends on a row the server cannot read names
+        /// that row's sequence as its next cursor, so the next page starts
+        /// after it: no row is skipped or served twice.
+        #[tokio::test]
+        async fn a_full_audit_page_ending_on_an_unreadable_row_names_it_as_the_next_cursor() {
+            let (router, _rx, runtime_store) = test_router_with_runtime_store().await;
+            let session_id = shell_gated_session(&router).await;
+            let grant = grant_shell_family(&router, &session_id, 600_000).await;
+            // A row a newer binary wrote, between the grant and its revoke.
+            let subject = meerkat_core::tool_grant::ToolGrantSubject::session(
+                SessionId::parse(&session_id).expect("session id"),
+            );
+            runtime_store
+                .append_tool_grant_audit(
+                    subject.key().as_str(),
+                    &[br#"{"at_ms":1,"event":{"kind":"activated"}}"#.to_vec()],
+                )
+                .await
+                .expect("append an audit row");
+            result_value(
+                &call(
+                    &router,
+                    "tool_grants/revoke",
+                    serde_json::json!({"grant_id": grant["grant_id"]}),
+                )
+                .await,
+            );
+
+            let page = result_value(
+                &call(
+                    &router,
+                    "tool_grants/audit",
+                    serde_json::json!({"subject": session_subject(&session_id), "limit": 2}),
+                )
+                .await,
+            );
+            let rows = page["rows"].as_array().expect("rows");
+            assert_eq!(rows.len(), 1, "{page}");
+            assert_eq!(rows[0]["sequence"], 0);
+            assert_eq!(rows[0]["event"]["kind"], "granted");
+            assert_eq!(page["unreadable"][0]["sequence"], 1, "{page}");
+            assert_eq!(page["next_sequence"], 1, "{page}");
+
+            let next = result_value(
+                &call(
+                    &router,
+                    "tool_grants/audit",
+                    serde_json::json!({
+                        "subject": session_subject(&session_id),
+                        "after_sequence": page["next_sequence"],
+                        "limit": 2,
+                    }),
+                )
+                .await,
+            );
+            let rows = next["rows"].as_array().expect("rows");
+            assert_eq!(rows.len(), 1, "{next}");
+            assert_eq!(rows[0]["sequence"], 2);
+            assert_eq!(rows[0]["event"]["kind"], "revoked");
+            assert!(next.get("unreadable").is_none(), "{next}");
+            assert!(next.get("next_sequence").is_none(), "{next}");
+        }
+
         #[tokio::test]
         async fn create_session_with_grant_gated_tools_persists_the_gate() {
             let (router, _rx) = test_router().await;

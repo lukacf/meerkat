@@ -899,11 +899,15 @@ class AgentBuildDraft:
         """Register a callable external tool on this build.
 
         Parity with :meth:`SessionBuildOptions.register_tool`, but available in
-        ``AgentCustomizer.customize_build`` — which runs on BOTH fresh create and
-        restore/reconcile. The handler is dispatched in-process when the agent
-        invokes the tool; it receives a dict of arguments and returns a
-        JSON-serializable result. Use this to reattach identity-scoped tools
-        (MCP, comms, etc.) so resumed agents keep them.
+        ``AgentCustomizer.customize_build``. That callback runs when an identity
+        is created (seated) or starts a fresh life, and right before each build
+        of its member, including the first build after a restart (the member's
+        first wake). It never runs at the restore itself: a restart over members
+        the mob already holds calls it for none of them until they are built.
+        The handler is dispatched in-process when the agent invokes the tool; it
+        receives a dict of arguments and returns a JSON-serializable result. Use
+        this for identity-scoped tools (MCP, comms, etc.): each build registers
+        them again, so the member keeps them across rebuilds and restarts.
 
         Args:
             name: Tool name (string).

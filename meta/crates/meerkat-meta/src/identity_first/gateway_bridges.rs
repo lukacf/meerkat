@@ -453,8 +453,10 @@ pub struct GatewayAgentCustomizer {
     /// Monotonic counter for minting a per-build tool-handler scope, so the SDK
     /// can register external-tool handlers in `customize_build` (parity with the
     /// `build_agent` scope). A fresh scope per call is correct: `customize_build`
-    /// is re-invoked on every restore/reconcile and the host re-registers under
-    /// the new scope.
+    /// runs again right before each build of the member (a restarted member's
+    /// first wake included, never the restore itself) and the host re-registers
+    /// under the new scope. The counter starts at 1 in each process, so a scope
+    /// id names a call only within the process that minted it.
     next_scope: AtomicU64,
 }
 
@@ -1779,7 +1781,7 @@ model = "gpt-5.5"
 
     #[tokio::test]
     async fn test_identity_first_gateway_customizer_scope_increments_per_build() {
-        // customize_build is re-invoked on every restore/reconcile; each call must
+        // customize_build runs again at each build of the member; each call must
         // mint a FRESH scope so the host re-registers handlers under the new scope.
         let mock = Arc::new(MockBridge::new());
         let returned_draft = AgentBuildDraft {

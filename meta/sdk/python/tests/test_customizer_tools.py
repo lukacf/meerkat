@@ -1,11 +1,13 @@
 """Tests for AgentCustomizer external-tool handler registration.
 
-The identity-first ``AgentCustomizer.customize_build`` callback runs on BOTH
-fresh create and restore/reconcile (unlike ``build_agent``, whose options are
-empty on restore). A customizer can register callable tools via
-``draft.register_tool(...)``; those handlers ride the SAME (scope_id, tool)
-map + ``callback/call_tool`` dispatch that ``build_agent`` uses, so resumed
-agents keep their identity-scoped tools (MCP, comms, etc.).
+The identity-first ``AgentCustomizer.customize_build`` callback runs when an
+identity is created and right before each build of its member, including the
+first build after a restart (the member's first wake), never at the restore
+itself (unlike ``build_agent``, whose options are empty on restore). A
+customizer can register callable tools via ``draft.register_tool(...)``;
+those handlers ride the SAME (scope_id, tool) map + ``callback/call_tool``
+dispatch that ``build_agent`` uses, and each build registers them again, so
+a rebuilt member keeps its identity-scoped tools (MCP, comms, etc.).
 """
 import pytest
 from meerkat_meta.agent_builder import CallbackDispatcher
@@ -94,11 +96,12 @@ class TestCustomizerToolDispatch:
 
     @pytest.mark.asyncio
     async def test_restore_reregisters_under_new_scope(self, dispatcher):
-        """customize_build re-invoked on restore with a NEW scope: latest wins.
+        """customize_build invoked again with a NEW scope: latest wins.
 
-        Models the gateway minting a fresh ``customize-<identity>-N`` scope on
-        every reconcile; the host re-registers handlers and the newest scope
-        dispatches. Releasing the stale scope leaves the latest working.
+        Models the gateway minting a fresh ``customize-<identity>-N`` scope for
+        each build of the member (a restarted member's first wake included);
+        the host re-registers handlers and the newest scope dispatches.
+        Releasing the stale scope leaves the latest working.
         """
         await dispatcher.handle_callback(
             "callback/agent_customizer/customize_build", _customize_params("customize-agent:alpha-1")

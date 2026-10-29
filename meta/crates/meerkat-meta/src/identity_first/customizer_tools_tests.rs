@@ -209,7 +209,7 @@ async fn a_publication_swaps_the_tool_list_and_the_serving_scope_together() {
     assert_eq!(served_by(&outcome), "customize-1:lookup");
     let first_epoch = entry.execution_binding_epoch("lookup");
 
-    // A second customize_build (a reset or reconcile) replaces both at once.
+    // A second customize_build (a later build, or a reset) replaces both at once.
     let second = Scope::new("customize-2", vec!["lookup", "schedule"]);
     let same = registry.publish(&id, Some(second.clone()));
     assert!(

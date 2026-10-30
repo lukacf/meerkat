@@ -3342,11 +3342,14 @@ impl<'a> StepOwnerChangeWait<'a> {
     }
 
     /// After an attempt that refused to rebuild ([`refuses_to_rebuild`]):
-    /// whether to make it again. While the work reports an owner change in
-    /// progress (a held reservation of the native owner's writer included),
-    /// wait for it within the bounds; with none at that read (the holder may
-    /// have finished between the attempt and the read), pause one backoff
-    /// step first. Again only after a settled wait, one of the step's free
+    /// whether to make it again. The attempt ran nothing, so it takes the
+    /// wait after a stale read
+    /// ([`crate::authorization::OwnerChangeChurn::wait_after_stale_read`]).
+    /// While the work reports an owner change in progress (a held
+    /// reservation of the native owner's writer included), wait for it
+    /// within the bounds; with none at that read (the holder may have
+    /// finished between the attempt and the read), pause one backoff step
+    /// first. Again only after a settled wait, one of the step's free
     /// rebuilds; never after an unsettled one, past the deadline or once the
     /// free rebuilds are spent.
     async fn again(&mut self) -> bool {
@@ -3355,7 +3358,7 @@ impl<'a> StepOwnerChangeWait<'a> {
             .prepared_authorization()
             .map(|prepared| &prepared.binding().facts().operation_id);
         self.churn
-            .wait_for_refused_step(
+            .wait_after_stale_read(
                 self.work.authorization().as_ref(),
                 context.remaining_tool_time(),
                 self.site,

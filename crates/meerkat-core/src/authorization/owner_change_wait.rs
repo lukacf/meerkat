@@ -10,16 +10,24 @@
 //! rebuild still requires a coherent observation and every current check, and
 //! no refusal is weakened.
 //!
+//! A pure observation of the publication (a host's own, for example) can end
+//! stale after a change it never saw in progress: one that waited for an
+//! owner's own lock while another actor's change held it ends stale only once
+//! that change published, often after it completed. Such a read waits with
+//! [`OwnerChangeChurn::wait_after_stale_read`], which with no change in
+//! progress as it starts pauses one backoff step first; a settled wait is one
+//! of the free rebuilds either way.
+//!
 //! A governed step of a tool dispatch takes the work owners' exclusion
 //! without waiting. When another actor holds it (an owner change still being
 //! prepared, a held exclusion or another operation's final entry), the
 //! native work owner refuses to rebuild and reports that hold as a change in
 //! progress until it ends, so the step's waiting form waits here too, only
-//! after the step returned and released everything it took. A hold that
-//! ended before the step read it is no ordinary refusal there: the step
-//! pauses one backoff step and rebuilds, as one of its free rebuilds
-//! ([`OwnerChangeChurn::wait_for_refused_step`]). This is shell
-//! synchronization: no machine input changes.
+//! after the step returned and released everything it took. A step refused
+//! to rebuild ran nothing, so it takes the same wait as a stale read: a hold
+//! that ended before the step read it is no ordinary refusal there, and the
+//! step pauses one backoff step and rebuilds, as one of its free rebuilds.
+//! This is shell synchronization: no machine input changes.
 
 use crate::time_compat::{DeadlineInstant, Duration};
 #[cfg(target_arch = "wasm32")]
@@ -151,17 +159,57 @@ impl OwnerChangeChurn {
         )
     }
 
-    /// After a governed step of a tool dispatch refused to rebuild: as
-    /// [`Self::wait_for_settled_change`], except that a read finding no
-    /// change in progress is no ordinary refusal. The step took the work
-    /// owners' exclusion without waiting, and the hold that refused it
-    /// (often another operation's final entry, shorter than the step's way
-    /// to this read) may already have ended, so the step pauses one backoff
-    /// step and waits for any change in progress after that pause. Either
-    /// way the wait is bounded, traced, reported and counted as every other
-    /// one: a settled wait is one of the operation's
-    /// [`OWNER_CHANGE_FREE_REBUILDS`], and no wait starts past the deadline.
-    pub(crate) async fn wait_for_refused_step(
+    /// The bounded wait after a stale read: a pure observation of `work`'s
+    /// own authorization publication (one that reads owners and runs no
+    /// effect, such as `LocalAuthorizationPublication::observe` around an
+    /// observed lineage resolution) found that an owner change published
+    /// during it (`PublicationError::Changed`,
+    /// `LineageResolutionRefusal::Changed`), and so did its one rebuild.
+    ///
+    /// It waits, as [`Self::wait_for_settled_change`] does, until a read
+    /// finds no owner change in progress on that publication (a reservation
+    /// of its writer that has not published counts as one where `work` names
+    /// it), however many changes begin meanwhile. Unlike that wait, it also
+    /// waits when none is in progress as it starts: the change that made the
+    /// observation stale has often completed already (an observation that
+    /// waited for an owner's own lock while the change held it ends stale
+    /// only once that change published), so it then pauses one backoff step
+    /// (1 ms) before it reads.
+    ///
+    /// - [`OwnerChangeWait::Settled`]: make the same observation once more,
+    ///   afresh from the owners. The wait was one of this churn's
+    ///   [`OWNER_CHANGE_FREE_REBUILDS`]. It promises nothing about the next
+    ///   read: that may be stale again, or `Unavailable` once the publication
+    ///   was poisoned.
+    /// - [`OwnerChangeWait::NotSettled`]: stop. The deadline passed, or every
+    ///   free rebuild is spent. Answer the observation as stale and keep it
+    ///   typed (for an operation, `ReprepareRequired`), never as
+    ///   unavailability.
+    ///
+    /// Call it only after a stale read, between attempts of the same pure
+    /// observation, and hold nothing across it: no publication guard or
+    /// exclusion, no owner or host lock, no store transaction. Never call it
+    /// around an effect: read, claim or record an effect once, after the
+    /// observation answered. Any other answer (current, a denial, a genuine
+    /// `Unavailable`) is final and never waits.
+    ///
+    /// The first wait of this churn arms its one deadline,
+    /// [`OWNER_CHANGE_WAIT_BOUND`] from then, clamped to `budget_remaining`
+    /// (in a tool body, `ToolDispatchContext::remaining_tool_time`). Later
+    /// waits keep it: none runs past it, and none starts once it passed.
+    /// Take a fresh churn for each decision point
+    /// (`ToolDispatchContext::owner_change_churn` in a tool body, otherwise
+    /// [`Self::new`]): a churn already spent elsewhere would cut this wait
+    /// short. Each wait is traced at `site` for `operation`
+    /// ([`OwnerChangeWait::trace`]) and reported to the operation refusal
+    /// observer of the host that composed the agent, when one is installed.
+    ///
+    /// Cancellation is safe: the wait holds nothing, so dropping the future
+    /// releases and undoes nothing. A cancelled wait spends no free rebuild
+    /// and is neither traced nor reported; a deadline it armed stays armed.
+    /// Shell synchronization only: it decides nothing, and every attempt is
+    /// still decided afresh by the owners.
+    pub async fn wait_after_stale_read(
         &mut self,
         work: &dyn WorkAuthorization,
         budget_remaining: Option<Duration>,
@@ -243,5 +291,162 @@ async fn await_owner_change(
         }
         tokio::time::sleep(backoff.min(deadline.saturating_duration_since(now))).await;
         backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+    use crate::authorization::{
+        OperationAuthorizationError, OwnerChangeInProgress, PreparedAuthorizationBinding,
+        PreparedOperationAuthorization,
+    };
+
+    const SITE: &str = "stale_read";
+
+    /// A work whose own publication has an owner change in progress while
+    /// `held` is set. It decides nothing.
+    #[derive(Default)]
+    struct Work {
+        held: AtomicBool,
+    }
+
+    impl Work {
+        fn held() -> Self {
+            Self {
+                held: AtomicBool::new(true),
+            }
+        }
+    }
+
+    impl WorkAuthorization for Work {
+        fn prepare(
+            &self,
+            _binding: &PreparedAuthorizationBinding,
+        ) -> Result<Arc<dyn PreparedOperationAuthorization>, OperationAuthorizationError> {
+            Err(OperationAuthorizationError::Unavailable)
+        }
+
+        fn owner_change_in_progress(&self) -> Option<OwnerChangeInProgress> {
+            if self.held.load(Ordering::SeqCst) {
+                Some(OwnerChangeInProgress::new(uuid::Uuid::nil(), 1))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// A read that waited for an owner's own lock ends stale only once the
+    /// change it met published, so that change may complete before the
+    /// caller asks. With nothing in progress the settled-change wait has
+    /// nothing to wait for; the stale-read wait pauses one backoff step and
+    /// settles as one free rebuild.
+    ///
+    /// RED on the base: no public wait settled such a read.
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_read_whose_change_completed_reads_again_after_one_pause() {
+        let work = Work::default();
+        let mut churn = OwnerChangeChurn::new();
+        assert_eq!(
+            churn.wait_for_settled_change(&work, None, SITE, None).await,
+            None,
+            "nothing in progress: the settled-change wait has nothing to wait for"
+        );
+        let wait = churn.wait_after_stale_read(&work, None, SITE, None).await;
+        assert!(wait.settled(), "read again: {wait:?}");
+        assert!(
+            wait.waited() >= FIRST_BACKOFF && wait.waited() < OWNER_CHANGE_WAIT_BOUND,
+            "after one pause: {wait:?}"
+        );
+    }
+
+    /// No wait runs past the churn's one deadline (the bound, or the
+    /// caller's budget when less), none starts once it passed, and no more
+    /// than [`OWNER_CHANGE_FREE_REBUILDS`] waits of one churn settle.
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_read_wait_never_outlasts_its_deadline_or_its_free_rebuilds() {
+        let held = Work::held();
+        for (budget, deadline) in [
+            (None, OWNER_CHANGE_WAIT_BOUND),
+            (Some(Duration::from_secs(10)), OWNER_CHANGE_WAIT_BOUND),
+            (Some(Duration::from_millis(300)), Duration::from_millis(300)),
+        ] {
+            let mut churn = OwnerChangeChurn::new();
+            let started = DeadlineInstant::now();
+            let wait = churn.wait_after_stale_read(&held, budget, SITE, None).await;
+            assert!(
+                !wait.settled() && wait.waited() >= deadline && started.elapsed() <= deadline,
+                "held throughout: it ends at the deadline, not past it: {wait:?}"
+            );
+            let again = churn.wait_after_stale_read(&held, budget, SITE, None).await;
+            assert_eq!(
+                (again.settled(), again.waited()),
+                (false, Duration::ZERO),
+                "no wait starts past the deadline"
+            );
+        }
+
+        let settled = Work::default();
+        let mut churn = OwnerChangeChurn::new();
+        for _ in 0..OWNER_CHANGE_FREE_REBUILDS {
+            assert!(
+                churn
+                    .wait_after_stale_read(&settled, None, SITE, None)
+                    .await
+                    .settled()
+            );
+        }
+        let started = DeadlineInstant::now();
+        let spent = churn
+            .wait_after_stale_read(&settled, None, SITE, None)
+            .await;
+        assert_eq!(
+            (spent.settled(), spent.waited(), started.elapsed()),
+            (false, Duration::ZERO, Duration::ZERO),
+            "every free rebuild spent: no wait at all"
+        );
+    }
+
+    /// Dropping a wait cancels it: it holds nothing, so nothing is released
+    /// or undone, and it spends no free rebuild. The deadline its first poll
+    /// armed stays armed for the churn's later waits.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_stale_read_wait_spends_nothing_and_keeps_its_deadline() {
+        let work = Work::held();
+        let mut churn = OwnerChangeChurn::new();
+        let mut wait = Box::pin(churn.wait_after_stale_read(&work, None, SITE, None));
+        assert!(
+            futures::poll!(wait.as_mut()).is_pending(),
+            "waiting for the change"
+        );
+        drop(wait);
+        work.held.store(false, Ordering::SeqCst);
+        for _ in 0..OWNER_CHANGE_FREE_REBUILDS {
+            assert!(
+                churn
+                    .wait_after_stale_read(&work, None, SITE, None)
+                    .await
+                    .settled(),
+                "the cancelled wait spent no free rebuild"
+            );
+        }
+
+        let mut churn = OwnerChangeChurn::new();
+        let mut wait = Box::pin(churn.wait_after_stale_read(&work, None, SITE, None));
+        assert!(
+            futures::poll!(wait.as_mut()).is_pending(),
+            "pausing before its read"
+        );
+        drop(wait);
+        tokio::time::advance(OWNER_CHANGE_WAIT_BOUND).await;
+        let late = churn.wait_after_stale_read(&work, None, SITE, None).await;
+        assert_eq!(
+            (late.settled(), late.waited()),
+            (false, Duration::ZERO),
+            "the cancelled first wait armed the deadline"
+        );
     }
 }

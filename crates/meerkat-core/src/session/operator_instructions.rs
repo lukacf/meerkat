@@ -778,6 +778,125 @@ pub(crate) fn rows_besides_operator_instruction_entries(messages: &[Message]) ->
         .count()
 }
 
+/// Why a model change cannot carry operator-instruction entry rows where
+/// they stand in the requests the target would serve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstructionEntryLoweringRefusal {
+    /// An entry row stands after a conversation row, and the target carries
+    /// System rows only before the first conversation row.
+    AfterConversationRow,
+    /// An entry row stands beside another System row, and the target's wire
+    /// carries one leading System row.
+    BesideAnotherSystemRow,
+}
+
+impl std::fmt::Display for InstructionEntryLoweringRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::AfterConversationRow => {
+                "an entry row stands after a conversation row, and the target carries System \
+                 rows only before the first one"
+            }
+            Self::BesideAnotherSystemRow => {
+                "an entry row stands beside another System row, and the target's wire carries \
+                 one leading System row"
+            }
+        })
+    }
+}
+
+/// Where operator-instruction entry rows stand in a model request: what a
+/// model change must carry. [`Self::refusal`] says whether a target that
+/// lowers entries as an [`InstructionLowering`] carries them there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InstructionEntryPlacement {
+    /// The entry rows judged.
+    entries: usize,
+    /// The request's System rows that are not entry rows.
+    other_system_rows: usize,
+    /// Whether a judged entry row stands after a conversation row (a row
+    /// that is not a System row).
+    after_conversation_row: bool,
+}
+
+impl InstructionEntryPlacement {
+    /// The placement of every operator-instruction entry row in `request`,
+    /// the rows a model is asked with.
+    #[must_use]
+    pub fn of_request(request: &[Message]) -> Self {
+        Self::of(request, |_| true)
+    }
+
+    /// The placement of the entry rows `judged` selects among `messages`. An
+    /// entry row it does not select is neither judged nor another System
+    /// row.
+    fn of(messages: &[Message], judged: impl Fn(&InstructionEntryIdentity) -> bool) -> Self {
+        let mut placement = Self::default();
+        let mut conversation_seen = false;
+        for message in messages {
+            let Message::System(system) = message else {
+                conversation_seen = true;
+                continue;
+            };
+            match system.instruction_entry.as_ref() {
+                Some(identity) if judged(identity) => {
+                    placement.entries = placement.entries.saturating_add(1);
+                    placement.after_conversation_row |= conversation_seen;
+                }
+                Some(_) => {}
+                None => {
+                    placement.other_system_rows = placement.other_system_rows.saturating_add(1);
+                }
+            }
+        }
+        placement
+    }
+
+    /// Whether the placement holds no entry row: every target carries it.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.entries == 0
+    }
+
+    /// This placement with one more System row besides the entry rows: a
+    /// row a build adds to the request, such as the prompt it authors.
+    #[must_use]
+    pub fn with_another_system_row(self) -> Self {
+        Self {
+            other_system_rows: self.other_system_rows.saturating_add(1),
+            ..self
+        }
+    }
+
+    /// Why a target that lowers operator-instruction entries as `lowering`
+    /// cannot carry entry rows placed so, or `None` when it can. A target
+    /// that lowers them anywhere carries every placement; one that lowers
+    /// them only inside the leading System prefix cannot carry an entry
+    /// after a conversation row; a wire that carries one leading System row
+    /// cannot carry that either, nor an entry beside another System row.
+    #[must_use]
+    pub fn refusal(self, lowering: InstructionLowering) -> Option<InstructionEntryLoweringRefusal> {
+        if self.is_empty() {
+            return None;
+        }
+        match lowering {
+            InstructionLowering::MidConversation => None,
+            InstructionLowering::LeadingPrefixOnly => self
+                .after_conversation_row
+                .then_some(InstructionEntryLoweringRefusal::AfterConversationRow),
+            InstructionLowering::Unavailable => {
+                if self.after_conversation_row {
+                    Some(InstructionEntryLoweringRefusal::AfterConversationRow)
+                } else if self.entries > 1 || self.other_system_rows > 0 {
+                    Some(InstructionEntryLoweringRefusal::BesideAnotherSystemRow)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
 fn entry_rows(
     messages: &[Message],
 ) -> impl Iterator<Item = (usize, &SystemMessage, &InstructionEntryIdentity)> {
@@ -1385,16 +1504,30 @@ impl Session {
         Ok(messages)
     }
 
-    /// Whether the transcript holds an operator-instruction entry row this
-    /// session wrote itself. Every model request carries such a row as a
-    /// System row, whatever the lowering
+    /// Where the operator-instruction entry rows this session wrote itself
+    /// stand in its model requests ([`Self::messages_for_model_boundary`]).
+    /// Every request carries them there, whatever the lowering
     /// ([`Self::messages_for_model_request`] leaves out only rows a fork
-    /// copied), so a wire that carries no System row besides its prompt
-    /// refuses that request.
-    pub fn holds_own_operator_instruction_entries(&self) -> bool {
-        self.carries_operator_instruction_facts()
-            && entry_rows(self.messages())
-                .any(|(_, _, identity)| identity.origin_session_id == self.id)
+    /// copied), so a model change must carry them there
+    /// ([`InstructionEntryPlacement::refusal`]). A copied row is neither the
+    /// session's own nor another System row: a request on a wire that
+    /// carries no System row besides its prompt leaves it out. A session
+    /// without instruction facts holds no entry row.
+    ///
+    /// # Errors
+    ///
+    /// [`ModelBoundaryProjectionError`] when the transcript cannot be
+    /// projected for a model request.
+    pub fn own_operator_instruction_entry_placement(
+        &self,
+    ) -> Result<InstructionEntryPlacement, ModelBoundaryProjectionError> {
+        if !self.carries_operator_instruction_facts() {
+            return Ok(InstructionEntryPlacement::default());
+        }
+        let projection = self.messages_for_model_boundary()?;
+        Ok(InstructionEntryPlacement::of(&projection, |identity| {
+            identity.origin_session_id == self.id
+        }))
     }
 
     /// A fork child that copied operator-instruction entry rows records the

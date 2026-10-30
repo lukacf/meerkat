@@ -797,10 +797,11 @@ async fn a_hot_swap_onto_a_chatgpt_backend_binding_defers_operator_instructions(
     );
 }
 
-/// Every request carries the entry rows a session wrote itself; a fork
-/// child's copied rows are left out wherever its model cannot lower them. A
-/// recorded target is no row, an applied entry is the session's own, and a
-/// fork child that copied it holds none of its own.
+/// Every request carries the entry rows a session wrote itself where they
+/// stand; a fork child's copied rows are left out wherever its model cannot
+/// lower them. A recorded target is no row; an entry applied after the
+/// conversation is carried only by a model that lowers System rows anywhere;
+/// a fork child that copied it holds none of its own.
 #[tokio::test]
 async fn own_operator_instruction_entries_are_the_rows_the_session_wrote() {
     let client = Arc::new(RecordingClient::default());
@@ -815,17 +816,39 @@ async fn own_operator_instruction_entries_are_the_rows_the_session_wrote() {
         .set_session_instruction(write("tone", 1, "Answer formally."))
         .unwrap();
     assert!(
-        !agent.session().holds_own_operator_instruction_entries(),
+        agent
+            .session()
+            .own_operator_instruction_entry_placement()
+            .unwrap()
+            .is_empty(),
         "a recorded target is no row"
     );
     agent
         .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
         .unwrap();
     agent.run("next".into()).await.unwrap();
+    let placement = agent
+        .session()
+        .own_operator_instruction_entry_placement()
+        .unwrap();
     assert!(
-        agent.session().holds_own_operator_instruction_entries(),
+        !placement.is_empty(),
         "the applied entry is the session's own"
     );
+    assert_eq!(
+        placement.refusal(InstructionLowering::MidConversation),
+        None
+    );
+    for lowering in [
+        InstructionLowering::LeadingPrefixOnly,
+        InstructionLowering::Unavailable,
+    ] {
+        assert_eq!(
+            placement.refusal(lowering),
+            Some(meerkat_core::InstructionEntryLoweringRefusal::AfterConversationRow),
+            "an entry after the conversation is not carried by a {lowering:?} model"
+        );
+    }
 
     let child = agent.session().fork();
     assert_eq!(
@@ -834,7 +857,56 @@ async fn own_operator_instruction_entries_are_the_rows_the_session_wrote() {
         "the child copied the row"
     );
     assert!(
-        !child.holds_own_operator_instruction_entries(),
+        child
+            .own_operator_instruction_entry_placement()
+            .unwrap()
+            .is_empty(),
         "a copied row is history, not the child's own"
+    );
+}
+
+/// On a wire that carries one leading System row, an entry the session wrote
+/// itself is carried only as the request's one System row: an entry beside
+/// the prompt, or beside another entry, is not. A request's placement judges
+/// every entry row it holds.
+#[test]
+fn an_entry_beside_another_system_row_is_carried_only_where_the_wire_takes_them_all() {
+    let mut session = fresh_session();
+    session
+        .append_operator_instruction_activation_for_test("app.example", "tone", 1, "Formal.")
+        .unwrap();
+    let beside_the_prompt = session.own_operator_instruction_entry_placement().unwrap();
+    assert_eq!(
+        beside_the_prompt.refusal(InstructionLowering::Unavailable),
+        Some(meerkat_core::InstructionEntryLoweringRefusal::BesideAnotherSystemRow)
+    );
+    for lowering in [
+        InstructionLowering::MidConversation,
+        InstructionLowering::LeadingPrefixOnly,
+    ] {
+        assert_eq!(beside_the_prompt.refusal(lowering), None);
+    }
+
+    let mut alone = Session::new();
+    alone
+        .append_operator_instruction_activation_for_test("app.example", "tone", 1, "Formal.")
+        .unwrap();
+    let placement = alone.own_operator_instruction_entry_placement().unwrap();
+    assert_eq!(
+        placement.refusal(InstructionLowering::Unavailable),
+        None,
+        "the request's only System row is carried as its leading row"
+    );
+    assert_eq!(
+        placement
+            .with_another_system_row()
+            .refusal(InstructionLowering::Unavailable),
+        Some(meerkat_core::InstructionEntryLoweringRefusal::BesideAnotherSystemRow),
+        "a prompt the build adds stands beside it"
+    );
+    assert_eq!(
+        meerkat_core::InstructionEntryPlacement::of_request(alone.messages())
+            .refusal(InstructionLowering::Unavailable),
+        None
     );
 }

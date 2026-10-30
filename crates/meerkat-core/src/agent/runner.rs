@@ -1080,6 +1080,11 @@ where
     /// serialized through the session metadata authority, and auth rotation is
     /// staged. The final client, request policy, durable identity, and active
     /// profile publication is therefore an infallible in-memory commit.
+    ///
+    /// A target whose operator-instruction lowering (the request policy's)
+    /// cannot carry the entry rows the session wrote itself where they
+    /// stand is refused before anything changes
+    /// ([`crate::InstructionEntryPlacement::refusal`]).
     pub fn hot_swap_llm_identity(
         &mut self,
         client: Arc<C>,
@@ -1097,6 +1102,23 @@ where
                 "live LLM hot-swap request policy provider params do not match the durable target identity"
                     .to_string(),
             ));
+        }
+        // Every request carries the operator-instruction entry rows this
+        // session wrote itself where they stand: a target that cannot carry
+        // them there would refuse every later request. Every live model
+        // change reaches this swap, a direct session-service caller's
+        // included, so none bypasses it.
+        if let Some(refusal) = self
+            .session
+            .own_operator_instruction_entry_placement()?
+            .refusal(request_policy.operator_instruction_lowering)
+        {
+            return Err(AgentError::ConfigError(format!(
+                "live LLM hot-swap target '{}:{}' cannot represent the operator-instruction entries already applied in session {}: {refusal}",
+                identity.provider.as_str(),
+                identity.model,
+                self.session.id()
+            )));
         }
         let target_profile = self
             .effective_model_registry

@@ -175,7 +175,8 @@ pub use instruction_target::{
 pub use operator_instructions::{
     EffectiveInstructionSlot, EffectiveOperatorInstructions, INSTRUCTION_ENTRY_RENDER_VERSION_V1,
     InstructionActiveRef, InstructionChange, InstructionEffect, InstructionEntryIdentity,
-    InstructionEntryKind, InstructionRevision, InstructionSlot, InvalidInstructionRevision,
+    InstructionEntryKind, InstructionEntryLoweringRefusal, InstructionEntryPlacement,
+    InstructionRevision, InstructionSlot, InvalidInstructionRevision,
     MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES, MAX_OPERATOR_INSTRUCTION_SLOTS,
     RunStartInstructionApplication, effective_operator_instructions,
     materialize_operator_instruction_messages, validate_operator_instruction_messages,

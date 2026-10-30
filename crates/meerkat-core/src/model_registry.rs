@@ -170,6 +170,20 @@ fn instruction_lowering_as_served(
     }
 }
 
+/// The weaker of two operator-instruction lowerings: the one that carries
+/// fewer entry placements.
+fn weaker_instruction_lowering(
+    a: crate::InstructionLowering,
+    b: crate::InstructionLowering,
+) -> crate::InstructionLowering {
+    use crate::InstructionLowering::{LeadingPrefixOnly, MidConversation, Unavailable};
+    match (a, b) {
+        (Unavailable, _) | (_, Unavailable) => Unavailable,
+        (LeadingPrefixOnly, _) | (_, LeadingPrefixOnly) => LeadingPrefixOnly,
+        (MidConversation, MidConversation) => MidConversation,
+    }
+}
+
 /// Opaque authority of one constructed effective model registry.
 ///
 /// This identity is construction-scoped, not a hash of registry contents:
@@ -477,6 +491,44 @@ impl ModelRegistry {
                 identity.auth_binding.as_ref(),
             ),
         )
+    }
+
+    /// The weakest operator-instruction lowering `identity` may be served
+    /// with, known before any client for it is built: its binding's
+    /// ([`Self::instruction_lowering_for_identity`]), or, when it names
+    /// none, the weakest of every binding its client resolution may select
+    /// ([`crate::resolve_auth_binding_candidates_for_provider`] from
+    /// `preferred_realm`). That resolution takes the first candidate that
+    /// resolves, which only resolving it tells, so a model change judged by
+    /// this lowering never builds a client for a target it refuses. Naming
+    /// the binding decides exactly.
+    pub fn weakest_instruction_lowering_for_target(
+        &self,
+        config: &crate::Config,
+        identity: &crate::SessionLlmIdentity,
+        preferred_realm: Option<&crate::RealmId>,
+    ) -> crate::InstructionLowering {
+        let lowering = self.instruction_lowering_for_identity(config, identity);
+        if identity.auth_binding.is_some() {
+            return lowering;
+        }
+        let Ok(candidates) = crate::resolve_auth_binding_candidates_for_provider(
+            config,
+            identity.provider,
+            None,
+            preferred_realm,
+            true,
+        ) else {
+            return lowering;
+        };
+        candidates.into_iter().fold(lowering, |weakest, candidate| {
+            let mut bound = identity.clone();
+            bound.auth_binding = Some(candidate.auth_binding);
+            weaker_instruction_lowering(
+                weakest,
+                self.instruction_lowering_for_identity(config, &bound),
+            )
+        })
     }
 
     /// Mint provenance for the exact provider/model profile in this registry.

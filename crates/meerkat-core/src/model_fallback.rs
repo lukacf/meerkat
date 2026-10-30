@@ -146,6 +146,15 @@ pub fn admit_model_fallback(
             context: Some(fact),
         }));
     }
+    // The request's operator-instruction entry rows ride every later request
+    // where they stand: a target that cannot lower them there is skipped as
+    // a request it cannot lower, before its adapter is consulted.
+    if crate::InstructionEntryPlacement::of_request(request.messages)
+        .refusal(profile.instruction_lowering())
+        .is_some()
+    {
+        return Err(skip(ModelFallbackSkipReason::RequestUnsupported));
+    }
     let capabilities = profile.profile();
     for message in request.messages {
         match message {

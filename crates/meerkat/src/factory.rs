@@ -1928,6 +1928,56 @@ fn grant_gate_for_build(
     )))
 }
 
+/// Refuse a build that resumes `session` onto a model that cannot carry
+/// the operator-instruction entry rows the session wrote itself where they
+/// stand ([`meerkat_core::InstructionEntryPlacement::refusal`]), before the
+/// build resolves the model's client. The model is judged by the weakest
+/// lowering its binding may serve
+/// ([`ModelRegistry::weakest_instruction_lowering_for_target`]);
+/// `authors_prompt_row` says whether the build adds a prompt row, which
+/// stands beside those entries.
+fn refuse_resumed_entries_the_model_cannot_carry(
+    session: &Session,
+    registry: &ModelRegistry,
+    config: &Config,
+    build_config: &AgentBuildConfig,
+    provider: Provider,
+    self_hosted_server_id: &Option<String>,
+    authors_prompt_row: bool,
+) -> Result<(), BuildAgentError> {
+    let placement = session
+        .own_operator_instruction_entry_placement()
+        .map_err(|error| BuildAgentError::Config(error.to_string()))?;
+    if placement.is_empty() {
+        return Ok(());
+    }
+    let placement = if authors_prompt_row {
+        placement.with_another_system_row()
+    } else {
+        placement
+    };
+    let identity = SessionLlmIdentity {
+        model: build_config.model.clone(),
+        provider,
+        self_hosted_server_id: self_hosted_server_id.clone(),
+        provider_params: build_config.provider_params.clone(),
+        auth_binding: build_config.auth_binding.clone(),
+    };
+    let lowering = registry.weakest_instruction_lowering_for_target(
+        config,
+        &identity,
+        build_config.realm_id.as_ref(),
+    );
+    match placement.refusal(lowering) {
+        None => Ok(()),
+        Some(refusal) => Err(BuildAgentError::Config(format!(
+            "model '{}' cannot represent the operator-instruction entries already applied in session {}: {refusal}",
+            identity.model,
+            session.id()
+        ))),
+    }
+}
+
 /// Errors that can occur when building an agent via [`AgentFactory::build_agent()`].
 #[derive(Debug, thiserror::Error)]
 pub enum BuildAgentError {
@@ -7887,12 +7937,28 @@ impl AgentFactory {
             RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.auth_lease().clone()),
             RuntimeBuildMode::StandaloneEphemeral => None,
         };
+        // A session that resumes holds its own operator-instruction entry
+        // rows where they stand: a model that cannot carry them there is
+        // refused here, before its client is built (credential resolution,
+        // lease publication). A prompt row this build authors stands beside
+        // them too.
+        let authors_prompt_row =
+            resumed_session_metadata.is_none() || build_config.system_prompt.is_explicit();
         let primary_llm_client_phase = match prepared_controller.as_deref() {
             Some(graph) => {
                 build_config.model.clone_from(&graph.resolved_model);
                 build_config
                     .auth_binding
                     .clone_from(&graph.resolved_auth_binding);
+                refuse_resumed_entries_the_model_cannot_carry(
+                    &session,
+                    &registry,
+                    config,
+                    &build_config,
+                    provider,
+                    &self_hosted_server_id,
+                    authors_prompt_row,
+                )?;
                 Ok(ResolvedLlmClientPhase {
                     llm_client: None,
                     credential_identity: graph.credential_identity.clone(),
@@ -7902,6 +7968,15 @@ impl AgentFactory {
                 })
             }
             None => {
+                refuse_resumed_entries_the_model_cannot_carry(
+                    &session,
+                    &registry,
+                    config,
+                    &build_config,
+                    provider,
+                    &self_hosted_server_id,
+                    authors_prompt_row,
+                )?;
                 self.resolve_llm_client_phase(
                     config,
                     &registry,

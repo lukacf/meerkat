@@ -355,7 +355,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # summary-dropped mutant to violate AuditResultFollowsSummary.
 # peer_request_maps_audit.sh requires its six witnesses reported violated,
 # and with --mutants each seeded defect's property or invariant violated.
-# mob_operator_grant_audit.sh requires each of its nine reachability
+# mob_operator_grant_audit.sh requires each of its ten reachability
 # witnesses violated, and with --mutants each seeded defect's property or
 # invariant.
 # generation_highwater_audit.sh requires each of its six reachability
@@ -501,6 +501,7 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessResolveCleared is violated."' \
   'echo "Error: Invariant NotAuditWitnessRebindsDropTheCreationScope is violated."' \
   'echo "Error: Invariant NotAuditWitnessCreationVerdicts is violated."' \
+  'echo "Error: Invariant NotAuditWitnessCreationBound is violated."' \
   'echo "Error: Action property AuditRebindDropsTheOtherScope is violated."' \
   'echo "Error: Invariant mob_operator_scopes_are_bound_to_an_incarnation is violated."' \
   'echo "Error: Invariant AuditCreationAdmittedOnlyInScope is violated."' \

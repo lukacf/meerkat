@@ -11,12 +11,13 @@
 # space. It then reruns the same space once per reachability witness, with
 # that witness's negation as an extra invariant, and requires TLC to report
 # exactly that violation, so the properties are not vacuous. With --mutants
-# it then seeds five defects into a copy of the generated model (a manage
+# it then seeds six defects into a copy of the generated model (a manage
 # rebind that keeps the stale spawn scope, a restore without its bound-scope
-# guard, a manage grant that records no binding, a manage rebind that keeps
-# the stale identity creation scope, a creation check that admits without
-# the creation scope) and requires TLC to refuse each with the property it
-# breaks. An anchor this script expects but cannot find fails the run.
+# guard, a restore whose guard lost only its identity creation conjunct, a
+# manage grant that records no binding, a manage rebind that keeps the stale
+# identity creation scope, a creation check that admits without the creation
+# scope) and requires TLC to refuse each with the property it breaks. An
+# anchor this script expects but cannot find fails the run.
 set -euo pipefail
 
 usage="usage: mob_operator_grant_audit.sh <max-steps> [--mutants] [extra tlc args...]"
@@ -118,7 +119,7 @@ fi
 
 for witness in Rebound RebindDroppedSpawn RebindDroppedManage BothScopes \
   TwoIncarnations RestoredBindings ResolveCleared RebindsDropTheCreationScope \
-  CreationVerdicts; do
+  CreationVerdicts CreationBound; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "
   NotAuditWitness${witness}"
@@ -185,6 +186,30 @@ assert len(guard.findall(body)) == 1, "expected one bound-scope guard in Restore
 assert "identity_creation_scope" in guard.search(body).group(0), \
     "expected the bound-scope guard to cover the identity creation scope"
 body = guard.sub(lambda _: "    /\\ TRUE", body)
+text = text[: block.start()] + body + text[block.end():]
+open(path, "w").write(text)
+PY
+
+  mutate restore_without_creation_guard \
+    "Invariant mob_operator_scopes_are_bound_to_an_incarnation" "$@" <<'PY'
+import os, re
+path = os.environ["MODEL"]
+text = open(path).read()
+block = re.search(r"^RestoreMobOperatorAuthority\(.*?\n\n", text, re.S | re.M)
+assert block, "RestoreMobOperatorAuthority not found"
+# Only the identity creation conjunct of the bound-scope guard: the manage
+# and spawn-profile conjuncts stay, so only the unbound creation restore the
+# audit explores can break the invariant.
+creation = re.compile(
+    r"\(\\A mob_id \\in DOMAIN identity_creation_scope : "
+    r"\(mob_id \\in DOMAIN mob_incarnations\)\)")
+body = block.group(0)
+assert len(creation.findall(body)) == 1, \
+    "expected one identity creation conjunct in the RestoreMobOperatorAuthority guard"
+for kept in ("\\A mob_id \\in managed_mob_scope : ",
+             "\\A mob_id \\in DOMAIN spawn_profile_scope : "):
+    assert kept in body, f"expected the guard to keep its conjunct {kept!r}"
+body = creation.sub(lambda _: "TRUE", body)
 text = text[: block.start()] + body + text[block.end():]
 open(path, "w").write(text)
 PY

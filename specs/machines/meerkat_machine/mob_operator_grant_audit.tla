@@ -51,12 +51,14 @@
 \*     never admit a creation.
 \*
 \* AuditWitness* operators are reachability goals the runner checks as
-\* expected violations, so the properties are not vacuous. With --mutants the
-\* runner also checks that five seeded model defects are refused: a manage
-\* rebind that keeps the stale spawn scope, a restore without its bound-scope
-\* guard, a manage grant that records no binding, a manage rebind that keeps
-\* the stale creation scope, and a creation check that admits without the
-\* creation scope.
+\* expected violations, so the properties are not vacuous. One of them needs
+\* the creation bind arm to grant the scope the check admits, so a model that
+\* lost that arm fails the audit. With --mutants the runner also checks that
+\* six seeded model defects are refused: a manage rebind that keeps the stale
+\* spawn scope, a restore without its bound-scope guard, a restore whose
+\* guard lost only its identity creation conjunct, a manage grant that
+\* records no binding, a manage rebind that keeps the stale creation scope,
+\* and a creation check that admits without the creation scope.
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* mob_operator_grant_audit.sh. Run a deeper bound by hand with:
@@ -72,12 +74,13 @@ VARIABLES
     audit_restored_bound,               \* a restore landed a non-empty binding map
     audit_cleared_after_grant,          \* a resolve cleared scope a grant had given
     audit_rebind_dropped_creation,      \* a manage or spawn rebind dropped creation scope the mob had
-    audit_creation_rebind_dropped_other \* a creation rebind dropped manage or spawn scope the mob had
+    audit_creation_rebind_dropped_other, \* a creation rebind dropped manage or spawn scope the mob had
+    audit_creation_bound                \* the creation bind arm granted a mob creation scope it had none of
 
 auditVars == <<audit_rebound, audit_rebind_dropped_spawn,
                audit_rebind_dropped_manage, audit_restored_bound,
                audit_cleared_after_grant, audit_rebind_dropped_creation,
-               audit_creation_rebind_dropped_other>>
+               audit_creation_rebind_dropped_other, audit_creation_bound>>
 
 AuditMobs == {"mobid_1", "mobid_2"}
 \* The mob that is granted and restored identity creation scope.
@@ -156,14 +159,14 @@ AuditNext ==
        /\ UNCHANGED <<audit_rebound, audit_rebind_dropped_spawn,
                       audit_rebind_dropped_manage, audit_restored_bound,
                       audit_rebind_dropped_creation,
-                      audit_creation_rebind_dropped_other>>
+                      audit_creation_rebind_dropped_other, audit_creation_bound>>
     \/ AuditRestore
        /\ audit_restored_bound' =
             (audit_restored_bound \/ DOMAIN mob_operator_mob_incarnations' # {})
        /\ UNCHANGED <<audit_rebound, audit_rebind_dropped_spawn,
                       audit_rebind_dropped_manage, audit_cleared_after_grant,
                       audit_rebind_dropped_creation,
-                      audit_creation_rebind_dropped_other>>
+                      audit_creation_rebind_dropped_other, audit_creation_bound>>
     \/ \E m \in AuditMobs, i \in AuditIncarnations :
         \/ GrantMobOperatorManageMob(m, i) /\ KeepHistory
         \/ SpawnBind(m, i) /\ KeepHistory
@@ -175,7 +178,7 @@ AuditNext ==
                 (audit_rebind_dropped_creation \/ HasCreationScope(m))
            /\ UNCHANGED <<audit_rebind_dropped_manage, audit_restored_bound,
                           audit_cleared_after_grant,
-                          audit_creation_rebind_dropped_other>>
+                          audit_creation_rebind_dropped_other, audit_creation_bound>>
         \/ SpawnRebind(m, i)
            /\ audit_rebound' = TRUE
            /\ audit_rebind_dropped_manage' =
@@ -184,9 +187,16 @@ AuditNext ==
                 (audit_rebind_dropped_creation \/ HasCreationScope(m))
            /\ UNCHANGED <<audit_rebind_dropped_spawn, audit_restored_bound,
                           audit_cleared_after_grant,
-                          audit_creation_rebind_dropped_other>>
+                          audit_creation_rebind_dropped_other, audit_creation_bound>>
     \/ \E i \in AuditIncarnations :
-        \/ CreationBind(AuditCreationMob, i) /\ KeepHistory
+        \/ CreationBind(AuditCreationMob, i)
+           /\ audit_creation_bound' =
+                (audit_creation_bound \/ ~HasCreationScope(AuditCreationMob))
+           /\ UNCHANGED <<audit_rebound, audit_rebind_dropped_spawn,
+                          audit_rebind_dropped_manage, audit_restored_bound,
+                          audit_cleared_after_grant,
+                          audit_rebind_dropped_creation,
+                          audit_creation_rebind_dropped_other>>
         \/ CreationRebind(AuditCreationMob, i)
            /\ audit_rebound' = TRUE
            /\ audit_creation_rebind_dropped_other' =
@@ -195,7 +205,7 @@ AuditNext ==
                     \/ AuditCreationMob \in DOMAIN mob_operator_spawn_profile_scope)
            /\ UNCHANGED <<audit_rebind_dropped_spawn, audit_rebind_dropped_manage,
                           audit_restored_bound, audit_cleared_after_grant,
-                          audit_rebind_dropped_creation>>
+                          audit_rebind_dropped_creation, audit_creation_bound>>
 
 AuditInit ==
     /\ Init
@@ -206,6 +216,7 @@ AuditInit ==
     /\ audit_cleared_after_grant = FALSE
     /\ audit_rebind_dropped_creation = FALSE
     /\ audit_creation_rebind_dropped_other = FALSE
+    /\ audit_creation_bound = FALSE
 
 AuditSpec == AuditInit /\ [][AuditNext]_<<vars, auditVars>>
 
@@ -314,6 +325,16 @@ AuditWitnessCreationVerdicts ==
           /\ ~HasCreationScope("mobid_2")
           /\ ENABLED CreationNotInScope("mobid_2", i, t)
 
+\* The creation bind arm granted the first mob creation scope it had none
+\* of, no rebind followed, and the check admits a template there: the scope
+\* the check admits came from the bind arm (restores run only from the
+\* initial state, before it).
+AuditWitnessCreationBound ==
+    /\ audit_creation_bound
+    /\ ~audit_rebound
+    /\ \E i \in AuditIncarnations, t \in AuditTemplates :
+          ENABLED CreationAdmitted(AuditCreationMob, i, t)
+
 NotAuditWitnessRebound == ~AuditWitnessRebound
 NotAuditWitnessRebindDroppedSpawn == ~AuditWitnessRebindDroppedSpawn
 NotAuditWitnessRebindDroppedManage == ~AuditWitnessRebindDroppedManage
@@ -323,4 +344,5 @@ NotAuditWitnessRestoredBindings == ~AuditWitnessRestoredBindings
 NotAuditWitnessResolveCleared == ~AuditWitnessResolveCleared
 NotAuditWitnessRebindsDropTheCreationScope == ~AuditWitnessRebindsDropTheCreationScope
 NotAuditWitnessCreationVerdicts == ~AuditWitnessCreationVerdicts
+NotAuditWitnessCreationBound == ~AuditWitnessCreationBound
 ====

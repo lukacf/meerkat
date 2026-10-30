@@ -406,20 +406,59 @@ fn a_valid_policy_parses_with_the_contract_defaults() {
 
 #[test]
 fn unknown_policy_keys_are_refused_typed() {
-    for value in [
-        json!({"enabled": true, "surprise": 1}),
-        json!({"enabled": true, "console": {"inherit_creator_access": true}}),
-        json!({"enabled": true, "limits": {"totals": 3}}),
-        json!({"enabled": true, "templates": {"t": {
-            "profiles": "any", "namespace": "t", "tools": {"celing": []}}}}),
-        json!({"enabled": true, "templates": {"t": {"profiles": "every", "namespace": "t"}}}),
-        json!({"enabled": "yes"}),
-    ] {
+    let cases = [
+        (json!({"enabled": true, "surprise": 1}), "", "surprise"),
+        (
+            json!({"enabled": true, "console": {"inherit_creator_access": true}}),
+            "console",
+            "inherit_creator_access",
+        ),
+        (
+            json!({"enabled": true, "limits": {"totals": 3}}),
+            "limits",
+            "totals",
+        ),
+        (
+            json!({"enabled": true, "templates": {"t": {
+                "profiles": "any", "namespace": "t", "tools": {"celing": []}}}}),
+            "templates.t.tools",
+            "celing",
+        ),
+        (
+            json!({"enabled": true, "templates": {"t": {"profiles": "every", "namespace": "t"}}}),
+            "templates.t.profiles",
+            "\"every\"",
+        ),
+        (
+            json!({"enabled": true, "templates": {"t": {"profiles": 5, "namespace": "t"}}}),
+            "templates.t.profiles",
+            "a list of profile names or \"any\"",
+        ),
+        (
+            json!({"enabled": true, "templates": {"t": {"profiles": "any"}}}),
+            "templates.t",
+            "namespace",
+        ),
+        (
+            json!({"enabled": true, "creators": [{"id": "a", "templats": []}]}),
+            "creators[0]",
+            "templats",
+        ),
+        (
+            json!({"enabled": true, "approval": {"rules": [{"change": ["create"]}, {"chnage": []}]}}),
+            "approval.rules[1]",
+            "chnage",
+        ),
+        (json!({"enabled": "yes"}), "enabled", "boolean"),
+    ];
+    for (value, path, detail) in cases {
         let refusal = refusal_of(&value);
-        assert!(
-            matches!(refusal.kind, PolicyRefusalKind::Malformed { .. }),
-            "{value}: {refusal}"
-        );
+        let PolicyRefusalKind::Malformed { detail: shown } = &refusal.kind else {
+            panic!("{value}: {refusal}");
+        };
+        assert_eq!(refusal.path, path, "{value}: {refusal}");
+        assert!(shown.contains(detail), "{value}: {refusal}");
+        assert!(!shown.contains("ListOrKeyword"), "{refusal}");
         assert!(refusal.to_string().starts_with("identity_creation"));
     }
 }

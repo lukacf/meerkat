@@ -213,7 +213,7 @@ pub struct TemplateConfig {
 
 /// A template's `profiles`: a list, or `"any"`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "ListOrKeyword", into = "ListOrKeyword")]
+#[serde(try_from = "Value", into = "ListOrKeyword")]
 pub enum ProfilesConfig {
     /// Every profile of the mob definition.
     Any,
@@ -229,7 +229,7 @@ impl Default for ProfilesConfig {
 
 /// A template's `models`: a list, or `"profile"`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "ListOrKeyword", into = "ListOrKeyword")]
+#[serde(try_from = "Value", into = "ListOrKeyword")]
 pub enum ModelsConfig {
     /// The bound profile's own model.
     #[default]
@@ -239,26 +239,47 @@ pub enum ModelsConfig {
 }
 
 /// A list of names, or one keyword in their place.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 enum ListOrKeyword {
     Keyword(String),
     List(Vec<String>),
 }
 
+impl ListOrKeyword {
+    /// `value` as one keyword or a list of names; `None` for anything else.
+    fn read(value: Value) -> Option<Self> {
+        match value {
+            Value::String(keyword) => Some(Self::Keyword(keyword)),
+            Value::Array(items) => items
+                .into_iter()
+                .map(|item| match item {
+                    Value::String(name) => Some(name),
+                    _ => None,
+                })
+                .collect::<Option<Vec<String>>>()
+                .map(Self::List),
+            _ => None,
+        }
+    }
+}
+
 const ANY_PROFILE: &str = "any";
 const PROFILE_MODEL: &str = "profile";
 
-impl TryFrom<ListOrKeyword> for ProfilesConfig {
+impl TryFrom<Value> for ProfilesConfig {
     type Error = String;
 
-    fn try_from(value: ListOrKeyword) -> Result<Self, Self::Error> {
-        match value {
-            ListOrKeyword::Keyword(keyword) if keyword == ANY_PROFILE => Ok(Self::Any),
-            ListOrKeyword::Keyword(other) => Err(format!(
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match ListOrKeyword::read(value) {
+            Some(ListOrKeyword::Keyword(keyword)) if keyword == ANY_PROFILE => Ok(Self::Any),
+            Some(ListOrKeyword::List(names)) => Ok(Self::Listed(names)),
+            Some(ListOrKeyword::Keyword(other)) => Err(format!(
                 "profiles is a list of profile names or \"{ANY_PROFILE}\", not {other:?}"
             )),
-            ListOrKeyword::List(names) => Ok(Self::Listed(names)),
+            None => Err(format!(
+                "profiles is a list of profile names or \"{ANY_PROFILE}\""
+            )),
         }
     }
 }
@@ -272,16 +293,21 @@ impl From<ProfilesConfig> for ListOrKeyword {
     }
 }
 
-impl TryFrom<ListOrKeyword> for ModelsConfig {
+impl TryFrom<Value> for ModelsConfig {
     type Error = String;
 
-    fn try_from(value: ListOrKeyword) -> Result<Self, Self::Error> {
-        match value {
-            ListOrKeyword::Keyword(keyword) if keyword == PROFILE_MODEL => Ok(Self::ProfileModel),
-            ListOrKeyword::Keyword(other) => Err(format!(
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match ListOrKeyword::read(value) {
+            Some(ListOrKeyword::Keyword(keyword)) if keyword == PROFILE_MODEL => {
+                Ok(Self::ProfileModel)
+            }
+            Some(ListOrKeyword::List(names)) => Ok(Self::Listed(names)),
+            Some(ListOrKeyword::Keyword(other)) => Err(format!(
                 "models is a list of model names or \"{PROFILE_MODEL}\", not {other:?}"
             )),
-            ListOrKeyword::List(names) => Ok(Self::Listed(names)),
+            None => Err(format!(
+                "models is a list of model names or \"{PROFILE_MODEL}\""
+            )),
         }
     }
 }

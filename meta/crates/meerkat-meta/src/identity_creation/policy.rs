@@ -7,13 +7,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use super::config::{
-    ApprovalConfig, ApprovalKind, ApprovalOutcomeConfig, ApproverConfig, ChangeClass, CreatorKind,
-    CreatorRuleConfig, CreatorSelectorConfig, ExcessMode, IdentityCreationConfig, KickoffRule,
+    ApprovalConfig, ApprovalKind, ApprovalOutcomeConfig, ApprovalRuleConfig, ApproverConfig,
+    AuthorityFieldConfig, ChangeClass, ConsoleConfig, CreatorKind, CreatorRuleConfig,
+    CreatorSelectorConfig, ExcessMode, IdentityCreationConfig, KickoffRule, LimitsConfig,
     MAX_DECISION_TIMEOUT_MS, MaxBytesConfig, ModelsConfig, NamingConfig, PeerOutcome, PeerRelation,
-    PeersConfig, PreparationMode, ProfilesConfig, SelectorConfig, TemplateConfig, TimeoutsConfig,
+    PeerRuleConfig, PeersConfig, PreparationMode, ProfilesConfig, ReservedKeysConfig,
+    SelectorConfig, TemplateConfig, TimeoutsConfig, ToolBoundsConfig,
 };
 use super::digest::{Sha256Digest, canonical_digest};
 use super::refusal::{PolicyRefusal, PolicyRefusalKind};
@@ -649,12 +652,9 @@ impl IdentityCreationPolicy {
     pub fn parse(value: &Value) -> Result<Option<Self>, PolicyRefusal> {
         let config: IdentityCreationConfig =
             serde_json::from_value(value.clone()).map_err(|error| {
-                PolicyRefusal::new(
-                    "",
-                    PolicyRefusalKind::Malformed {
-                        detail: error.to_string(),
-                    },
-                )
+                let (path, detail) =
+                    locate_malformed(value).unwrap_or_else(|| (String::new(), error.to_string()));
+                PolicyRefusal::new(path, PolicyRefusalKind::Malformed { detail })
             })?;
         Self::from_config(config)
     }
@@ -865,6 +865,95 @@ pub fn resolve_launch_policy(
         ));
     }
     Ok(Some(Arc::new(policy)))
+}
+
+/// Where in `value` the policy's shape breaks, and the parser's detail
+/// there: the policy object itself for an unknown member, else the member,
+/// the template or its tools, limits or authority field, or the rule list
+/// item that does not parse.
+fn locate_malformed(value: &Value) -> Option<(String, String)> {
+    let object = value.as_object()?;
+    for (key, member) in object {
+        let found = match key.as_str() {
+            "enabled" => shape_error::<bool>(member, key),
+            "reserved_keys" => shape_error::<ReservedKeysConfig>(member, key),
+            "creators" => list_shape_error::<CreatorRuleConfig>(member, key),
+            "limits" => shape_error::<LimitsConfig>(member, key),
+            "templates" => templates_shape_error(member),
+            "peers" => member
+                .get("rules")
+                .and_then(|rules| list_shape_error::<PeerRuleConfig>(rules, "peers.rules"))
+                .or_else(|| shape_error::<PeersConfig>(member, key)),
+            "naming" => shape_error::<NamingConfig>(member, key),
+            "approval" => member
+                .get("rules")
+                .and_then(|rules| list_shape_error::<ApprovalRuleConfig>(rules, "approval.rules"))
+                .or_else(|| shape_error::<ApprovalConfig>(member, key)),
+            "console" => shape_error::<ConsoleConfig>(member, key),
+            _ => Some((String::new(), format!("unknown field `{key}`"))),
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+/// The parser's detail when `value` is not a `T`, at `path`.
+fn shape_error<T: DeserializeOwned>(value: &Value, path: &str) -> Option<(String, String)> {
+    serde_json::from_value::<T>(value.clone())
+        .err()
+        .map(|error| (path.to_owned(), error.to_string()))
+}
+
+/// The first item of the list `value` that is not a `T`, else the list.
+fn list_shape_error<T: DeserializeOwned>(value: &Value, path: &str) -> Option<(String, String)> {
+    value
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .enumerate()
+                .find_map(|(index, item)| shape_error::<T>(item, &format!("{path}[{index}]")))
+        })
+        .or_else(|| shape_error::<Vec<T>>(value, path))
+}
+
+/// The first template of `value` that does not parse, at its profiles, its
+/// models, its tools, its limits, an authority field or itself; else the
+/// map.
+fn templates_shape_error(value: &Value) -> Option<(String, String)> {
+    let Some(templates) = value.as_object() else {
+        return shape_error::<BTreeMap<String, TemplateConfig>>(value, "templates");
+    };
+    for (id, template) in templates {
+        let path = format!("templates.{id}");
+        let inner = template.as_object().and_then(|members| {
+            members.iter().find_map(|(key, member)| {
+                let member_path = format!("{path}.{key}");
+                match key.as_str() {
+                    "profiles" => shape_error::<ProfilesConfig>(member, &member_path),
+                    "models" => shape_error::<ModelsConfig>(member, &member_path),
+                    "tools" => shape_error::<ToolBoundsConfig>(member, &member_path),
+                    "max_bytes" => shape_error::<MaxBytesConfig>(member, &member_path),
+                    "authority_fields" => member.as_object().and_then(|fields| {
+                        fields.iter().find_map(|(field, rule)| {
+                            shape_error::<AuthorityFieldConfig>(
+                                rule,
+                                &format!("{member_path}.{field}"),
+                            )
+                        })
+                    }),
+                    _ => None,
+                }
+            })
+        });
+        let found = inner.or_else(|| shape_error::<TemplateConfig>(template, &path));
+        if found.is_some() {
+            return found;
+        }
+    }
+    shape_error::<BTreeMap<String, TemplateConfig>>(value, "templates")
 }
 
 fn policy_revision(config: &IdentityCreationConfig) -> Result<Sha256Digest, PolicyRefusal> {

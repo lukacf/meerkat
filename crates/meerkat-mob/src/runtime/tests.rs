@@ -28954,9 +28954,9 @@ async fn test_visible_mob_operator_reads_still_require_exact_scope() {
     .expect("compose dispatcher")
     .expect("operator dispatcher should be visible when authority is injected");
 
-    // The injected authority binds only another mob, so the member's own mob
-    // operator tools are not listed, and a read that still reaches them is
-    // admitted like any other, which denies it.
+    // The injected authority binds only another mob, so it holds no mob
+    // operator scope in this one: the member's own mob operator tools are not
+    // listed, and a read that still reaches them is denied.
     let tools = dispatcher.tools();
     let tool_names = tools
         .iter()

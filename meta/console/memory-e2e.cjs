@@ -266,10 +266,11 @@ const openAccessFlows = [
       // Knowledge: identity selector + composition segments.
       await openTab(page, "knowledge");
       await page.getByTestId(T.KNOWLEDGE).waitFor({ timeout: 10_000 });
+      // Options read display names; the raw identities are their values.
       const identityOptions = await page
         .getByTestId(T.KNOWLEDGE_IDENTITY)
         .locator("option")
-        .allTextContents();
+        .evaluateAll((nodes) => nodes.map((node) => node.value));
       assert(
         identityOptions.includes("router") && identityOptions.includes("delivery"),
         `knowledge identity options: ${JSON.stringify(identityOptions)}`,
@@ -279,17 +280,17 @@ const openAccessFlows = [
       await page.getByTestId(T.KNOWLEDGE_IDENTITY).selectOption("router");
       await page.getByTestId(T.knowledgeSegment("identity:router")).waitFor({ timeout: 10_000 });
 
-      // Pipeline: stages summary counts both parked promotions.
+      // Pipeline: the stage stepper counts both parked promotions.
       await openTab(page, "pipeline");
       await page.getByTestId(T.PIPELINE).waitFor({ timeout: 10_000 });
       const stages = await page.getByTestId(T.PIPELINE_STAGES).innerText();
-      assert(stages.includes("PENDING GATE (2)"), `pipeline stages: ${stages}`);
+      assert(/Waiting for approval\s+2/.test(stages), `pipeline stages: ${stages}`);
 
       // Dreams: the seeded run with both touched-record links.
       await openTab(page, "dreams");
       await page.getByTestId(T.dream("run-dream-e2e-1")).waitFor({ timeout: 10_000 });
       const dreamText = await page.getByTestId(T.dream("run-dream-e2e-1")).innerText();
-      assert(dreamText.includes("2 ops"), `dream run summary: ${dreamText}`);
+      assert(dreamText.includes("2 changes"), `dream run summary: ${dreamText}`);
       for (const memoryId of seed.dreamRun.memory_ids) {
         await page
           .getByTestId(T.dreamRecord("run-dream-e2e-1", memoryId))
@@ -324,9 +325,14 @@ const openAccessFlows = [
         "tip must be the current lineage node",
       );
 
-      // Life: the seeded build-surface injection, humanized.
+      // Life: the seeded build-surface injection, as a sentence naming the
+      // agent; the raw identity is the name's tooltip.
       const life = await page.getByTestId(T.DETAIL_LIFE).innerText();
-      assert(/build • router/.test(life), `life section injection line: ${life}`);
+      assert(/Given to .+ at startup/.test(life), `life section injection line: ${life}`);
+      assert(
+        (await page.getByTestId(T.DETAIL_LIFE).locator('[title="router"]').count()) > 0,
+        "the injection names identity router (in the agent name's tooltip)",
+      );
       assertNoRawJson(await page.getByTestId(T.DETAIL).innerText(), "biography");
 
       // Evidence click-through: the seeded ref names a session absent from
@@ -335,13 +341,13 @@ const openAccessFlows = [
       await evidenceRef.waitFor({ timeout: 10_000 });
       const evidenceText = await evidenceRef.innerText();
       assert(
-        evidenceText.includes("sess-router-archived-1") && evidenceText.includes("gen 2"),
+        evidenceText.includes("sess-router-archived-1") && evidenceText.includes("generation 2"),
         `evidence label: ${evidenceText}`,
       );
       await evidenceRef.click();
       await page.getByTestId(T.EVIDENCE_DEGRADED).waitFor({ timeout: 10_000 });
       const degraded = await page.getByTestId(T.EVIDENCE_DEGRADED).innerText();
-      // Gate fix: the copy no longer claims the session is gone — it may
+      // Gate fix: the copy no longer claims the session is gone; it may
       // merely be outside the recent-1000 timeline window.
       assert(
         degraded.includes("not found in the recent timeline window"),
@@ -482,14 +488,14 @@ const openAccessFlows = [
 
       // Open access on a mutable console offers the decision. Gated
       // promotions are waiting on this record, so a release is refused
-      // typed (the Gating inbox decides it) and nothing changes.
+      // typed (Approvals decides it) and nothing changes.
       await page.getByTestId(T.QUARANTINE_DECIDE).waitFor({ timeout: 10_000 });
       await page.getByTestId(T.QUARANTINE_RELEASE).click();
       const refusal = page.getByTestId(T.QUARANTINE_ERROR);
       await refusal.waitFor({ timeout: 10_000 });
       const refusalText = await refusal.innerText();
       assert(
-        refusalText.includes("gated promotion") && refusalText.includes("Gating inbox"),
+        refusalText.includes("waiting for approval") && refusalText.includes("Approvals"),
         `gated release refusal: ${refusalText}`,
       );
       const after = await rpc(baseUrl, "meta/memory/panel/record", {
@@ -502,7 +508,7 @@ const openAccessFlows = [
       );
       await page.getByTestId(T.DETAIL_BACK).click();
 
-      // The decide button is a door into the Gating inbox.
+      // The decide button is a door into Approvals (the gating panel).
       await openTab(page, "pipeline");
       await page.getByTestId(T.pipelineDecide("gate-mob-promotion")).click();
       await page.getByTestId("gating-panel").waitFor({ timeout: 10_000 });
@@ -541,7 +547,7 @@ const openAccessFlows = [
       // No-flicker contract (gate fix): lattice re-checks retain the prior
       // verdict instead of resetting to "unverifiable", so once the walk
       // above has landed HOLDING, every tile reads its settled status
-      // directly — an instantaneous read regressing here means the flicker
+      // directly; an instantaneous read regressing here means the flicker
       // came back.
       for (const [id, status] of Object.entries(expected)) {
         const tile = page.getByTestId(T.verdictTile(id));
@@ -553,7 +559,10 @@ const openAccessFlows = [
         );
       }
       const latticeText = await page.getByTestId(T.verdictTile("lattice")).innerText();
-      assert(latticeText.includes("0 violations"), `lattice tile: ${latticeText}`);
+      assert(
+        latticeText.includes("No record breaks the trust rules"),
+        `lattice tile: ${latticeText}`,
+      );
       assert(
         (await page.getByTestId(T.verdictTile("echo-safety")).innerText()).includes(
           "UNVERIFIABLE",

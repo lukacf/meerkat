@@ -404,7 +404,7 @@ async function main() {
     if ((detail.injections || []).length > 0) {
       const life = await page.getByTestId(T.DETAIL_LIFE).innerText();
       assert(
-        /build|turn/.test(life),
+        /at startup|during a turn/.test(life),
         `LIFE renders the real injection ledger rows: ${life}`,
       );
       note(`biography LIFE shows ${detail.injections.length} real injection row(s)`);
@@ -419,11 +419,12 @@ async function main() {
     const realRun = dreams[0];
     await page.getByTestId(T.dream(realRun.run_id)).waitFor({ timeout: 15_000 });
     const dreamText = await page.getByTestId(T.dream(realRun.run_id)).innerText();
+    const changes = `${realRun.ops} ${realRun.ops === 1 ? "change" : "changes"}`;
     assert(
-      dreamText.includes(`${realRun.ops} ops`) || realRun.ops === 0,
-      `dreams tab shows the real op count: ${dreamText}`,
+      dreamText.includes(changes) || realRun.ops === 0,
+      `dreams tab shows the real change count: ${dreamText}`,
     );
-    note(`dreams tab renders real run ${realRun.run_id} (${realRun.ops} ops)`);
+    note(`dreams tab renders real run ${realRun.run_id} (${changes})`);
     await page.screenshot({ path: path.join(screenshotDir, "4-dreams.png"), fullPage: true });
 
     // Pipeline live strip: real memory.* frames, humanized.

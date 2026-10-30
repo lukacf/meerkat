@@ -127,6 +127,8 @@ mod inline_image_externalization_tests;
 mod instruction_activation;
 #[cfg(test)]
 mod instruction_envelope_tests;
+#[cfg(test)]
+mod instruction_target_tests;
 pub mod model_routing_control;
 pub mod model_routing_handoff_staging;
 mod operator_instructions;

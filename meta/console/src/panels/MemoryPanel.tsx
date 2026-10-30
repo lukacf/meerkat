@@ -1620,7 +1620,8 @@ function QuarantineDecisionBlock({
         it stays capped below verified trust because it was quarantined. Tombstone discards it.
       </div>
       <input
-        className="memory-filterbar__input"
+        className="cc-input memory-quarantine__rationale"
+        aria-label="Rationale"
         data-testid="memory-quarantine-rationale"
         placeholder="Rationale (optional, recorded in the audit)"
         value={rationale}

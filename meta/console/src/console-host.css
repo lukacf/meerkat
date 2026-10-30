@@ -1502,11 +1502,13 @@ svg[data-svg="fit"],
 .gitem:hover { background: var(--bg-elev-2); }
 .gitem.is-selected { background: var(--bg-elev-2); box-shadow: inset 3px 0 0 var(--accent); }
 .gitem__risk {
-  width: 8px; height: 8px; border-radius: 50%;
+  width: 8px; height: 8px; border-radius: var(--r-round);
   justify-self: center;
-  background: var(--ink-muted);
+  background: var(--ink-dim);
 }
-[data-cc-variant="terminal"] .gitem__risk { border-radius: 0; }
+/* Risk tiers: r3 critical, r2 warning, lower tiers and unknown stay neutral. */
+.gitem[data-risk="r3"] .gitem__risk { background: var(--crit); }
+.gitem[data-risk="r2"] .gitem__risk { background: var(--warn); }
 .gating__audit-note { padding: 12px 24px; color: var(--ink-muted); font-size: 12px; }
 .gitem__id { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); }
 .gitem__action { font-size: 12.5px; color: var(--ink); font-weight: 500; }
@@ -3060,7 +3062,7 @@ svg[data-svg="fit"],
 }
 /* Keep provisional speech readable with a quiet rail and explicit live label. */
 .conv-turn--live {
-  border-left: 1px solid var(--border, rgba(127, 127, 127, 0.5));
+  border-left: 1px solid var(--line-strong);
   padding-left: 8px;
 }
 .msg--live .msg__bubble {
@@ -3561,6 +3563,7 @@ svg[data-svg="fit"],
 
 /* === Memory panel (records, quarantine, dreams) === */
 .memory-panel__body { padding-bottom: 12px; }
+.memory-quarantine__rationale { width: 100%; max-width: 520px; margin: 6px 0; }
 .memory-note {
   margin: 12px 14px 4px;
   padding: 8px 10px;
@@ -4052,7 +4055,7 @@ svg[data-svg="fit"],
 }
 .workgraph__dot.is-in_progress { background: var(--accent); }
 .workgraph__dot.is-completed { background: var(--ok); }
-.workgraph__dot.is-failed { background: var(--bad, var(--err, #d4564e)); }
+.workgraph__dot.is-failed { background: var(--crit); }
 .workgraph__dot.is-blocked { background: var(--warn); }
 .workgraph__item-title {
   font-size: 12px;
@@ -4082,7 +4085,7 @@ svg[data-svg="fit"],
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.workgraph__chip.is-priority-high { color: var(--bad, var(--err, #d4564e)); border-color: currentColor; }
+.workgraph__chip.is-priority-high { color: var(--crit); border-color: currentColor; }
 .workgraph__action {
   flex: none;
   font: inherit;
@@ -4116,7 +4119,7 @@ svg[data-svg="fit"],
 }
 .workgraph__mode.is-pursue { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 45%, var(--line)); }
 .workgraph__mode.is-review { color: var(--ok); border-color: color-mix(in oklch, var(--ok) 45%, var(--line)); }
-.workgraph__mode.is-falsify { color: var(--bad, var(--err, #d4564e)); border-color: currentColor; }
+.workgraph__mode.is-falsify { color: var(--crit); border-color: currentColor; }
 .workgraph__mode.is-judge { color: var(--warn); border-color: color-mix(in oklch, var(--warn) 45%, var(--line)); }
 .workgraph__binding-status {
   font-family: var(--mono);
@@ -4277,8 +4280,8 @@ svg[data-svg="fit"],
 }
 .workgraph-graph__node.is-completed .workgraph-graph__node-box { stroke: var(--ok); }
 .workgraph-graph__node.is-completed .workgraph-graph__node-dot { fill: var(--ok); }
-.workgraph-graph__node.is-failed .workgraph-graph__node-box { stroke: var(--bad, var(--err, #d4564e)); }
-.workgraph-graph__node.is-failed .workgraph-graph__node-dot { fill: var(--bad, var(--err, #d4564e)); }
+.workgraph-graph__node.is-failed .workgraph-graph__node-box { stroke: var(--crit); }
+.workgraph-graph__node.is-failed .workgraph-graph__node-dot { fill: var(--crit); }
 .workgraph-graph__node.is-blocked .workgraph-graph__node-box { stroke: var(--warn); }
 .workgraph-graph__node.is-blocked .workgraph-graph__node-dot { fill: var(--warn); }
 .workgraph-graph__node.is-cancelled { opacity: 0.55; }
@@ -4321,7 +4324,7 @@ svg[data-svg="fit"],
   gap: 12px;
   padding: 8px 14px;
   background: var(--bg-elev-1);
-  color: var(--err, #d4564e);
+  color: var(--crit-ink);
   border-bottom: 1px solid var(--line);
   font-size: 12px;
 }
@@ -4383,5 +4386,5 @@ svg[data-svg="fit"],
 .runtime-panel-empty h2, .runtime-panel-empty p { margin:0; }
 .runtime-panel-empty p { color:var(--ink-muted); }
 .runtime-scoped-panel > :last-child { flex:1; min-height:0; }
-.runtime-panel-selector { display:flex; align-items:center; gap:12px; padding:12px 18px; border-bottom:1px solid var(--line); font:13px var(--font-sans); }
-.runtime-panel-selector select { flex:1; min-width:0; padding:7px 10px; background:var(--paper); color:var(--ink); border:1px solid var(--line); border-radius:6px; }
+.runtime-panel-selector { display:flex; align-items:center; gap:12px; padding:12px 18px; border-bottom:1px solid var(--line); font:13px var(--sans); }
+.runtime-panel-selector select { flex:1; min-width:0; padding:7px 10px; background:var(--bg); color:var(--ink); border:1px solid var(--line); border-radius:var(--r-sm); }

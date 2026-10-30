@@ -1,6 +1,9 @@
+/* The shared panel carries its own short names so it renders in any host.
+   Every one points at a --_cc-* token, so the variants apply (the terminal
+   variant's square corners included) and it matches the console's panels. */
 .topo {
   --bg: var(--_cc-surface-canvas);
-  --bg-elev-1: var(--_cc-surface-raised);
+  --bg-elev-1: var(--_cc-surface-card);
   --bg-elev-2: var(--_cc-surface-hover);
   --line: var(--_cc-border-soft);
   --ink: var(--_cc-foreground);
@@ -15,7 +18,7 @@
   --c-init: var(--_cc-link);
   --disp: var(--_cc-font-display);
   --mono: var(--_cc-font-mono);
-  --r-sm: 8px;
+  --r-sm: var(--_cc-radius-sm);
   flex: 1; position: relative;
   background: var(--bg-elev-1);
   overflow: hidden;

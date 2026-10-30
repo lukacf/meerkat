@@ -323,7 +323,7 @@ export function AccessPanel({
       <p role="status">{loading ? "Loading Console access..." : status?.available === false
         ? "Console access administration is not available on this runtime."
         : "Current administrator access is required to view this configuration."}</p>
-      <button onClick={onRefresh} data-testid="access-refresh">Refresh</button>
+      <button className="cc-btn" onClick={onRefresh} data-testid="access-refresh">Refresh</button>
     </section>
   );
 
@@ -364,7 +364,7 @@ export function AccessPanel({
           refresh never moves them under a click in progress. */}
       {loading ? <p role="status">Refreshing owner state. Changes are temporarily unavailable.</p> : null}
       {error || saveFailure ? <div className="gating__empty" role="alert" data-testid="access-error">{error || (saveFailure ? accessSaveNotice(saveFailure) : null)}</div> : null}
-      {requiresReview && canReview ? <button onClick={reviewAndReapply}>Review and reapply</button> : null}
+      {requiresReview && canReview ? <button className="cc-btn cc-btn--primary" onClick={reviewAndReapply}>Review and reapply</button> : null}
       {error ? <p style={{ padding: "0 24px" }}>Last loaded configuration may be out of date. Refresh before making changes.</p> : null}
       <fieldset className="gating__list access-panel__body" disabled={tab === "preview" ? !current : tab === "groups" ? !current || saving : !canEdit} style={{ border: 0, margin: 0, minWidth: 0 }}>
         {tab === "overview" ? (
@@ -384,6 +384,7 @@ export function AccessPanel({
               {canEdit ? (
                 <div className="gpolicy__stats">
                   <button
+                    className="cc-btn"
                     data-testid="access-toggle-enabled"
                     onClick={() => void mutate("immediate", captureBase(), base => onSetEnabled(!enabled, base))}
                   >
@@ -413,6 +414,7 @@ export function AccessPanel({
                   {canEdit ? (
                     <div className="gpolicy__stats">
                       <button
+                        className="cc-btn"
                         data-testid="access-edit-admins"
                         onClick={() => { setAdminsBase(captureBase()); setAdminsDraft(formatListInput(config?.admins)); }}
                       >
@@ -434,7 +436,7 @@ export function AccessPanel({
                   </label>
                   <div className="access-panel__form-actions">
                     <button
-                      className="approve"
+                      className="cc-btn cc-btn--primary approve"
                       data-testid="access-save-admins"
                       onClick={() => {
                         void mutate("admins", adminsBase, base => onSaveAdmins(parseListInput(adminsDraft), base), () => { setAdminsDraft(null); setAdminsBase(null); });
@@ -442,7 +444,7 @@ export function AccessPanel({
                     >
                       Save
                     </button>
-                    <button onClick={() => { setAdminsDraft(null); setAdminsBase(null); }}>Cancel</button>
+                    <button className="cc-btn cc-btn--ghost" onClick={() => { setAdminsDraft(null); setAdminsBase(null); }}>Cancel</button>
                   </div>
                 </div>
               )}
@@ -477,7 +479,7 @@ export function AccessPanel({
                           {current && !saving ? (
                             <button
                               type="button"
-                              style={{ textDecoration: "underline" }}
+                              className="cc-btn cc-btn--ghost cc-btn--sm"
                               aria-label={`Inspect access for ${member}`}
                               onClick={() => inspectSubject(member)}
                             >
@@ -491,13 +493,14 @@ export function AccessPanel({
                   {canEdit ? (
                     <div className="gpolicy__stats">
                       <button
+                        className="cc-btn"
                         data-testid={`access-group-edit:${name}`}
                         onClick={() => startGroupEdit(name, group.members)}
                       >
                         Edit members
                       </button>
                       <button
-                        className="reject"
+                        className="cc-btn cc-btn--danger reject"
                         data-testid={`access-group-delete:${name}`}
                         onClick={() => {
                           if (window.confirm(`Delete group "${name}"?`)) {
@@ -543,11 +546,11 @@ export function AccessPanel({
                     />
                   </label>
                   <div className="access-panel__form-actions">
-                    <button className="approve" data-testid="access-group-save" onClick={submitGroup} disabled={!canEdit}>
+                    <button className="cc-btn cc-btn--primary approve" data-testid="access-group-save" onClick={submitGroup} disabled={!canEdit}>
                       {editingGroup ? "Save members" : "Create group"}
                     </button>
                     {editingGroup ? (
-                      <button onClick={() => { setEditingGroup(null); setGroupNameDraft(""); setGroupMembersDraft(""); setGroupBase(null); }} disabled={!canEdit}>
+                      <button className="cc-btn cc-btn--ghost" onClick={() => { setEditingGroup(null); setGroupNameDraft(""); setGroupMembersDraft(""); setGroupBase(null); }} disabled={!canEdit}>
                         Cancel
                       </button>
                     ) : null}
@@ -589,13 +592,14 @@ export function AccessPanel({
                   {canEdit ? (
                     <div className="gpolicy__stats">
                       <button
+                        className="cc-btn"
                         data-testid={`access-rule-edit:${rule.id}`}
                         onClick={() => { setRuleBase(captureBase()); setRuleDraft(draftFromRule(rule)); }}
                       >
                         Edit
                       </button>
                       <button
-                        className="reject"
+                        className="cc-btn cc-btn--danger reject"
                         data-testid={`access-rule-delete:${rule.id}`}
                         onClick={() => {
                           if (window.confirm(`Delete rule "${rule.id}"? Access it grants (or denies) stops immediately.`)) {
@@ -612,7 +616,7 @@ export function AccessPanel({
             )}
             {canEdit && !ruleDraft ? (
               <div className="gpolicy__stats">
-                <button data-testid="access-rule-new" onClick={() => { setRuleBase(captureBase()); setRuleDraft({ ...emptyRuleDraft(), actions: actions.slice(0, 1) }); }}>
+                <button className="cc-btn cc-btn--primary" data-testid="access-rule-new" onClick={() => { setRuleBase(captureBase()); setRuleDraft({ ...emptyRuleDraft(), actions: actions.slice(0, 1) }); }}>
                   New rule
                 </button>
               </div>
@@ -725,7 +729,7 @@ export function AccessPanel({
                   </label>
                   <div className="access-panel__form-actions">
                     <button
-                      className="approve"
+                      className="cc-btn cc-btn--primary approve"
                       data-testid="access-rule-save"
                       disabled={!canEdit || !ruleDraft.id.trim() || ruleDraft.actions.length === 0 || ruleDraft.actions.some(action => !actions.includes(action))}
                       onClick={() => {
@@ -734,7 +738,7 @@ export function AccessPanel({
                     >
                       Save rule
                     </button>
-                    <button onClick={() => { setRuleDraft(null); setRuleBase(null); }}>Cancel</button>
+                    <button className="cc-btn cc-btn--ghost" onClick={() => { setRuleDraft(null); setRuleBase(null); }}>Cancel</button>
                   </div>
                 </div>
               </div>
@@ -787,7 +791,7 @@ export function AccessPanel({
                   </select>
                 </label>
                 <div className="access-panel__form-actions">
-                  <button className="approve" data-testid="access-preview-run" disabled={!current || !previewSubject.trim() || !actions.includes(previewAction) || previewPending} onClick={() => void runPreview()}>
+                  <button className="cc-btn cc-btn--primary approve" data-testid="access-preview-run" disabled={!current || !previewSubject.trim() || !actions.includes(previewAction) || previewPending} onClick={() => void runPreview()}>
                     Evaluate
                   </button>
                 </div>

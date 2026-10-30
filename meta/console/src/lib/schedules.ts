@@ -532,6 +532,8 @@ export function scheduleErrorMessage(error: unknown, command: ConsoleScheduleCom
       return "This console runs a candidate launch, which changes no schedules.";
     case "schedule_not_found":
       return "This schedule no longer exists.";
+    case "schedule_revision_conflict":
+      return "This schedule changed meanwhile, so nothing was changed. Check it and try again.";
     case "unknown_identity":
       return "The console does not know this agent.";
     case "not_addressable":

@@ -335,6 +335,10 @@ test("a refusal reads by its kind, and server text shows only for invalid params
   assert.match(scheduleErrorMessage(rpcError(-32030, { kind: "access_denied" }), create), /not message this agent/);
   assert.match(scheduleErrorMessage(rpcError(-32047, { kind: "candidate_launch" }), create), /candidate launch/);
   assert.equal(scheduleErrorMessage(rpcError(-32001, { kind: "schedule_not_found" }), create), "This schedule no longer exists.");
+  assert.match(
+    scheduleErrorMessage(rpcError(-32009, { kind: "schedule_revision_conflict" }), CONSOLE_SCHEDULE_COMMANDS.update),
+    /changed meanwhile/,
+  );
   assert.match(scheduleErrorMessage(rpcError(-32001, { kind: "unknown_identity" }), create), /does not know this agent/);
   assert.match(scheduleErrorMessage(rpcError(-32002, { kind: "not_addressable" }), create), /takes no console messages/);
   assert.match(scheduleErrorMessage(rpcError(-32004, { kind: "governed_target" }), create), /governed input/);

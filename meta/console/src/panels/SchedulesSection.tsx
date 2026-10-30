@@ -21,6 +21,10 @@ import {
   type ConsoleScheduleTimingKind,
 } from "../lib/schedules";
 
+/// The least time between two list reads the pane's refreshes cause: the
+/// list reads the whole schedule store, and the pane refreshes on activity.
+const AUTO_REFRESH_INTERVAL_MS = 15_000;
+
 const WEEKDAYS: Array<{ day: number; label: string }> = [
   { day: 1, label: "Mon" },
   { day: 2, label: "Tue" },
@@ -38,7 +42,10 @@ export interface SchedulesSectionProps {
   editing: ConsoleScheduleEditing;
   /** Runs one schedule command for `identity`; rejects with the console's typed error. */
   run: (command: ConsoleScheduleCommand, params: Record<string, unknown>) => Promise<unknown>;
-  /** A value that changes whenever the pane refreshes: the list is read again. */
+  /**
+   * A value that changes whenever the pane refreshes: the list is read
+   * again, at most once every 15 seconds.
+   */
   refreshToken?: unknown;
   now?: () => Date;
   timezone?: string;
@@ -76,8 +83,11 @@ export function SchedulesSection({
   const [form, setForm] = React.useState<ScheduleForm | null>(null);
   const runRef = React.useRef(run);
   runRef.current = run;
+  const nowRef = React.useRef(now);
+  nowRef.current = now;
   const alive = React.useRef(true);
   const loadSeq = React.useRef(0);
+  const lastLoadAt = React.useRef<number | null>(null);
   React.useEffect(() => {
     alive.current = true;
     return () => {
@@ -87,6 +97,7 @@ export function SchedulesSection({
 
   const load = React.useCallback(async () => {
     const seq = ++loadSeq.current;
+    lastLoadAt.current = nowRef.current().getTime();
     try {
       const result = await runRef.current(CONSOLE_SCHEDULE_COMMANDS.list, {});
       if (!alive.current || seq !== loadSeq.current) return;
@@ -95,6 +106,9 @@ export function SchedulesSection({
       setLoadError(null);
     } catch (error) {
       if (!alive.current || seq !== loadSeq.current) return;
+      // A list that cannot be read now is not shown as it was: the viewer
+      // may have lost sight of the agent.
+      setSchedules([]);
       setStatus("failed");
       setLoadError(scheduleErrorMessage(error, CONSOLE_SCHEDULE_COMMANDS.list));
     }
@@ -102,7 +116,13 @@ export function SchedulesSection({
 
   React.useEffect(() => {
     void load();
-  }, [identity, refreshToken, load]);
+  }, [identity, load]);
+
+  React.useEffect(() => {
+    const last = lastLoadAt.current;
+    if (last !== null && nowRef.current().getTime() - last < AUTO_REFRESH_INTERVAL_MS) return;
+    void load();
+  }, [refreshToken, load]);
 
   React.useEffect(() => {
     if (!editing.canChange) {
@@ -300,6 +320,7 @@ export function SchedulesSection({
               <button
                 type="button"
                 aria-label={`Resume ${label}`}
+                title="Resuming makes you its sender"
                 data-testid={`schedule-resume:${id}`}
                 disabled={working}
                 onClick={() => runAction(schedule, CONSOLE_SCHEDULE_COMMANDS.resume)}

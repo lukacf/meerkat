@@ -95,7 +95,7 @@ function present(view: ReturnType<typeof render>, testId: string): boolean {
 function section(
   run: ReturnType<typeof gateway>["run"],
   canChange: boolean,
-  extra: { note?: string | null; refreshToken?: unknown } = {},
+  extra: { note?: string | null; refreshToken?: unknown; now?: () => Date } = {},
 ) {
   return (
     <SchedulesSection
@@ -103,7 +103,7 @@ function section(
       editing={{ canChange, note: extra.note ?? null }}
       run={run}
       refreshToken={extra.refreshToken}
-      now={now}
+      now={extra.now ?? now}
       timezone="UTC"
       formatTime={verbatim}
     />
@@ -279,18 +279,50 @@ describe("SchedulesSection", () => {
     expect(state.calls.some((call) => call.command === "createSchedule")).toBe(false);
   });
 
-  it("names a refused list and reads it again when the pane refreshes", async () => {
+  it("reads the list again on pane refreshes, at most every 15 seconds, and hides a list it cannot read", async () => {
     const { run, state } = gateway([item()]);
+    let clock = NOW.getTime();
+    const ticking = () => new Date(clock);
+    const view = render(section(run, true, { refreshToken: 1, now: ticking }));
+    await waitFor(() => expect(present(view, "schedule:sch_1")).toBe(true));
+
+    view.rerender(section(run, true, { refreshToken: 2, now: ticking }));
+    expect(state.calls.map((call) => call.command)).toEqual(["listSchedules"]);
+
+    clock += 16_000;
     state.fail = (call) => (call.command === "listSchedules" ? rpcError(-32030, { kind: "access_denied" }) : null);
-    const view = render(section(run, true, { refreshToken: 1 }));
+    view.rerender(section(run, true, { refreshToken: 3, now: ticking }));
     await waitFor(() => expect(present(view, "schedules-load-error:alpha")).toBe(true));
     expect(view.getByTestId("schedules-load-error:alpha").textContent).toBe("You may not view this agent's schedules.");
     expect(present(view, "schedule:sch_1")).toBe(false);
 
+    clock += 16_000;
     state.fail = null;
-    view.rerender(section(run, true, { refreshToken: 2 }));
+    view.rerender(section(run, true, { refreshToken: 4, now: ticking }));
     await waitFor(() => expect(present(view, "schedule:sch_1")).toBe(true));
     expect(present(view, "schedules-load-error:alpha")).toBe(false);
-    expect(state.calls.map((call) => call.command)).toEqual(["listSchedules", "listSchedules"]);
+    expect(state.calls.map((call) => call.command)).toEqual(["listSchedules", "listSchedules", "listSchedules"]);
+  });
+
+  it("names a change made meanwhile as a conflict and reads the list again", async () => {
+    const { run, state } = gateway([item()]);
+    state.fail = (call) =>
+      call.command === "updateSchedule"
+        ? rpcError(-32009, { kind: "schedule_revision_conflict", expected_revision: 1, actual_revision: 2 })
+        : null;
+    const view = render(section(run, true));
+    await waitFor(() => expect(present(view, "schedule:sch_1")).toBe(true));
+
+    fireEvent.click(view.getByTestId("schedule-edit:sch_1"));
+    fireEvent.submit(view.getByTestId("schedule-form:alpha"));
+
+    await waitFor(() => expect(present(view, "schedules-error:alpha")).toBe(true));
+    expect(view.getByTestId("schedules-error:alpha").textContent).toBe(
+      "This schedule changed meanwhile, so nothing was changed. Check it and try again.",
+    );
+    expect(present(view, "schedule-form:alpha")).toBe(true);
+    await waitFor(() =>
+      expect(state.calls.map((call) => call.command)).toEqual(["listSchedules", "updateSchedule", "listSchedules"]),
+    );
   });
 });

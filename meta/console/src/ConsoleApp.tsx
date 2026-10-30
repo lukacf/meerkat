@@ -2674,47 +2674,34 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   consoleReadOnlyRef.current = consoleReadOnly;
   // "Fork to side chat" is offered only where the gateway advertises
   // `meta/fork_member` (its sessions persist) and the viewer may spawn, so
-  // the action never dead-ends; the gateway still judges every fork.
+  // the action never dead-ends; the gateway still judges every fork. An
+  // agent's details pane lists its schedules only where the gateway
+  // advertises `meta/schedule/list`, and offers changes only where it
+  // advertises every write; the gateway still judges each call. One read
+  // of the capabilities serves both.
   const canSpawnMembers = experience?.runtime_capabilities?.can_spawn_members === true;
   React.useEffect(() => {
-    if (!canSpawnMembers) {
-      setSideChatsOffered(false);
-      return;
-    }
+    if (!canSpawnMembers) setSideChatsOffered(false);
     let active = true;
     void Promise.resolve()
       .then(() => consoleTransport.capabilities())
       .then((capabilities) => {
-        if (active) {
-          setSideChatsOffered(
+        if (!active) return;
+        setSideChatsOffered(
+          canSpawnMembers &&
             capabilities.methods.includes(consoleCommandMethod(CONSOLE_COMMAND_NAMES.forkMember)),
-          );
-        }
+        );
+        setScheduleOffer(consoleScheduleOffer(capabilities.methods));
       })
       .catch(() => {
-        if (active) setSideChatsOffered(false);
+        if (!active) return;
+        setSideChatsOffered(false);
+        setScheduleOffer(NO_CONSOLE_SCHEDULES);
       });
     return () => {
       active = false;
     };
   }, [consoleTransport, canSpawnMembers, sendScope]);
-  // An agent's details pane lists its schedules only where the gateway
-  // advertises `meta/schedule/list`, and offers changes only where it
-  // advertises every write; the gateway still judges each call.
-  React.useEffect(() => {
-    let active = true;
-    void Promise.resolve()
-      .then(() => consoleTransport.capabilities())
-      .then((capabilities) => {
-        if (active) setScheduleOffer(consoleScheduleOffer(capabilities.methods));
-      })
-      .catch(() => {
-        if (active) setScheduleOffer(NO_CONSOLE_SCHEDULES);
-      });
-    return () => {
-      active = false;
-    };
-  }, [consoleTransport, sendScope]);
   // Same-key resend of an uncertain send is safe only against a durable
   // dedupe store; older gateways (field absent) and in-memory stores are not.
   const resendUncertain = experience?.send_dedupe?.durable === true;

@@ -107,6 +107,21 @@ describe("Roster manual order", () => {
     expect(onSelect).toHaveBeenCalledTimes(1);
   });
 
+  it("names an agent without a display name for people and keeps its identity in the tooltip and copy action", () => {
+    const view = render(<Sidebar {...props} onTogglePinnedAgent={vi.fn()} agents={[
+      agent("router", "router:main", { identity: "router:main", role: "lead" }),
+      agent("bravo", "Bravo"),
+    ]} />);
+    const row = view.getByTestId("sidebar-agent:router");
+    expect(row.querySelector(".agent__name")?.textContent).toBe("Router main");
+    expect((row.textContent || "").includes("router:main")).toBe(false);
+    expect(row.getAttribute("title")).toBe("Identity: router:main");
+    expect(view.queryByRole("button", { name: "Copy the identity of Router main" }) !== null).toBe(true);
+    expect(view.queryByRole("button", { name: "Pin Router main" }) !== null).toBe(true);
+    fireEvent.change(view.getByPlaceholderText("Search roster..."), { target: { value: "router main" } });
+    expect(rows(view.container)).toEqual(["router"]);
+  });
+
   it("lets the pin button take Enter without opening the agent", () => {
     const onSelect = vi.fn();
     const onTogglePinnedAgent = vi.fn();

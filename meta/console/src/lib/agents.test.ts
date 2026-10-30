@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { canonicalConsoleIdentity, normalizeAgents } from "./agents";
+import { agentDisplayTitle, agentKindLabel, canonicalConsoleIdentity, normalizeAgents } from "./agents";
 
 test("normalizeAgents preserves identity-status summary fields without invention", () => {
   const agents = normalizeAgents(
@@ -423,4 +423,39 @@ test("normalizeAgents carries a side chat's source from the experience row", () 
   assert.equal(agents.find((agent) => agent.member_id === "alpha-side-ab12")?.side_chat_of, "alpha");
   assert.equal("side_chat_of" in (agents.find((agent) => agent.member_id === "alpha") ?? {}), false);
   assert.equal("side_chat_of" in (agents.find((agent) => agent.member_id === "beta") ?? {}), false);
+});
+
+test("agentDisplayTitle keeps a display name and gives an agent without one a human name", () => {
+  const agent = (label: string, extra: Record<string, unknown> = {}) => ({
+    agent_id: "router:main",
+    member_id: "router:main",
+    identity: "router:main",
+    label,
+    ...extra,
+  });
+
+  assert.equal(agentDisplayTitle(agent("Router")), "Router");
+  assert.equal(agentDisplayTitle(agent("router:main")), "Router main", "a readable identity reads as words");
+  assert.equal(agentDisplayTitle({ agent_id: "w", member_id: "worker-2024", label: "worker-2024" }), "Worker 2024");
+  assert.equal(agentDisplayTitle({ agent_id: "w", member_id: "w", identity: "worker2024", label: "worker2024" }), "Worker2024");
+  assert.equal(
+    agentDisplayTitle({
+      agent_id: "a",
+      member_id: "3f2a9c1e-8b7d-4c6e-9f0a-1b2c3d4e5f60",
+      identity: "3f2a9c1e-8b7d-4c6e-9f0a-1b2c3d4e5f60",
+      label: "3f2a9c1e-8b7d-4c6e-9f0a-1b2c3d4e5f60",
+      role: "code_reviewer",
+    }),
+    "Code reviewer 4e5f60",
+    "a generated id reads as the kind and a short suffix",
+  );
+  assert.equal(
+    agentDisplayTitle({ agent_id: "x", member_id: "x", identity: "agent:01HXYZ8Q9ABCDEF", label: "agent:01HXYZ8Q9ABCDEF" }),
+    "Agent abcdef",
+  );
+  assert.equal(
+    agentDisplayTitle({ agent_id: "x", member_id: "x", identity: "x", label: "x", labels: { agent_identity: "router:main" } }),
+    "X",
+  );
+  assert.equal(agentKindLabel({ role: "", group: "domain_agents" }), "Domain agents");
 });

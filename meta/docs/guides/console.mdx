@@ -306,7 +306,9 @@ Operator panels depend on a few host constraints:
 - A page served with `frame-ancestors 'none'`, such as a secret-entry page, cannot be framed and must not be configured as a panel.
 
 Each agent row shows:
-- The agent's display name
+- The agent's display name or, for an agent without one, its identity in words
+  (`router:main` reads "Router main"; a generated id reads as the agent's kind
+  and the id's last six characters, such as "Reviewer 4e5f60")
 - A second line with what the agent is (its role, else its group) and what it
   is doing in words, or how long ago it was last active, for example
   `Router · working` or `Router · active 3 min ago`

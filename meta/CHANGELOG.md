@@ -140,7 +140,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   configuration edit no longer resets them; pins an earlier console kept carry
   over once. An agent row's second line now reads as the agent's role or group
   and its status in words or its last activity (`Router · active 3 min ago`);
-  its identity moved to the row's tooltip and a copy action.
+  its identity moved to the row's tooltip and a copy action, and an agent
+  without a display name is named by its identity in words (`router:main`
+  reads "Router main") or, for a generated id, by its kind and a short suffix.
 
 - `/console/experience` sidebar, `identity_status` and `health_overview` rows
   carry `last_activity_ms`, the newest time the console's frame log recorded

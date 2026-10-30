@@ -43,7 +43,7 @@ import type {
 } from "../types";
 import { Icon } from "../icon";
 import { isAgentPinned, operatorPanelPath, sidebarAgentPinId } from "../lib/adapters";
-import { agentKindLabel } from "../lib/agents";
+import { agentDisplayTitle, agentKindLabel } from "../lib/agents";
 import { countRender } from "../lib/render-counts";
 
 export { sidebarAgentPinId } from "../lib/adapters";
@@ -415,6 +415,7 @@ export const __sidebarTest = {
   agentSubtreeEnd,
   compareAgentNames,
   compareBySidebarSort,
+  sidebarAgentTitle,
   newestFrameTimes,
   agentLastActivity,
   agentStatusText,
@@ -633,8 +634,19 @@ function sidebarAgentOrderKey(agent: ConsoleAgent): string {
   return sidebarAgentPinId(agent);
 }
 
+const AGENT_TITLES = new WeakMap<ConsoleAgent, { label: string; identity: string | undefined; title: string }>();
+
+/** {@link agentDisplayTitle}, kept per agent object while its label and identity stay: sorts ask often. */
+function sidebarAgentTitle(agent: ConsoleAgent): string {
+  const known = AGENT_TITLES.get(agent);
+  if (known && known.label === agent.label && known.identity === agent.identity) return known.title;
+  const title = agentDisplayTitle(agent);
+  AGENT_TITLES.set(agent, { label: agent.label, identity: agent.identity, title });
+  return title;
+}
+
 function compareAgentNames(a: ConsoleAgent, b: ConsoleAgent): number {
-  const byName = AGENT_NAME_COLLATOR.compare(a.label, b.label);
+  const byName = AGENT_NAME_COLLATOR.compare(sidebarAgentTitle(a), sidebarAgentTitle(b));
   if (byName !== 0) return byName;
   const aKey = sidebarAgentOrderKey(a);
   const bKey = sidebarAgentOrderKey(b);
@@ -1349,7 +1361,7 @@ function sidebarNavigationLabel(row: SidebarVirtualRow): string {
     case "empty":
       return row.sectionConfig?.empty_title || row.sectionConfig?.empty_text || "No agents";
     case "agent":
-      return row.row.agent.label;
+      return sidebarAgentTitle(row.row.agent);
   }
 }
 
@@ -1551,7 +1563,7 @@ function renderSidebarDragPreviewRows(rows: SidebarVirtualRow[]): React.JSX.Elem
       >
         <span className="agent__dot" />
         <span className="sidebar__drag-preview-agent-body">
-          <span className="agent__name">{row.row.agent.label}</span>
+          <span className="agent__name">{sidebarAgentTitle(row.row.agent)}</span>
           {agentKindLabel(row.row.agent) ? <span className="agent__detail">{agentKindLabel(row.row.agent)}</span> : null}
         </span>
       </div>
@@ -1686,6 +1698,8 @@ function renderAgentRow({
   const badges = configuredAgentBadges(agent, grouping);
   const pinned = isAgentPinned(agent, pinnedAgentIds);
   const detail = agentDetailParts(agent, lastActivityMs, nowMs);
+  // The name for people; the raw identity is the tooltip and the copy action.
+  const title = sidebarAgentTitle(agent);
   const movable = reorder?.enabled === true;
   return (
     <div
@@ -1728,7 +1742,7 @@ function renderAgentRow({
       {reorder?.dragOver ? <span className="agent__drop-line" data-where={reorder.dragOver} aria-hidden="true" /> : null}
       <span className="agent__dot" />
       <span className="agent__body">
-        <span className="agent__name">{agent.label}</span>
+        <span className="agent__name">{title}</span>
         {detail.kind || detail.status ? (
           // The kind gives way first, so the status always shows in a narrow roster.
           <span className="agent__detail" data-testid={`sidebar-agent-detail:${agent.member_id}`}>
@@ -1775,7 +1789,7 @@ function renderAgentRow({
         >
           <CopyButton
             text={identity}
-            label={`Copy the identity of ${agent.label}`}
+            label={`Copy the identity of ${title}`}
             copiedLabel="Identity copied"
           />
         </span>
@@ -1784,7 +1798,7 @@ function renderAgentRow({
             type="button"
             className="agent__pin"
             data-active={pinned ? "true" : undefined}
-            aria-label={pinned ? `Unpin ${agent.label}` : `Pin ${agent.label}`}
+            aria-label={pinned ? `Unpin ${title}` : `Pin ${title}`}
             aria-pressed={pinned}
             title={pinned ? "Unpin agent" : "Pin agent"}
             data-testid={`sidebar-agent-pin:${agent.member_id}`}
@@ -1952,7 +1966,8 @@ export const Sidebar = React.memo(function Sidebar({
         : agent.response_phase === "waiting" || agent.response_phase === "tool-executing" || agent.response_phase === "generating"
           ? "working" : "unknown";
       return (activityFilter === "all" || activity === activityFilter) && (!needle ||
-        [agent.label, agent.identity, agent.member_id, agent.role].some(value => value?.toLowerCase().includes(needle)));
+        [sidebarAgentTitle(agent), agent.label, agent.identity, agent.member_id, agent.role]
+          .some(value => value?.toLowerCase().includes(needle)));
     });
   }, [agents, q, activityFilter]);
 
@@ -2123,8 +2138,10 @@ export const Sidebar = React.memo(function Sidebar({
     if (inputSource === "keyboard") {
       pendingOrderFocusRef.current = { kind: "agent", id: draggedId, container };
     }
-    const labelOf = (key: string) =>
-      siblings.find((row) => sidebarAgentOrderKey(row.row.agent) === key)?.row.agent.label || key;
+    const labelOf = (key: string) => {
+      const found = siblings.find((row) => sidebarAgentOrderKey(row.row.agent) === key);
+      return found ? sidebarAgentTitle(found.row.agent) : key;
+    };
     setOrderAnnouncement(`Moved ${labelOf(draggedId)} ${where === "before" ? "above" : "below"} ${labelOf(target)}.`);
   }, [agentOrder, agentOrderStorageKey, agents, presentAgentKeys]);
   const handleSectionOrderKeyDown = React.useCallback((event: React.KeyboardEvent<HTMLElement>, bucket: string) => {
@@ -2164,7 +2181,7 @@ export const Sidebar = React.memo(function Sidebar({
     const up = event.key === "ArrowUp";
     const target = index < 0 ? undefined : up ? siblings[index - 1] : siblings[index + 1];
     if (!target) {
-      setOrderAnnouncement(`${row.row.agent.label} is already ${up ? "first" : "last"}.`);
+      setOrderAnnouncement(`${sidebarAgentTitle(row.row.agent)} is already ${up ? "first" : "last"}.`);
       return true;
     }
     completeAgentDrop(target, up ? "before" : "after", key, row.container, "keyboard");

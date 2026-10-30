@@ -5,16 +5,18 @@
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's finite
-# model values (two mob ids, two incarnations, one spawn profile), its four
-# action properties and its step bound, and checks them over the whole
-# bounded space. It then reruns the same space once per reachability witness,
-# with that witness's negation as an extra invariant, and requires TLC to
-# report exactly that violation, so the properties are not vacuous. With
-# --mutants it then seeds three defects into a copy of the generated model (a
-# manage rebind that keeps the stale spawn scope, a restore without its
-# bound-scope guard, a manage grant that records no binding) and requires TLC
-# to refuse each with the property it breaks. An anchor this script expects
-# but cannot find fails the run.
+# model values (two mob ids, two incarnations, one spawn profile, two
+# templates), its four action properties, its two identity creation check
+# invariants and its step bound, and checks them over the whole bounded
+# space. It then reruns the same space once per reachability witness, with
+# that witness's negation as an extra invariant, and requires TLC to report
+# exactly that violation, so the properties are not vacuous. With --mutants
+# it then seeds five defects into a copy of the generated model (a manage
+# rebind that keeps the stale spawn scope, a restore without its bound-scope
+# guard, a manage grant that records no binding, a manage rebind that keeps
+# the stale identity creation scope, a creation check that admits without
+# the creation scope) and requires TLC to refuse each with the property it
+# breaks. An anchor this script expects but cannot find fails the run.
 set -euo pipefail
 
 usage="usage: mob_operator_grant_audit.sh <max-steps> [--mutants] [extra tlc args...]"
@@ -53,8 +55,10 @@ write_cfg() {
   local cfg="$1" extra="$2"
   cp "${ci_cfg}" "${cfg}"
   replace_exact_line "SPECIFICATION Spec" "SPECIFICATION AuditSpec" "${cfg}"
-  replace_exact_line "  StringValues = {}" '  StringValues = {"mobid_1", "mobid_2", "profile_1"}' "${cfg}"
-  replace_exact_line "  SetOfStringValues = {{}}" '  SetOfStringValues = {{}, {"profile_1"}}' "${cfg}"
+  replace_exact_line "  StringValues = {}" \
+    '  StringValues = {"mobid_1", "mobid_2", "profile_1", "template_1", "template_2"}' "${cfg}"
+  replace_exact_line "  SetOfStringValues = {{}}" \
+    '  SetOfStringValues = {{}, {"profile_1"}, {"template_1"}}' "${cfg}"
   replace_exact_line "  MobIncarnationIdValues = {}" \
     '  MobIncarnationIdValues = {"mobincarnationid_1", "mobincarnationid_2"}' "${cfg}"
   replace_exact_line "  OpaquePrincipalTokenValues = {}" \
@@ -66,7 +70,9 @@ write_cfg() {
   AuditRebindDropsTheOtherScope
   AuditBoundIncarnationKeepsTheOtherScope
   AuditResolveClearsScope
-INVARIANTS${extra}" "${cfg}"
+INVARIANTS
+  AuditCreationCheckIsTotal
+  AuditCreationAdmittedOnlyInScope${extra}" "${cfg}"
   replace_exact_line "  CiStateConstraint" "  AuditStateConstraint" "${cfg}"
   printf 'CHECK_DEADLOCK FALSE\n' >> "${cfg}"
 }
@@ -111,7 +117,8 @@ if [[ "${safety_status}" != "0" ]] \
 fi
 
 for witness in Rebound RebindDroppedSpawn RebindDroppedManage BothScopes \
-  TwoIncarnations RestoredBindings ResolveCleared; do
+  TwoIncarnations RestoredBindings ResolveCleared RebindsDropTheCreationScope \
+  CreationVerdicts; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "
   NotAuditWitness${witness}"
@@ -170,11 +177,14 @@ path = os.environ["MODEL"]
 text = open(path).read()
 block = re.search(r"^RestoreMobOperatorAuthority\(.*?\n\n", text, re.S | re.M)
 assert block, "RestoreMobOperatorAuthority not found"
-old = ("    /\\ ((\\A mob_id \\in managed_mob_scope : (mob_id \\in DOMAIN mob_incarnations))"
-       " /\\ (\\A mob_id \\in DOMAIN spawn_profile_scope : (mob_id \\in DOMAIN mob_incarnations)))")
+# The bound-scope guard: one conjunct over the manage, spawn-profile and
+# identity creation scopes.
+guard = re.compile(r"^    /\\ \(\(\\A mob_id \\in managed_mob_scope : .*$", re.M)
 body = block.group(0)
-assert body.count(old) == 1, "expected one bound-scope guard in RestoreMobOperatorAuthority"
-body = body.replace(old, "    /\\ TRUE")
+assert len(guard.findall(body)) == 1, "expected one bound-scope guard in RestoreMobOperatorAuthority"
+assert "identity_creation_scope" in guard.search(body).group(0), \
+    "expected the bound-scope guard to cover the identity creation scope"
+body = guard.sub(lambda _: "    /\\ TRUE", body)
 text = text[: block.start()] + body + text[block.end():]
 open(path, "w").write(text)
 PY
@@ -191,6 +201,40 @@ old = "    /\\ mob_operator_mob_incarnations' = MapSet(mob_operator_mob_incarnat
 body = block.group(0)
 assert body.count(old) == 1, "expected one binding update in GrantMobOperatorManageMob"
 body = body.replace(old, "    /\\ mob_operator_mob_incarnations' = mob_operator_mob_incarnations")
+text = text[: block.start()] + body + text[block.end():]
+open(path, "w").write(text)
+PY
+
+  mutate rebind_keeps_creation_scope "Action property AuditRebindDropsTheOtherScope" "$@" <<'PY'
+import os, re
+path = os.environ["MODEL"]
+text = open(path).read()
+block = re.search(r"^RebindMobOperatorManageMob\(.*?\n\n", text, re.S | re.M)
+assert block, "RebindMobOperatorManageMob not found"
+old = ("    /\\ mob_operator_identity_creation_scope' = "
+       "MapRemove(mob_operator_identity_creation_scope, mob_id)")
+body = block.group(0)
+assert body.count(old) == 1, "expected one creation scope drop in RebindMobOperatorManageMob"
+body = body.replace(
+    old, "    /\\ mob_operator_identity_creation_scope' = mob_operator_identity_creation_scope")
+text = text[: block.start()] + body + text[block.end():]
+open(path, "w").write(text)
+PY
+
+  mutate check_admits_without_creation_scope \
+    "Invariant AuditCreationAdmittedOnlyInScope|Invariant AuditCreationCheckIsTotal" \
+    "$@" <<'PY'
+import os, re
+path = os.environ["MODEL"]
+text = open(path).read()
+block = re.search(r"^ResolveMobOperatorIdentityCreationAdmitted\(.*?\n\n", text, re.S | re.M)
+assert block, "ResolveMobOperatorIdentityCreationAdmitted not found"
+# The template guard, with any definedness conjunct of its strict read: every
+# guard line of the arm that reads the identity creation scope.
+guard = re.compile(r"^    /\\ (?!.*')(.*mob_operator_identity_creation_scope.*)$", re.M)
+body = block.group(0)
+assert guard.findall(body), "expected a template guard in ResolveMobOperatorIdentityCreationAdmitted"
+body = guard.sub(lambda _: "    /\\ TRUE", body)
 text = text[: block.start()] + body + text[block.end():]
 open(path, "w").write(text)
 PY

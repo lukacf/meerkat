@@ -40,6 +40,7 @@ import {
   type WorkGraphCardActions,
 } from "@console-components";
 import type { ConsoleAgent } from "../types";
+import { responsePhaseWords } from "../lib/agents";
 import type { LiveSpeechItem } from "../lib/voice-session";
 import { VoiceButton } from "./VoiceBar";
 import { humanizeEnum } from "../../../packages/console-components/src/panel-kit/format";
@@ -213,8 +214,8 @@ interface ChatTurnPreview {
 
 function phaseLabel(_phase: "waiting" | "tool-executing" | "generating"): string {
   // Single label across all phases. The phase distinction is still
-  // surfaced in the composer footer chip; the inline typing indicator
-  // just signals "this agent is currently working".
+  // surfaced in the composer footer; the inline typing indicator just
+  // signals "this agent is currently working".
   return "working";
 }
 
@@ -2696,7 +2697,9 @@ export function ChatPane({
                         state === "retired" ? "var(--ink-faint)" : "var(--ink-dim)",
           }} />
           <span>{state}</span>
-          {phase && <><span>·</span><span style={{ color: "var(--accent)" }}>{phase}</span></>}
+          {/* What the agent is doing, in the footer's own ink: the accent is
+              for things that act. */}
+          {phase && <><span>·</span><span>{responsePhaseWords(phase)}</span></>}
           {readOnly && <><span>·</span><span>view only</span></>}
           {!readOnly && sendWithheld && <><span>·</span><span>send not permitted</span></>}
           {!readOnly && !canAttachImages && <><span>·</span><span>model cannot see images</span></>}

@@ -81,6 +81,22 @@ export function normalizeLastActivityMs(value: unknown): number | undefined {
 // every surface and every test bundle shares it.
 export { agentDisplayTitle, agentKindLabel } from "../../../packages/console-core/src/agent-title";
 
+/// What an agent is doing while it answers, in words: "writing a reply",
+/// "running a tool", "starting a reply". The roster and the composer footer
+/// say the same. Empty for no phase.
+export function responsePhaseWords(phase: string | null | undefined): string {
+  switch (phase) {
+    case "generating":
+      return "writing a reply";
+    case "tool-executing":
+      return "running a tool";
+    case "waiting":
+      return "starting a reply";
+    default:
+      return "";
+  }
+}
+
 /**
  * An agent's entry in the panels' name directory, named the way the sidebar
  * names it ({@link agentDisplayTitle}), so a panel and the sidebar never

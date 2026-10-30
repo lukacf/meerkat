@@ -1,6 +1,6 @@
 import React from "react";
 import type { ConsoleAgent } from "../types";
-import { agentDisplayTitle } from "../lib/agents";
+import { agentDisplayTitle, responsePhaseWords } from "../lib/agents";
 import { restartOffered } from "../lib/side-chat";
 import { bucketOf } from "./Sidebar";
 import {
@@ -98,16 +98,8 @@ export function rosterActivity(agent: ConsoleAgent): string {
   if (state === "broken") return "needs attention";
   // A wedged agent still has its run open; it is stuck, not working.
   if (agent.progress?.health === "wedged") return "stalled";
-  switch (agent.response_phase) {
-    case "generating":
-      return "writing a reply";
-    case "tool-executing":
-      return "running a tool";
-    case "waiting":
-      return "starting a reply";
-    default:
-      break;
-  }
+  const phase = responsePhaseWords(agent.response_phase);
+  if (phase) return phase;
   const progress = agent.progress;
   if (progress?.run_state === "run_open") {
     return progress.in_flight_work > 1 ? `working on ${progress.in_flight_work} tasks` : "working";

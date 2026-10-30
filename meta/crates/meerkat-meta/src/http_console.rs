@@ -1105,6 +1105,24 @@ pub async fn console_json_handler(
         apply_console_visibility_policy(&mut snapshot, state.visibility_policy.as_ref());
         snapshot
     });
+    // Each row's last console activity, read from the console frame log
+    // alone: the read enters no member actor, so it wakes no dormant member.
+    // Without an answer the rows carry none, and the console reads unknown.
+    let live_snapshot = match (live_snapshot, state.console_aggregator.as_ref()) {
+        (Some(snapshot), Some(aggregator)) => {
+            let identities = snapshot.listed_identities();
+            match aggregator.last_activity_for_identities(&identities).await {
+                Ok(last_activity) => {
+                    Some(snapshot.with_last_activity_ms(last_activity.into_iter().collect()))
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "console last activity unavailable");
+                    Some(snapshot)
+                }
+            }
+        }
+        (snapshot, _) => snapshot,
+    };
 
     let panel_runtimes = match state
         .console_aggregator

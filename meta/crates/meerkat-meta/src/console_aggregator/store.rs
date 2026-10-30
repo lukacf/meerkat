@@ -38,6 +38,42 @@ impl ConsoleSendDedupeDurability {
     }
 }
 
+/// How many of an identity's newest frames
+/// [`ConsoleLogStore::latest_activity_times`] looks through for one that
+/// records the identity acting.
+const LATEST_ACTIVITY_SCAN_FRAMES: usize = 512;
+
+/// The frame sources that record an identity acting: live runtime events,
+/// console sends and tool applications.
+const ACTIVITY_SOURCE_KINDS: [ConsoleFrameSourceKind; 3] = [
+    ConsoleFrameSourceKind::ConsoleEvent,
+    ConsoleFrameSourceKind::Send,
+    ConsoleFrameSourceKind::ToolApplication,
+];
+
+fn is_activity_source(kind: &ConsoleFrameSourceKind) -> bool {
+    ACTIVITY_SOURCE_KINDS.contains(kind)
+}
+
+/// One identity's newest activity time: a seek through
+/// `idx_console_frames_identity_cursor` to its newest frames, never a scan
+/// of the log.
+fn latest_activity_sql() -> String {
+    let kinds = ACTIVITY_SOURCE_KINDS
+        .iter()
+        .map(|kind| format!("'{}'", kind.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT timestamp_ms FROM (
+             SELECT cursor_seq, timestamp_ms, source_kind FROM console_frames
+             WHERE identity = ?1 ORDER BY cursor_seq DESC LIMIT ?2
+         )
+         WHERE source_kind IN ({kinds})
+         ORDER BY cursor_seq DESC LIMIT 1"
+    )
+}
+
 /// Storage retains complete frames, including private member provenance, across
 /// append, lookup, status changes and reopen. Serde frame serialization is the
 /// storage representation; use aggregator projections for transport output.
@@ -96,6 +132,21 @@ pub trait ConsoleLogStore: Send + Sync {
         _limit: usize,
     ) -> ConsoleLogResult<Vec<ConsoleFrame>> {
         Ok(Vec::new())
+    }
+
+    /// The newest activity time of each named identity, in milliseconds since
+    /// the epoch: the `timestamp_ms` of its newest frame that records the
+    /// identity acting (a live runtime event, a console send or a tool
+    /// application), looked for among its newest 512 frames. Frames rebuilt
+    /// from session history or synthesized by the console are stamped when the
+    /// console observes them, so they do not count. An identity without such a
+    /// frame is absent. Stores that cannot answer keep the default and report
+    /// none, so every identity's activity reads as unknown.
+    async fn latest_activity_times(
+        &self,
+        _identities: &[String],
+    ) -> ConsoleLogResult<HashMap<String, u64>> {
+        Ok(HashMap::new())
     }
 
     /// Whether the dedupe records above survive a gateway restart. Stores
@@ -448,6 +499,32 @@ impl ConsoleLogStore for InMemoryConsoleLogStore {
             .take(limit)
             .cloned()
             .collect())
+    }
+
+    async fn latest_activity_times(
+        &self,
+        identities: &[String],
+    ) -> ConsoleLogResult<HashMap<String, u64>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| boxed_error("console log lock poisoned"))?;
+        let mut times = HashMap::new();
+        for identity in identities {
+            let Some(seqs) = state.identity_to_seqs.get(identity) else {
+                continue;
+            };
+            let newest = seqs
+                .iter()
+                .rev()
+                .take(LATEST_ACTIVITY_SCAN_FRAMES)
+                .filter_map(|seq| state.frames.get(seq))
+                .find(|frame| is_activity_source(&frame.source.kind));
+            if let Some(frame) = newest {
+                times.insert(identity.clone(), frame.timestamp_ms);
+            }
+        }
+        Ok(times)
     }
 
     async fn compact_message_deltas(
@@ -1139,6 +1216,33 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
             params![window, limit],
         )?;
         Ok(frames.into_iter().filter(is_unsettled_send_frame).collect())
+    }
+
+    async fn latest_activity_times(
+        &self,
+        identities: &[String],
+    ) -> ConsoleLogResult<HashMap<String, u64>> {
+        if identities.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let scan_limit = i64::try_from(LATEST_ACTIVITY_SCAN_FRAMES).unwrap_or(i64::MAX);
+        let _fence = self.operation_fence()?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| boxed_error("console log lock poisoned"))?;
+        let mut statement = conn.prepare(&latest_activity_sql()).map_err(into_boxed)?;
+        let mut times = HashMap::with_capacity(identities.len());
+        for identity in identities {
+            let timestamp: Option<i64> = statement
+                .query_row(params![identity, scan_limit], |row| row.get(0))
+                .optional()
+                .map_err(into_boxed)?;
+            if let Some(timestamp) = timestamp.and_then(|value| u64::try_from(value).ok()) {
+                times.insert(identity.clone(), timestamp);
+            }
+        }
+        Ok(times)
     }
 
     async fn latest_cursor(&self) -> ConsoleLogResult<Option<ConsoleCursor>> {
@@ -1993,6 +2097,94 @@ mod tests {
             run_id: None,
             parent_frame_id: None,
             caused_by_frame_id: None,
+        }
+    }
+
+    fn activity_frame(
+        dedupe_key: &str,
+        identity: &str,
+        timestamp_ms: u64,
+        source: ConsoleFrameSourceKind,
+    ) -> NewConsoleFrame {
+        let mut frame = sample_frame(dedupe_key, identity);
+        frame.timestamp_ms = timestamp_ms;
+        frame.source.kind = source;
+        frame
+    }
+
+    /// The last-activity read takes each identity's newest frame of the
+    /// identity acting. Frames rebuilt from session history or synthesized by
+    /// the console are stamped when the console observes them, so they do not
+    /// count, and an identity with only such frames reads unknown.
+    #[tokio::test]
+    async fn latest_activity_times_take_each_identitys_newest_acting_frame() {
+        let stores: Vec<Box<dyn ConsoleLogStore>> = vec![
+            Box::new(InMemoryConsoleLogStore::new()),
+            Box::new(SqliteConsoleLogStore::in_memory().expect("sqlite store")),
+        ];
+        for store in stores {
+            for frame in [
+                activity_frame(
+                    "router-event",
+                    "router",
+                    100,
+                    ConsoleFrameSourceKind::ConsoleEvent,
+                ),
+                activity_frame(
+                    "router-history",
+                    "router",
+                    300,
+                    ConsoleFrameSourceKind::SessionHistory,
+                ),
+                activity_frame(
+                    "delivery-send",
+                    "delivery",
+                    50,
+                    ConsoleFrameSourceKind::Send,
+                ),
+                activity_frame(
+                    "delivery-tool",
+                    "delivery",
+                    70,
+                    ConsoleFrameSourceKind::ToolApplication,
+                ),
+                activity_frame(
+                    "archivist-history",
+                    "archivist",
+                    400,
+                    ConsoleFrameSourceKind::SessionHistory,
+                ),
+                activity_frame(
+                    "notices-synthetic",
+                    "notices",
+                    500,
+                    ConsoleFrameSourceKind::Synthetic,
+                ),
+                activity_frame(
+                    "bystander-event",
+                    "bystander",
+                    600,
+                    ConsoleFrameSourceKind::ConsoleEvent,
+                ),
+            ] {
+                store.append_if_absent(frame).await.expect("append");
+            }
+            let identities =
+                ["router", "delivery", "archivist", "notices", "missing"].map(str::to_string);
+            assert_eq!(
+                store
+                    .latest_activity_times(&identities)
+                    .await
+                    .expect("activity"),
+                HashMap::from([("router".to_string(), 100), ("delivery".to_string(), 70)]),
+            );
+            assert_eq!(
+                store
+                    .latest_activity_times(&[])
+                    .await
+                    .expect("no identities"),
+                HashMap::new(),
+            );
         }
     }
 

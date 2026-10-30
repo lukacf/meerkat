@@ -2,7 +2,7 @@ import React from "react";
 import { describeFailure } from "../lib/failure-summary";
 import { turnSender, turnSenderWords } from "../lib/turn-origin";
 import { stripPeerTransportScaffold } from "../lib/adapters";
-import { quarantineVerdictWords } from "../lib/memory-event-words";
+import { isOpenLoopNudge, quarantineVerdictWords } from "../lib/memory-event-words";
 import type { ConsoleFrame } from "../types";
 import {
   EmptyState,
@@ -108,6 +108,9 @@ function memoryLine(event: string, data: Record<string, unknown>, who: Segment):
     case "memory.write.quarantined":
       return { segments: ["A memory write from ", who, " was quarantined"], snippet: reason, tone: "warn", kind };
     case "memory.quarantine.verdict": {
+      // The steward's open-loop nudge rides the verdict event; nobody
+      // reviewed anything.
+      if (isOpenLoopNudge(event, data)) return { segments: ["An open loop needs follow-up"], tone: "neutral", kind };
       const verdict = textOf(data.verdict);
       return { segments: [who, " reviewed a quarantined record"], snippet: verdict ? quarantineVerdictWords(verdict) : undefined, tone: "neutral", kind };
     }

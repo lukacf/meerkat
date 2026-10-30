@@ -380,3 +380,19 @@ test("signals rail memory lines lead with names and plain words, not keys", () =
   assert.ok(!titles.some((title) => /promot/i.test(title)), JSON.stringify(titles));
   assert.ok(!details.some((detail) => /identity:|mob:main/.test(detail)), JSON.stringify(details));
 });
+
+test("signals rail calls the steward's open-loop nudge a follow-up, not a quarantine verdict", () => {
+  const frames: ConsoleFrame[] = [
+    {
+      id: "nudge",
+      event: "memory.quarantine.verdict",
+      identity: "_system",
+      timestampMs: Date.now(),
+      data: { realm: "default", record_id: "rec-open-loop", verdict: "open_loop_escalated" },
+    },
+  ];
+  const [group] = buildSignalGroupsForTest(frames);
+  assert.equal(group?.title, "Open loop needs follow-up");
+  assert.equal(group?.detail, "An open loop needs follow-up");
+  assert.equal(/quarantin|verdict|escalated/i.test(`${group?.title} ${group?.detail}`), false);
+});

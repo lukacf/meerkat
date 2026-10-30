@@ -69,6 +69,16 @@ const VERDICT_WORDS: Readonly<Record<string, string>> = {
   promote_pending_gate: "sent for approval",
 };
 
+/** The verdict the steward's open-loop nudge carries on the quarantine
+ * verdict event. It names a stale open loop and decides nothing about
+ * quarantine. */
+export const OPEN_LOOP_NUDGE_VERDICT = "open_loop_escalated";
+
+/** Whether a memory event is the steward's open-loop nudge. */
+export function isOpenLoopNudge(event: string, data: Record<string, unknown>): boolean {
+  return event === "memory.quarantine.verdict" && text(data, "verdict") === OPEN_LOOP_NUDGE_VERDICT;
+}
+
 /** A quarantine verdict in words: "discarded", "released", "kept in
  * quarantine", "moved to team memory". */
 export function quarantineVerdictWords(verdict: string): string {
@@ -100,6 +110,10 @@ export function describeMemoryEventForPeople(
       return data.gated === true ? `${line} after approval` : line;
     }
     case "memory.quarantine.verdict": {
+      if (isOpenLoopNudge(event, data)) {
+        const title = names.recordTitle?.(text(data, "record_id"));
+        return title ? `“${title}” needs follow-up` : "An open loop needs follow-up";
+      }
       return withDetail(`Quarantine verdict: ${quarantineVerdictWords(text(data, "verdict"))}`, text(data, "rationale"));
     }
     case "memory.quarantine.release_blocked": {

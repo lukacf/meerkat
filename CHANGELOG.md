@@ -329,6 +329,28 @@ them.
   no machine input, generated authority or owner fact changed, and the
   review spend stays single and machine-owned.
 
+- `meerkat-runtime`: native admission of a scoped original no longer
+  reports an owner change it meets as an unavailable policy. The scoped
+  original check (`ScopedOriginalIngress`) resolved the admitted
+  original's own grant-lineage mandate, and the liveness of each
+  contributor it names, with the standalone lineage resolution, which
+  reports an owner change published on the grant publication during the
+  read (a grant issuance or revocation, or a source owner's custody
+  change) as an unavailable grant authority. The admission was then
+  refused as `RuntimeDriverError::ControllerReadinessUnavailable` with
+  `ControllerReadinessFailure::PolicyUnavailable` (wire kind
+  `policy_unavailable`), an owner that cannot say now, although
+  controller admission of the same input has answered such a change as
+  `PolicyChanged` since 0.9.4. Both reads now answer it as
+  `ControllerReadinessFailure::PolicyChanged` (wire kind
+  `policy_changed`): a change of policy, after which asking again may
+  succeed. The retained-resume check (`ScopedRetainedResume`) answers the
+  same two reads the same way, and so does `require_source_original_live`
+  when it is called outside an exclusion of owner changes. A poisoned or
+  retired publication, failed durable grant custody and a clock failure
+  still answer `PolicyUnavailable`, and nothing waits: the answer is
+  returned at once, as before.
+
 ## [0.9.7] - 2026-10-28
 
 ### Breaking

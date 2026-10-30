@@ -30,6 +30,7 @@ const {
   memoryTabLabel,
   resolveMemoryTabAlias,
   buildRecordsQueryParams,
+  resolveRecordsSearchKey,
   hasActiveFilter,
   filtersEquivalent,
   memorySectionOutcome,
@@ -497,6 +498,33 @@ const emptyVerdictInputs = {
   dreamsDenied: false,
   lattice: null,
 };
+
+test("records search can resolve a typed display name to the key the server matches", () => {
+  const resolveKey = (text: string) => (text.trim().toLowerCase() === "support triage" ? "identity:support-triage" : text);
+  assert.deepEqual(buildRecordsQueryParams({ key: "Support Triage" }, { resolveKey }), { identity: "identity:support-triage" });
+  assert.deepEqual(buildRecordsQueryParams({ scope: "identity", key: "support triage" }, { resolveKey }), { identity: "identity:support-triage" });
+  // Without a resolver the typed text is sent as it is.
+  assert.deepEqual(buildRecordsQueryParams({ key: "Support Triage" }), { identity: "Support Triage" });
+});
+
+test("records search turns a display name into its agent's scope key", () => {
+  const candidates = [
+    { key: "identity:support-triage", name: "Support Triage" },
+    { key: "identity:research", name: "Research Analyst" },
+    { key: "identity:research-two", name: "Analyst" },
+    { key: "identity:research-three", name: "Analyst" },
+    { key: "router", name: "router" },
+  ];
+  assert.equal(resolveRecordsSearchKey("Support Triage", candidates), "identity:support-triage");
+  assert.equal(resolveRecordsSearchKey("  support triage ", candidates), "identity:support-triage");
+  // Partial and shared names and unknown text are sent as typed; a typed
+  // key stays as it is.
+  assert.equal(resolveRecordsSearchKey("Supp", candidates), "Supp");
+  assert.equal(resolveRecordsSearchKey("Analyst", candidates), "Analyst");
+  assert.equal(resolveRecordsSearchKey("ops-team", candidates), "ops-team");
+  assert.equal(resolveRecordsSearchKey("identity:research", candidates), "identity:research");
+  assert.equal(resolveRecordsSearchKey("router", candidates), "router");
+});
 
 test("verdict strip mounts six tiles; checks this console cannot run say so", () => {
   const tiles = computeVerdictTiles(emptyVerdictInputs);

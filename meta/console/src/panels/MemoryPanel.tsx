@@ -419,15 +419,36 @@ export function injectionLine(injection: MemoryInjectionEntry, now = Date.now())
   return `${surface} • ${injection.identity} • ${relativeAge(injection.at_ms, now)}`;
 }
 
+/// The scope key a records search means: a known key typed as is, else the
+/// one key whose display name equals the text (case-insensitive). Anything
+/// else, a partial or shared name included, is sent as typed, so a raw key
+/// is never swapped for a guess.
+export function resolveRecordsSearchKey(
+  text: string,
+  candidates: ReadonlyArray<{ key: string; name: string }>,
+): string {
+  const typed = text.trim();
+  if (!typed) return typed;
+  if (candidates.some((candidate) => candidate.key === typed)) return typed;
+  const needle = typed.toLowerCase();
+  const matches = Array.from(new Set(
+    candidates.filter((candidate) => candidate.name.trim().toLowerCase() === needle).map((candidate) => candidate.key),
+  ));
+  return matches.length === 1 ? matches[0] : typed;
+}
+
 /// Build panel/records params from the filter bar. Identity scope rides the
 /// `identity` param; mob/operator ride `scope` + `scope_key` (the shapes the
 /// server already accepts, `http_console.rs` handle_memory_panel_records).
 export function buildRecordsQueryParams(
   filter: MemoryRecordsFilter,
-  options: { cursor?: string; limit?: number } = {},
+  options: { cursor?: string; limit?: number; resolveKey?: (text: string) => string } = {},
 ): Record<string, unknown> {
   const params: Record<string, unknown> = {};
-  const key = filter.key?.trim();
+  // The server matches scope keys exactly; a typed display name resolves to
+  // its key first (the page shows names, the keys sit in tooltips).
+  const typed = filter.key?.trim();
+  const key = typed && options.resolveKey ? options.resolveKey(typed).trim() : typed;
   if (filter.scope === "identity" || (!filter.scope && key)) {
     if (key) params.identity = key;
     else params.scope = "identity";
@@ -528,6 +549,8 @@ export interface MemoryRecordsPagerDeps {
   query: (params: Record<string, unknown>) => Promise<MemoryPanelRecordsResult | null>;
   setPaged: (paged: MemoryPagedState | null) => void;
   setLoading: (loading: boolean) => void;
+  /// Resolves a typed display name to the scope key the server matches.
+  resolveKey?: (text: string) => string;
 }
 
 /// Fetch orchestration for the Records tab (filtered queries + keyset
@@ -553,7 +576,7 @@ export function createMemoryRecordsPager(deps: MemoryRecordsPagerDeps) {
       }
       deps.setLoading(true);
       try {
-        const result = await deps.query(buildRecordsQueryParams(next));
+        const result = await deps.query(buildRecordsQueryParams(next, { resolveKey: deps.resolveKey }));
         if (seq !== seqCounter) return;
         if (result === null) {
           // Denied filtered query: mark it so the view says "no grant",
@@ -591,7 +614,7 @@ export function createMemoryRecordsPager(deps: MemoryRecordsPagerDeps) {
       deps.setLoading(true);
       try {
         const result = await deps.query(
-          buildRecordsQueryParams(current.filter, { cursor }),
+          buildRecordsQueryParams(current.filter, { cursor, resolveKey: deps.resolveKey }),
         );
         if (seq !== seqCounter) return;
         const base = current.paged ? current.paged.records : current.baseRecords;
@@ -1960,6 +1983,7 @@ export const __memoryTest = {
   memoryTabLabel,
   resolveMemoryTabAlias,
   buildRecordsQueryParams,
+  resolveRecordsSearchKey,
   hasActiveFilter,
   filtersEquivalent,
   memorySectionOutcome,
@@ -3293,6 +3317,20 @@ export function MemoryPanel({
   const [pageLoading, setPageLoading] = React.useState(false);
   const queryRecordsRef = React.useRef(onQueryRecords);
   queryRecordsRef.current = onQueryRecords;
+  // Names people can type in the records search: each agent scope key the
+  // panel has seen, by its display name.
+  const searchDirectory = useAgentDirectory();
+  const searchCandidatesRef = React.useRef<Array<{ key: string; name: string }>>([]);
+  searchCandidatesRef.current = React.useMemo(() => {
+    const keys = new Set<string>();
+    for (const record of records) {
+      if (record.scope?.scope === "identity" && record.scope.identity) keys.add(record.scope.identity);
+    }
+    for (const scope of overview?.scopes ?? []) {
+      if (scope.scope_kind === "identity" && scope.scope_key) keys.add(scope.scope_key);
+    }
+    return Array.from(keys, (key) => ({ key, name: agentDisplayName(key, searchDirectory) }));
+  }, [records, overview, searchDirectory]);
   const pagerRef = React.useRef<ReturnType<typeof createMemoryRecordsPager> | null>(null);
   if (!pagerRef.current) {
     pagerRef.current = createMemoryRecordsPager({
@@ -3300,6 +3338,7 @@ export function MemoryPanel({
         queryRecordsRef.current ? queryRecordsRef.current(params) : Promise.resolve(null),
       setPaged,
       setLoading: setPageLoading,
+      resolveKey: (text) => resolveRecordsSearchKey(text, searchCandidatesRef.current),
     });
   }
   const pager = pagerRef.current;
@@ -3660,8 +3699,8 @@ export function MemoryPanel({
         {onQueryRecords ? (
           <Toolbar testId="memory-filter" className="memory-toolbar">
             <SearchField
-              label="Agent or scope key"
-              placeholder="Agent or scope key"
+              label="Search by agent"
+              placeholder="Agent name or key"
               value={filter.key || ""}
               testId="memory-filter-input"
               onChange={(value) => setFilter({ ...filter, key: value })}

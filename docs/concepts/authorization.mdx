@@ -235,13 +235,16 @@ owner then executes the held request at most once.
   accepted. The decision's machine makes this check; with no presentation at
   all, the decision stays `presentation_incomplete`. The two times come from
   different clocks: the observed time is the ingress's (a provider's message
-  timestamp, for example), and a presentation's time is the host's. A coarse
-  or lagging ingress clock can only make a decision look earlier, so the
-  worst case is a retryable `decided_before_presentation`, never the
-  acceptance of a decision made before it was shown; that assumes the ingress
-  clock does not run ahead of the host's. A presentation time of 0 is no
-  reading: a presentation recorded at 0 is refused as
-  `presentation_incomplete`, and so is a decision that carries one.
+  timestamp, for example), and a presentation's time is the host's. An
+  ingress clock that truncates (to whole seconds, for example) or runs behind
+  the host's can only make a decision look earlier, so the worst case is a
+  retryable `decided_before_presentation`. An ingress clock that runs ahead of
+  the host's by d lets a decision made up to d before the presentation be
+  accepted, and a rounding clock runs ahead by up to half its unit, so the
+  ingress must bound that skew. A presentation time of 0 is no reading: a
+  presentation recorded at 0 is refused as `presentation_incomplete`, and so
+  is a decision that carries one, even after a valid presentation was
+  recorded.
 - **Execution once.** The owner executes an approved decision under an
   execution permit, issued only before the deadline, and settles it: executed,
   released (the decision stays approved) or permanently refused. A permit

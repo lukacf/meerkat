@@ -89,12 +89,16 @@ impl AttestedDecision {
     ///
     /// The decision's machine compares that reading with each presentation's
     /// `at_ms`, a reading of the host clock, and refuses a decision observed
-    /// before the first presentation. An ingress clock that is coarser than
-    /// the host's or behind it can only make a decision look earlier: the
-    /// worst case is a retryable `decided_before_presentation` (the decision
-    /// stays open), never the acceptance of a decision made before it was
-    /// shown. That guarantee assumes the ingress clock does not run ahead of
-    /// the host's. A presentation at 0 is no reading and never counts.
+    /// before the first presentation. An ingress clock that truncates (to
+    /// whole seconds, for example) or runs behind the host's can only make a
+    /// decision look earlier: the worst case is a retryable
+    /// `decided_before_presentation` (the decision stays open). An ingress
+    /// clock that runs ahead of the host's by `d` lets a decision made up to
+    /// `d` before the presentation be accepted, and a rounding clock runs
+    /// ahead by up to half its unit, so the ingress must bound that skew. A
+    /// presentation time of 0 is no reading: a decision carrying a
+    /// presentation at 0 is refused outright (`presentation_incomplete`),
+    /// even after a valid presentation was recorded.
     ///
     /// # Errors
     /// [`DecisionContractError::UnqualifiedPrincipal`] when the approver's

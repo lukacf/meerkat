@@ -161,7 +161,8 @@ pub mod types {
         Expired,
         /// The presented digest is not the held subject digest.
         SubjectChanged,
-        /// The presentation did not cover the whole held subject.
+        /// The presentation did not cover the whole held subject, none reached
+        /// the deciding party, or it was shown at 0 (no reading of when).
         PresentationIncomplete,
         /// The presentation was shown to a party that does not decide now.
         WrongAudience,

@@ -6481,10 +6481,13 @@ where
         } else {
             let run_id = match resumed.as_ref() {
                 Some(start) => start.cursor.run_id.clone(),
+                // The run its run start named in an operator-instruction
+                // entry, when it reserved one, then a new one.
                 None => self
                     .turn_state_handle
                     .as_deref()
                     .and_then(|handle| handle.snapshot().active_run_id)
+                    .or_else(|| self.run_start_reserved_run_id.take())
                     .unwrap_or_else(|| RunId(uuid::Uuid::new_v4())),
             };
             self.apply_turn_input(TurnExecutionInput::StartConversationRun {

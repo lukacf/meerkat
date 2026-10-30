@@ -18,7 +18,10 @@
 //! child copied are history in the child: its model reads them as headers
 //! without bodies.
 
-use super::Session;
+use super::{
+    InstructionLowering, InstructionRunStart, InstructionStateError, ModelBoundaryProjectionError,
+    RunStartInstructionOutcome, SESSION_INSTRUCTION_STATE_KEY, Session,
+};
 use crate::lifecycle::RunId;
 use crate::types::{
     InstructionContentDigest, InstructionKey, InstructionNamespace, Message, MessageTimestamp,
@@ -257,10 +260,9 @@ impl InstructionEntryIdentity {
         self.target_generation
     }
 
-    /// The run whose start applied the entry: a delta's run, or the run at
-    /// whose first request a fold applied the recorded target. None for a
-    /// fold of what was already in effect, and for a run without runtime
-    /// identity.
+    /// The run whose start applied the entry, the run the agent itself runs:
+    /// a delta's run, or the run at whose first request a fold applied the
+    /// recorded target. None for a fold of what was already in effect.
     #[must_use]
     pub fn run_id(&self) -> Option<&RunId> {
         self.run_id.as_ref()
@@ -416,6 +418,18 @@ fn check_body(
     Ok(())
 }
 
+/// How [`walk_entry_bodies`] reads an entry's bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyRead {
+    /// Check every body against its digest, then the whole row against a
+    /// re-render of its typed identity.
+    Verify,
+    /// The row's transcript buffer already verified it, and a row cannot
+    /// change in place without dropping that record: locate the bodies at
+    /// their typed lengths only.
+    Verified,
+}
+
 /// The bodies an entry's content holds, in identity order, read at their
 /// typed byte lengths. Every byte of the content is compared with the render
 /// of the typed identity, so a row whose bytes are not the entry its identity
@@ -423,6 +437,14 @@ fn check_body(
 fn entry_bodies<'a>(
     identity: &InstructionEntryIdentity,
     content: &'a str,
+) -> Result<Vec<&'a str>, String> {
+    walk_entry_bodies(identity, content, BodyRead::Verify)
+}
+
+fn walk_entry_bodies<'a>(
+    identity: &InstructionEntryIdentity,
+    content: &'a str,
+    read: BodyRead,
 ) -> Result<Vec<&'a str>, String> {
     let prefix = render_prefix_v1(identity);
     let mut rest = content.strip_prefix(prefix.as_str()).ok_or_else(|| {
@@ -446,7 +468,9 @@ fn entry_bodies<'a>(
                 } = change
                 {
                     let (body, after) = take_body(rest, *body_bytes)?;
-                    check_body(body, content_sha256, &change.slot())?;
+                    if read == BodyRead::Verify {
+                        check_body(body, content_sha256, &change.slot())?;
+                    }
                     bodies.push(body);
                     rest = after;
                 }
@@ -463,7 +487,9 @@ fn entry_bodies<'a>(
                     )
                 })?;
                 let (body, after) = take_body(rest, active.body_bytes)?;
-                check_body(body, &active.content_sha256, &active.slot())?;
+                if read == BodyRead::Verify {
+                    check_body(body, &active.content_sha256, &active.slot())?;
+                }
                 bodies.push(body);
                 rest = after;
             }
@@ -474,7 +500,7 @@ fn entry_bodies<'a>(
     }
     // The walk compared every byte; the whole re-render is the same check
     // stated once, kept so a future renderer change cannot drift from it.
-    if render_entry_v1(identity, &bodies)? != content {
+    if read == BodyRead::Verify && render_entry_v1(identity, &bodies)? != content {
         return Err("operator instruction entry bytes do not match its typed identity".to_string());
     }
     Ok(bodies)
@@ -822,10 +848,26 @@ fn render_inherited_v1(
 /// keeps its stored bytes; a row another session minted (copied by a fork)
 /// reads as its inherited header. A row whose bytes are not the entry its
 /// identity names fails the projection.
-pub(crate) fn project_operator_instruction_messages_in_place(
+fn project_operator_instruction_messages_in_place(
     session_id: &SessionId,
     messages: &mut [Message],
 ) -> Result<(), String> {
+    for (_, system, identity) in entry_rows(messages) {
+        validate_identity_shape(identity)?;
+        entry_bodies(identity, &system.content)?;
+    }
+    project_verified_operator_instruction_messages_in_place(session_id, messages);
+    Ok(())
+}
+
+/// [`project_operator_instruction_messages_in_place`] over entry rows the
+/// session's transcript buffer already verified
+/// ([`Session::verify_operator_instruction_rows`]): nothing is re-rendered
+/// or re-hashed, a copied row only reads as its inherited header.
+pub(crate) fn project_verified_operator_instruction_messages_in_place(
+    session_id: &SessionId,
+    messages: &mut [Message],
+) {
     for message in messages.iter_mut() {
         let Message::System(system) = message else {
             continue;
@@ -833,13 +875,10 @@ pub(crate) fn project_operator_instruction_messages_in_place(
         let Some(identity) = system.instruction_entry.as_ref() else {
             continue;
         };
-        validate_identity_shape(identity)?;
-        entry_bodies(identity, &system.content)?;
         if &identity.origin_session_id != session_id {
             system.content = render_inherited_v1(identity, session_id);
         }
     }
-    Ok(())
 }
 
 /// [`project_operator_instruction_messages_in_place`] over a copy.
@@ -1052,16 +1091,32 @@ pub fn effective_operator_instructions(
     session_id: &SessionId,
     messages: &[Message],
 ) -> Result<EffectiveOperatorInstructions, String> {
+    effective_set(session_id, messages, BodyRead::Verify)
+}
+
+fn effective_set(
+    session_id: &SessionId,
+    messages: &[Message],
+    read: BodyRead,
+) -> Result<EffectiveOperatorInstructions, String> {
     let mut chains: BTreeMap<SessionId, OriginChain> = BTreeMap::new();
     let mut effective = EffectiveOperatorInstructions::default();
     for (index, system, identity) in entry_rows(messages) {
-        validate_identity_shape(identity)?;
-        let bodies = entry_bodies(identity, &system.content)?;
+        let own = &identity.origin_session_id == session_id;
+        let bodies = match read {
+            BodyRead::Verify => {
+                validate_identity_shape(identity)?;
+                entry_bodies(identity, &system.content)?
+            }
+            BodyRead::Verified if own => walk_entry_bodies(identity, &system.content, read)?,
+            // A copied row adds no body to this session's set.
+            BodyRead::Verified => Vec::new(),
+        };
         chains
             .entry(identity.origin_session_id.clone())
             .or_default()
             .apply(identity)?;
-        if &identity.origin_session_id == session_id {
+        if own {
             effective.apply(identity, &bodies, index)?;
         }
     }
@@ -1236,15 +1291,19 @@ pub(crate) fn mint_operator_instruction_snapshot(
 
 impl Session {
     /// Append one minted operator-instruction entry at the transcript tail,
-    /// refusing a row that does not continue its origin's entry chronology.
-    /// A refusal changes nothing.
+    /// refusing a row that does not hold the bytes its identity names or does
+    /// not continue its origin's entry chronology. A session that holds an
+    /// entry row records the instruction state, so the state key alone
+    /// answers whether its document carries instruction facts: an append into
+    /// a session that records none records an unowned one. A refusal changes
+    /// nothing.
     pub(crate) fn append_operator_instruction_entry(
         &mut self,
         entry: SystemMessage,
     ) -> Result<(), String> {
-        if entry.instruction_entry.is_none() {
+        let Some(identity) = entry.instruction_entry.as_ref() else {
             return Err("an operator instruction entry row needs its typed identity".to_string());
-        }
+        };
         if entry.identity.is_some()
             || entry.prompt_version.is_some()
             || entry.instruction_activation.is_some()
@@ -1253,17 +1312,241 @@ impl Session {
                 "System message semantic identities must be mutually exclusive".to_string(),
             );
         }
-        let mut rows = entry_rows(self.messages())
-            .map(|(_, system, _)| Message::System(system.clone()))
-            .collect::<Vec<_>>();
-        rows.push(Message::System(entry));
-        validate_operator_instruction_messages(&rows)?;
-        let Some(Message::System(entry)) = rows.pop() else {
-            return Err("operator instruction entry row went missing".to_string());
-        };
+        self.verify_operator_instruction_rows(self.messages.len())?;
+        validate_identity_shape(identity)?;
+        entry_bodies(identity, &entry.content)?;
+        let mut chains: BTreeMap<SessionId, OriginChain> = BTreeMap::new();
+        for (_, _, existing) in entry_rows(self.messages()) {
+            chains
+                .entry(existing.origin_session_id.clone())
+                .or_default()
+                .apply(existing)?;
+        }
+        chains
+            .entry(identity.origin_session_id.clone())
+            .or_default()
+            .apply(identity)?;
+        if !self.carries_operator_instruction_facts() {
+            self.record_inherited_instruction_state()
+                .map_err(|error| error.to_string())?;
+        }
         self.messages.push(Message::System(entry));
+        let appended = self.messages.len();
+        self.messages.record_verified_entry_rows(appended);
         self.mark_content_mutated(crate::time_compat::SystemTime::now());
         Ok(())
+    }
+
+    /// Verify the operator-instruction entry rows among the first `count`
+    /// rows that this transcript buffer has not verified yet: each holds the
+    /// bytes its typed identity names (shape, digests and the whole render).
+    /// A buffer's rows change in place only through a non-append mutation,
+    /// which drops what it recorded as verified, so every row is verified
+    /// once rather than on every model request, run start or write.
+    pub(crate) fn verify_operator_instruction_rows(&self, count: usize) -> Result<(), String> {
+        let count = count.min(self.messages.len());
+        let verified = self.messages.verified_entry_row_count();
+        let Some(rows) = self.messages.get(verified..count) else {
+            return Ok(());
+        };
+        for (_, system, identity) in entry_rows(rows) {
+            validate_identity_shape(identity)?;
+            entry_bodies(identity, &system.content)?;
+        }
+        self.messages.record_verified_entry_rows(count);
+        Ok(())
+    }
+
+    /// This session's effective set, as [`effective_operator_instructions`]
+    /// derives it from its own entry rows. Each row's bytes are verified once
+    /// per transcript buffer; a later read locates the bodies at their typed
+    /// lengths without re-rendering or re-hashing them.
+    pub fn effective_operator_instruction_set(
+        &self,
+    ) -> Result<EffectiveOperatorInstructions, String> {
+        self.verify_operator_instruction_rows(self.messages.len())?;
+        effective_set(self.id(), self.messages(), BodyRead::Verified)
+    }
+
+    /// The model boundary projection ([`Self::messages_for_model_boundary`])
+    /// for a model that carries operator-instruction rows as `lowering`
+    /// says. A row a fork copied is history the session never applies; where
+    /// the model cannot lower it (after the leading System prefix of a model
+    /// that lowers System rows only there, anywhere on a wire that carries
+    /// no System row besides its prompt) the request leaves it out, and the
+    /// transcript keeps it. The session's own rows are always lowerable: a
+    /// run start and a compaction fold place them for the lowering in force.
+    pub fn messages_for_model_request(
+        &self,
+        lowering: InstructionLowering,
+    ) -> Result<Vec<Message>, ModelBoundaryProjectionError> {
+        let mut messages = self.messages_for_model_boundary()?;
+        retain_lowerable_inherited_entry_rows(self.id(), &mut messages, lowering);
+        Ok(messages)
+    }
+
+    /// A fork child that copied operator-instruction entry rows records the
+    /// instruction state of a session without a target of its own (unowned,
+    /// nothing pending), so the state key alone keeps answering whether its
+    /// document carries instruction facts. `source_records_state` is whether
+    /// the source records the key: only such a source holds entry rows, so
+    /// any other fork is not scanned.
+    pub(super) fn record_copied_operator_instruction_rows(&mut self, source_records_state: bool) {
+        if !source_records_state || !self.messages().iter().any(is_operator_instruction_entry) {
+            return;
+        }
+        // A fork child records no state before this (the source's is
+        // session authority, which a fork does not copy), so recording the
+        // unowned state has nothing to refuse.
+        if let Err(error) = self.record_inherited_instruction_state() {
+            tracing::error!(
+                session_id = %self.id(),
+                %error,
+                "a fork child could not record the instruction state of the operator-instruction \
+                 entry rows it copied"
+            );
+        }
+    }
+
+    /// [`Self::apply_run_start_instructions`], and what an applied entry
+    /// changed: the entry row and the recorded target before it. A run that
+    /// never starts (a refusal or a veto before it, an interrupt before it
+    /// began) hands the application back to
+    /// [`Self::revert_run_start_instructions`], so no entry names a run that
+    /// never ran and the changes stay pending. A refused application changes
+    /// nothing, even after it appended its entry.
+    pub fn apply_run_start_instructions_reversibly(
+        &mut self,
+        run_start: InstructionRunStart,
+        lowering: InstructionLowering,
+        run_id: Option<RunId>,
+    ) -> Result<
+        (
+            RunStartInstructionOutcome,
+            Option<RunStartInstructionApplication>,
+        ),
+        InstructionStateError,
+    > {
+        let entry_index = self.messages.len();
+        let state_before = self.metadata.get(SESSION_INSTRUCTION_STATE_KEY).cloned();
+        let outcome = match self.apply_run_start_instructions(run_start, lowering, run_id) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if self
+                    .messages
+                    .get(entry_index)
+                    .is_some_and(is_operator_instruction_entry)
+                {
+                    self.messages.remove_row(entry_index);
+                    if let Some(state_before) = state_before {
+                        self.set_metadata_unchecked(SESSION_INSTRUCTION_STATE_KEY, state_before);
+                    }
+                }
+                return Err(error);
+            }
+        };
+        let application = match (outcome, state_before) {
+            (RunStartInstructionOutcome::Applied { entry_sequence, .. }, Some(state_before)) => {
+                Some(RunStartInstructionApplication {
+                    entry_index,
+                    entry_sequence,
+                    state_before,
+                })
+            }
+            _ => None,
+        };
+        Ok((outcome, application))
+    }
+
+    /// Take back the entry a run start applied for a run that never started:
+    /// the entry row leaves the transcript and the recorded target is
+    /// restored as it was before the application, so its changes are pending
+    /// again. Rows appended after the entry stay. Refused, changing nothing,
+    /// when the entry is no longer at its row or already committed.
+    pub fn revert_run_start_instructions(
+        &mut self,
+        application: RunStartInstructionApplication,
+    ) -> Result<(), String> {
+        let RunStartInstructionApplication {
+            entry_index,
+            entry_sequence,
+            state_before,
+        } = application;
+        let entry = match self.messages.get(entry_index) {
+            Some(Message::System(system)) => system.instruction_entry.as_ref(),
+            _ => None,
+        };
+        let names_the_entry = entry.is_some_and(|identity| {
+            identity.kind == InstructionEntryKind::Delta
+                && identity.entry_sequence == entry_sequence
+                && identity.origin_session_id == self.id
+        });
+        if !names_the_entry {
+            return Err(format!(
+                "operator instruction entry {entry_sequence} is no longer at transcript row \
+                 {entry_index}"
+            ));
+        }
+        let index = u64::try_from(entry_index).unwrap_or(u64::MAX);
+        if self
+            .messages
+            .committed_row_prefix_count()
+            .is_some_and(|committed| committed > index)
+        {
+            return Err(format!(
+                "operator instruction entry {entry_sequence} is already committed"
+            ));
+        }
+        self.messages.remove_row(entry_index);
+        self.set_metadata_unchecked(SESSION_INSTRUCTION_STATE_KEY, state_before);
+        self.mark_content_mutated(crate::time_compat::SystemTime::now());
+        Ok(())
+    }
+}
+
+/// What a fresh run start's operator-instruction entry changed in its
+/// session ([`Session::apply_run_start_instructions_reversibly`]): the entry
+/// row's place and sequence, and the recorded target before it.
+#[derive(Debug, Clone)]
+pub struct RunStartInstructionApplication {
+    entry_index: usize,
+    entry_sequence: u64,
+    state_before: serde_json::Value,
+}
+
+/// Take out of a model request the operator-instruction rows a fork copied
+/// that the model cannot lower where they stand
+/// ([`Session::messages_for_model_request`]).
+fn retain_lowerable_inherited_entry_rows(
+    session_id: &SessionId,
+    messages: &mut Vec<Message>,
+    lowering: InstructionLowering,
+) {
+    let copied = |message: &Message| {
+        matches!(
+            message,
+            Message::System(system)
+                if system
+                    .instruction_entry
+                    .as_ref()
+                    .is_some_and(|identity| &identity.origin_session_id != session_id)
+        )
+    };
+    match lowering {
+        InstructionLowering::MidConversation => {}
+        InstructionLowering::LeadingPrefixOnly => {
+            let leading = messages
+                .iter()
+                .position(|message| !matches!(message, Message::System(_)))
+                .unwrap_or(messages.len());
+            let mut index = 0;
+            messages.retain(|message| {
+                let keep = index < leading || !copied(message);
+                index += 1;
+                keep
+            });
+        }
+        InstructionLowering::Unavailable => messages.retain(|message| !copied(message)),
     }
 }
 
@@ -1271,8 +1554,9 @@ impl Session {
 impl Session {
     /// Test seam: append one delta entry that activates `body` at `revision`
     /// for (`namespace`, `key`), superseding the revision in effect, as a run
-    /// start would. It records no target state. Production code never calls
-    /// it.
+    /// start would. It records no target: like every entry append, it
+    /// records an unowned instruction state when the session records none.
+    /// Production code never calls it.
     #[doc(hidden)]
     pub fn append_operator_instruction_activation_for_test(
         &mut self,
@@ -1286,7 +1570,7 @@ impl Session {
             key: InstructionKey::new(key).map_err(|error| error.to_string())?,
         };
         let revision = InstructionRevision::new(revision).map_err(|error| error.to_string())?;
-        let effective = effective_operator_instructions(self.id(), self.messages())?;
+        let effective = self.effective_operator_instruction_set()?;
         let supersedes = effective
             .slot(&slot)
             .filter(|state| state.effect() == InstructionEffect::Active)

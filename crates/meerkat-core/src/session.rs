@@ -177,8 +177,8 @@ pub use operator_instructions::{
     InstructionActiveRef, InstructionChange, InstructionEffect, InstructionEntryIdentity,
     InstructionEntryKind, InstructionRevision, InstructionSlot, InvalidInstructionRevision,
     MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES, MAX_OPERATOR_INSTRUCTION_SLOTS,
-    effective_operator_instructions, materialize_operator_instruction_messages,
-    validate_operator_instruction_messages,
+    RunStartInstructionApplication, effective_operator_instructions,
+    materialize_operator_instruction_messages, validate_operator_instruction_messages,
 };
 pub(crate) use operator_instructions::{
     is_operator_instruction_entry, rows_besides_operator_instruction_entries,
@@ -5394,16 +5394,16 @@ impl Session {
     }
 
     /// Whether this document carries a fact only envelope 5 can read: the
-    /// recorded operator-instruction target state, or an operator-instruction
-    /// entry row. Entry rows leave the live transcript only through a
-    /// compaction fold, which records the target state (its entry-sequence
-    /// high-water) in the same rewrite, so a document whose rewrite graph
-    /// retains an entry row always carries the state too: once 5, always 5.
+    /// recorded operator-instruction state. Every path that puts an
+    /// operator-instruction entry row in a session records it (a run start's
+    /// application, a compaction fold, any entry append, a fork that copies
+    /// entry rows), and decode carries it with the rows, so the key alone
+    /// answers, in O(1) and without reading the transcript. Entry rows leave
+    /// the live transcript only through a compaction fold, which records the
+    /// state in the same rewrite, so a document whose rewrite graph retains
+    /// an entry row always carries it too: once 5, always 5.
     pub fn carries_operator_instruction_facts(&self) -> bool {
         self.metadata.contains_key(SESSION_INSTRUCTION_STATE_KEY)
-            || self.messages().iter().any(|message| {
-                matches!(message, Message::System(system) if system.instruction_entry.is_some())
-            })
     }
 
     /// The envelope version this document is written with: the current
@@ -7025,6 +7025,14 @@ impl Session {
         &self,
         messages: &[Message],
     ) -> Result<Vec<Message>, ModelBoundaryProjectionError> {
+        // Every operator-instruction entry row read here holds the bytes its
+        // typed identity names: the transcript buffer verifies each row once,
+        // and a row cannot change in place without dropping that record.
+        self.verify_operator_instruction_rows(messages.len())
+            .map_err(|reason| ModelBoundaryProjectionError {
+                session_id: self.id().clone(),
+                reason,
+            })?;
         let copied = crate::fork_notice::CopiedForkRows::of(
             self.messages(),
             self.id(),
@@ -7040,15 +7048,11 @@ impl Session {
                 reason,
             })?;
         // Operator-instruction entries a fork copied read as history in the
-        // child; a row whose bytes are not its typed entry fails closed.
-        operator_instructions::project_operator_instruction_messages_in_place(
+        // child.
+        operator_instructions::project_verified_operator_instruction_messages_in_place(
             self.id(),
             &mut projected,
-        )
-        .map_err(|reason| ModelBoundaryProjectionError {
-            session_id: self.id().clone(),
-            reason,
-        })?;
+        );
         crate::types::strip_tool_result_host_metadata(&mut projected);
         Ok(projected)
     }
@@ -9482,7 +9486,7 @@ impl Session {
         let now = SystemTime::now();
         let truncated = self.messages[..index.min(self.messages.len())].to_vec();
         let id = SessionId::new();
-        Self {
+        let mut forked = Self {
             version: session_version(),
             realtime_transcript: Box::new(SessionRealtimeTranscriptProjection::empty(&id)),
             id,
@@ -9504,7 +9508,9 @@ impl Session {
             model_routing_control: Box::new(
                 model_routing_control::SessionModelRoutingControlHistory::new(),
             ),
-        }
+        };
+        forked.record_copied_operator_instruction_rows(self.carries_operator_instruction_facts());
+        forked
     }
 
     /// Fork at one complete transcript boundary.
@@ -9683,7 +9689,7 @@ impl Session {
     pub fn fork(&self) -> Self {
         let now = SystemTime::now();
         let id = SessionId::new();
-        Self {
+        let mut forked = Self {
             version: session_version(),
             realtime_transcript: Box::new(SessionRealtimeTranscriptProjection::empty(&id)),
             id,
@@ -9699,7 +9705,11 @@ impl Session {
             model_routing_control: Box::new(
                 model_routing_control::SessionModelRoutingControlHistory::new(),
             ),
-        }
+        };
+        // A source without the instruction state holds no entry row, so a
+        // fork of one stays O(1).
+        forked.record_copied_operator_instruction_rows(self.carries_operator_instruction_facts());
+        forked
     }
 }
 

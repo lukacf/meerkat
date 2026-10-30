@@ -1896,7 +1896,11 @@ where
         self.session
             .validate_instruction_activation_turn_readiness()
             .map_err(AgentError::InstructionActivation)?;
-        let mut messages = self.session.messages_for_model_boundary()?;
+        // Operator-instruction rows a fork copied that this model cannot
+        // lower where they stand are left out of its request.
+        let mut messages = self
+            .session
+            .messages_for_model_request(self.operator_instruction_lowering())?;
         if let Some(instructions) = self.output_schema_request_instructions() {
             crate::structured_output::project_output_schema_instructions(
                 &mut messages,
@@ -3756,6 +3760,8 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             runtime_execution_kind: None,
             runtime_started_run_id: None,
             run_started_fresh: false,
+            run_start_reserved_run_id: None,
+            unconcluded_run_start_instructions: None,
             runtime_terminal_failure_witness: None,
             active_transcript_identity: None,
             active_turn_request_contexts: Vec::new(),

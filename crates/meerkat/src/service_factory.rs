@@ -600,6 +600,14 @@ impl SessionAgent for FactoryAgent {
             .apply_run_start_operator_instructions(run_start, run_id)
     }
 
+    fn conclude_run_start_operator_instructions(
+        &mut self,
+        run_started: bool,
+    ) -> Result<bool, meerkat_core::error::AgentError> {
+        self.agent
+            .conclude_run_start_operator_instructions(run_started)
+    }
+
     fn stage_external_tool_filter(
         &mut self,
         filter: meerkat_core::ToolFilter,

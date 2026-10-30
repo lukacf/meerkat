@@ -812,6 +812,8 @@ impl AgentBuilder {
             runtime_execution_kind: self.runtime_execution_kind,
             runtime_started_run_id: None,
             run_started_fresh: false,
+            run_start_reserved_run_id: None,
+            unconcluded_run_start_instructions: None,
             runtime_terminal_failure_witness: None,
             active_transcript_identity: None,
             active_turn_request_contexts: Vec::new(),

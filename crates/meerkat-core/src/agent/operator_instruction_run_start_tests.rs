@@ -351,3 +351,107 @@ async fn a_prefix_only_fork_child_leaves_out_the_copied_rows_it_cannot_lower() {
         );
     }
 }
+
+fn instruction_state(session: &Session) -> Option<serde_json::Value> {
+    session
+        .metadata()
+        .get(meerkat_core::SESSION_INSTRUCTION_STATE_KEY)
+        .cloned()
+}
+
+fn request_json(messages: &[Message]) -> String {
+    serde_json::to_string(messages).unwrap()
+}
+
+/// The session task reports a run that never started (a refusal or a veto
+/// before it, an interrupt before it began): the entry its run start
+/// appended is taken back and the recorded target restored, so the next
+/// fresh run start applies the same change again and the entry names the
+/// run that does run.
+#[tokio::test]
+async fn an_entry_whose_run_never_starts_is_taken_back_and_its_change_stays_pending() {
+    let client = Arc::new(RecordingClient::default());
+    let mut agent = build_agent(
+        conversed_session(),
+        &client,
+        InstructionLowering::MidConversation,
+    )
+    .await;
+    agent
+        .session_mut()
+        .set_session_instruction(write("tone", 1, "Answer formally."))
+        .unwrap();
+    let transcript_before = request_json(agent.session().messages());
+    let state_before = instruction_state(agent.session());
+    assert!(state_before.is_some(), "the write is recorded");
+
+    let outcome = agent
+        .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        RunStartInstructionOutcome::Applied {
+            entry_sequence: 1,
+            ..
+        }
+    ));
+    assert_eq!(entry_identities(agent.session().messages()).len(), 1);
+
+    assert!(
+        agent
+            .conclude_run_start_operator_instructions(false)
+            .unwrap(),
+        "the entry of a run that never started is taken back"
+    );
+    assert_eq!(
+        request_json(agent.session().messages()),
+        transcript_before,
+        "no row names a run that never ran"
+    );
+    assert_eq!(
+        instruction_state(agent.session()),
+        state_before,
+        "the recorded target is as the write left it"
+    );
+    assert!(
+        !agent
+            .conclude_run_start_operator_instructions(false)
+            .unwrap(),
+        "nothing is left to take back"
+    );
+
+    let outcome = agent
+        .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            RunStartInstructionOutcome::Applied {
+                entry_sequence: 1,
+                ..
+            }
+        ),
+        "the change is still pending: {outcome:?}"
+    );
+    agent.run("next".into()).await.unwrap();
+    assert!(
+        !agent
+            .conclude_run_start_operator_instructions(true)
+            .unwrap(),
+        "a run that started keeps its entry"
+    );
+
+    let messages = agent.session().messages();
+    let entries = entry_identities(messages);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].run_id(), last_run_id(messages).as_ref());
+    let requests = client.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .iter()
+            .filter(|message| is_entry(message))
+            .count(),
+        1
+    );
+}

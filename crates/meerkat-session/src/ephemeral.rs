@@ -4256,13 +4256,28 @@ pub trait SessionAgent: Send {
     /// At a turn's run start, after its start disposition is resolved and
     /// before any input of the run is appended: apply the session's pending
     /// operator instructions when the session-document authority authorizes
-    /// it. An agent without a canonical Session document applies nothing.
+    /// it. `run_id` is the run a runtime dispatched, if any; an agent that
+    /// runs its own run identity names the run it runs. An agent without a
+    /// canonical Session document applies nothing.
     fn apply_run_start_operator_instructions(
         &mut self,
         _run_start: meerkat_core::InstructionRunStart,
         _run_id: Option<meerkat_core::lifecycle::RunId>,
     ) -> Result<meerkat_core::RunStartInstructionOutcome, meerkat_core::error::AgentError> {
         Ok(meerkat_core::RunStartInstructionOutcome::NotNeeded)
+    }
+
+    /// Conclude the turn's run start once the turn ends: `run_started` is
+    /// whether its run started. A run that never started (a refusal or a
+    /// veto before it, an interrupt before it began) takes back the
+    /// operator-instruction entry its run start applied and restores the
+    /// recorded target, so the changes stay pending. Returns whether an entry
+    /// was taken back. An agent that applies nothing has nothing to conclude.
+    fn conclude_run_start_operator_instructions(
+        &mut self,
+        _run_started: bool,
+    ) -> Result<bool, meerkat_core::error::AgentError> {
+        Ok(false)
     }
 
     async fn prepare_head_canonical_runtime_boundary(
@@ -11226,8 +11241,10 @@ async fn session_task<A: SessionAgent>(
                     resume_receipt,
                     resume_interrupted_calls,
                 } = *run_context;
-                // The run an operator-instruction entry names, kept before a
-                // resumed run's dispatch consumes the run id.
+                // The run a runtime dispatched, kept for the operator-instruction
+                // run start before a resumed run's dispatch consumes it. An
+                // entry names the run the agent itself runs: this one when the
+                // runtime started it, else one the agent picks.
                 let instruction_run_id = dispatched_run_id.clone();
                 let work_authorization = runtime.work_authorization;
                 let metadata = runtime.turn_metadata;
@@ -11670,6 +11687,18 @@ async fn session_task<A: SessionAgent>(
                             Ok(_) => agent.append_system_messages(system_messages),
                         };
                         if let Err(error) = system_append {
+                            // The run never starts: the operator-instruction
+                            // entry its run start applied is taken back, so
+                            // the changes stay pending for the next one.
+                            let taken_back = agent.conclude_run_start_operator_instructions(false);
+                            let error = match taken_back {
+                                Ok(_) => error,
+                                Err(failure) => error.with_ancillary_failure(
+                                    "failed to take back the operator-instruction entry of a run \
+                                     that never started",
+                                    failure,
+                                ),
+                            };
                             let _ = agent.set_turn_tool_overlay(None);
                             let resolve_projection = {
                                 let mut slot = lock_turn_admission(&control.turn_admission);
@@ -12021,9 +12050,32 @@ async fn session_task<A: SessionAgent>(
                     control.state_tx.send_replace(projection);
                 }
 
+                // A run that publishes no `RunStarted` and fails never started
+                // (a refusal or a veto before it, an interrupt before it
+                // began): the operator-instruction entry its run start
+                // applied is taken back, so no entry names a run that never
+                // ran and the changes stay pending for the next run start.
+                let run_never_started = result.is_err() && !run_started_observed;
+                let taken_back = agent.conclude_run_start_operator_instructions(!run_never_started);
+                let (result, entry_taken_back) = match taken_back {
+                    Ok(taken_back) => (result, taken_back),
+                    Err(failure) => (
+                        Err(match result {
+                            Err(primary) => primary.with_ancillary_failure(
+                                "failed to take back the operator-instruction entry of a run \
+                                 that never started",
+                                failure,
+                            ),
+                            Ok(_) => failure,
+                        }),
+                        false,
+                    ),
+                };
+
                 // Update cached summary
                 let snap = agent.snapshot();
-                let message_count_after_run = snap.message_count;
+                // The entry taken back was appended before the run, not by it.
+                let message_count_after_run = snap.message_count + usize::from(entry_taken_back);
                 control.publish_summary(SessionSummaryCache {
                     updated_at: snap.updated_at,
                     message_count: snap.message_count,

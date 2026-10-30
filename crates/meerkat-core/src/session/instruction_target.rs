@@ -2,20 +2,23 @@
 //! session-document authority seam that decides every change to it.
 //!
 //! `SessionDocumentMachine` holds a session's operator-instruction facts per
-//! slot: the recorded target (revision, effect and digest per slot), its
-//! owner (and the mob a mob owner is) and generation, the effective set (the
-//! same per slot), and the entry-sequence high-water. Before every operation
-//! this module seeds a fresh authority (`RecoverSessionInstructionState`):
-//! the target from its durable projection of that state under
-//! [`SESSION_INSTRUCTION_STATE_KEY`], the slots in effect from the session's
-//! own entry rows ([`effective_operator_instructions`]), a transcript fact.
+//! slot: the recorded target (revision, effect, digest and body bytes per
+//! slot), its owner (and the mob a mob owner is) and generation, the slots in
+//! effect (the same per slot) and the generation they realize, and the
+//! entry-sequence high-water. Before every operation this module recovers a
+//! fresh authority in three steps: the owner and the recorded high-water,
+//! then the target from its durable projection under
+//! [`SESSION_INSTRUCTION_STATE_KEY`], then the slots in effect from the
+//! session's own entry rows ([`Session::effective_operator_instruction_set`]),
+//! a transcript fact.
 //! It then feeds the operation's request and transcript facts, lets the
-//! authority decide (ownership, revision order, the slot limit, whether a
-//! run start appends an entry, what a compaction fold renders), and writes
-//! the authority's resulting state back. Its own share is the bodies, kept
-//! by digest while their slot is pending (an applied body lives in its entry
-//! row), the rendering of entries from the authority's state, and request
-//! validation (body and active-set budgets, digests).
+//! authority decide (ownership, revision order, the slot limit, the active
+//! budget, whether a run start appends an entry, what a compaction fold
+//! renders), and writes the authority's resulting state back. Its own share
+//! is the bodies, kept by digest while their slot is pending (an applied
+//! body lives in its entry row), the rendering of entries from the
+//! authority's state, and request validation (a body's size, a declared
+//! digest).
 //!
 //! Nothing here wakes a session or applies inside a running turn: a write, a
 //! record, a rebind or a release only changes the target, and the only
@@ -33,8 +36,8 @@ use super::operator_instructions::{
     ActiveOperatorInstruction, EffectiveOperatorInstructions, InstructionEffect,
     InstructionRevision, InstructionSlot, MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES,
     MAX_OPERATOR_INSTRUCTION_SLOTS, OperatorInstructionChangeContent,
-    OperatorInstructionEntryHeader, effective_operator_instructions,
-    mint_operator_instruction_delta, mint_operator_instruction_snapshot,
+    OperatorInstructionEntryHeader, mint_operator_instruction_delta,
+    mint_operator_instruction_snapshot,
 };
 use super::{MAX_INSTRUCTION_BODY_BYTES, SESSION_INSTRUCTION_STATE_KEY, Session};
 use crate::generated::session_document as document;
@@ -1144,10 +1147,12 @@ impl Session {
         Ok(())
     }
 
+    /// This session's effective set, from its own entry rows; each row's
+    /// bytes are verified once per transcript buffer.
     fn own_effective_instructions(
         &self,
     ) -> Result<EffectiveOperatorInstructions, InstructionStateError> {
-        effective_operator_instructions(self.id(), self.messages())
+        self.effective_operator_instruction_set()
             .map_err(InstructionStateError::MalformedHistory)
     }
 

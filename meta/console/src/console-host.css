@@ -1680,7 +1680,9 @@ svg[data-svg="fit"],
 }
 .agent__grip:hover { color: var(--ink-muted); }
 .agent__grip:active { cursor: grabbing; }
-.agent[data-dragging="true"] { opacity: 0.5; }
+/* A dragged row fades with its pin and copy actions, which sit beside it. */
+.agent[data-dragging="true"],
+.agent[data-dragging="true"] + .agent__actions { opacity: 0.5; }
 .agent__drop-line {
   position: absolute;
   left: 12px;

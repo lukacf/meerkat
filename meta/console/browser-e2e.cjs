@@ -1914,6 +1914,17 @@ async function runSidebarManualAgentOrderProof() {
     await drag(page.getByTestId("sidebar-agent-grip:team-dov"), page.getByTestId("sidebar-agent:team-ada"), "before");
     await page.waitForSelector('[data-testid="sidebar-agent:team-ada"][data-drag-over="before"]', { timeout: 5_000 });
     assert.equal(await page.getByTestId("sidebar-drag-preview").count(), 1, "the drag shows a preview");
+    // The dragged row fades with its pin and copy actions, which sit beside it.
+    const dragFade = await page.evaluate(() => {
+      const row = document.querySelector('[data-testid="sidebar-agent:team-dov"]');
+      const actions = row?.parentElement?.querySelector(":scope > .agent__actions");
+      return {
+        dragging: row?.getAttribute("data-dragging") ?? "",
+        row: row ? getComputedStyle(row).opacity : "",
+        actions: actions ? getComputedStyle(actions).opacity : "",
+      };
+    });
+    assert.deepEqual(dragFade, { dragging: "true", row: "0.5", actions: "0.5" }, "the dragged row and its actions fade together");
     await page.screenshot({ path: path.join(evidenceDir, "sidebar-manual-order-drag.png") });
     await page.mouse.up();
     await expectOrder(teamOrder, ["team-dov", "team-ada", "team-bea", "team-cyd"], "the pointer drag reorders agents");

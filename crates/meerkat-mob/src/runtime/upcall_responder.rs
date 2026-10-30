@@ -943,6 +943,9 @@ impl UpcallServeSeams for MobUpcallSeams {
             can_mutate_profiles: record.can_mutate_profiles,
             managed_mob_scope: record.managed_mob_scope.clone(),
             spawn_profile_scope: record.spawn_profile_scope.clone(),
+            // A placed member's record holds no identity creation scope: its
+            // upcalls never create identities.
+            identity_creation_scope: std::collections::BTreeMap::new(),
         };
         let provenance = MobToolCallerProvenance::default()
             .with_mob_id(fenced.handle.mob_id().as_str())
@@ -2145,6 +2148,7 @@ mod tests {
             can_mutate_profiles: false,
             managed_mob_scope: managed,
             spawn_profile_scope: spawn_scope,
+            identity_creation_scope: std::collections::BTreeMap::new(),
         };
         let provenance = MobToolCallerProvenance::default()
             .with_mob_id("mob-a")

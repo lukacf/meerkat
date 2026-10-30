@@ -3,7 +3,9 @@
 //! Host and mob surfaces use this module to mint or widen
 //! `MobToolAuthorityContext`. The context itself is a projection; the
 //! capability/admission/provenance facts are changed only by generated
-//! MeerkatMachine inputs in this module.
+//! MeerkatMachine inputs in this module. The identity creation check of an
+//! agent creator's commit ([`admit_identity_creation_from_template`]) is a
+//! generated verdict over the same facts.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -39,7 +41,7 @@ pub extern "Rust" fn generated_authority_bridge_token_is_valid(
 #[allow(improper_ctypes_definitions, unsafe_code)]
 unsafe extern "Rust" {
     #[link_name = concat!(
-        "__meerkat_core_runtime_generated_mob_tool_authority_context_build_v2_",
+        "__meerkat_core_runtime_generated_mob_tool_authority_context_build_v3_",
         env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
     )]
     fn core_generated_mob_tool_authority_context_build(
@@ -50,6 +52,7 @@ unsafe extern "Rust" {
         can_run_adaptive_packs: bool,
         managed_mob_scope: BTreeSet<String>,
         spawn_profile_scope: BTreeMap<String, BTreeSet<String>>,
+        identity_creation_scope: BTreeMap<String, BTreeSet<String>>,
         mob_incarnations: BTreeMap<String, MobIncarnationId>,
         caller_provenance: Option<MobToolCallerProvenance>,
         audit_invocation_id: Option<String>,
@@ -139,16 +142,19 @@ pub struct MobOperatorAuthorityFacts {
     pub can_mutate_profiles: bool,
     pub managed_mob_scope: BTreeSet<String>,
     pub spawn_profile_scope: BTreeMap<String, BTreeSet<String>>,
+    /// The identity creation scope: per mob id, the templates the member
+    /// may create identities from (see [`grant_identity_creation_in_mob`]).
+    pub identity_creation_scope: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// Re-mint a sealed `MobToolAuthorityContext` from capability facts through
 /// the generated ladder (ADJ-15): `create_only_mob_operator_authority` →
 /// `set_create_authority` → `set_profile_mutation` → `grant_manage_mob` per
 /// managed scope → `grant_spawn_profiles_in_mob` per entry →
-/// `with_caller_provenance` → `with_audit_invocation_id`. Every step is a
-/// generated MeerkatMachine input, so the output satisfies
-/// `is_generated_authority_context()` — no stored-context rehydration exists
-/// on this path.
+/// `grant_identity_creation_in_mob` per entry → `with_caller_provenance` →
+/// `with_audit_invocation_id`. Every step is a generated MeerkatMachine
+/// input, so the output satisfies `is_generated_authority_context()` — no
+/// stored-context rehydration exists on this path.
 ///
 /// `holder_mob_id` and `holder_incarnation` name the mob whose store holds
 /// the facts, as it runs now (the witness its handle hands out): every scope
@@ -169,6 +175,7 @@ pub fn mint_mob_operator_authority_from_facts(
         .managed_mob_scope
         .iter()
         .chain(facts.spawn_profile_scope.keys())
+        .chain(facts.identity_creation_scope.keys())
         .find(|mob_id| mob_id.as_str() != holder_mob_id)
     {
         return Err(format!(
@@ -187,6 +194,14 @@ pub fn mint_mob_operator_authority_from_facts(
             mob_id.clone(),
             holder_incarnation,
             profiles.iter().cloned(),
+        )?;
+    }
+    for (mob_id, templates) in &facts.identity_creation_scope {
+        context = grant_identity_creation_in_mob(
+            &context,
+            mob_id.clone(),
+            holder_incarnation,
+            templates.iter().cloned(),
         )?;
     }
     context = with_caller_provenance(&context, caller_provenance)?;
@@ -422,6 +437,131 @@ where
     context_from_authority_state(authority.state())
 }
 
+/// Grant identity creation scope in the mob `mob_id` as it runs at
+/// `mob_incarnation`, the witness its handle hands out: the templates an
+/// agent creator holding this authority may create identities from in that
+/// mob. A host mints it at the creator's build from its creation policy.
+///
+/// A grant at the bound incarnation replaces the templates held there, so a
+/// host whose policy changed mints the scope again with the new templates;
+/// an empty set keeps the binding and allows no template. A grant for a new
+/// incarnation of an id replaces the old binding and drops the manage and
+/// spawn-profile scope held for it, as a manage or spawn-profile grant for a
+/// new incarnation drops the creation scope held for the old one.
+///
+/// The scope is part of the generated seal: a persisted projection of the
+/// context never carries it, so a restored member holds it only when its
+/// build mints it again. Manage, spawn-profile, create and profile-mutation
+/// authority never admit a creation; the creation commit asks
+/// [`admit_identity_creation_from_template`].
+pub fn grant_identity_creation_in_mob<I, S>(
+    authority_context: &MobToolAuthorityContext,
+    mob_id: impl Into<String>,
+    mob_incarnation: LiveMobIncarnation,
+    templates: I,
+) -> Result<MobToolAuthorityContext, String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut authority = authority_from_context(authority_context)?;
+    apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::SetMobOperatorIdentityCreationInMob {
+            mob_id: mob_id.into(),
+            mob_incarnation: mob_incarnation.incarnation(),
+            templates: templates.into_iter().map(Into::into).collect(),
+        },
+    )?;
+    context_from_authority_state(authority.state())
+}
+
+/// The generated refusal of an agent creator's identity creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum IdentityCreationScopeRefusal {
+    /// The creator's authority holds no identity creation scope for the
+    /// template in the mob at the incarnation the creation acts on: no
+    /// authority, a persisted projection, scope held for another incarnation
+    /// of the mob, and manage or spawn-profile scope alone all end here.
+    #[error(
+        "the creator's mob operator authority does not allow identity creation from this \
+         template in this mob"
+    )]
+    TemplateNotAllowed,
+}
+
+/// The identity creation check of an agent creator's commit: the generated
+/// MeerkatMachine verdict on whether `creator_authority`, the sealed
+/// authority of the creator's session, may create identities from
+/// `template` in the mob `mob_id` as it runs at `mob_incarnation`.
+///
+/// Pass the creator session's live authority: the sealed context its build
+/// settled and bound to the session's tools, whose identity creation scope
+/// that build minted. Never pass a context decoded from a record (a session's
+/// stored build state, a wire projection): a decoded context is unsealed and
+/// carries no scope, so it is refused like `None` (the session holds no
+/// generated authority). A fresh machine restores the sealed authority
+/// through the generated ladder and answers
+/// `ResolveMobOperatorIdentityCreation` from its own state; this function
+/// mirrors the verdict. `mob_incarnation` is the incarnation of the live mob
+/// the commit acts on (`meerkat_mob::MobHandle::incarnation`), never a value
+/// decoded from input: scope held for another incarnation of the mob admits
+/// nothing.
+///
+/// Only the identity creation scope admits a creation, so an agent holding
+/// every other mob operator right, or a creation tool mounted by mistake,
+/// is still refused. A commit with several identities asks once per
+/// identity's template, before it writes anything.
+pub fn admit_identity_creation_from_template(
+    creator_authority: Option<&MobToolAuthorityContext>,
+    mob_id: &str,
+    mob_incarnation: MobIncarnationId,
+    template: &str,
+) -> Result<(), IdentityCreationScopeRefusal> {
+    let mut authority = fresh_authority();
+    if let Some(sealed) =
+        creator_authority.filter(|context| context.is_generated_authority_context())
+        && let Err(error) = apply_restore(&mut authority, sealed, None, None)
+    {
+        tracing::warn!(
+            error = %error,
+            "generated mob operator authority rejected a creator's sealed context; \
+             identity creation refused"
+        );
+        return Err(IdentityCreationScopeRefusal::TemplateNotAllowed);
+    }
+    let verdict = match dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::ResolveMobOperatorIdentityCreation {
+            mob_id: mob_id.to_string(),
+            mob_incarnation,
+            template: template.to_string(),
+        },
+    ) {
+        Ok(transition) => transition.effects().iter().find_map(|effect| match effect {
+            dsl::MeerkatMachineEffect::MobOperatorIdentityCreationResolved { verdict } => {
+                Some(*verdict)
+            }
+            _ => None,
+        }),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "generated mob operator authority rejected the identity creation check; \
+                 identity creation refused"
+            );
+            None
+        }
+    };
+    match verdict {
+        Some(dsl::MobOperatorIdentityCreationVerdict::Admitted) => Ok(()),
+        Some(dsl::MobOperatorIdentityCreationVerdict::TemplateNotAllowed) | None => {
+            Err(IdentityCreationScopeRefusal::TemplateNotAllowed)
+        }
+    }
+}
+
 pub fn with_caller_provenance(
     authority_context: &MobToolAuthorityContext,
     caller_provenance: MobToolCallerProvenance,
@@ -480,6 +620,7 @@ fn apply_restore(
             can_mutate_profiles: authority_context.can_mutate_profiles(),
             managed_mob_scope: authority_context.managed_mob_scope().clone(),
             spawn_profile_scope: authority_context.spawn_profile_scope().clone(),
+            identity_creation_scope: authority_context.identity_creation_scope().clone(),
             mob_incarnations: authority_context.mob_incarnations().clone(),
             caller_provenance: caller_provenance
                 .unwrap_or_else(|| authority_context.caller_provenance().cloned()),
@@ -518,6 +659,7 @@ fn context_from_authority_state(
             false,
             state.mob_operator_managed_mob_scope.clone(),
             state.mob_operator_spawn_profile_scope.clone(),
+            state.mob_operator_identity_creation_scope.clone(),
             state.mob_operator_mob_incarnations.clone(),
             state.mob_operator_caller_provenance.clone(),
             state.mob_operator_audit_invocation_id.clone(),
@@ -591,6 +733,10 @@ mod tests {
                 "mob-1".to_string(),
                 BTreeSet::from(["investigator".to_string(), "writer".to_string()]),
             )]),
+            identity_creation_scope: BTreeMap::from([(
+                "mob-1".to_string(),
+                BTreeSet::from(["template-a".to_string()]),
+            )]),
         };
         let incarnation = MobIncarnationId::mint();
         let minted = mint_mob_operator_authority_from_facts(
@@ -611,6 +757,19 @@ mod tests {
         assert!(minted.spawn_profile_scope_contains("mob-1", incarnation, "writer"));
         assert_eq!(minted.managed_mob_scope(), &facts.managed_mob_scope);
         assert_eq!(minted.spawn_profile_scope(), &facts.spawn_profile_scope);
+        assert_eq!(
+            minted.identity_creation_scope(),
+            &facts.identity_creation_scope
+        );
+        assert_eq!(
+            admit_identity_creation_from_template(
+                Some(&minted),
+                "mob-1",
+                incarnation,
+                "template-a"
+            ),
+            Ok(())
+        );
         assert_eq!(minted.audit_invocation_id(), Some("req-42"));
         assert!(minted.caller_provenance().is_some());
     }
@@ -756,12 +915,34 @@ mod tests {
                 can_mutate_profiles: true,
                 managed_mob_scope: BTreeSet::from(["mob-1".to_string()]),
                 spawn_profile_scope: BTreeMap::new(),
+                identity_creation_scope: BTreeMap::new(),
                 mob_incarnations: BTreeMap::new(),
                 caller_provenance: None,
                 audit_invocation_id: None,
             },
         )
         .expect_err("a restore whose scope names an unbound mob must be refused");
+        assert!(error.contains("rejected"), "{error}");
+        assert!(!authority.state().mob_operator_authority_present);
+
+        let error = apply(
+            &mut authority,
+            dsl::MeerkatMachineInput::RestoreMobOperatorAuthority {
+                principal_token: OpaquePrincipalToken::generated(),
+                can_create_mobs: false,
+                can_mutate_profiles: false,
+                managed_mob_scope: BTreeSet::new(),
+                spawn_profile_scope: BTreeMap::new(),
+                identity_creation_scope: BTreeMap::from([(
+                    "mob-1".to_string(),
+                    BTreeSet::from(["template-a".to_string()]),
+                )]),
+                mob_incarnations: BTreeMap::new(),
+                caller_provenance: None,
+                audit_invocation_id: None,
+            },
+        )
+        .expect_err("a restore whose identity creation scope names an unbound mob is refused");
         assert!(error.contains("rejected"), "{error}");
         assert!(!authority.state().mob_operator_authority_present);
     }
@@ -779,6 +960,13 @@ mod tests {
                 spawn_profile_scope: BTreeMap::from([(
                     "other-mob".to_string(),
                     BTreeSet::from(["worker".to_string()]),
+                )]),
+                ..MobOperatorAuthorityFacts::default()
+            },
+            MobOperatorAuthorityFacts {
+                identity_creation_scope: BTreeMap::from([(
+                    "other-mob".to_string(),
+                    BTreeSet::from(["template-a".to_string()]),
                 )]),
                 ..MobOperatorAuthorityFacts::default()
             },
@@ -916,5 +1104,422 @@ mod tests {
             .expect("narrow mob-2 to nothing");
         assert!(!narrowed.spawn_profile_scope_present("mob-2", second));
         assert!(narrowed.can_manage_mob("mob-2", second));
+    }
+
+    const CREATION_REFUSED: Result<(), IdentityCreationScopeRefusal> =
+        Err(IdentityCreationScopeRefusal::TemplateNotAllowed);
+
+    /// Every mob operator right in `mob_id` except identity creation, bound
+    /// to `incarnation`: create and profile-mutation authority, manage scope
+    /// and spawn scope over two profiles. A member holding the mob tools has
+    /// this, and may have a creation tool mounted by mistake.
+    fn every_other_operator_right(
+        mob_id: &str,
+        incarnation: MobIncarnationId,
+    ) -> MobToolAuthorityContext {
+        let authority = grant_manage_mob(&create_only(), mob_id, live(incarnation))
+            .expect("manage scope at the incarnation");
+        grant_spawn_profiles_in_mob(&authority, mob_id, live(incarnation), ["lead", "worker"])
+            .expect("spawn scope at the incarnation")
+    }
+
+    /// Row (RED): an agent creator's identity creation is refused unless its
+    /// sealed authority holds the identity creation scope for the template,
+    /// in the mob, at the incarnation the creation acts on. Every other mob
+    /// operator right admits nothing, and neither does no authority or a
+    /// persisted projection. A creation grant admits its templates only.
+    #[test]
+    fn an_agent_without_the_scope_is_refused_even_with_the_tool() {
+        let incarnation = MobIncarnationId::mint();
+        let tool_holder = every_other_operator_right("mob-1", incarnation);
+        assert!(tool_holder.can_create_mobs() && tool_holder.can_mutate_profiles());
+        assert!(tool_holder.can_manage_mob("mob-1", incarnation));
+        assert!(tool_holder.spawn_profile_scope_contains("mob-1", incarnation, "worker"));
+        assert!(!tool_holder.identity_creation_scope_present("mob-1", incarnation));
+        assert_eq!(
+            admit_identity_creation_from_template(
+                Some(&tool_holder),
+                "mob-1",
+                incarnation,
+                "template-a"
+            ),
+            CREATION_REFUSED,
+            "manage, spawn, create and mutate rights never admit an identity creation"
+        );
+        assert_eq!(
+            admit_identity_creation_from_template(None, "mob-1", incarnation, "template-a"),
+            CREATION_REFUSED,
+            "a session with no generated authority creates nothing"
+        );
+
+        let creator = grant_identity_creation_in_mob(
+            &tool_holder,
+            "mob-1",
+            live(incarnation),
+            ["template-a"],
+        )
+        .expect("a creation grant at the bound incarnation");
+        assert!(creator.identity_creation_scope_present("mob-1", incarnation));
+        assert_eq!(
+            admit_identity_creation_from_template(
+                Some(&creator),
+                "mob-1",
+                incarnation,
+                "template-a"
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            admit_identity_creation_from_template(
+                Some(&creator),
+                "mob-1",
+                incarnation,
+                "template-b"
+            ),
+            CREATION_REFUSED,
+            "only the granted templates"
+        );
+        assert_eq!(
+            admit_identity_creation_from_template(
+                Some(&creator),
+                "mob-2",
+                incarnation,
+                "template-a"
+            ),
+            CREATION_REFUSED,
+            "only the granted mob"
+        );
+        let projected = persisted_projection(creator);
+        assert_eq!(
+            admit_identity_creation_from_template(
+                Some(&projected),
+                "mob-1",
+                incarnation,
+                "template-a"
+            ),
+            CREATION_REFUSED,
+            "a persisted projection grants nothing"
+        );
+    }
+
+    /// Row: identity creation scope reaches only the incarnation of the mob
+    /// it was granted for. A later mob under the same id is another
+    /// incarnation: the scope admits nothing there, and any grant for the
+    /// later mob replaces the binding and drops the scope held for the
+    /// earlier one.
+    #[test]
+    fn a_scope_for_another_mob_incarnation_grants_nothing() {
+        let first = MobIncarnationId::mint();
+        let later = MobIncarnationId::mint();
+        let creator =
+            grant_identity_creation_in_mob(&create_only(), "mob-x", live(first), ["template-a"])
+                .expect("a creation grant for the first mob");
+        assert_eq!(
+            admit_identity_creation_from_template(Some(&creator), "mob-x", first, "template-a"),
+            Ok(())
+        );
+        assert_eq!(
+            admit_identity_creation_from_template(Some(&creator), "mob-x", later, "template-a"),
+            CREATION_REFUSED,
+            "scope granted for an earlier mob under the same id"
+        );
+        assert!(!creator.identity_creation_scope_present("mob-x", later));
+
+        // A manage or spawn grant for the later mob drops the creation
+        // scope held for the earlier one.
+        for rebound in [
+            grant_manage_mob(&creator, "mob-x", live(later)).expect("a manage rebind"),
+            grant_spawn_profile_in_mob(&creator, "mob-x", live(later), "worker")
+                .expect("a spawn rebind"),
+        ] {
+            assert!(rebound.identity_creation_scope().get("mob-x").is_none());
+            for incarnation in [first, later] {
+                assert_eq!(
+                    admit_identity_creation_from_template(
+                        Some(&rebound),
+                        "mob-x",
+                        incarnation,
+                        "template-a"
+                    ),
+                    CREATION_REFUSED
+                );
+            }
+        }
+
+        // A creation grant for the later mob admits there only, and drops
+        // the manage and spawn scope held for the earlier one.
+        let earlier_rights = every_other_operator_right("mob-x", first);
+        let rebound =
+            grant_identity_creation_in_mob(&earlier_rights, "mob-x", live(later), ["template-a"])
+                .expect("a creation rebind");
+        assert_eq!(
+            admit_identity_creation_from_template(Some(&rebound), "mob-x", later, "template-a"),
+            Ok(())
+        );
+        assert_eq!(
+            admit_identity_creation_from_template(Some(&rebound), "mob-x", first, "template-a"),
+            CREATION_REFUSED
+        );
+        assert!(!rebound.managed_mob_scope().contains("mob-x"));
+        assert!(rebound.spawn_profile_scope().get("mob-x").is_none());
+        assert_eq!(rebound.mob_incarnations().get("mob-x"), Some(&later));
+    }
+
+    /// Row: the identity creation scope never leaves the generated seal. A
+    /// creator's persisted projection is the projection of the same
+    /// authority without the scope, so a reader that knows only the earlier
+    /// facts (the wire mirror, which refuses an unknown key) reads it as
+    /// before and finds no creation scope. Nothing read back admits a
+    /// creation: the projection restores nothing, and facts re-minted from
+    /// what it carries hold no creation scope.
+    #[test]
+    fn a_pre_099_reader_drops_the_scope_and_the_creator_loses_creation() {
+        let incarnation = MobIncarnationId::mint();
+        let tool_holder = every_other_operator_right("mob-1", incarnation);
+        let creator = grant_identity_creation_in_mob(
+            &tool_holder,
+            "mob-1",
+            live(incarnation),
+            ["template-a"],
+        )
+        .expect("a creation grant at the bound incarnation");
+        assert_eq!(
+            admit_identity_creation_from_template(
+                Some(&creator),
+                "mob-1",
+                incarnation,
+                "template-a"
+            ),
+            Ok(())
+        );
+
+        let projection = serde_json::to_value(creator).expect("project the creator");
+        assert_eq!(
+            projection,
+            serde_json::to_value(tool_holder).expect("project the authority without the scope"),
+            "the projection carries no identity creation scope"
+        );
+        let earlier_facts: meerkat_contracts::wire::WireMobToolAuthorityContext =
+            serde_json::from_value(projection.clone())
+                .expect("a reader of the earlier facts decodes the projection");
+        let read_back: MobToolAuthorityContext =
+            serde_json::from_value(projection).expect("decode the projection");
+        assert!(read_back.identity_creation_scope().is_empty());
+        assert!(restore_mob_operator_authority(&read_back).is_err());
+        assert_eq!(
+            admit_identity_creation_from_template(
+                Some(&read_back),
+                "mob-1",
+                incarnation,
+                "template-a"
+            ),
+            CREATION_REFUSED
+        );
+
+        let facts = MobOperatorAuthorityFacts {
+            can_create_mobs: earlier_facts.can_create_mobs,
+            can_mutate_profiles: earlier_facts.can_mutate_profiles,
+            managed_mob_scope: earlier_facts.managed_mob_scope,
+            spawn_profile_scope: earlier_facts.spawn_profile_scope,
+            ..MobOperatorAuthorityFacts::default()
+        };
+        let reminted = mint_mob_operator_authority_from_facts(
+            &facts,
+            "mob-1",
+            live(incarnation),
+            MobToolCallerProvenance::default(),
+            "req-1",
+        )
+        .expect("the earlier facts re-mint");
+        assert!(reminted.can_manage_mob("mob-1", incarnation));
+        assert_eq!(
+            admit_identity_creation_from_template(
+                Some(&reminted),
+                "mob-1",
+                incarnation,
+                "template-a"
+            ),
+            CREATION_REFUSED,
+            "the creator loses creation"
+        );
+    }
+
+    /// A creation grant at the bound incarnation replaces the templates: a
+    /// host whose creation policy changed mints the scope again. An empty
+    /// set keeps the binding and allows nothing, and the other scope of the
+    /// mob is kept.
+    #[test]
+    fn an_identity_creation_grant_at_the_bound_incarnation_replaces_the_templates() {
+        let incarnation = MobIncarnationId::mint();
+        let check = |context: &MobToolAuthorityContext, template: &str| {
+            admit_identity_creation_from_template(Some(context), "mob-1", incarnation, template)
+        };
+        let manager = grant_manage_mob(&create_only(), "mob-1", live(incarnation))
+            .expect("manage scope at the incarnation");
+        let creator = grant_identity_creation_in_mob(
+            &manager,
+            "mob-1",
+            live(incarnation),
+            ["template-a", "template-b"],
+        )
+        .expect("a creation grant");
+        assert_eq!(check(&creator, "template-a"), Ok(()));
+        assert_eq!(check(&creator, "template-b"), Ok(()));
+
+        let narrowed =
+            grant_identity_creation_in_mob(&creator, "mob-1", live(incarnation), ["template-b"])
+                .expect("the policy minted again");
+        assert_eq!(check(&narrowed, "template-a"), CREATION_REFUSED);
+        assert_eq!(check(&narrowed, "template-b"), Ok(()));
+        assert!(narrowed.can_manage_mob("mob-1", incarnation));
+
+        let emptied = grant_identity_creation_in_mob(
+            &narrowed,
+            "mob-1",
+            live(incarnation),
+            Vec::<String>::new(),
+        )
+        .expect("a policy that allows nothing");
+        assert_eq!(check(&emptied, "template-b"), CREATION_REFUSED);
+        assert!(!emptied.identity_creation_scope_present("mob-1", incarnation));
+        assert_eq!(emptied.mob_incarnations().get("mob-1"), Some(&incarnation));
+        assert!(emptied.can_manage_mob("mob-1", incarnation));
+    }
+
+    /// The identity creation scope survives the generated restore and the
+    /// provenance and audit re-mints, as the other scopes do.
+    #[test]
+    fn restores_and_re_mints_keep_the_identity_creation_scope() {
+        let incarnation = MobIncarnationId::mint();
+        let creator = grant_identity_creation_in_mob(
+            &create_only(),
+            "mob-1",
+            live(incarnation),
+            ["template-a"],
+        )
+        .expect("a creation grant");
+        let creator = with_caller_provenance(
+            &creator,
+            MobToolCallerProvenance::default().with_mob_id("mob-1"),
+        )
+        .expect("caller provenance");
+        let creator = with_audit_invocation_id(&creator, "audit-1").expect("audit invocation id");
+        let restored = restore_mob_operator_authority(&creator).expect("a sealed context restores");
+        assert_eq!(
+            restored.identity_creation_scope(),
+            creator.identity_creation_scope()
+        );
+        assert_eq!(
+            admit_identity_creation_from_template(
+                Some(&restored),
+                "mob-1",
+                incarnation,
+                "template-a"
+            ),
+            Ok(())
+        );
+    }
+
+    /// The authority a member's build composes before any host edit: the
+    /// create-only authority an enabled build resolves, then the default
+    /// spawn scope over the profiles of the mob the member runs in.
+    fn composed_member_build_authority(incarnation: MobIncarnationId) -> MobToolAuthorityContext {
+        let (override_mob, composed) =
+            resolve_mob_operator_access(ToolCategoryOverride::Enable, None);
+        assert_eq!(override_mob, ToolCategoryOverride::Enable);
+        let composed = composed.expect("an enabled build composes generated authority");
+        grant_spawn_profiles_in_mob(&composed, "mob-1", live(incarnation), ["lead", "worker"])
+            .expect("the default spawn scope")
+    }
+
+    /// Row: the positive path. A creator's build mints the identity creation
+    /// scope from the host's policy on the authority the build composed, with
+    /// the live witness of the mob the creator runs in, and the creation
+    /// check admits every template the policy names, in that mob, at that
+    /// incarnation. The mint changes nothing else the build composed.
+    #[test]
+    fn an_agent_with_the_minted_scope_creates_in_its_mob_incarnation() {
+        let incarnation = MobIncarnationId::mint();
+        let composed = composed_member_build_authority(incarnation);
+        let policy_templates = ["research-helper", "reviewer"];
+        let creator =
+            grant_identity_creation_in_mob(&composed, "mob-1", live(incarnation), policy_templates)
+                .expect("the build mints the scope");
+        assert!(creator.is_generated_authority_context());
+        assert!(creator.identity_creation_scope_present("mob-1", incarnation));
+        for template in policy_templates {
+            assert_eq!(
+                admit_identity_creation_from_template(
+                    Some(&creator),
+                    "mob-1",
+                    incarnation,
+                    template
+                ),
+                Ok(()),
+                "{template}"
+            );
+        }
+        assert_eq!(
+            creator.spawn_profile_scope(),
+            composed.spawn_profile_scope()
+        );
+        assert_eq!(creator.can_create_mobs(), composed.can_create_mobs());
+        assert_eq!(
+            creator.can_mutate_profiles(),
+            composed.can_mutate_profiles()
+        );
+        assert_eq!(creator.mob_incarnations(), composed.mob_incarnations());
+    }
+
+    /// Row: the identity creation scope is never read from a record. A
+    /// creator's session records its authority as a projection; a build that
+    /// restores the session from that record restores no authority at all,
+    /// composes the member's authority again, and holds no creation scope
+    /// until it mints the scope from the policy. Facts re-minted from a
+    /// member's durable record carry none either.
+    #[test]
+    fn a_restored_context_carries_no_scope_until_the_build_mints_it() {
+        let incarnation = MobIncarnationId::mint();
+        let check = |context: Option<&MobToolAuthorityContext>| {
+            admit_identity_creation_from_template(context, "mob-1", incarnation, "template-a")
+        };
+        let creator = grant_identity_creation_in_mob(
+            &composed_member_build_authority(incarnation),
+            "mob-1",
+            live(incarnation),
+            ["template-a"],
+        )
+        .expect("the first build mints the scope");
+        assert_eq!(check(Some(&creator)), Ok(()));
+
+        let record = persisted_projection(creator);
+        let (override_mob, restored) =
+            resolve_mob_operator_access(ToolCategoryOverride::Enable, Some(record.clone()));
+        assert_eq!(override_mob, ToolCategoryOverride::Disable);
+        assert!(restored.is_none(), "a record restores no authority");
+        assert!(restore_mob_operator_authority(&record).is_err());
+        assert_eq!(check(Some(&record)), CREATION_REFUSED);
+
+        let rebuilt = composed_member_build_authority(incarnation);
+        assert!(rebuilt.identity_creation_scope().is_empty());
+        assert_eq!(check(Some(&rebuilt)), CREATION_REFUSED);
+
+        let reminted = mint_mob_operator_authority_from_facts(
+            &MobOperatorAuthorityFacts {
+                managed_mob_scope: BTreeSet::from(["mob-1".to_string()]),
+                ..MobOperatorAuthorityFacts::default()
+            },
+            "mob-1",
+            live(incarnation),
+            MobToolCallerProvenance::default(),
+            "req-1",
+        )
+        .expect("a durable record's facts re-mint");
+        assert_eq!(check(Some(&reminted)), CREATION_REFUSED);
+
+        let minted =
+            grant_identity_creation_in_mob(&rebuilt, "mob-1", live(incarnation), ["template-a"])
+                .expect("the rebuild mints the scope again");
+        assert_eq!(check(Some(&minted)), Ok(()));
     }
 }

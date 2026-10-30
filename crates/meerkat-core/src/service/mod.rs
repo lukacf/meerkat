@@ -1622,6 +1622,13 @@ pub struct MobToolAuthorityContext {
     managed_mob_scope: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     spawn_profile_scope: BTreeMap<String, BTreeSet<String>>,
+    /// The identity creation scope: per mob id, the templates an agent
+    /// holding this authority may create identities from there. Part of the
+    /// generated seal, like the incarnation bindings: a persisted projection
+    /// never carries it, so a reader of a projection, an older one included,
+    /// reads none, and the projection grants no creation.
+    #[serde(skip)]
+    identity_creation_scope: BTreeMap<String, BTreeSet<String>>,
     /// The mob incarnation each scoped mob id is bound to: a scope entry
     /// reaches only the mob instance it was granted for. Part of the
     /// generated seal, so a persisted projection binds no mob.
@@ -1654,6 +1661,8 @@ impl MobToolAuthorityContextSeal {
 static EMPTY_MOB_AUTHORITY_MANAGED_SCOPE: LazyLock<BTreeSet<String>> = LazyLock::new(BTreeSet::new);
 static EMPTY_MOB_AUTHORITY_SPAWN_SCOPE: LazyLock<BTreeMap<String, BTreeSet<String>>> =
     LazyLock::new(BTreeMap::new);
+static EMPTY_MOB_AUTHORITY_IDENTITY_CREATION_SCOPE: LazyLock<BTreeMap<String, BTreeSet<String>>> =
+    LazyLock::new(BTreeMap::new);
 static EMPTY_MOB_AUTHORITY_INCARNATIONS: LazyLock<BTreeMap<String, MobIncarnationId>> =
     LazyLock::new(BTreeMap::new);
 static UNTRUSTED_MOB_AUTHORITY_PRINCIPAL: LazyLock<OpaquePrincipalToken> =
@@ -1664,11 +1673,13 @@ impl MobToolAuthorityContext {
         not(any(test, meerkat_internal_generated_authority_bridge)),
         allow(dead_code)
     )]
+    #[allow(clippy::too_many_arguments)]
     fn from_generated_parts(
         principal_token: OpaquePrincipalToken,
         capabilities: MobToolAuthorityCapabilities,
         managed_mob_scope: BTreeSet<String>,
         spawn_profile_scope: BTreeMap<String, BTreeSet<String>>,
+        identity_creation_scope: BTreeMap<String, BTreeSet<String>>,
         mob_incarnations: BTreeMap<String, MobIncarnationId>,
         caller_provenance: Option<MobToolCallerProvenance>,
         audit_invocation_id: Option<String>,
@@ -1679,6 +1690,7 @@ impl MobToolAuthorityContext {
         if let Some(unbound) = managed_mob_scope
             .iter()
             .chain(spawn_profile_scope.keys())
+            .chain(identity_creation_scope.keys())
             .find(|mob_id| !mob_incarnations.contains_key(mob_id.as_str()))
         {
             return Err(format!(
@@ -1693,6 +1705,7 @@ impl MobToolAuthorityContext {
             can_run_adaptive_packs: capabilities.can_run_adaptive_packs,
             managed_mob_scope,
             spawn_profile_scope,
+            identity_creation_scope,
             mob_incarnations,
             caller_provenance,
             audit_invocation_id,
@@ -1701,7 +1714,7 @@ impl MobToolAuthorityContext {
 
     /// A generated-shape context for core's own tests. Every scoped mob is
     /// bound to a fresh incarnation, read back through
-    /// [`Self::mob_incarnations`].
+    /// [`Self::mob_incarnations`]. It holds no identity creation scope.
     #[cfg(test)]
     #[allow(clippy::expect_used, clippy::too_many_arguments)]
     pub(crate) fn generated_for_test(
@@ -1728,6 +1741,7 @@ impl MobToolAuthorityContext {
             },
             managed_mob_scope,
             spawn_profile_scope,
+            BTreeMap::new(),
             mob_incarnations,
             caller_provenance,
             audit_invocation_id,
@@ -1777,6 +1791,17 @@ impl MobToolAuthorityContext {
             &self.spawn_profile_scope
         } else {
             &EMPTY_MOB_AUTHORITY_SPAWN_SCOPE
+        }
+    }
+
+    /// The identity creation scope: per mob id, the templates an agent
+    /// holding this authority may create identities from there. A
+    /// projection holds none.
+    pub fn identity_creation_scope(&self) -> &BTreeMap<String, BTreeSet<String>> {
+        if self.is_generated_authority_context() {
+            &self.identity_creation_scope
+        } else {
+            &EMPTY_MOB_AUTHORITY_IDENTITY_CREATION_SCOPE
         }
     }
 
@@ -1858,6 +1883,25 @@ impl MobToolAuthorityContext {
                 .get(mob_id)
                 .is_some_and(|profiles| profiles.contains(profile))
     }
+
+    /// Raw, atomic observation: whether the operator holds a non-empty
+    /// identity creation scope for the mob `mob_id` at `incarnation`, the
+    /// incarnation of the live mob the caller resolved, never a value
+    /// decoded from input. A host reads it to decide whether a member is
+    /// offered identity creation at all. It is not the creation check: a
+    /// creation commit asks the generated verdict,
+    /// `meerkat_runtime::mob_operator_authority::admit_identity_creation_from_template`.
+    pub fn identity_creation_scope_present(
+        &self,
+        mob_id: &str,
+        incarnation: MobIncarnationId,
+    ) -> bool {
+        self.scope_bound_to(mob_id, incarnation)
+            && self
+                .identity_creation_scope()
+                .get(mob_id)
+                .is_some_and(|templates| !templates.is_empty())
+    }
 }
 
 #[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
@@ -1877,7 +1921,7 @@ unsafe extern "Rust" {
 #[allow(improper_ctypes_definitions, unsafe_code)]
 #[allow(clippy::too_many_arguments)]
 #[unsafe(export_name = concat!(
-    "__meerkat_core_runtime_generated_mob_tool_authority_context_build_v2_",
+    "__meerkat_core_runtime_generated_mob_tool_authority_context_build_v3_",
     env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
 ))]
 pub(crate) extern "Rust" fn runtime_generated_mob_tool_authority_context_build(
@@ -1888,6 +1932,7 @@ pub(crate) extern "Rust" fn runtime_generated_mob_tool_authority_context_build(
     can_run_adaptive_packs: bool,
     managed_mob_scope: BTreeSet<String>,
     spawn_profile_scope: BTreeMap<String, BTreeSet<String>>,
+    identity_creation_scope: BTreeMap<String, BTreeSet<String>>,
     mob_incarnations: BTreeMap<String, MobIncarnationId>,
     caller_provenance: Option<MobToolCallerProvenance>,
     audit_invocation_id: Option<String>,
@@ -1909,6 +1954,7 @@ pub(crate) extern "Rust" fn runtime_generated_mob_tool_authority_context_build(
         },
         managed_mob_scope,
         spawn_profile_scope,
+        identity_creation_scope,
         mob_incarnations,
         caller_provenance,
         audit_invocation_id,
@@ -4843,6 +4889,7 @@ mod tests {
             BTreeSet::from(["mob-1".to_string()]),
             BTreeMap::new(),
             BTreeMap::new(),
+            BTreeMap::new(),
             None,
             None,
         )
@@ -4853,12 +4900,79 @@ mod tests {
             MobToolAuthorityCapabilities::default(),
             BTreeSet::new(),
             BTreeMap::from([("mob-2".to_string(), BTreeSet::from(["worker".to_string()]))]),
+            BTreeMap::new(),
             BTreeMap::from([("mob-1".to_string(), MobIncarnationId::mint())]),
             None,
             None,
         )
         .expect_err("an unbound spawn-profile scope must be refused");
         assert!(error.contains("mob-2"), "{error}");
+        let error = MobToolAuthorityContext::from_generated_parts(
+            OpaquePrincipalToken::new("generated-test"),
+            MobToolAuthorityCapabilities::default(),
+            BTreeSet::new(),
+            BTreeMap::new(),
+            BTreeMap::from([(
+                "mob-3".to_string(),
+                BTreeSet::from(["template".to_string()]),
+            )]),
+            BTreeMap::from([("mob-1".to_string(), MobIncarnationId::mint())]),
+            None,
+            None,
+        )
+        .expect_err("an unbound identity creation scope must be refused");
+        assert!(error.contains("mob-3"), "{error}");
+    }
+
+    /// The identity creation scope is sealed and bound like the other
+    /// scopes: present only at the incarnation it was granted for, and never
+    /// carried by a persisted projection, which reads none.
+    #[test]
+    fn identity_creation_scope_is_sealed_and_bound_to_its_incarnation() {
+        let incarnation = MobIncarnationId::mint();
+        let ctx = MobToolAuthorityContext::from_generated_parts(
+            OpaquePrincipalToken::new("generated-test"),
+            MobToolAuthorityCapabilities::default(),
+            BTreeSet::new(),
+            BTreeMap::new(),
+            BTreeMap::from([
+                (
+                    "mob-1".to_string(),
+                    BTreeSet::from(["template-a".to_string()]),
+                ),
+                ("mob-2".to_string(), BTreeSet::new()),
+            ]),
+            BTreeMap::from([
+                ("mob-1".to_string(), incarnation),
+                ("mob-2".to_string(), incarnation),
+            ]),
+            None,
+            None,
+        )
+        .expect("a bound identity creation scope is generated-shape valid");
+        assert!(ctx.identity_creation_scope_present("mob-1", incarnation));
+        assert!(!ctx.identity_creation_scope_present("mob-1", MobIncarnationId::mint()));
+        assert!(
+            !ctx.identity_creation_scope_present("mob-2", incarnation),
+            "an empty template set allows no creation"
+        );
+        assert!(!ctx.identity_creation_scope_present("mob-3", incarnation));
+
+        let value = serde_json::to_value(ctx).expect("serialize projection");
+        assert!(
+            value.get("identity_creation_scope").is_none(),
+            "a projection never carries the identity creation scope: {value}"
+        );
+        let projected: MobToolAuthorityContext =
+            serde_json::from_value(value).expect("deserialize projection");
+        assert!(projected.identity_creation_scope().is_empty());
+        assert!(!projected.identity_creation_scope_present("mob-1", incarnation));
+        let mut forged = serde_json::to_value(projected).expect("serialize projection");
+        forged["identity_creation_scope"] = serde_json::json!({"mob-1": ["template-a"]});
+        let forged: MobToolAuthorityContext =
+            serde_json::from_value(forged).expect("an unknown key is ignored");
+        assert!(forged.identity_creation_scope().is_empty());
+        assert!(!forged.identity_creation_scope_present("mob-1", incarnation));
     }
 
     /// A mob incarnation is an identity with one spelling: it renders and

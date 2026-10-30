@@ -55,6 +55,23 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.8
+
+This section is for systems running 0.9.7. The full list of changes is in
+the CHANGELOG under `## [0.9.8]`.
+
+### Downgrading to 0.9.7
+
+Durable decisions live in their own file, `approval_decisions.sqlite3`,
+beside `approvals.json` under the store path; 0.9.8 creates it with the first
+hold and changes no other file for them. 0.9.7 never opens that file and reads
+`approvals.json` as before, so a downgrade keeps every approval and leaves the
+decisions untouched. Nothing serves the decisions under 0.9.7: none expires,
+executes or settles its notice. Back on 0.9.8, an open decision past its
+deadline expires at its first read, or when a deadline driver reads the due
+ones, and owes its notice; an approved decision is listed as owed, and runs
+only before its deadline.
+
 ## Upgrading to 0.9.7
 
 This section is for systems running 0.9.6. The full list of changes is in

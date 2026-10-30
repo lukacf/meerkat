@@ -208,5 +208,39 @@ in-memory host provides process-lifetime history. An optional event exporter is
 not the authoritative record, and a missing record after a crash does not prove
 that no effect occurred.
 
+## Durable decisions hold one operation until it is decided
+
+Some operations wait for a decision longer than one run, across restarts. A
+**durable decision** holds one such operation, sealed by the operation id and
+request digest its owner computed, until an attested party decides it, its
+requester or the host withdraws it, or its deadline passes. The operation's
+owner then executes the held request at most once.
+
+- **One subject digest.** A decision binds one canonical rendering of the held
+  request. Core computes its digest from the rendering, and refuses a
+  presentation, decision or review that names another digest. A presentation
+  counts only when it shows every canonical part of the rendering to the party
+  that decides now.
+- **Attested decisions.** A human decides for the decision's approver id with
+  an authenticated decision event and its evidence; the decider's eligibility is
+  checked when the decision commits, the requester never decides its own
+  request, and the first valid decision wins. A decision can name a reviewer
+  instead, whose verdict allows, denies or escalates to the human.
+- **Execution once.** The owner executes an approved decision under an
+  execution permit, issued only before the deadline, and settles it: executed,
+  released (the decision stays approved) or permanently refused. A permit
+  outstanding at the deadline holds the decision until its settlement. Without
+  one, an approved decision expires at its deadline and never runs after it.
+- **One notice.** An ended decision whose requester can be told owes it one
+  notice, settled by its delivery receipt.
+
+Decisions live in their own file beside the approval records,
+`approval_decisions.sqlite3` under the store path, created by the first hold;
+nothing is read at start, and a read touches one decision or one index page. A
+candidate launch reads decisions and writes none. Durable decisions share no
+record, file or machine with the in-run consent above, and `approval/list` never
+shows them. Core adds no wire method for them: a host builds its decision
+surfaces on the Rust owner, `meerkat_runtime::decision::DurableDecisionService`.
+
 Read the [integration and migration guide](/guides/authorization-integration)
 for host responsibilities and the remaining deployment checks.

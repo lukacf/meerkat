@@ -339,8 +339,9 @@ async fn a_pure_observation_behind_completed_issuances_reads_again_within_the_bo
 /// and not past it, and a later wait of the same churn starts nothing: the
 /// host keeps its stale answer.
 ///
-/// RED at v0.9.7: nothing named the unpublished issuance, so the wait
-/// settled after its pause while the issuance still held.
+/// RED at v0.9.7: there was no wait after a stale read, and nothing named the
+/// unpublished issuance, so such a wait would settle after its pause while
+/// the issuance still held.
 #[tokio::test(start_paused = true)]
 async fn a_wait_after_a_stale_read_ends_at_its_deadline_while_an_issuance_holds() {
     let world = World::new();

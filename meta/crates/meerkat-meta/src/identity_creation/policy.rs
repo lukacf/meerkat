@@ -1003,7 +1003,7 @@ fn is_id(value: &str) -> bool {
 
 /// `[A-Za-z0-9][A-Za-z0-9_.:/-]*`, at most 128 bytes: label and context
 /// keys.
-fn is_key(value: &str) -> bool {
+pub(crate) fn is_key(value: &str) -> bool {
     is_ascii_word(value, KEY_MAX_BYTES, |byte| {
         byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'/' | b'-')
     })
@@ -1011,7 +1011,7 @@ fn is_key(value: &str) -> bool {
 
 /// `[A-Za-z0-9_.:/-]`, at most 128 bytes, starting with a letter, digit or
 /// underscore: tool names.
-fn is_tool_name(value: &str) -> bool {
+pub(crate) fn is_tool_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= TOOL_NAME_MAX_BYTES
         && value.bytes().all(|byte| {

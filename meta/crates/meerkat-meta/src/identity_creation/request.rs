@@ -20,8 +20,8 @@ use super::approval::{ApprovalPlan, PlanRequest, plan_approval};
 use super::config::{ChangeClass, CreatorKind, ExcessMode, KickoffRule, PeerOutcome, PeerRelation};
 use super::digest::{Sha256Digest, canonical_digest, canonical_json};
 use super::policy::{
-    CORE_BATCH_MAX, DEFAULT_PEER_RULE_ID, IdentityCreationPolicy, PeerPolicy, PeerRule,
-    SlugRefusal, Template,
+    CORE_BATCH_MAX, CREATION_TOOLS, DEFAULT_PEER_RULE_ID, IdentityCreationPolicy, PeerPolicy,
+    PeerRule, SlugRefusal, Template, is_key, is_tool_name,
 };
 use super::refusal::{
     IdentityRefusal, IdentityRefusalKind, LimitKind, NameTakenBy, RequestProblem,
@@ -39,6 +39,7 @@ pub const REQUEST_BODY_MAX_BYTES: usize = 256 * 1024;
 
 const FORMAT_REQUEST: &str = "meerkat.identity.request.v1";
 const REFERENCE_MAX_BYTES: u64 = 1024;
+const LABEL_VALUE_MAX_BYTES: usize = 256;
 
 /// Who asks, as the transport attributed it: an agent from its session, the
 /// host on one of its surfaces, or a human. Never taken from request
@@ -932,19 +933,39 @@ fn supplied_context(
     Ok(canonical)
 }
 
+/// A request's descriptive labels: keys in the label key alphabet and not
+/// reserved, values of at most 256 bytes without control characters, and
+/// at most `limit` bytes together.
 fn descriptive_labels(
     policy: &IdentityCreationPolicy,
     labels: &BTreeMap<String, String>,
     limit: u64,
     field: &str,
 ) -> Result<BTreeMap<String, String>, IdentityRefusal> {
+    let malformed = IdentityRefusalKind::InvalidRequest {
+        problem: RequestProblem::Malformed,
+    };
     let mut size = 0_u64;
     for (key, value) in labels {
+        if !is_key(key) {
+            return Err(refused(malformed, field));
+        }
         if policy.is_reserved_label(key) || policy.is_reserved_context(key) {
             return Err(refused(
                 IdentityRefusalKind::ReservedKey { key: key.clone() },
                 field,
             ));
+        }
+        if value.len() > LABEL_VALUE_MAX_BYTES {
+            return Err(refused(
+                IdentityRefusalKind::TextTooLarge {
+                    limit: LABEL_VALUE_MAX_BYTES as u64,
+                },
+                format!("{field}.{key}"),
+            ));
+        }
+        if value.chars().any(char::is_control) {
+            return Err(refused(malformed, format!("{field}.{key}")));
         }
         size = size.saturating_add((key.len() + value.len()) as u64);
     }
@@ -1009,8 +1030,11 @@ fn default_tools(template: &Template, creator: CreatorBound<'_>) -> BTreeSet<Str
 
 /// The sealed tools of a request, checked against the template's ceiling
 /// and the creator side (`creator`). In strict mode an excess is refused;
-/// in consequence mode each excess item is a consequence. Returns whether
-/// any excess was stated.
+/// in consequence mode each excess item is a consequence, except a tool no
+/// decision can grant: a name outside the tool-name rule, or a creation
+/// tool on a template that does not grant creation, which are refused
+/// `exceeds_template` in either mode. Returns whether any excess was
+/// stated.
 fn sealed_tools(
     template: &Template,
     creator: CreatorBound<'_>,
@@ -1043,6 +1067,21 @@ fn sealed_tools(
         )),
         ExcessMode::Strict => Ok((sealed, false)),
         ExcessMode::Consequence => {
+            let ungrantable: Vec<String> = outside_template
+                .iter()
+                .filter(|tool| {
+                    !is_tool_name(tool)
+                        || (!template.may_grant_creation()
+                            && CREATION_TOOLS.contains(&tool.as_str()))
+                })
+                .cloned()
+                .collect();
+            if !ungrantable.is_empty() {
+                return Err(refused(
+                    IdentityRefusalKind::ExceedsTemplate { tools: ungrantable },
+                    field,
+                ));
+            }
             for tool in outside_template {
                 consequences.insert(Consequence::new(
                     identity,

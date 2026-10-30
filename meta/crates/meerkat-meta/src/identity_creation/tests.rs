@@ -1685,6 +1685,40 @@ fn normalization_refuses_typed() {
         ),
         spec_case(
             |spec| {
+                spec.descriptive_labels = BTreeMap::from([("bad key".to_owned(), "x".to_owned())]);
+            },
+            IdentityRefusalKind::InvalidRequest {
+                problem: RequestProblem::Malformed,
+            },
+            "identities[0].descriptive_labels",
+        ),
+        spec_case(
+            |spec| {
+                spec.descriptive_labels = BTreeMap::from([(String::new(), "x".to_owned())]);
+            },
+            IdentityRefusalKind::InvalidRequest {
+                problem: RequestProblem::Malformed,
+            },
+            "identities[0].descriptive_labels",
+        ),
+        spec_case(
+            |spec| {
+                spec.descriptive_labels = BTreeMap::from([("note".to_owned(), "a\nb".to_owned())]);
+            },
+            IdentityRefusalKind::InvalidRequest {
+                problem: RequestProblem::Malformed,
+            },
+            "identities[0].descriptive_labels.note",
+        ),
+        spec_case(
+            |spec| {
+                spec.descriptive_labels = BTreeMap::from([("note".to_owned(), "x".repeat(257))]);
+            },
+            IdentityRefusalKind::TextTooLarge { limit: 256 },
+            "identities[0].descriptive_labels.note",
+        ),
+        spec_case(
+            |spec| {
                 spec.supplied_context = Some(BTreeMap::from([("project".to_owned(), json!("x"))]));
             },
             IdentityRefusalKind::ReservedKey {
@@ -1954,6 +1988,41 @@ fn consequence_mode_turns_excess_into_require_approval_with_lines() {
     let refusal =
         create(&policy, &RequesterFacts::host("gateway"), &[open]).expect_err("nobody can decide");
     assert_eq!(refusal.kind, IdentityRefusalKind::ApprovalUnavailable);
+}
+
+#[test]
+fn consequence_mode_refuses_tools_no_decision_can_grant() {
+    let mut value = policy_json();
+    value["templates"]["research"]["excess"] = json!("consequence");
+    let policy = parse(&value);
+    for tool in ["identity_create", "shell\u{202E}", ""] {
+        let mut request = spec("helper");
+        request.tools = Some(vec!["search".to_owned(), tool.to_owned()]);
+        let refusal = create(&policy, &lead(), &[request]).expect_err("no decision can grant it");
+        assert_eq!(
+            refusal.kind,
+            IdentityRefusalKind::ExceedsTemplate {
+                tools: vec![tool.to_owned()]
+            },
+            "{tool:?}"
+        );
+        assert_eq!(refusal.field.as_deref(), Some("identities[0].tools"));
+    }
+
+    // A template that grants creation lets a human decide on a creation
+    // tool beyond its ceiling.
+    value["templates"]["research"]["may_grant_creation"] = json!(true);
+    let granting = parse(&value);
+    let mut request = spec("helper");
+    request.tools = Some(vec!["identity_create".to_owned()]);
+    let normalized = create(&granting, &lead(), &[request]).expect("a human decides");
+    assert!(normalized.plan.raised);
+    assert!(normalized.request.consequences.contains(&Consequence {
+        identity: "team:helper".to_owned(),
+        effect: ConsequenceEffect::ToolOutsideTemplate {
+            tool: "identity_create".to_owned()
+        },
+    }));
 }
 
 #[test]

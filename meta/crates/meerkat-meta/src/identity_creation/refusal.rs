@@ -189,14 +189,18 @@ pub enum RequestProblem {
     /// Two parts of the request contradict each other, such as one peer
     /// both added and removed.
     Conflicting,
+    /// A value outside its form, such as a descriptive label key outside
+    /// the key alphabet or a label value with a control character.
+    Malformed,
 }
 
 impl RequestProblem {
-    /// The stable token (`empty`, `conflicting`).
+    /// The stable token (`empty`, `conflicting`, `malformed`).
     pub fn token(self) -> &'static str {
         match self {
             Self::Empty => "empty",
             Self::Conflicting => "conflicting",
+            Self::Malformed => "malformed",
         }
     }
 }

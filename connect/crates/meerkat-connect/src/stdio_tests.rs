@@ -3634,7 +3634,11 @@ async fn connector_start_retirement_joins_discovery_and_retires_late_attempt() {
     assert!(d.connector_busy);
     let (mut socket, _) = tokio::select! { value=listener.accept()=>value.unwrap(),
     _=d.tasks.next()=>panic!("discovery must wait for controlled response") };
-    let (header, _) = connector_http(&mut socket).await;
+    // The native client writes its request only while the start worker is
+    // polled (its connection must become ready first). Keep driving the
+    // worker while reading, as the driver's own loop does.
+    let (header, _) = tokio::select! { value=connector_http(&mut socket)=>value,
+    _=d.tasks.next()=>panic!("discovery must wait for controlled response") };
     assert!(header.starts_with("GET /.well-known/oauth-authorization-server "));
     retire(&mut d);
     d.settle();

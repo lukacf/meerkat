@@ -4413,7 +4413,7 @@ macro_rules! mob_catalog_machine_dsl {
         // The destroy beats every member lifecycle. A destroyed mob holds
         // no residency, rotation intent, pending host preparation or
         // archive-only retirement, so nothing waits on a rotation or a host
-        // carry-out after it.
+        // carry-out after it, and no identity entry or entry custody.
         invariant destroyed_mob_holds_no_member_lifecycle {
             self.lifecycle_phase != Phase::Destroyed
             || (self.member_materialization == EmptyMap
@@ -4421,7 +4421,9 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.member_rotation_session_ids == EmptyMap
                 && self.member_rotation_peer_endpoints == EmptyMap
                 && self.member_host_preparation_pending == EmptySet
-                && self.runtime_retire_archive_only == EmptySet)
+                && self.runtime_retire_archive_only == EmptySet
+                && self.identity_entry_origins == EmptyMap
+                && self.spawn_exec_entry_custody == EmptySet)
         }
 
         // =====================================================================
@@ -21843,6 +21845,9 @@ macro_rules! mob_catalog_machine_dsl {
                 self.external_peer_edges_by_key = EmptyMap;
                 self.identity_to_runtime = EmptyMap;
                 self.identity_entry_origins = EmptyMap;
+                // No spawn ladder acts for an identity entry after the
+                // destroy.
+                self.spawn_exec_entry_custody = EmptySet;
                 self.member_definition_wiring_exempt = EmptySet;
                 self.identity_runtime_generations = EmptyMap;
                 self.identity_generation_highwater = EmptyMap;

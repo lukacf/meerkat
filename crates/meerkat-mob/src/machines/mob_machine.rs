@@ -12863,4 +12863,32 @@ mod tests {
             "an entry of an unseated identity is refused at recovery"
         );
     }
+
+    /// A placed spawn never acts for an identity entry: the remote ladder
+    /// has no arm for an input that carries entry custody
+    /// (`placed_spawn_without_entry_custody`), while the same input without
+    /// it opens the ladder.
+    #[test]
+    fn a_placed_spawn_with_entry_custody_has_no_arm() {
+        let identity = AgentIdentity::from("placed-entry");
+        let host = HostId("entry-placed-host".to_string());
+        let spawn_id = PlacedSpawnId("entry-placed-spawn".to_string());
+        let mut authority = MobMachineAuthority::new();
+        authorize_remote_placed_spawn(&mut authority, &identity, &host, "spec-digest");
+        let mut with_custody = begin_remote_placed_spawn(&identity, &host, &spawn_id);
+        if let MobMachineInput::BeginSpawnExec { entry_custody, .. } = &mut with_custody {
+            *entry_custody = true;
+        }
+        assert!(
+            MobMachineMutator::apply(&mut authority, with_custody).is_err(),
+            "the remote ladder refuses entry custody"
+        );
+        assert!(authority.state().spawn_exec_entry_custody.is_empty());
+        assert!(!authority.state().spawn_exec_phase.contains_key(&identity));
+        MobMachineMutator::apply(
+            &mut authority,
+            begin_remote_placed_spawn(&identity, &host, &spawn_id),
+        )
+        .expect("the same placed spawn without entry custody opens its ladder");
+    }
 }

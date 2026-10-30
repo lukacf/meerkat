@@ -24,6 +24,7 @@ import {
   agentDisplayName,
   agentInitial,
   createAgentDirectory,
+  formatDuration,
   formatRelativeTime,
   humanizeEnum,
   joinMeta,
@@ -96,6 +97,12 @@ describe("copy helpers", () => {
     expect(humanizeEnum("in-progress")).toBe("In progress");
     expect(humanizeEnum("toolCallRequested")).toBe("Tool call requested");
     expect(humanizeEnum("")).toBe("");
+  });
+
+  it("rounds short durations down so a minute never reads as 60 s", () => {
+    expect(formatDuration(59_600)).toBe("59 s");
+    expect(formatDuration(60_000)).toBe("1 min");
+    expect(formatDuration(4 * 60_000 + 20_000)).toBe("4 min");
   });
 
   it("joins parts with the middle dot and skips empty ones", () => {

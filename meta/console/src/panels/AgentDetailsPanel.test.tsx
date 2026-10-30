@@ -153,6 +153,19 @@ describe("HealthPanel", () => {
     expect(onOpen.mock.calls[0]?.[0]).toBe("identity:writer");
   });
 
+  it("makes a row a button only when its agent's details can open", () => {
+    const view = render(
+      <HealthPanel
+        identities={rows}
+        stateLabel={identityStateLabel}
+        onOpen={() => {}}
+        canOpen={(identity) => identity !== "identity:monitor"}
+      />,
+    );
+    expect(view.getByTestId("health-identity:identity:writer").tagName).toBe("BUTTON");
+    expect(view.getByTestId("health-identity:identity:monitor").tagName).toBe("DIV");
+  });
+
   it("has a designed empty state", () => {
     const view = render(<HealthPanel identities={[]} stateLabel={identityStateLabel} />);
     expect(view.getByText("No agents to report on yet").className).toBe("cc-panel-empty__title");

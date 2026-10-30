@@ -95,6 +95,8 @@ export function rosterActivity(agent: ConsoleAgent): string {
   if (state === "retiring") return "retiring";
   if (isRetired(agent)) return "retired";
   if (state === "broken") return "needs attention";
+  // A wedged agent still has its run open; it is stuck, not working.
+  if (agent.progress?.health === "wedged") return "stalled";
   switch (agent.response_phase) {
     case "generating":
       return "writing a reply";

@@ -231,7 +231,7 @@ export function SchedulesSection({
       data-testid={`schedules:${identity}`}
     >
       <div className="cc-section-head console-schedules__head">
-        <h4 id={headingId} className="cc-section-head__label">Schedules</h4>
+        <h3 id={headingId} className="cc-section-head__label">Schedules</h3>
         <div className="cc-section-head__action">
           <button
             type="button"

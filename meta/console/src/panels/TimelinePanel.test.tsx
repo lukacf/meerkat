@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { render } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
-import { describeTodayFrame } from "./TimelinePanel";
+import { TimelinePanel, describeTodayFrame } from "./TimelinePanel";
 import { rememberOwnSend } from "../lib/turn-origin";
 import type { ConsoleFrame } from "../types";
 
@@ -28,5 +29,17 @@ describe("Today names who sent a turn", () => {
       .toBe("You asked identity:nightly-monitor");
     expect(sentence(userInput("e", { content: "Probe", origin: "release-gate", origin_kind: "operator_probe" })))
       .toBe("An operator check asked identity:nightly-monitor");
+  });
+});
+
+describe("Today rows", () => {
+  it("renders a frame that arrives twice without colliding React keys", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const frame: ConsoleFrame = { id: "twice", event: "interaction_complete", identity: "identity:coordinator", interactionId: "turn-1", timestampMs: Date.now(), data: { result: "Done." } };
+    const view = render(<TimelinePanel frames={[frame, { ...frame }]} />);
+    const collisions = errors.mock.calls.filter((call) => /same key/.test(String(call[0])));
+    errors.mockRestore();
+    expect(collisions.length).toBe(0);
+    expect(view.container.querySelectorAll(".today__row").length).toBe(2);
   });
 });

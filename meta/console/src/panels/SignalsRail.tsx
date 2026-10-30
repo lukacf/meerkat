@@ -712,7 +712,7 @@ export const SignalsRail = React.memo(function SignalsRail({
                     onSelect(s.items[0].raw);
                   }}
                 >
-                  State here
+                  Open in Memory
                 </button>
               ) : null}
               {s.items.length > 1 && expanded && (

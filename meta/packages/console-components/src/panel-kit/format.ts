@@ -79,7 +79,8 @@ export function formatClockTime(value: TimeInput): string {
 /** A short duration: "4 min", "45 s", "2 h 5 min". */
 export function formatDuration(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return "";
-  if (ms < MINUTE) return `${Math.max(0, Math.round(ms / SECOND))} s`;
+  // Seconds round down, so 59.6 s reads "59 s" and never "60 s".
+  if (ms < MINUTE) return `${Math.max(0, Math.floor(ms / SECOND))} s`;
   if (ms < HOUR) return `${Math.round(ms / MINUTE)} min`;
   const hours = Math.floor(ms / HOUR);
   const minutes = Math.round((ms % HOUR) / MINUTE);

@@ -5505,6 +5505,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       <HealthPanel
         identities={identities}
         stateLabel={identityStateLabel}
+        canOpen={(identity) => agents.some((candidate) => candidate.identity === identity || candidate.member_id === identity)}
         onOpen={(identity) => {
           const agent = agents.find((candidate) => candidate.identity === identity || candidate.member_id === identity);
           if (agent) handleShowRosterDetails(agent);

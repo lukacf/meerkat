@@ -250,8 +250,10 @@ export function TimelinePanel({ frames }: TimelinePanelProps): React.JSX.Element
           />
         ) : (
           <ol className="today__list">
-            {entries.map(({ key, ms, line }) => (
-              <li className="today__row" key={key}>
+            {entries.map(({ key, ms, line }, index) => (
+              // A frame can arrive twice (live and history copies): the
+              // position keeps the keys apart.
+              <li className="today__row" key={`${key}:${index}`}>
                 <time className="today__time" dateTime={new Date(ms).toISOString()} title={formatAbsoluteTime(ms)}>
                   {formatClockTime(ms)}
                 </time>

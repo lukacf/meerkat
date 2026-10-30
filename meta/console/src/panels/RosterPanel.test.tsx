@@ -68,6 +68,8 @@ describe("Roster words", () => {
     expect(rosterActivity({ ...coordinator, progress: { ...coordinator.progress!, in_flight_work: 3 } })).toBe("working on 3 tasks");
     expect(rosterActivity({ ...coordinator, progress: { ...coordinator.progress!, run_state: "idle", in_flight_work: 0 } })).toBe("idle");
     expect(rosterActivity(monitor)).toBe("retired");
+    // A stalled agent's run is still open; it is not "working".
+    expect(rosterActivity(writer)).toBe("stalled");
   });
 
   it("raises a chip only for health problems and never tones status with the accent", () => {

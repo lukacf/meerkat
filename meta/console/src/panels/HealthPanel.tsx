@@ -24,10 +24,14 @@ export function HealthPanel({
   identities,
   stateLabel,
   onOpen,
+  canOpen,
 }: {
   identities: IdentityStatusRow[];
   stateLabel: (row: IdentityStatusRow) => string;
   onOpen?: (identity: string) => void;
+  /** Whether a row's agent has details to open; rows that cannot open are
+   * not buttons. */
+  canOpen?: (identity: string) => boolean;
 }): React.JSX.Element {
   const rows = identities.map((row) => ({ row, status: agentStatusChip(stateLabel(row), row.progress?.health) }));
   const count = (label: string) => rows.filter((entry) => entry.status.label === label).length;
@@ -58,7 +62,7 @@ export function HealthPanel({
                 <ListRow
                   key={row.identity}
                   testId={`health-identity:${row.identity}`}
-                  onActivate={onOpen ? () => onOpen(row.identity) : undefined}
+                  onActivate={onOpen && (canOpen ? canOpen(row.identity) : true) ? () => onOpen(row.identity) : undefined}
                   lead={<StatusDot tone={status.tone} />}
                   title={row.display_name || row.identity}
                   titleAttr={row.identity}

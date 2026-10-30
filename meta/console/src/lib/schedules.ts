@@ -312,6 +312,29 @@ export function describeSchedulePhase(phase: string): string {
   return phase;
 }
 
+/**
+ * Who a schedule sends as, in words. An agent reads by its name, a console
+ * identity ("console:shared") as "the shared console identity", and any
+ * other principal (an email address, a token subject) as it is. A schedule
+ * without a sender sends as the console's shared account: "this console".
+ * The raw sender stays the line's tooltip.
+ */
+export function describeScheduleSender(
+  sender: string | null | undefined,
+  agentName: (sender: string) => string | undefined = () => undefined,
+): string {
+  const raw = typeof sender === "string" ? sender.trim() : "";
+  if (!raw) return "this console";
+  const named = agentName(raw)?.trim();
+  if (named) return named;
+  const consoleIdentity = /^console:(.+)$/i.exec(raw);
+  if (consoleIdentity) {
+    const words = consoleIdentity[1].replace(/[_\-.:]+/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+    if (words) return `the ${words} console identity`;
+  }
+  return raw;
+}
+
 /** How the form says when a schedule fires. `keep` leaves an edited schedule's timing as it is. */
 export type ConsoleScheduleTimingKind = "keep" | "once" | "interval" | "daily";
 

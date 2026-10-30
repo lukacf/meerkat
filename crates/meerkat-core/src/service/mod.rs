@@ -4292,7 +4292,7 @@ mod tests {
                 ))
             })
             .collect();
-        let visibility_owner: Arc<dyn crate::tool_scope::ToolVisibilityOwner> = Arc::clone(&owner);
+        let visibility_owner: Arc<dyn crate::tool_scope::ToolVisibilityOwner> = owner.clone();
         let scope = crate::ToolScope::new_with_visibility_owner(
             tools,
             std::collections::HashSet::new(),

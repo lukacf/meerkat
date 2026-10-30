@@ -1,4 +1,5 @@
 import { act, fireEvent, render } from "@testing-library/react";
+import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -13,9 +14,11 @@ import {
   PanelHeader,
   PanelTabs,
   RelativeTime,
+  RowList,
   SearchField,
   SegmentedControl,
   SelectField,
+  SplitDetail,
   StatTile,
   StatusDot,
   StatusRow,
@@ -532,5 +535,152 @@ describe("rows and controls", () => {
     expect(view.getByTestId("denied").querySelector('[data-glyph="shield"]') !== null).toBe(true);
     expect(view.getByTestId("notice").getAttribute("data-tone")).toBe("warn");
     expect(view.getByText("This connection is read-only.").className).toBe("cc-notice__text");
+  });
+});
+
+describe("SplitDetail", () => {
+  const AGENTS = [
+    { id: "coordinator", name: "Coordinator" },
+    { id: "analyst", name: "Research Analyst" },
+  ];
+
+  // A roster-like list and detail. `narrow` adds the narrow pane's rule that
+  // hides the list under an open detail (jsdom runs no container queries).
+  function Harness({
+    narrow,
+    heading = true,
+    markSelection = true,
+    rekeyOnBack = false,
+  }: {
+    narrow: boolean;
+    heading?: boolean;
+    markSelection?: boolean;
+    rekeyOnBack?: boolean;
+  }) {
+    const [selected, setSelected] = useState<string | null>(null);
+    const [open, setOpen] = useState(false);
+    const [generation, setGeneration] = useState(0);
+    const name = AGENTS.find((agent) => agent.id === selected)?.name ?? "";
+    return (
+      <div>
+        {narrow ? <style>{".cc-split.has-detail .cc-split__list { visibility: hidden; }"}</style> : null}
+        <button type="button" data-testid="outside" onClick={() => { setSelected("analyst"); setOpen(true); }}>
+          Show the analyst
+        </button>
+        <SplitDetail
+          testId="split"
+          list={(
+            <RowList>
+              {AGENTS.map((agent) => (
+                <ListRow
+                  key={`${agent.id}:${generation}`}
+                  title={agent.name}
+                  testId={`row:${agent.id}`}
+                  selected={markSelection && selected === agent.id}
+                  onActivate={() => { setSelected(agent.id); setOpen(true); }}
+                />
+              ))}
+            </RowList>
+          )}
+          detail={selected ? (
+            <div>
+              {heading ? <h3 data-testid="detail-heading">{name}</h3> : <p>{name}</p>}
+              <button type="button" onClick={() => setSelected("coordinator")}>Show the coordinator</button>
+            </div>
+          ) : null}
+          emptyDetail={<p data-testid="empty-detail">Select an agent.</p>}
+          detailOpen={open}
+          onBack={() => {
+            setOpen(false);
+            if (rekeyOnBack) setGeneration((value) => value + 1);
+          }}
+          backLabel="All agents"
+        />
+      </div>
+    );
+  }
+
+  const activeTestId = () => document.activeElement?.getAttribute("data-testid") ?? null;
+
+  it("shows the empty detail, then the detail with a Back row once opened", () => {
+    const view = render(<Harness narrow={false} />);
+    const split = view.getByTestId("split");
+    expect(split.classList.contains("has-detail")).toBe(false);
+    expect(view.queryByTestId("empty-detail") !== null).toBe(true);
+    expect(view.queryByRole("button", { name: "All agents" }) === null).toBe(true);
+    fireEvent.click(view.getByTestId("row:analyst"));
+    expect(split.classList.contains("has-detail")).toBe(true);
+    expect(view.getByTestId("detail-heading").textContent).toBe("Research Analyst");
+    expect(view.queryByTestId("empty-detail") === null).toBe(true);
+    expect(view.getByRole("button", { name: "All agents" }).classList.contains("cc-split__back")).toBe(true);
+  });
+
+  it("moves focus into a detail that replaces the list, and back to its row on Back", () => {
+    const view = render(<Harness narrow />);
+    const row = view.getByTestId("row:analyst");
+    row.focus();
+    fireEvent.click(row);
+    expect(view.getByTestId("split").classList.contains("has-detail")).toBe(true);
+    expect(activeTestId()).toBe("detail-heading");
+    expect(view.getByTestId("detail-heading").getAttribute("tabindex")).toBe("-1");
+
+    const back = view.getByRole("button", { name: "All agents" });
+    back.focus();
+    fireEvent.click(back);
+    expect(view.getByTestId("split").classList.contains("has-detail")).toBe(false);
+    expect(activeTestId()).toBe("row:analyst");
+  });
+
+  it("focuses the detail itself when it has no heading", () => {
+    const view = render(<Harness narrow heading={false} />);
+    const row = view.getByTestId("row:coordinator");
+    row.focus();
+    fireEvent.click(row);
+    expect(document.activeElement?.classList.contains("cc-split__detail")).toBe(true);
+    expect(document.activeElement?.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("returns focus to the row the detail shows after moving to another agent", () => {
+    const view = render(<Harness narrow />);
+    const row = view.getByTestId("row:analyst");
+    row.focus();
+    fireEvent.click(row);
+    fireEvent.click(view.getByRole("button", { name: "Show the coordinator" }));
+    expect(view.getByTestId("detail-heading").textContent).toBe("Coordinator");
+    const back = view.getByRole("button", { name: "All agents" });
+    back.focus();
+    fireEvent.click(back);
+    expect(activeTestId()).toBe("row:coordinator");
+  });
+
+  it("finds the opening row again by its test ID when the list re-rendered it", () => {
+    const view = render(<Harness narrow markSelection={false} rekeyOnBack />);
+    const row = view.getByTestId("row:analyst");
+    row.focus();
+    fireEvent.click(row);
+    expect(activeTestId()).toBe("detail-heading");
+    const back = view.getByRole("button", { name: "All agents" });
+    back.focus();
+    fireEvent.click(back);
+    expect(row.isConnected).toBe(false);
+    expect(activeTestId()).toBe("row:analyst");
+    expect(document.activeElement?.tagName).toBe("BUTTON");
+  });
+
+  it("leaves focus alone side by side, and when it was outside the list", () => {
+    const wide = render(<Harness narrow={false} />);
+    const row = wide.getByTestId("row:analyst");
+    row.focus();
+    fireEvent.click(row);
+    expect(wide.getByTestId("split").classList.contains("has-detail")).toBe(true);
+    expect(activeTestId()).toBe("row:analyst");
+    wide.unmount();
+
+    const narrow = render(<Harness narrow />);
+    const outside = narrow.getByTestId("outside");
+    outside.focus();
+    fireEvent.click(outside);
+    expect(narrow.getByTestId("split").classList.contains("has-detail")).toBe(true);
+    expect(activeTestId()).toBe("outside");
   });
 });

@@ -1148,6 +1148,11 @@ button.cc-tile:focus-visible,
   border-left: 1px solid var(--_cc-border-soft);
   background: var(--_cc-surface-card);
 }
+/* Focus lands here when a detail without a heading replaces the list. */
+.cc-split__detail:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: -2px;
+}
 .cc-split__back {
   display: none;
   align-items: center;

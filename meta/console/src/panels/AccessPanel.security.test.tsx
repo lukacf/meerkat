@@ -30,7 +30,7 @@ describe("backend-owned access affordances", () => {
     const input = props();
     render(<AccessPanel {...input} status={{ ...input.status, actions: [] }} />);
     fireEvent.click(screen.getByTestId("access-tab:preview"));
-    expect(screen.queryByRole("option", { name: "agent.view", exact: true })).toBeNull();
+    expect(document.querySelector('option[value="agent.view"]') === null).toBe(true);
     fireEvent.change(screen.getByTestId("access-preview-subject"), { target: { value: "operator@example.test" } });
     expect(screen.getByTestId("access-preview-run")).toBeDisabled();
     expect(input.onPreview).not.toHaveBeenCalled();
@@ -56,7 +56,7 @@ describe("backend-owned access affordances", () => {
     render(<AccessPanel {...input} status={{ ...input.status, actions: ["custom.current.action"] }} />);
     fireEvent.click(screen.getByTestId("access-tab:preview"));
     expect(screen.getByRole("option", { name: "custom.current.action" })).toBeVisible();
-    expect(screen.queryByRole("option", { name: "access.admin", exact: true })).toBeNull();
+    expect(document.querySelector('option[value="access.admin"]') === null).toBe(true);
     expect(screen.getByTestId("access-preview-action")).toHaveValue("custom.current.action");
   });
   it("invalidates completed and pending previews on owner revision refresh", async () => {
@@ -475,5 +475,34 @@ describe("rule editor identity", () => {
     expect(idField.readOnly).toBe(false);
     fireEvent.change(idField, { target: { value: "ops-view-specialists" } });
     expect(idField.value).toBe("ops-view-specialists");
+  });
+});
+
+describe("permission words", () => {
+  it("names known permissions in words and keeps the key in the tooltip and the option value", () => {
+    const input = props();
+    const rule = { id: "ops-view", description: "Ops can see and message agents", effect: "allow" as const, actions: ["agent.view", "agent.send"] };
+    render(
+      <AccessPanel
+        {...input}
+        status={{ ...input.status, actions: ["agent.view", "agent.send", "custom.current.action"] }}
+        config={{ ...input.config, rules: [rule] }}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    const card = screen.getByTestId("access-rule:ops-view");
+    const chips = Array.from(card.querySelectorAll(".cc-chip")).map((chip) => [chip.textContent, chip.getAttribute("title")]);
+    expect(chips).toContainEqual(["View agents", "agent.view"]);
+    expect(chips).toContainEqual(["Message agents", "agent.send"]);
+    expect(chips.some(([text]) => text === "agent.view" || text === "agent.send")).toBe(false);
+
+    fireEvent.click(screen.getByTestId("access-rule-edit:ops-view"));
+    expect(screen.getByTestId("access-rule-action:agent.view").textContent).toBe("View agents");
+    expect(screen.getByTestId("access-rule-action:custom.current.action").textContent).toBe("custom.current.action");
+
+    fireEvent.click(screen.getByTestId("access-tab:preview"));
+    const option = screen.getByRole("option", { name: "View agents" }) as HTMLOptionElement;
+    expect(option.value).toBe("agent.view");
+    expect((screen.getByRole("option", { name: "custom.current.action" }) as HTMLOptionElement).value).toBe("custom.current.action");
   });
 });

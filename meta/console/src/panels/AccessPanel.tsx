@@ -8,6 +8,7 @@ import type {
   ConsoleAccessStatus,
 } from "../types";
 import { accessSaveNotice } from "../lib/errors";
+import { accessActionLabel, isKnownAccessAction } from "../lib/access-actions";
 import {
   AgentAvatar,
   Button,
@@ -25,6 +26,7 @@ import {
   RowList,
   SectionHeader,
   SelectField,
+  TechnicalDetails,
   TechnicalId,
   Toolbar,
   agentDisplayName,
@@ -273,7 +275,9 @@ function RuleCard({
   ) : "Everyone";
   const what = rule.actions.length ? (
     <span className="cc-chips">
-      {rule.actions.map((action) => <Chip key={action} mono title={action}>{action}</Chip>)}
+      {rule.actions.map((action) => (
+        <Chip key={action} mono={!isKnownAccessAction(action)} title={action}>{accessActionLabel(action)}</Chip>
+      ))}
     </span>
   ) : "No actions";
   const on = agents.length || roles.length || labels.length ? (
@@ -295,6 +299,12 @@ function RuleCard({
           { label: "Who", value: who },
           { label: "What", value: what },
           { label: "On", value: on },
+        ]}
+      />
+      <TechnicalDetails
+        className="access-panel__rule-tech"
+        items={[
+          rule.actions.length ? { label: "Permission keys", value: rule.actions.join(", "), plain: true } : null,
         ]}
       />
       {actions ? <div className="access-panel__rule-actions">{actions}</div> : null}
@@ -615,6 +625,7 @@ export function AccessPanel({
               aria-pressed={selected}
               data-selected={selected ? "true" : "false"}
               data-testid={`access-rule-action:${action}`}
+              title={action}
               onClick={() =>
                 setRuleDraft({
                   ...ruleDraft,
@@ -625,7 +636,7 @@ export function AccessPanel({
               }
             >
               {selected ? <KitGlyph name="check" className="access-panel__action-mark" /> : null}
-              {action}
+              {accessActionLabel(action)}
             </button>
           );
         })}
@@ -953,7 +964,7 @@ export function AccessPanel({
                   testId="access-preview-action"
                   value={previewAction}
                   onChange={(value) => setPreviewAction(value)}
-                  options={actions.map((action) => ({ value: action, label: action }))}
+                  options={actions.map((action) => ({ value: action, label: accessActionLabel(action) }))}
                 />
                 <SelectField
                   label="Agent"

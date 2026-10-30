@@ -3242,6 +3242,8 @@ svg[data-svg="fit"],
   overflow-wrap: anywhere;
 }
 .access-panel__rule-id { margin-top: -4px; }
+.access-panel__rule-tech { margin-top: 2px; }
+.access-panel__rule-tech .cc-kv dd { font-family: var(--mono); font-size: 11px; color: var(--ink-meta); }
 .access-panel__rule-actions {
   display: flex;
   flex-wrap: wrap;

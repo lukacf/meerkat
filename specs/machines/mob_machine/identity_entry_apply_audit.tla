@@ -38,7 +38,9 @@
 \*     already gone, its session archived or not, its incarnation local or
 \*     hosted elsewhere); the replay of its start row (marking it, or stale);
 \*     its declarations, the seal, the build seed's composition authority,
-\*     Stop and Resume, and the mob's reset.
+\*     Stop, Resume and Complete, and the mob's reset from each phase it
+\*     leaves (its intent, its preflight with member 2 seated or not, and
+\*     its commit on an empty roster).
 \*   roles (RolesSpec): member 1 recovered and made an entry by the replay of
 \*     its row, declared under its own role and mode, another role (with the
 \*     migration declared from its role or not) or another mode, on a durable
@@ -104,10 +106,15 @@
 \*     action properties.
 \*   legacy: AuditMarkReplayExactlyOne (invariant, ENABLED form: exactly one
 \*     arm answers the replay of a start row, while the replay runs);
-\*     AuditReplayRecordsOnlyArchived (the replay records an archived session
-\*     only when its row archived it); AuditHostedReplayKeepsHosted (the
-\*     replay of a hosted incarnation's retirement keeps the entry hosted on
-\*     its first use, with no record); both action properties.
+\*     AuditResetPreflightAgrees (invariant, ENABLED form: on an empty
+\*     roster the reset's preflight admits exactly the resets the mob
+\*     commits); AuditReplayRecordsOnlyArchived (the replay records an
+\*     archived session only when its row archived it);
+\*     AuditHostedReplayKeepsHosted (the replay of a hosted incarnation's
+\*     retirement keeps the entry hosted on its first use, with no record);
+\*     AuditResetOnEmptyRoster (the reset commits only on an empty roster);
+\*     AuditResetPreflightChangesNothing (the preflight changes nothing);
+\*     the last four action properties.
 \*   roles: AuditRolesDeclareExactlyOne; AuditHostPreparationNeverWoken
 \*     (action property: no wake opens an attempt for a member with a host
 \*     preparation cause; the run drives WakeMember and the boot plan, and no
@@ -297,6 +304,12 @@ AMark == \E rid \in {Rid1, Rid3} : RecoverIdentityEntryRetiringMarkedRunning(Id1
 
 ASeed == \E authority \in {"Authoritative", "NonAuthoritative"} : SeedMemberResidencyRunning("OnDemand", authority, {})
 AQuiesceReset == BeginPlacedCompletionLifecycleQuiesceFresh("Reset")
+\* The reset's intent in a stopped and a completed mob (each takes over the
+\* quiesce its Stop or Complete began), and the reset's preflight in each
+\* phase a reset leaves.
+AQuiesceResetStopped == BeginPlacedCompletionLifecycleQuiesceStoppedReplay("Reset")
+AQuiesceResetCompleted == BeginPlacedCompletionLifecycleQuiesceCompletedReplay("Reset")
+AdmitReset == AdmitResetRunning \/ AdmitResetStopped \/ AdmitResetCompleted
 
 \* Member 2 (the legacy run): a legacy member the replay recovered, a
 \* worker until adopted, retired (archive-only) in a running mob and ended
@@ -361,7 +374,9 @@ ApplySpec == Init /\ [][ApplyNext]_vars
 \* The legacy run: member 2 recovered by replay, a worker until its
 \* adoption, then unlisted and retired to every copy of the plain end; its
 \* declarations, the seal, the replay of its unlisted retirement's mark, the
-\* build seed's composition authority, Stop and Resume, and the mob's reset.
+\* build seed's composition authority, Stop, Resume and Complete, and the
+\* mob's reset from each phase it leaves: its intent, its preflight (with
+\* member 2 seated or not) and its commit, which needs the roster empty.
 LegacyNext ==
     \/ ASeed
     \/ \E s \in ApplyShapes : DeclareArm(Id2, s)
@@ -379,7 +394,12 @@ LegacyNext ==
     \/ AuditQuiesceStop
     \/ StopRunning
     \/ ResumeStopped
+    \/ AuditQuiesceComplete
+    \/ CompleteRunning
     \/ AQuiesceReset
+    \/ AQuiesceResetStopped
+    \/ AQuiesceResetCompleted
+    \/ AdmitReset
     \/ ResetToRunning
 
 LegacySpec == Init /\ [][LegacyNext]_vars
@@ -488,6 +508,19 @@ AuditHostedReplayKeepsHosted ==
          => (UnseatedNext(Id2) = Some("HostedOnFirstUse") /\ RecordNext(Id2) = Record(Id2))
       ]_vars
 
+\* The reset commits only on an empty roster: its retirement batch ended
+\* every member's retirement first, so no member before it is a member
+\* after it.
+AuditResetOnEmptyRoster == [][ResetToRunning => DOMAIN identity_to_runtime = {}]_vars
+
+\* The reset's preflight is a verdict: it changes nothing.
+AuditResetPreflightChangesNothing == [][AdmitReset => StateView' = StateView]_vars
+
+\* On an empty roster the preflight admits exactly the resets the mob
+\* commits: every other guard of the reset is the preflight's.
+AuditResetPreflightAgrees ==
+    DOMAIN identity_to_runtime = {} => (ENABLED AdmitReset <=> ENABLED ResetToRunning)
+
 \* Witnesses of the apply and legacy runs (the legacy run's name member 2).
 \* A legacy member adopted, then unlisted by the seal and retired: the end
 \* of its retirement removes the entry.
@@ -594,6 +627,12 @@ AuditWitnessInFlight == DeclareIdentityEntryLifecycleInFlight(Id1, AuditProfile,
 \* A mob reset and a destroy with entries present.
 AuditWitnessResetEndsEntries == Entries # {} /\ ResetToRunning
 AuditWitnessDestroyEndsEntries == Entries # {} /\ DestroyFromAny
+\* The reset's preflight admits a mob with member 2 seated, whose
+\* retirement the reset's batch then ends.
+AuditWitnessPreflightAdmitsMembers == Id2 \in DOMAIN identity_to_runtime /\ AdmitReset
+\* The reset after member 2's retirement ended with its entry kept unseated
+\* and its archived session recorded: the reset ends the entry.
+AuditWitnessResetEndsRetiredEntry == Id2 \in Entries /\ Record(Id2) # None /\ ResetToRunning
 
 NotAuditWitnessAdoptedThenUnlisted == [][~AuditWitnessAdoptedThenUnlisted]_vars
 NotAuditWitnessUnlistedEndStopped == [][~AuditWitnessUnlistedEndStopped]_vars
@@ -618,6 +657,8 @@ NotAuditWitnessHostAdopted == [][~AuditWitnessHostAdopted]_vars
 NotAuditWitnessInFlight == [][~AuditWitnessInFlight]_vars
 NotAuditWitnessResetEndsEntries == [][~AuditWitnessResetEndsEntries]_vars
 NotAuditWitnessDestroyEndsEntries == [][~AuditWitnessDestroyEndsEntries]_vars
+NotAuditWitnessPreflightAdmitsMembers == [][~AuditWitnessPreflightAdmitsMembers]_vars
+NotAuditWitnessResetEndsRetiredEntry == [][~AuditWitnessResetEndsRetiredEntry]_vars
 
 (***************************************************************************)
 (* The roles run.                                                          *)

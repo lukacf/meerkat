@@ -1445,6 +1445,13 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         input: MobMachineCatalogInput::CloseDeclaredApply,
         reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
     },
+    MobMachineRuntimeInternalClassificationRecord {
+        // The reset's preflight admission is decided by MobMachine from the
+        // reset's guards but its empty roster; the actor probes it before the
+        // retirement batch that empties the roster. Not a surface command.
+        input: MobMachineCatalogInput::AdmitReset,
+        reason: MobMachineRuntimeInternalReason::SurfaceResultClassificationAuthority,
+    },
 ];
 
 #[doc(hidden)]

@@ -645,6 +645,10 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "CloseDeclaredApplyStopped",
             "CloseDeclaredApplyCompleted",
             "CloseDeclaredApplyDestroyed",
+            // The reset's preflight admission (0.9.9).
+            "AdmitResetRunning",
+            "AdmitResetStopped",
+            "AdmitResetCompleted",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

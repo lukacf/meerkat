@@ -4900,6 +4900,9 @@ runtime_internal_inputs!(
         // apply by the handle. Neither is a surface command.
         OpenDeclaredApply,
         CloseDeclaredApply,
+        // The reset's preflight admission, probed by the actor before the
+        // reset's retirement batch. Not a surface command.
+        AdmitReset,
     ]
 );
 

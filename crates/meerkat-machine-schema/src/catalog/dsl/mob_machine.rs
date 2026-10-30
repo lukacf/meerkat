@@ -2008,6 +2008,9 @@ macro_rules! mob_catalog_machine_dsl {
             OpenDeclaredApply,
             // The open declared apply closes, whatever its outcome.
             CloseDeclaredApply,
+            // The reset's preflight (MobHandle::reset probes it before its
+            // retirement batch empties the roster): a pure verdict.
+            AdmitReset,
         }
 
         surface_only [
@@ -15514,6 +15517,10 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.lifecycle_phase == Phase::Stopped
                 || self.lifecycle_phase == Phase::Completed
             }
+            // No member before the reset is a member after it: the reset
+            // commits only once its retirement batch emptied the roster. Its
+            // preflight (AdmitReset) admits a mob with members.
+            guard "roster_empty" { self.identity_to_runtime == EmptyMap }
             guard "remote_turn_pending_drained" { self.pending_remote_turn_outcomes == EmptySet }
             guard "remote_turn_committed_drained" { self.committed_remote_turn_outcomes == EmptySet }
             guard "remote_turn_resolved_drained" { self.resolved_remote_turn_outcomes == EmptySet }
@@ -29596,6 +29603,39 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.declared_apply_open = false;
             }
+            to Running
+        }
+
+        // The reset's preflight: the shell probes it before the retirement
+        // batch that empties the roster, which ResetToRunning then requires.
+        // Admitted exactly when every guard of ResetToRunning but the empty
+        // roster holds, in each phase a reset leaves; a pure verdict that
+        // changes nothing. No arm answers a destroyed mob or a reset that
+        // must wait (a resume attempt, adaptive work, remote or placed
+        // custody, no reset intent): the shell answers the reset an invalid
+        // transition. Appended after every published transition.
+        transition AdmitReset {
+            per_phase [Running, Stopped, Completed]
+            on input AdmitReset
+            guard "explicit_resume_settled" { self.explicit_resume_attempt == None }
+            guard "adaptive_lifecycle_drained" {
+                mob_machine_adaptive_lifecycle_drained(
+                    self.adaptive_active_run,
+                    self.adaptive_active_layer,
+                    self.adaptive_active_members,
+                    self.adaptive_layer_phase,
+                    self.adaptive_layer_disposition)
+            }
+            guard "remote_turn_pending_drained" { self.pending_remote_turn_outcomes == EmptySet }
+            guard "remote_turn_committed_drained" { self.committed_remote_turn_outcomes == EmptySet }
+            guard "remote_turn_resolved_drained" { self.resolved_remote_turn_outcomes == EmptySet }
+            guard "placed_completion_pending_drained" { self.pending_placed_completion_outcomes == EmptySet }
+            guard "placed_completion_cancel_requested_drained" { self.cancel_requested_placed_completion_outcomes == EmptySet }
+            guard "placed_completion_resolved_drained" { self.resolved_placed_completion_outcomes == EmptySet }
+            guard "placed_completion_reset_intent" { self.placed_completion_lifecycle_intent == Some(PlacedCompletionLifecycleIntentKind::Reset) }
+            guard "placed_kickoff_pending_drained" { self.pending_placed_kickoff_outcomes == EmptySet }
+            guard "placed_kickoff_resolved_drained" { self.resolved_placed_kickoff_outcomes == EmptySet }
+            update {}
             to Running
         }
     }

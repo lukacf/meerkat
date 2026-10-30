@@ -9464,8 +9464,8 @@ mod tests {
             PlacedCompletionLifecycleIntentKind::Reset,
         );
         assert!(
-            MobMachineMutator::apply(&mut authority, MobMachineInput::Reset).is_err(),
-            "reset must wait for placed kickoff custody to drain"
+            MobMachineMutator::apply(&mut authority, MobMachineInput::AdmitReset).is_err(),
+            "the reset's admission must wait for placed kickoff custody to drain"
         );
         MobMachineMutator::apply(
             &mut authority,
@@ -9503,8 +9503,12 @@ mod tests {
             },
         )
         .expect("cancelled no-effect replay is idempotent");
-        MobMachineMutator::apply(&mut authority, MobMachineInput::Reset)
-            .expect("reset is admitted after certified no-effect custody closure");
+        MobMachineMutator::apply(&mut authority, MobMachineInput::AdmitReset)
+            .expect("the reset is admitted after certified no-effect custody closure");
+        assert!(
+            MobMachineMutator::apply(&mut authority, MobMachineInput::Reset).is_err(),
+            "the reset itself commits only once the placed member's retirement emptied the roster"
+        );
     }
 
     #[test]
@@ -10177,6 +10181,46 @@ mod tests {
             disposal: MemberSessionDisposal::Archived,
             preserve_machine_topology: false,
         }
+    }
+
+    /// The reset commits only on an empty roster, and its preflight admits a
+    /// mob with members: `AdmitReset` answers the reset's other guards and
+    /// changes nothing, `ResetToRunning` is refused while a member holds an
+    /// identity, and it commits once the member's retirement ended, as the
+    /// reset's retirement batch ends every member's.
+    #[test]
+    fn the_reset_preflight_admits_a_mob_with_members_and_the_reset_needs_an_empty_roster() {
+        let (mut authority, member) = dormant_member_authority("reset-member");
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Reset,
+        );
+        let before = authority.state().clone();
+        MobMachineMutator::apply(&mut authority, MobMachineInput::AdmitReset)
+            .expect("the preflight admits a reset of a mob with members");
+        assert_eq!(authority.state(), &before, "the preflight changes nothing");
+        assert!(
+            MobMachineMutator::apply(&mut authority, MobMachineInput::Reset).is_err(),
+            "the reset waits for its retirement batch to empty the roster"
+        );
+        assert_eq!(
+            authority.state(),
+            &before,
+            "a refused reset changes nothing"
+        );
+
+        MobMachineMutator::apply(
+            &mut authority,
+            retire_input(&member, Some(member.session_id.clone())),
+        )
+        .expect("the member's retirement is admitted");
+        authority
+            .apply_signal(archived_signal(&member))
+            .expect("the member's retirement ends");
+        assert!(authority.state().identity_to_runtime.is_empty());
+        MobMachineMutator::apply(&mut authority, MobMachineInput::Reset)
+            .expect("the reset commits on the empty roster");
+        assert_eq!(authority.state().lifecycle_phase, MobPhase::Running);
     }
 
     fn wake_input(identity: &AgentIdentity) -> MobMachineInput {

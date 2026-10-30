@@ -69,22 +69,23 @@
 #   end (live or after its runtime retired, running or stopped, or the
 #   replay of its retirement, its session archived or not, its incarnation
 #   local or hosted elsewhere), the replay of its mark (stale or not), its
-#   declarations and seal, and the mob's reset. roles: a seated entry
-#   declared under another role or mode (the role hold, the restamp, the
-#   migration, the rotation), a first-boot preparation, every WakeMember
-#   cause and the same-session rotation of a declared migration. hold: a
-#   role-held member under a declared migration, its same-session and
-#   fresh-session rotations under another role or its own, and a first-boot
-#   Resume request. resume: a member, Dormant or Live, whose host
-#   preparation (a first-boot preparation or a role hold) is owed or not,
-#   through an explicit resume. held: held creation and the held spawn,
-#   entries hosted on their first use, the dormant seat's refusal of both,
-#   and Stop, Resume and Complete, where the declaration and the seal refuse;
-#   the declared apply's open fact. placed: one bound host and the placed
-#   spawn ladder with or without entry custody, its remote commit, its
-#   retirement and the placed end. They check every generated invariant
-#   (the declared apply's among them: unseated_entry_is_not_a_member,
-#   retiring_entry_is_a_declared_entry,
+#   declarations and seal, Stop, Resume and Complete, and the mob's reset
+#   from each phase it leaves (its intent, its preflight and its commit).
+#   roles: a seated entry declared under another role or mode (the role
+#   hold, the restamp, the migration, the rotation), a first-boot
+#   preparation, every WakeMember cause and the same-session rotation of a
+#   declared migration. hold: a role-held member under a declared
+#   migration, its same-session and fresh-session rotations under another
+#   role or its own, and a first-boot Resume request. resume: a member,
+#   Dormant or Live, whose host preparation (a first-boot preparation or a
+#   role hold) is owed or not, through an explicit resume. held: held
+#   creation and the held spawn, entries hosted on their first use, the
+#   dormant seat's refusal of both, and Stop, Resume and Complete, where the
+#   declaration and the seal refuse; the declared apply's open fact. placed:
+#   one bound host and the placed spawn ladder with or without entry
+#   custody, its remote commit, its retirement and the placed end. They
+#   check every generated invariant (the declared apply's among them:
+#   unseated_entry_is_not_a_member, retiring_entry_is_a_declared_entry,
 #   held_creation_entry_was_never_created,
 #   archived_session_record_is_unseated,
 #   placed_entry_custody_is_hosted_on_first_use), exactly one arm answering
@@ -101,12 +102,14 @@
 #   ending it exactly when it commits another role, a seated member's
 #   first-boot Resume writing the role hold it masked, the replay recording
 #   an archived session only when its row archived it and keeping a hosted
-#   incarnation's entry hosted on its first use, the explicit resume never
-#   rebuilding a member whose host preparation is owed and answering it held
-#   with no change, the remote commit seating its custody's entry, the placed
-#   end keeping it hosted on its first use, the dormant seat taking only an
-#   entry owed its seat, and a ladder opened for an entry's name holding its
-#   custody.
+#   incarnation's entry hosted on its first use, the reset committing only
+#   on an empty roster and its preflight changing nothing and admitting, on
+#   an empty roster, exactly the resets the mob commits, the explicit resume
+#   never rebuilding a member whose host preparation is owed and answering
+#   it held with no change, the remote commit seating its custody's entry,
+#   the placed end keeping it hosted on its first use, the dormant seat
+#   taking only an entry owed its seat, and a ladder opened for an entry's
+#   name holding its custody.
 #
 # Each run must finish without an error, reach at least its floor of distinct
 # states and fire every action of its covered list (TLC coverage). The runner
@@ -176,7 +179,7 @@ in_part() {
 entry_states=12960
 lifecycle_states=12041
 apply_states=1628
-legacy_states=1104
+legacy_states=2208
 roles_states=1224
 held_states=2000
 placed_states=192
@@ -325,9 +328,15 @@ legacy_covered_actions=(
   ObserveMemberRetirementArchivedRetiredStopped
   StopRunning
   ResumeStopped
+  CompleteRunning
   ResetToRunning
+  AdmitResetRunning
+  AdmitResetStopped
+  AdmitResetCompleted
   BeginPlacedCompletionLifecycleQuiesceFresh
   BeginPlacedCompletionLifecycleQuiesceFreshStop
+  BeginPlacedCompletionLifecycleQuiesceStoppedReplay
+  BeginPlacedCompletionLifecycleQuiesceCompletedReplay
   RetireRunningReleasingArchiveOnly
   RetireRunningPreservingBindingArchiveOnly
   SessionIngressDetachedForMobDestroyRunning
@@ -647,11 +656,14 @@ write_cfg() {
   AuditCandidateChangesNothing
   AuditApplyEntryOnlyWithCause
   AuditReplayRecordsOnlyArchived
-  AuditHostedReplayKeepsHosted"
+  AuditHostedReplayKeepsHosted
+  AuditResetOnEmptyRoster
+  AuditResetPreflightChangesNothing"
           run_invariants="
   AuditDeclareExactlyOne
   AuditSealExactlyOne
-  AuditMarkReplayExactlyOne"
+  AuditMarkReplayExactlyOne
+  AuditResetPreflightAgrees"
           ;;
         roles)
           spec="RolesSpec"
@@ -866,7 +878,8 @@ for witness in \
   "legacy:Action property:ResetEndsEntries" "legacy:Action property:UnlistedEndStopped" \
   "legacy:Action property:UnlistedEndRetired" "legacy:Action property:UnlistedReplayEnd" \
   "legacy:Action property:ReplayKeepsUnarchived" "legacy:Action property:HostedReplayKept" \
-  "legacy:Action property:StaleMarkIgnored" \
+  "legacy:Action property:StaleMarkIgnored" "legacy:Action property:PreflightAdmitsMembers" \
+  "legacy:Action property:ResetEndsRetiredEntry" \
   "roles:Action property:RoleHoldRefusesPeerWake" "roles:Action property:MigrationVerdict" \
   "roles:Action property:MigrationRestamped" "roles:Action property:RestampVerdict" \
   "roles:Action property:RotateVerdict" "roles:Action property:RoleHoldEnded" \
@@ -1271,6 +1284,24 @@ PY
     "Action property AuditApplyEntryOnlyWithCause|Invariant entry_is_seated_or_has_an_unseated_cause" <<'PY'
 update_var("AdoptLegacyIdentityEntryNotAdoptable", "identity_entry_origins",
            'MapSet(identity_entry_origins, agent_identity, "Declared")')
+PY
+
+  # The reset commits with a member seated (its roster_empty guard
+  # dropped).
+  mutate legacy reset_ignores_roster "Action property AuditResetOnEmptyRoster" <<'PY'
+drop_guard("ResetToRunning", "(identity_to_runtime = [x \\in {} |-> None])")
+PY
+
+  # The reset's preflight drops the seal's marks, which only the reset's
+  # commit may end.
+  mutate legacy preflight_drops_marks "Action property AuditResetPreflightChangesNothing" <<'PY'
+update_var("AdmitResetRunning", "identity_entry_retiring", "{}")
+PY
+
+  # The preflight admits a reset of a stopped mob with no reset intent (its
+  # placed_completion_reset_intent guard dropped).
+  mutate legacy preflight_ignores_intent "Invariant AuditResetPreflightAgrees" <<'PY'
+drop_guard("AdmitResetStopped", 'placed_completion_lifecycle_intent = Some("Reset")')
 PY
 
   # A wake that ignores a host preparation cause.

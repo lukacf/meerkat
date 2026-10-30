@@ -31947,8 +31947,11 @@ impl MobActor {
                             Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Reset),
                         )
                         .await?;
+                        // The reset's own guards but the empty roster: the
+                        // retirement batch below empties it, and only then
+                        // does ResetToRunning commit.
                         self.probe_command_admission(
-                            mob_dsl::MobMachineInput::Reset,
+                            mob_dsl::MobMachineInput::AdmitReset,
                             MobState::Running,
                             "reset_command_admission",
                         )?;

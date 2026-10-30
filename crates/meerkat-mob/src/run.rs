@@ -690,6 +690,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
             | mob_dsl::MobMachineInput::Complete
             | mob_dsl::MobMachineInput::Reset
+            | mob_dsl::MobMachineInput::AdmitReset
             | mob_dsl::MobMachineInput::Destroy
             | mob_dsl::MobMachineInput::RosterSnapshot
             | mob_dsl::MobMachineInput::ListMembers
@@ -1985,6 +1986,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
             | mob_dsl::MobMachineInput::Complete
             | mob_dsl::MobMachineInput::Reset
+            | mob_dsl::MobMachineInput::AdmitReset
             | mob_dsl::MobMachineInput::Destroy
             | mob_dsl::MobMachineInput::RosterSnapshot
             | mob_dsl::MobMachineInput::ListMembers

@@ -174,7 +174,8 @@ them.
   placement, held_creation, declared_migration_from, intent_managed,
   session_memory_only, resume_session_role, first_boot }`,
   `SealDeclaredRoster { desired }`, `ForgetArchivedSession { agent_identity,
-  session_id, reason }`, `OpenDeclaredApply` and `CloseDeclaredApply`;
+  session_id, reason }`, `OpenDeclaredApply`, `CloseDeclaredApply` and
+  `AdmitReset`;
   `MobMachineSignal` and its variant enum and the kernel `Signal` and
   `SignalKind` gain `RecoverIdentityEntryRetiring { agent_identity,
   agent_runtime_id }`; `MobMachineEffect` and its variant enum and the kernel
@@ -220,8 +221,9 @@ them.
   `OpenDeclaredApplyBusy`, `OpenDeclaredApplyMobNotRunningStopped`,
   `OpenDeclaredApplyMobNotRunningCompleted`,
   `OpenDeclaredApplyMobNotRunningDestroyed`, `CloseDeclaredApplyRunning`,
-  `CloseDeclaredApplyStopped`, `CloseDeclaredApplyCompleted` and
-  `CloseDeclaredApplyDestroyed`, so no existing variant's discriminant moves.
+  `CloseDeclaredApplyStopped`, `CloseDeclaredApplyCompleted`,
+  `CloseDeclaredApplyDestroyed`, `AdmitResetRunning`, `AdmitResetStopped` and
+  `AdmitResetCompleted`, so no existing variant's discriminant moves.
   Exhaustive matches must add the new variants.
   `meerkat_mob::MobEventKind::MemberRetirementStarted` gains the public field
   `cause` (why the retirement started) and `MemberRetired` the public field
@@ -567,6 +569,14 @@ them.
   same-session one, which `rotate_member` cannot end (it plans a fresh
   session, refused while that rotation stands). The mob's destroy ends
   either.
+- `meerkat-mob`, `meerkat-machine-schema`: the mob's reset commits only on an
+  empty roster. MobMachine's `ResetToRunning` requires that no member holds
+  an identity (`roster_empty`), so no member before a reset is a member after
+  it by the machine's own guard, not by the order of the reset's steps. The
+  reset's preflight, which runs before the retirement batch that empties the
+  roster, is the new pure admission input `AdmitReset`: every guard of
+  `ResetToRunning` but the empty roster, changing nothing.
+  `MobHandle::reset` answers as before.
 
 ## [0.9.7] - 2026-10-28
 

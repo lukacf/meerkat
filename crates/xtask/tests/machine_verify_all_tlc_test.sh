@@ -690,12 +690,14 @@ fi
 # adopted, unlisted and retired to every copy of the plain end (live, after
 # its runtime retired, stopped, or replayed with its session archived or
 # not and its incarnation local or hosted elsewhere), the replay of its
-# start row (stale or not) and the mob's reset; and an explicit resume over
-# a member, Dormant or Live, whose host preparation is owed or not. --part
-# roles (shard audits-n): a seated entry declared under another role or
-# mode, a first-boot preparation and every WakeMember cause; and a
-# role-held member's declared migration, its same-session and fresh-session
-# rotations under another role or its own, and a first-boot Resume request.
+# start row (stale or not), Stop, Resume and Complete, and the mob's reset
+# from each phase it leaves (its preflight with a member seated, its commit
+# on an empty roster); and an explicit resume over a member, Dormant or
+# Live, whose host preparation is owed or not. --part roles (shard
+# audits-n): a seated entry declared under another role or mode, a
+# first-boot preparation and every WakeMember cause; and a role-held
+# member's declared migration, its same-session and fresh-session rotations
+# under another role or its own, and a first-boot Resume request.
 # --part hosted (shard audits-o): held creation, the held spawn and entries
 # hosted on their first use, with Stop, Resume and Complete, and the
 # declared apply's open fact; and one bound host and the placed spawn
@@ -704,8 +706,8 @@ fi
 # arm answering every declaration, seal, mark replay and apply opening, and
 # the declared apply's action properties (identity_entry_apply_audit.tla
 # names them); they require every listed arm to fire, a floor of distinct
-# states and their forty-eight witnesses reached, and --mutants refuses
-# forty-six seeded defects: one per declared apply invariant and property,
+# states and their fifty witnesses reached, and --mutants refuses
+# forty-nine seeded defects: one per declared apply invariant and property,
 # and one per guard of the declared apply that a reachable state needs.
 identity_entry_audit="${workspace_root}/specs/machines/mob_machine/identity_entry_audit.sh"
 if [[ ! -x "${identity_entry_audit}" ]]; then
@@ -919,11 +921,11 @@ run_machine_verify() {
 # audits-k, audits-m, audits-n and audits-o = the identity entry audit's
 # declared apply parts with --mutants, alone, locally with 4 TLC workers
 # (2026-10-30): apply (one whole-space run, 14 witnesses, 14 mutants)
-# 166 s; legacy (two runs, 11 witnesses, 14 mutants) 169 s; roles (two
+# 166 s; legacy (two runs, 13 witnesses, 17 mutants) 226 s; roles (two
 # runs, 13 witnesses, 9 mutants) 186 s; hosted (two runs, 10 witnesses, 9
 # mutants) 116 s. As one part (five runs, 28 witnesses, 17 mutants) the
-# declared apply took 300-305 s; with its seven runs, 48 witnesses and 46
-# mutants it would take about 637 s, past 10 minutes on a hosted runner.
+# declared apply took 300-305 s; with its seven runs, 50 witnesses and 49
+# mutants it would take about 694 s, past 10 minutes on a hosted runner.
 # None of audits-g, audits-i and audits-k through audits-o has been
 # measured on a hosted runner yet.
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,

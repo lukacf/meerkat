@@ -10332,12 +10332,12 @@ impl MobHandle {
             super::state::ScopeAdmissionSubject::LegacyAdoption(identity.clone()),
         )
         .await?;
-        // The adoption ran: the spawn row is not read again.
+        // The adoption ran: the spawn row is not read again. A created
+        // entry's name is no host's to adopt, which MobMachine answers.
         let already_an_entry = super::identity_entry::machine_entry_origin(
             &self.machine_state_watch_rx.borrow(),
             identity,
-        )
-        .is_some();
+        ) == Some(super::IdentityEntryOrigin::Declared);
         if already_an_entry {
             return Ok(super::LegacyIdentityEntryAdoption::AlreadyAnEntry);
         }

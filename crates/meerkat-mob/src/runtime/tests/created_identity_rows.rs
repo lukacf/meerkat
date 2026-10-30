@@ -621,6 +621,42 @@ async fn the_adoption_reconciler_skips_created_rows() {
     assert_eq!(mob.origin("owner"), Some(IdentityEntryOrigin::Created));
 }
 
+/// The legacy adoption never adopts a created entry's name, nor a removed
+/// or unreadable one: each is answered `NotAdoptable`, typed, and nothing is
+/// written.
+///
+/// RED: answer `AlreadyAnEntry` for an entry of any origin before MobMachine
+/// decides (the handle's shortcut over every origin, the shape before this
+/// fix): the created owner is answered `AlreadyAnEntry`, as if a host had
+/// adopted it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_legacy_adoption_answers_a_created_or_reserved_name_not_adoptable() {
+    let mut mob = CreatedMob::new("created-adoption").await;
+    mob.spawn_worker("owner").await;
+    mob.put_created("owner", CreatedIdentityPresence::Present)
+        .await;
+    mob.put_created("removed", CreatedIdentityPresence::Removed)
+        .await;
+    mob.put_raw("later", later_build_row()).await;
+    mob.restart().await;
+    assert_eq!(mob.origin("owner"), Some(IdentityEntryOrigin::Created));
+
+    let journal = mob.journal_len().await;
+    for name in ["owner", "removed", "later"] {
+        let answer = tokio::time::timeout(STEP, mob.handle.adopt_legacy_identity_entry(&id(name)))
+            .await
+            .expect("the adoption answers")
+            .expect("the adoption is decided");
+        assert_eq!(
+            answer,
+            crate::runtime::LegacyIdentityEntryAdoption::NotAdoptable,
+            "{name}"
+        );
+    }
+    assert_eq!(mob.journal_len().await, journal, "nothing is journaled");
+    assert_eq!(mob.origin("owner"), Some(IdentityEntryOrigin::Created));
+}
+
 /// The census counts created entries apart from declared ones, by standing
 /// and cause, counts removed and unreadable names apart, and is incomplete
 /// while a name is unreadable; the reads list an unreadable name as such and

@@ -198,8 +198,8 @@ binding unchanged, with its stored peer endpoint when the machine holds one, a
 restart restores the entry from it, and the label is never read for the member
 again. The answer is a
 `LegacyIdentityEntryAdoption`: `Adopted`, `AlreadyAnEntry`, `NameHeldByWorker`
-(no marker), `NotAdoptable` (a placed member, one bound to no session, or a
-retiring one), `NotSeated` or `NonAuthoritative`. A mob that is not running
+(no marker), `NotAdoptable` (a placed member, one bound to no session, a
+retiring one, or a created entry's or reserved name), `NotSeated` or `NonAuthoritative`. A mob that is not running
 refuses it (an entry answers `AlreadyAnEntry` in any phase), and it needs
 `ControlScope::Retire`, checked before any answer. A member whose incarnation
 keeps changing while its binding history is read answers the retryable

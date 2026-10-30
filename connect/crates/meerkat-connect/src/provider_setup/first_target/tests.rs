@@ -168,9 +168,11 @@ async fn first_target_refuses_profile_collision_and_present_default() {
     // An ancestor's different realm may reuse a profile name (covered above).
     // Its same-id realm section is replaced by whole-section native merge, so
     // preserved bytes alone would not prove preserved effective settings.
+    // The user document composes into a parentless realm only once some
+    // document configures [realm.global]; without it the section is inert.
     for body in [
         "[realm.work]\nparent = \"global\"\n",
-        "[realm.work.backend.unrelated]\nprovider = \"openai\"\nbackend_kind = \"openai_api\"\n",
+        "[realm.global]\n[realm.work.backend.unrelated]\nprovider = \"openai\"\nbackend_kind = \"openai_api\"\n",
     ] {
         let root = tempfile::tempdir().unwrap();
         let storage = storage(root.path());

@@ -1906,12 +1906,14 @@ impl LifecycleProjectionStatus {
 #[non_exhaustive]
 pub enum LifecycleProjectionState {
     /// Not started: no roster pass or lifecycle step read its cursor yet, or
-    /// the last read failed (the next step reads it again).
+    /// fewer than three reads in a row failed (it is read again at the next
+    /// step, or the next sweep).
     Pending,
     /// Projecting Core's member lifecycle journal.
     Running,
-    /// Projecting, but its last runs failed: the side effects of later steps
-    /// wait until a run gets through.
+    /// Its last three preparations failed, or the last three runs of one of
+    /// its lanes (this process's steps, a predecessor's backlog): the side
+    /// effects they owe wait until one gets through.
     Stalled,
     /// Nothing to project: a candidate launch, which changes no stored
     /// member, or a runtime without a session bridge.

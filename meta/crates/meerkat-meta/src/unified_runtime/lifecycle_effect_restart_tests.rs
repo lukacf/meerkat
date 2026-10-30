@@ -8,8 +8,8 @@
 //! the effect: the next start over the same state delivers it, once, and
 //! repeats none that the killed process completed, nor one for an
 //! incarnation that ended since. An effect that never answers, or whose
-//! write always fails, is reported and holds back none of the effects after
-//! it.
+//! write always fails, is reported and delays the effects after it by at most
+//! its bound.
 //!
 //! A kill is a child process of this test binary: the test's own body,
 //! selected by [`CHILD_STATE_ENV`], boots over a state directory, takes the

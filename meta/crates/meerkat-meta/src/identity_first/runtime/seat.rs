@@ -247,24 +247,36 @@ impl IdentityRuntime {
         };
         // The lifecycle projection's cursor is read before the step asks
         // Core for anything, so each seat and rotation it journals is
-        // projected. While no cursor can be read or started, the step is
-        // refused, retryable, with nothing asked of Core: a seat Core
+        // projected. While no cursor is stored and none can be started, the
+        // step is refused, retryable, with nothing asked of Core: a seat Core
         // committed before the cursor would lie behind it, and its
-        // `after_create` would never be told.
-        if let Err(error) = self.prepare_lifecycle_projection().await {
-            for spec in specs {
-                outcomes.insert(
-                    spec.identity.clone(),
-                    Err(IdentityRuntimeError::IdentityHistoryUnavailable {
-                        identity: spec.identity.clone(),
-                        detail: format!(
-                            "nothing was asked of Core: the lifecycle projection's cursor could \
-                             not be read or started ({error})"
-                        ),
-                    }),
+        // `after_create` would never be told. With a cursor stored, the step
+        // goes ahead: what it journals lies past that cursor, and the
+        // projection reads it once a preparation gets through.
+        match self.prepare_lifecycle_projection().await {
+            Ok(()) => {}
+            Err(unprepared) if unprepared.cursor_stored() => {
+                tracing::warn!(
+                    error = %unprepared,
+                    "the lifecycle projection could not be prepared; the seat step goes ahead \
+                     past its stored cursor, and is projected once a preparation gets through"
                 );
             }
-            return outcomes;
+            Err(unprepared) => {
+                for spec in specs {
+                    outcomes.insert(
+                        spec.identity.clone(),
+                        Err(IdentityRuntimeError::IdentityHistoryUnavailable {
+                            identity: spec.identity.clone(),
+                            detail: format!(
+                                "nothing was asked of Core: the lifecycle projection's cursor \
+                                 could not be read or started ({unprepared})"
+                            ),
+                        }),
+                    );
+                }
+                return outcomes;
+            }
         }
         // The manifest is read first: an unreadable one refuses every
         // identity of the step, since which of them it covers is unknown.
@@ -1349,7 +1361,6 @@ impl IdentityRuntime {
                         self.prepare_lifecycle_retirement(
                             identity,
                             crate::runtime::LifecycleEffectVerb::RoleMove,
-                            Some(super::super::types::RetiredIdentityCause::RoleMove),
                         )
                         .await?
                     }
@@ -1357,7 +1368,6 @@ impl IdentityRuntime {
                         self.prepare_lifecycle_retirement(
                             identity,
                             crate::runtime::LifecycleEffectVerb::Reset,
-                            Some(super::super::types::RetiredIdentityCause::Reset),
                         )
                         .await?
                     }

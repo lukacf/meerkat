@@ -370,25 +370,29 @@ operation that seated the identity has answered; the roster bootstrap's own
 seats are normally told before the init settles (a bootstrap whose journal
 reads fail answers anyway, and the calls follow). Calls for different
 identities run concurrently, up to 16 at once, in no order across
-identities. A seat whose incarnation has ended by the time the gateway
-reaches it (the identity was retired, reset or moved since) is not told: its
-retirement is handed to the retirement hook instead.
+identities. Calls for one identity keep the journal's order, also across a
+restart: what a stopped gateway still owed an identity (its retirement hook,
+say) comes before the calls this gateway's own steps owe it. A seat whose
+incarnation has ended by the time the gateway reaches it (the identity was
+retired, reset or moved since) is not told: its retirement is handed to the
+retirement hook instead.
 
 Each call has a deadline of 30 seconds. A call that has not answered by then
 is made again, at most three times in all; an error it answers is final. A
 call that failed is recorded, reported to the error hook as
-`lifecycle_effect_failed` (effect `after_create`), and not made again; no
-other call waits for it. Calls are attempted at least once: a gateway stopped
-between the seat and the call (killed, or a shutdown whose share of the drain
-window closed first) makes it at its next start when its metadata store is
-durable (`rpc_gateway` over a state directory or a host store realm;
-`meta_gateway` keeps it in memory, so there it holds within the process
-only), and one stopped during the call may make it again, so key what it
-does by the session. The context's `model` is the build's model, else the
-model of the profile when the mob definition declares it inline; it is empty
-for a realm-bound profile the build sets no model for. A call made at a
-later start reports the identity's roster labels and no `system_prompt`: the
-build that made the seat ended with the stopped process.
+`lifecycle_effect_failed` (effect `after_create`), and not made again; one
+that never answers delays later side effects by at most its bound. Calls are
+attempted at least once: a gateway stopped between the seat and the call
+(killed, or a shutdown whose share of the drain window closed first) makes
+it at its next start when its metadata store is durable (`rpc_gateway` over
+a state directory or a host store realm; `meta_gateway` keeps it in memory,
+so there it holds within the process only), and one stopped during the call
+may make it again, so key what it does by the session. The context's `model`
+is the build's model, else the model of the profile when the mob definition
+declares it inline; it is empty for a realm-bound profile the build sets no
+model for. A call made at a later start reports the identity's roster labels
+and no `system_prompt`: the build that made the seat ended with the stopped
+process.
 `AgentCustomizer::after_create` has a no-op default, so a wrapper that
 overrides only `customize_build` silently drops the SDK's `after_create`
 callback.

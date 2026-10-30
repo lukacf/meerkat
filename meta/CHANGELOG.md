@@ -235,9 +235,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `LifecycleProjectionStatus`: its `state` (`pending`, `running`, `stalled`,
   `inactive` or `off`), the journal events a stopped predecessor's side
   effects are still owed for (`owed_events`), and why it is off or stalled
-  (`detail`). `meta/status` carries it as `lifecycle_projection`, and the JSON
-  `/healthz` summary reads `degraded` while it is off or stalled and names it,
-  and names the owed events while they drain.
+  (`detail`). It reads `stalled` once the projection's preparation, or the
+  runs of either of its lanes (this process's steps, a predecessor's
+  backlog), failed three times in a row. `meta/status` carries it as
+  `lifecycle_projection`, and the JSON `/healthz` summary reads `degraded`
+  while it is off or stalled and names it, and names the owed events while
+  they drain.
   `IdentityRuntime::lifecycle_effect_failures` reads the side effects
   recorded as failed.
 
@@ -334,19 +337,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     (`IdentityRuntime::lifecycle_effect_failures`) and reported on the error
     hook (`retired_member_release_failed` for the hook,
     `lifecycle_effect_failed` for the others), and the projection goes on:
-    one that never answers, or a write that always fails, holds back no
-    other. Hooks and `after_create` calls for different identities run up to
-    16 at once, in no order across identities;
+    one that never answers, or a write that always fails, delays later side
+    effects by at most its bound. A step that holds an identity's lifecycle
+    lock past 30 seconds (a build stuck in the customizer) is not waited
+    for; a retirement hook call that would have waited for it names no
+    registration. Hooks and `after_create` calls for different identities
+    run up to 16 at once, in no order across identities;
   - a first-boot `Fresh` row (`meta_gateway identity-reset`) of a live member
     distills the old session, as the online reset does;
   - a unified runtime's identity bootstrap answers once the side effects of
     its own steps ran, normally; what a stopped predecessor still owed runs
     in the background after the bootstrap answered, and
     `meta/status` (`lifecycle_projection.owed_events`) counts it until it
-    ran;
-  - a seat step is refused, retryable, with nothing asked of Core, while the
-    projection's cursor can be neither read nor started, so no seat is ever
-    committed behind it. A step whose record cannot be written (a reload's
+    ran. One identity's side effects keep journal order all the same: a step
+    of this process for an identity the predecessor still owed side effects
+    has its own run after those (a hook the predecessor owed an unlisted
+    identity reaches the host before the relisted identity's next
+    `after_create`);
+  - a seat step is refused, retryable, with nothing asked of Core, while no
+    projection cursor is stored and none can be started, so no seat is ever
+    committed behind it. With a cursor stored, the step goes ahead past it,
+    and the projection reads it once a preparation gets through (it tries
+    again at each sweep). A step whose record cannot be written (a reload's
     and a respawn's too) is refused the same way, as
     `IdentityHistoryUnavailable`;
   - a roster pass that lists an identity again takes back an unlisting Core
@@ -485,6 +497,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     member's seat at a later generation);
   - whether a seat's incarnation is still current, read from Core's latest
     binding of the identity;
+  - whether Core never carried out an unlisting a later roster pass undid,
+    read from Core still binding the incarnation it named live (Core
+    journals the start of a retirement, which the bridge does not read
+    yet);
   - why Core rotated an identity no Meta verb asked it to rotate (`rotated`
     or `role_move`, read from Core's member history); Core's legacy member
     resets owe nothing.

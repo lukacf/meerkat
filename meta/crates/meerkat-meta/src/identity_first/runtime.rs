@@ -776,14 +776,6 @@ impl FreshLife {
             Self::Delete => crate::runtime::LifecycleEffectVerb::Delete,
         }
     }
-
-    /// The cause the retirement hook names for the incarnation it ends.
-    fn cause(self) -> super::types::RetiredIdentityCause {
-        match self {
-            Self::Reset => super::types::RetiredIdentityCause::Reset,
-            Self::Delete => super::types::RetiredIdentityCause::Delete,
-        }
-    }
 }
 
 /// Whether Core's rotation answered `error` before any of it started: Core's
@@ -13680,16 +13672,11 @@ impl IdentityRuntime {
             self.prepare_lifecycle_retirement(
                 identity,
                 crate::runtime::LifecycleEffectVerb::Unlisted,
-                Some(super::types::RetiredIdentityCause::Unlisted),
             )
             .await?
         } else {
-            self.prepare_lifecycle_retirement(
-                identity,
-                crate::runtime::LifecycleEffectVerb::Reload,
-                None,
-            )
-            .await?
+            self.prepare_lifecycle_retirement(identity, crate::runtime::LifecycleEffectVerb::Reload)
+                .await?
         };
         // A failed retire keeps what it recorded: the retirement may have
         // started, and Core finishes it; one that did not is asked again by
@@ -14283,11 +14270,7 @@ impl IdentityRuntime {
             // A replacement on the same session owes no lifecycle side
             // effect: recorded before Core is asked, as a reload's.
             let prepared = self
-                .prepare_lifecycle_retirement(
-                    identity,
-                    crate::runtime::LifecycleEffectVerb::Reload,
-                    None,
-                )
+                .prepare_lifecycle_retirement(identity, crate::runtime::LifecycleEffectVerb::Reload)
                 .await?;
             self.core_bridge(identity)?
                 .retire_member(&live.agent_runtime_id)
@@ -14646,12 +14629,7 @@ impl IdentityRuntime {
         // `None` when Core holds none the identity spawned, and its rotation
         // seats the identity fresh.
         let retiring = self
-            .prepare_lifecycle_retirement_of(
-                identity,
-                previous,
-                life.effect_verb(),
-                Some(life.cause()),
-            )
+            .prepare_lifecycle_retirement_of(identity, previous, life.effect_verb())
             .await?;
         let from_generation = retiring
             .as_ref()

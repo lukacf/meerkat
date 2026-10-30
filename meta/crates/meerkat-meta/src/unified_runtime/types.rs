@@ -954,8 +954,8 @@ pub enum ErrorEvent {
     /// `distillation`) answered an error, or did not answer or land within
     /// its deadline on each of its `attempts`. The identity runtime recorded
     /// the failure durably and went on; the side effect is not run again,
-    /// and no later one waited for it. A retirement hook's failure is a
-    /// [`Self::RetiredMemberReleaseFailed`].
+    /// and it delayed later ones by at most its bound. A retirement hook's
+    /// failure is a [`Self::RetiredMemberReleaseFailed`].
     LifecycleEffectFailed {
         identity: String,
         /// The incarnation the side effect was owed for.

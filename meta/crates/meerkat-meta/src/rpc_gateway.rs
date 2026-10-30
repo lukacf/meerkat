@@ -15709,7 +15709,8 @@ pub trait GatewayHostComposition: Send + Sync + 'static {
     /// concurrently, up to 16 at once, in no order across identities. Such a
     /// call that has not answered within 30 seconds is made again, at most
     /// three times in all, then reported as `retired_member_release_failed`
-    /// (timed out) and not made again; no other call waits for it.
+    /// (timed out) and not made again; it delays later side effects by at
+    /// most its bound.
     /// The gateway installs it right after [`Self::bind_identity_runtime`],
     /// so the identity bootstrap's own retirements of members the roster no
     /// longer lists reach it too, before the init settles. Never called for a

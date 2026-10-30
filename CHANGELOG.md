@@ -56,8 +56,9 @@ them.
   legacy_roster_member }` and `ResolveAgentLaneMemberAdmission {
   agent_identity }`; `MobMachineSignal` and its variant enum and the kernel
   `Signal` and `SignalKind` gain `RecoverIdentityEntry { agent_identity,
-  agent_runtime_id, origin }`; `MobMachineEffect` and its variant enum and the
-  kernel `Effect` and `EffectKind` gain `LegacyIdentityEntryAdoptionResolved`
+  agent_runtime_id, origin }`; `MobMachineEffect`, its variant enum
+  `MobMachineEffectVariant` (meerkat-machine-schema), and the kernel `Effect`
+  and `EffectKind` gain `LegacyIdentityEntryAdoptionResolved`
   and `AgentLaneMemberAdmissionResolved`; `MemberAdmissionVerdictKind`
   gains `IdentityMemberRejected`; and `MobMachineRuntimeInternalReason`
   (meerkat-mob) gains `IdentityEntryAuthority`; each appended last. The enums

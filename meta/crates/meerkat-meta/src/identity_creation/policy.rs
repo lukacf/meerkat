@@ -826,11 +826,15 @@ impl RuntimeOptionPolicy {
 /// The policy a launch uses: the native host's Rust form, or
 /// `runtime_options.identity_creation`, never both; checked against the mob
 /// definition's profiles. `host_policy` is the host's answer, `None` when
-/// the launch has no native host composition.
+/// the launch has no native host composition. Created identities are
+/// durable, so a launch without persistence (`persistent: false`) refuses a
+/// policy from either source, a disabled option included: it is never
+/// ignored.
 pub fn resolve_launch_policy(
     host_policy: Option<Result<Option<IdentityCreationPolicy>, PolicyRefusal>>,
     option: RuntimeOptionPolicy,
     profiles: &BTreeSet<String>,
+    persistent: bool,
 ) -> Result<Option<Arc<IdentityCreationPolicy>>, PolicyRefusal> {
     let has_native_host = host_policy.is_some();
     let from_host = match host_policy {
@@ -841,9 +845,16 @@ pub fn resolve_launch_policy(
         (Some(_), RuntimeOptionPolicy::Disabled | RuntimeOptionPolicy::Enabled(_)) => {
             return Err(PolicyRefusal::new("", PolicyRefusalKind::TwoSources));
         }
+        (None, RuntimeOptionPolicy::Absent) => return Ok(None),
+        _ if !persistent => {
+            return Err(PolicyRefusal::new(
+                "",
+                PolicyRefusalKind::NeedsPersistentLaunch,
+            ));
+        }
         (Some(policy), RuntimeOptionPolicy::Absent) => policy,
         (None, RuntimeOptionPolicy::Enabled(policy)) => *policy,
-        (None, RuntimeOptionPolicy::Absent | RuntimeOptionPolicy::Disabled) => return Ok(None),
+        (None, RuntimeOptionPolicy::Disabled) => return Ok(None),
     };
     policy.check_mob_profiles(profiles)?;
     if !has_native_host && let Some(template) = policy.template_needing_native_host() {

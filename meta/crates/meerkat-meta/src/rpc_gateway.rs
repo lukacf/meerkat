@@ -811,11 +811,15 @@ fn launch_provider_auth_persistence(
 /// ([`GatewayHostComposition::identity_creation_policy`]) or
 /// `runtime_options.identity_creation`, never both, checked against the mob
 /// definition's profiles. A template whose preparation holds a construction
-/// needs a native host. The message of a refusal names the policy path.
+/// needs a native host, and a launch without persistence (`persistent`
+/// false: no `persistent_state`) refuses a policy from either source, a
+/// disabled option included, rather than ignore it. The message of a
+/// refusal names the policy path.
 fn launch_identity_creation_policy(
     host: Option<&Arc<dyn GatewayHostComposition>>,
     option: crate::identity_creation::RuntimeOptionPolicy,
     definition: &MobDefinition,
+    persistent: bool,
 ) -> Result<Option<Arc<crate::identity_creation::IdentityCreationPolicy>>, String> {
     let profiles: BTreeSet<String> = definition
         .profiles
@@ -826,6 +830,7 @@ fn launch_identity_creation_policy(
         host.map(|host| host.identity_creation_policy()),
         option,
         &profiles,
+        persistent,
     )
     .map_err(|refusal| refusal.to_string())
 }
@@ -15906,9 +15911,9 @@ pub trait GatewayHostComposition: Send + Sync + 'static {
     }
     /// The identity creation policy in its Rust form, taken once at init in
     /// place of `runtime_options.identity_creation`: a launch that gives
-    /// both is refused. Build it with
-    /// `IdentityCreationPolicy::from_config`, which validates it. `Ok(None)`
-    /// (the default) gives none; `Err` refuses init.
+    /// both is refused, and so is a policy on a launch without persistence.
+    /// Build it with `IdentityCreationPolicy::from_config`, which validates
+    /// it. `Ok(None)` (the default) gives none; `Err` refuses init.
     fn identity_creation_policy(
         &self,
     ) -> Result<
@@ -17524,12 +17529,14 @@ external_addressable = true
     }
     // The identity creation policy, settled before the durable phase: the
     // native host's Rust form or the init option, never both, checked
-    // against the definition's profiles. Nothing acts on it yet; the
-    // operation executor takes it from here.
+    // against the definition's profiles, and refused on a launch without
+    // persistence. Nothing acts on it yet; the operation executor takes it
+    // from here.
     let _identity_creation = launch_identity_creation_policy(
         host,
         std::mem::take(&mut gateway_options.identity_creation),
         &definition,
+        persistent_state.is_some(),
     )
     .map_err(|message| fail_init(&request_id, -32602, message))?;
     // The members' configuration from the native realm, read once with
@@ -26306,7 +26313,7 @@ model = "gpt-5.5"
         let definition = definition();
         let option = RuntimeOptionPolicy::parse(&policy_value()).expect("a policy");
         assert!(
-            launch_identity_creation_policy(None, option.clone(), &definition)
+            launch_identity_creation_policy(None, option.clone(), &definition, true)
                 .expect("the option's policy")
                 .is_some()
         );
@@ -26318,12 +26325,13 @@ model = "gpt-5.5"
             launch_identity_creation_policy(
                 Some(&naming),
                 RuntimeOptionPolicy::Absent,
-                &definition
+                &definition,
+                true
             )
             .expect("the host's policy")
             .is_some()
         );
-        let both = launch_identity_creation_policy(Some(&naming), option, &definition)
+        let both = launch_identity_creation_policy(Some(&naming), option, &definition, true)
             .err()
             .unwrap_or_default();
         assert!(both.contains("both"), "{both}");
@@ -26335,6 +26343,7 @@ model = "gpt-5.5"
             Some(&refusing),
             RuntimeOptionPolicy::Absent,
             &definition,
+            true,
         )
         .err()
         .unwrap_or_default();
@@ -26346,7 +26355,8 @@ model = "gpt-5.5"
             launch_identity_creation_policy(
                 Some(&host(Ok(None))),
                 RuntimeOptionPolicy::Absent,
-                &definition
+                &definition,
+                true
             )
             .expect("no policy")
             .is_none()
@@ -26357,9 +26367,59 @@ model = "gpt-5.5"
             None,
             RuntimeOptionPolicy::parse(&ghost).expect("a policy"),
             &definition,
+            true,
         )
         .err()
         .unwrap_or_default();
         assert!(refused.contains("ghost"), "{refused}");
+    }
+
+    /// Created identities are durable: a launch without persistence refuses
+    /// an `identity_creation` option at init, a disabled one included, and
+    /// a policy from the native host, rather than ignore them. A launch
+    /// that gives none starts as before.
+    #[test]
+    fn an_identity_creation_option_without_persistence_is_refused_at_init() {
+        let definition = definition();
+        let mut disabled = policy_value();
+        disabled["enabled"] = json!(false);
+        for option in [
+            RuntimeOptionPolicy::parse(&policy_value()).expect("a policy"),
+            RuntimeOptionPolicy::parse(&disabled).expect("a disabled policy"),
+        ] {
+            let refused = launch_identity_creation_policy(None, option, &definition, false)
+                .err()
+                .unwrap_or_default();
+            assert!(
+                refused.starts_with("identity_creation: created identities are durable"),
+                "{refused}"
+            );
+        }
+        let RuntimeOptionPolicy::Enabled(policy) =
+            RuntimeOptionPolicy::parse(&policy_value()).expect("a policy")
+        else {
+            panic!("an enabled policy");
+        };
+        let refused = launch_identity_creation_policy(
+            Some(&host(Ok(Some(*policy)))),
+            RuntimeOptionPolicy::Absent,
+            &definition,
+            false,
+        )
+        .err()
+        .unwrap_or_default();
+        assert!(refused.contains("persistent launch"), "{refused}");
+        for host_answer in [None, Some(host(Ok(None)))] {
+            assert!(
+                launch_identity_creation_policy(
+                    host_answer.as_ref(),
+                    RuntimeOptionPolicy::Absent,
+                    &definition,
+                    false
+                )
+                .expect("no policy, no refusal")
+                .is_none()
+            );
+        }
     }
 }

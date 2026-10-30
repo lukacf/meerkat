@@ -576,6 +576,10 @@ pub enum PolicyRefusalKind {
     /// A template's preparation mode needs a native host composition, and
     /// the launch has none.
     NeedsNativeHost { template: String },
+    /// The launch has no persistence (`persistent_state`), and created
+    /// identities are durable: a policy, even a disabled one, is refused
+    /// rather than ignored.
+    NeedsPersistentLaunch,
     /// The policy is given both as `runtime_options.identity_creation` and
     /// by the native host composition.
     TwoSources,
@@ -636,6 +640,10 @@ impl fmt::Display for PolicyRefusalKind {
                 formatter,
                 "template {template:?} uses preparation \"constructed\", which needs a native \
                  host composition"
+            ),
+            Self::NeedsPersistentLaunch => formatter.write_str(
+                "created identities are durable: identity creation needs a persistent launch \
+                 (persistent_state)",
             ),
             Self::TwoSources => formatter.write_str(
                 "the policy is given both as runtime_options.identity_creation and by the \

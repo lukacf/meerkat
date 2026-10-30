@@ -830,6 +830,7 @@ fn the_policy_comes_from_the_option_or_the_host_never_both() {
         None,
         RuntimeOptionPolicy::Enabled(Box::new(policy.clone())),
         &mob,
+        true,
     )
     .unwrap();
     assert_eq!(from_option.as_deref(), Some(&policy));
@@ -837,6 +838,7 @@ fn the_policy_comes_from_the_option_or_the_host_never_both() {
         Some(Ok(Some(policy.clone()))),
         RuntimeOptionPolicy::Absent,
         &mob,
+        true,
     )
     .unwrap();
     assert_eq!(from_host.as_deref(), Some(&policy));
@@ -844,6 +846,7 @@ fn the_policy_comes_from_the_option_or_the_host_never_both() {
         Some(Ok(None)),
         RuntimeOptionPolicy::Enabled(Box::new(policy.clone())),
         &mob,
+        true,
     )
     .unwrap();
     assert_eq!(host_without_one.as_deref(), Some(&policy));
@@ -851,7 +854,7 @@ fn the_policy_comes_from_the_option_or_the_host_never_both() {
         RuntimeOptionPolicy::Disabled,
         RuntimeOptionPolicy::Enabled(Box::new(policy.clone())),
     ] {
-        let both = resolve_launch_policy(Some(Ok(Some(policy.clone()))), option, &mob)
+        let both = resolve_launch_policy(Some(Ok(Some(policy.clone()))), option, &mob, true)
             .expect_err("two sources");
         assert_eq!(both.kind, PolicyRefusalKind::TwoSources);
     }
@@ -860,18 +863,19 @@ fn the_policy_comes_from_the_option_or_the_host_never_both() {
         resolve_launch_policy(
             Some(Err(host_refusal.clone())),
             RuntimeOptionPolicy::Absent,
-            &mob
+            &mob,
+            true
         )
         .unwrap_err(),
         host_refusal
     );
     assert!(
-        resolve_launch_policy(None, RuntimeOptionPolicy::Absent, &mob)
+        resolve_launch_policy(None, RuntimeOptionPolicy::Absent, &mob, true)
             .unwrap()
             .is_none()
     );
     assert!(
-        resolve_launch_policy(None, RuntimeOptionPolicy::Disabled, &mob)
+        resolve_launch_policy(None, RuntimeOptionPolicy::Disabled, &mob, true)
             .unwrap()
             .is_none()
     );
@@ -879,6 +883,7 @@ fn the_policy_comes_from_the_option_or_the_host_never_both() {
         None,
         RuntimeOptionPolicy::Enabled(Box::new(policy)),
         &strings(["assistant", "lead"]),
+        true,
     )
     .expect_err("a profile is missing");
     assert_eq!(
@@ -902,6 +907,7 @@ fn a_constructed_template_needs_its_deadline_and_a_native_host() {
         None,
         RuntimeOptionPolicy::Enabled(Box::new(policy.clone())),
         &mob_profile_names(),
+        true,
     )
     .expect_err("no native host");
     assert_eq!(refusal.path, "templates.research.preparation");
@@ -916,6 +922,7 @@ fn a_constructed_template_needs_its_deadline_and_a_native_host() {
             Some(Ok(None)),
             RuntimeOptionPolicy::Enabled(Box::new(policy)),
             &mob_profile_names(),
+            true,
         )
         .unwrap()
         .is_some()
@@ -924,6 +931,38 @@ fn a_constructed_template_needs_its_deadline_and_a_native_host() {
     let refusal = refusal_of(&value);
     assert_eq!(refusal.path, "templates.research.construction_deadline_ms");
     assert!(matches!(refusal.kind, PolicyRefusalKind::OutOfRange { .. }));
+}
+
+#[test]
+fn a_launch_without_persistence_refuses_a_policy_from_either_source() {
+    let policy = policy();
+    let mob = mob_profile_names();
+    for (host_policy, option) in [
+        (None, RuntimeOptionPolicy::Enabled(Box::new(policy.clone()))),
+        (None, RuntimeOptionPolicy::Disabled),
+        (Some(Ok(None)), RuntimeOptionPolicy::Disabled),
+        (Some(Ok(Some(policy.clone()))), RuntimeOptionPolicy::Absent),
+    ] {
+        let refusal =
+            resolve_launch_policy(host_policy, option, &mob, false).expect_err("no persistence");
+        assert_eq!(refusal.kind, PolicyRefusalKind::NeedsPersistentLaunch);
+        assert_eq!(refusal.path, "");
+    }
+    for host_policy in [None, Some(Ok(None))] {
+        assert!(
+            resolve_launch_policy(host_policy, RuntimeOptionPolicy::Absent, &mob, false)
+                .expect("nothing given, nothing refused")
+                .is_none()
+        );
+    }
+    let both = resolve_launch_policy(
+        Some(Ok(Some(policy.clone()))),
+        RuntimeOptionPolicy::Enabled(Box::new(policy)),
+        &mob,
+        false,
+    )
+    .expect_err("two sources");
+    assert_eq!(both.kind, PolicyRefusalKind::TwoSources);
 }
 
 #[test]

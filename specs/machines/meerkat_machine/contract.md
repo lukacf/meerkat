@@ -135,6 +135,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `turn_tool_overlay_allow_active`: `Bool`
 - `turn_tool_overlay_allow_names`: `Set<ToolName>`
 - `turn_tool_overlay_deny_names`: `Set<ToolName>`
+- `tool_grant_gated_names`: `Set<ToolName>`
+- `tool_grant_open_names`: `Set<ToolName>`
 - `input_authority_bindings`: `Map<String, String>`
 - `input_authority_batch_keys`: `Map<String, String>`
 - `scoped_context_binding`: `Option<String>`
@@ -908,6 +910,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeOperatorDurableTailRepair`(session_id: SessionId, candidate_id: String, candidate_run_id: RunId, class: DurableTailRecoveryClass, observed_lifecycle: DurableRecoveryObservedLifecycle, observed_current_run: DurableRecoveryObservedRun, last_committed_sequence: u64, prior_commit: DurableRecoveryPriorCommit, input_evidence: DurableRecoveryInputEvidence)
 - `ResolveEmptyResumeRetirement`(queued_input_present: Bool)
 - `ClaimCompositionResidency`(session_id: SessionId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>)
+- `ReplaceToolGrantGate`(gated: Set<ToolName>)
+- `ApplyToolGrantOpenSet`(open: Set<ToolName>)
 
 ## Signals
 - `Initialize`
@@ -1526,6 +1530,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `supervisor_rotation_receipt_consistency`
 - `supervisor_rotation_terminal_receipts_closed_shape`
 - `supervisor_rotation_phase_shape`
+- `tool_grant_open_names_are_gated`
 
 ## Transitions
 ### `Initialize`
@@ -22894,6 +22899,136 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `staged_deferred_authorities_are_name_scoped`
   - `active_deferred_authorities_have_identity`
   - `staged_deferred_authorities_have_identity`
+- To: `Stopped`
+
+### `ReplaceToolGrantGateIdle`
+- From: `Idle`
+- On: `ReplaceToolGrantGate`(gated)
+- Guards:
+  - `session_registered`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Idle`
+
+### `ReplaceToolGrantGateAttached`
+- From: `Attached`
+- On: `ReplaceToolGrantGate`(gated)
+- Guards:
+  - `session_registered`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Attached`
+
+### `ReplaceToolGrantGateRunning`
+- From: `Running`
+- On: `ReplaceToolGrantGate`(gated)
+- Guards:
+  - `session_registered`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Running`
+
+### `ReplaceToolGrantGateRetired`
+- From: `Retired`
+- On: `ReplaceToolGrantGate`(gated)
+- Guards:
+  - `session_registered`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Retired`
+
+### `ReplaceToolGrantGateStopped`
+- From: `Stopped`
+- On: `ReplaceToolGrantGate`(gated)
+- Guards:
+  - `session_registered`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Stopped`
+
+### `ApplyToolGrantOpenSetChangedIdle`
+- From: `Idle`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_names_are_gated`
+  - `open_set_changed`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Idle`
+
+### `ApplyToolGrantOpenSetChangedAttached`
+- From: `Attached`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_names_are_gated`
+  - `open_set_changed`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Attached`
+
+### `ApplyToolGrantOpenSetChangedRunning`
+- From: `Running`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_names_are_gated`
+  - `open_set_changed`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Running`
+
+### `ApplyToolGrantOpenSetChangedRetired`
+- From: `Retired`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_names_are_gated`
+  - `open_set_changed`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Retired`
+
+### `ApplyToolGrantOpenSetChangedStopped`
+- From: `Stopped`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_names_are_gated`
+  - `open_set_changed`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Stopped`
+
+### `ApplyToolGrantOpenSetUnchangedIdle`
+- From: `Idle`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_set_unchanged`
+- To: `Idle`
+
+### `ApplyToolGrantOpenSetUnchangedAttached`
+- From: `Attached`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_set_unchanged`
+- To: `Attached`
+
+### `ApplyToolGrantOpenSetUnchangedRunning`
+- From: `Running`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_set_unchanged`
+- To: `Running`
+
+### `ApplyToolGrantOpenSetUnchangedRetired`
+- From: `Retired`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_set_unchanged`
+- To: `Retired`
+
+### `ApplyToolGrantOpenSetUnchangedStopped`
+- From: `Stopped`
+- On: `ApplyToolGrantOpenSet`(open)
+- Guards:
+  - `session_registered`
+  - `open_set_unchanged`
 - To: `Stopped`
 
 ### `McpServerConnectPendingIdle`

@@ -13,7 +13,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `mob_owner_bridge_cleanup_authority` (machine `MobMachine`): `crates/meerkat-mob-mcp/src/lib.rs` — MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants
 - `mob_coordination_board_authority` (machine `MobMachine`): `crates/meerkat-mob/src/coordination.rs` — MobMachine coordination board authority: record work intent, record resource claim, update coordination work intent status planned active blocked completed cancelled, update coordination resource claim status active released expired cancelled, observe coordination resource claim overlap, and the recorded/status-changed/overlap-observed coordination effects
 - `mob_operator_admission_authority` (machine `MobMachine`): `crates/meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)
-- `mob_membership_classifier_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate or admitted from machine-owned binding and pending-spawn state; compute respawn generation successor; reconcile desired members to spawn retain or retire against current bindings emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects
+- `mob_membership_classifier_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate, admitted or refused as an identity entry's name without entry custody from machine-owned binding, pending-spawn and entry state; compute respawn generation successor; reconcile desired workers to spawn retain or retire against current bindings, never an identity entry, emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects
+- `mob_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/identity_entry_admission.rs` — MobMachine identity entries realized by the actor: refuse an agent-lane member command addressed to an identity entry from the resolved agent lane member admission, and adopt a legacy member as an identity entry from the shell's observation of its spawn row, journaling the adoption before it commits; the entry is seated, local, spared by the worker reconcile, and its custody belongs to an open spawn ladder, emitting the agent lane member admission resolved and legacy identity entry adoption resolved effects
 - `mob_flow_fault_topology_escalation_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/flow.rs` — MobMachine flow-step fault, topology-edge, and supervisor-escalation classifiers owned by the flow engine: classify step output fault retry or terminal malformed json into a step fault disposition; evaluate topology edge rule allow deny or default into a policy decision verdict; and escalate to supervisor target found with a real supervisor identity or no eligible target, emitting the step output fault classified, topology edge verdict resolved, supervisor escalation requested, and supervisor escalation failed effects
 
 ### Scenarios
@@ -1783,6 +1784,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ProbeMemberAdmissionAdmittedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ComputeRespawnGenerationRunning`
@@ -4752,6 +4765,66 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ExemptMemberFromDefinitionWiringSeatedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecoverIdentityEntrySeatedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverIdentityEntrySeatedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryAdopted`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryNameHeldByWorker`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryNotAdoptable`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryStaleObservation`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryNotSeated`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryAlreadyAnEntry`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryNonAuthoritative`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionAdmittedRunning`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionAdmittedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionAdmittedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionAdmittedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionIdentityMemberRunning`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionIdentityMemberStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionIdentityMemberCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionIdentityMemberDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `HoldMemberRunStarts`
@@ -5258,6 +5331,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PersistMemberSeatSessionBorn`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LegacyIdentityEntryAdoptionResolved`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AgentLaneMemberAdmissionResolved`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `stopped_mob_holds_member_run_starts`
@@ -5487,6 +5566,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `definition_wiring_exempt_member_is_seated`
   - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `entry_is_seated_or_has_an_unseated_cause`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `identity_entry_is_local`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `worker_reconcile_spares_entries`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `entry_custody_ladder_is_open`
+  - anchors: `mob_identity_entry_authority`
   - scenarios: (unclaimed)
 - `owed_edge_repairs_join_seated_members`
   - anchors: (unclaimed)

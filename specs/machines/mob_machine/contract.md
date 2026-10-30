@@ -308,6 +308,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_seat_session_unborn`: `Set<AgentIdentity>`
 - `unborn_seat_sessions`: `Set<SessionId>`
 - `member_definition_wiring_exempt`: `Set<AgentIdentity>`
+- `identity_entry_origins`: `Map<AgentIdentity, IdentityEntryOrigin>`
+- `spawn_exec_entry_custody`: `Set<AgentIdentity>`
 
 ## Inputs
 - `RunFlow`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
@@ -376,7 +378,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyFlowStepTerminality`(run_id: RunId, step_id: StepId, status: StepRunStatus)
 - `ClassifyFlowFrameTerminalStatus`(frame_id: FrameId)
 - `ClassifyFlowRunPublicResult`(run_id: RunId, status: FlowRunStatus)
-- `BeginSpawnExec`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: Bool, runtime_mode: SpawnPolicyRuntimeMode, bridge_session_id: Option<SessionId>, replacing: Option<SessionId>, placement: Option<HostId>, workgraph_required: Bool, rust_bundles_present: Bool, per_spawn_external_tools_present: Bool, mob_default_external_tools_present: Bool, default_llm_client_override_present: Bool, host_surface_mcp_allowlist_present: Bool, inherited_tool_filter_present: Bool, shell_env_present: Bool, mcp_stdio_env_present: Bool, mcp_http_headers_present: Bool, memory_required: Bool, mcp_required: Bool, resume_session_id: Option<SessionId>, placed_spawn_id: Option<PlacedSpawnId>, placed_provision_operation_id: Option<String>, placed_operation_owner_session_id: Option<SessionId>, effective_profile_override_present: Bool, effective_model_override_present: Bool)
+- `BeginSpawnExec`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: Bool, runtime_mode: SpawnPolicyRuntimeMode, bridge_session_id: Option<SessionId>, replacing: Option<SessionId>, placement: Option<HostId>, workgraph_required: Bool, rust_bundles_present: Bool, per_spawn_external_tools_present: Bool, mob_default_external_tools_present: Bool, default_llm_client_override_present: Bool, host_surface_mcp_allowlist_present: Bool, inherited_tool_filter_present: Bool, shell_env_present: Bool, mcp_stdio_env_present: Bool, mcp_http_headers_present: Bool, memory_required: Bool, mcp_required: Bool, resume_session_id: Option<SessionId>, placed_spawn_id: Option<PlacedSpawnId>, placed_provision_operation_id: Option<String>, placed_operation_owner_session_id: Option<SessionId>, effective_profile_override_present: Bool, effective_model_override_present: Bool, entry_custody: Bool)
 - `CommitSpawnActivation`(agent_identity: AgentIdentity)
 - `AbortSpawnExec`(agent_identity: AgentIdentity)
 - `AuthorizePlacedCarrierCleanup`(obligation: PlacedCarrierCleanupObligation)
@@ -495,7 +497,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `KickoffClear`(member_id: AgentIdentity)
 - `KickoffQuiesced`(member_id: AgentIdentity)
 - `CancelPendingSpawn`(agent_identity: AgentIdentity)
-- `ProbeMemberAdmission`(agent_identity: AgentIdentity)
+- `ProbeMemberAdmission`(agent_identity: AgentIdentity, entry_custody: Bool)
 - `ComputeRespawnGeneration`(agent_identity: AgentIdentity)
 - `ClassifyStepOutputFault`(run_id: RunId, step_id: StepId, target_retry_key: String, fault: StepOutputFaultKind, attempt: u32, max_retries: u32)
 - `EscalateToSupervisor`(run_id: RunId, step_id: StepId, supervisor_identity: AgentIdentity, turn_timeout_ms: u64)
@@ -552,6 +554,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `BeginMemberRotation`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, session_archived: Bool)
 - `CommitMemberRotation`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>, disposal: MemberSessionDisposal, next_agent_runtime_id: AgentRuntimeId, next_fence_token: FenceToken, next_generation: Generation, runtime_mode: SpawnPolicyRuntimeMode, external_addressable: Bool, kickoff_owed: Bool, kickoff_objective_id: String, definition_wiring_exempt: Bool)
 - `ClassifyMemberRelease`(agent_identity: AgentIdentity)
+- `AdoptLegacyIdentityEntry`(agent_identity: AgentIdentity, generation: Generation, legacy_roster_member: Bool)
+- `ResolveAgentLaneMemberAdmission`(agent_identity: AgentIdentity)
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, runtime_epoch_id: Option<RuntimeEpochId>)
@@ -641,6 +645,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveMemberRevivalSessionCreated`(agent_identity: AgentIdentity, attempt: u64)
 - `RecoverMemberSeatSession`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, unborn: Bool)
 - `ExemptMemberFromDefinitionWiring`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
+- `RecoverIdentityEntry`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, origin: IdentityEntryOrigin)
 
 ## Effects
 - `HoldMemberRunStarts`
@@ -811,6 +816,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `OwedMemberWakesRecorded`
 - `OwedEdgeRepairsRecorded`
 - `PersistMemberSeatSessionBorn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId)
+- `LegacyIdentityEntryAdoptionResolved`(agent_identity: AgentIdentity, verdict: LegacyIdentityEntryAdoptionKind)
+- `AgentLaneMemberAdmissionResolved`(agent_identity: AgentIdentity, admission: AgentLaneMemberAdmissionKind)
 
 ## Helpers
 - `identity_reconcile_decision`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, replacement: IdentityReplacementCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition) -> `IdentityReconcileDecision`
@@ -987,6 +994,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `unborn_seat_session_is_recorded`
 - `spawn_profile_authority_is_a_pending_grant`
 - `definition_wiring_exempt_member_is_seated`
+- `entry_is_seated_or_has_an_unseated_cause`
+- `identity_entry_is_local`
+- `worker_reconcile_spares_entries`
+- `entry_custody_ladder_is_open`
 - `owed_edge_repairs_join_seated_members`
 - `destroyed_mob_holds_no_member_lifecycle`
 
@@ -3842,7 +3853,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecFresh`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `lifecycle_origin_open`
   - `placement_absent`
@@ -3856,6 +3867,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `spawn_exec_settled`
   - `no_prior_session_binding`
   - `current_binding_absent`
+  - `entry_name_free`
   - `generation_is_next`
   - `replacing_absent`
   - `identity_not_external_peer`
@@ -3867,7 +3879,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecFreshPeerOnly`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `lifecycle_origin_open`
   - `placement_absent`
@@ -3881,6 +3893,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `spawn_exec_settled`
   - `no_prior_session_binding`
   - `current_binding_absent`
+  - `entry_name_free`
   - `generation_is_next`
   - `replacing_absent`
   - `identity_not_external_peer`
@@ -3892,7 +3905,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedNonPortableRustBundles`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `rust_bundles_present`
@@ -3901,7 +3914,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedNonPortablePerSpawnExternalTools`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `per_spawn_external_tools_present`
@@ -3910,7 +3923,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedNonPortableMobDefaultExternalTools`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `mob_default_external_tools_present`
@@ -3919,7 +3932,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedNonPortableDefaultLlmClientOverride`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `default_llm_client_override_present`
@@ -3928,7 +3941,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedNonPortableHostSurfaceMcpAllowlist`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `host_surface_mcp_allowlist_present`
@@ -3937,7 +3950,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedNonPortableInheritedToolFilter`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `inherited_tool_filter_present`
@@ -3946,7 +3959,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedNonPortableWorkgraphTools`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `workgraph_required`
@@ -3955,7 +3968,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedSecretBearingShellEnv`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `shell_env_present`
@@ -3964,7 +3977,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedSecretBearingMcpStdioEnv`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `mcp_stdio_env_present`
@@ -3973,7 +3986,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedSecretBearingMcpHttpHeaders`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `mcp_http_headers_present`
@@ -3982,7 +3995,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedHostNotBound`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `portability_clean`
@@ -3992,7 +4005,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedMissingCapabilityAutonomousMembers`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `portability_clean`
@@ -4004,7 +4017,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedMissingCapabilityDurableSessions`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `portability_clean`
@@ -4016,7 +4029,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedMissingCapabilityTrackedInputCancel`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `portability_clean`
@@ -4028,7 +4041,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedMissingCapabilityProtocolV4`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `portability_clean`
@@ -4040,7 +4053,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedMissingCapabilityMemoryStore`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `portability_clean`
@@ -4052,7 +4065,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedMissingCapabilityMcp`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `portability_clean`
@@ -4065,7 +4078,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedOwnerBridgeAbsent`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `portability_clean`
@@ -4079,7 +4092,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedResumePlacementMismatch`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `portability_clean`
@@ -4094,7 +4107,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecDeniedDigestAbsent`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `placement_present`
   - `portability_clean`
@@ -4110,10 +4123,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSpawnExecRemote`
 - From: `Running`
-- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present)
+- On: `BeginSpawnExec`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing, placement, workgraph_required, rust_bundles_present, per_spawn_external_tools_present, mob_default_external_tools_present, default_llm_client_override_present, host_surface_mcp_allowlist_present, inherited_tool_filter_present, shell_env_present, mcp_stdio_env_present, mcp_http_headers_present, memory_required, mcp_required, resume_session_id, placed_spawn_id, placed_provision_operation_id, placed_operation_owner_session_id, effective_profile_override_present, effective_model_override_present, entry_custody)
 - Guards:
   - `lifecycle_origin_open`
   - `placement_present`
+  - `placed_spawn_without_entry_custody`
   - `placed_spawn_id_present`
   - `placed_operation_owner_present`
   - `portability_clean`
@@ -4376,6 +4390,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `lifecycle_origin_open`
   - `coordinator_bound`
   - `identity_absent`
+  - `not_an_identity_entry`
 - Emits: `MemberSpawnRequired`
 - To: `Running`
 
@@ -6283,65 +6298,105 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ProbeMemberAdmissionDuplicateRunning`
 - From: `Running`
-- On: `ProbeMemberAdmission`(agent_identity)
+- On: `ProbeMemberAdmission`(agent_identity, entry_custody)
 - Guards:
   - `identity_already_bound_or_pending`
+  - `not_an_entry_without_custody`
 - Emits: `MemberAdmissionProbed`
 - To: `Running`
 
 ### `ProbeMemberAdmissionDuplicateStopped`
 - From: `Stopped`
-- On: `ProbeMemberAdmission`(agent_identity)
+- On: `ProbeMemberAdmission`(agent_identity, entry_custody)
 - Guards:
   - `identity_already_bound_or_pending`
+  - `not_an_entry_without_custody`
 - Emits: `MemberAdmissionProbed`
 - To: `Stopped`
 
 ### `ProbeMemberAdmissionDuplicateCompleted`
 - From: `Completed`
-- On: `ProbeMemberAdmission`(agent_identity)
+- On: `ProbeMemberAdmission`(agent_identity, entry_custody)
 - Guards:
   - `identity_already_bound_or_pending`
+  - `not_an_entry_without_custody`
 - Emits: `MemberAdmissionProbed`
 - To: `Completed`
 
 ### `ProbeMemberAdmissionDuplicateDestroyed`
 - From: `Destroyed`
-- On: `ProbeMemberAdmission`(agent_identity)
+- On: `ProbeMemberAdmission`(agent_identity, entry_custody)
 - Guards:
   - `identity_already_bound_or_pending`
+  - `not_an_entry_without_custody`
 - Emits: `MemberAdmissionProbed`
 - To: `Destroyed`
 
 ### `ProbeMemberAdmissionAdmittedRunning`
 - From: `Running`
-- On: `ProbeMemberAdmission`(agent_identity)
+- On: `ProbeMemberAdmission`(agent_identity, entry_custody)
 - Guards:
   - `identity_not_bound_and_not_pending`
+  - `not_an_entry_without_custody`
 - Emits: `MemberAdmissionProbed`
 - To: `Running`
 
 ### `ProbeMemberAdmissionAdmittedStopped`
 - From: `Stopped`
-- On: `ProbeMemberAdmission`(agent_identity)
+- On: `ProbeMemberAdmission`(agent_identity, entry_custody)
 - Guards:
   - `identity_not_bound_and_not_pending`
+  - `not_an_entry_without_custody`
 - Emits: `MemberAdmissionProbed`
 - To: `Stopped`
 
 ### `ProbeMemberAdmissionAdmittedCompleted`
 - From: `Completed`
-- On: `ProbeMemberAdmission`(agent_identity)
+- On: `ProbeMemberAdmission`(agent_identity, entry_custody)
 - Guards:
   - `identity_not_bound_and_not_pending`
+  - `not_an_entry_without_custody`
 - Emits: `MemberAdmissionProbed`
 - To: `Completed`
 
 ### `ProbeMemberAdmissionAdmittedDestroyed`
 - From: `Destroyed`
-- On: `ProbeMemberAdmission`(agent_identity)
+- On: `ProbeMemberAdmission`(agent_identity, entry_custody)
 - Guards:
   - `identity_not_bound_and_not_pending`
+  - `not_an_entry_without_custody`
+- Emits: `MemberAdmissionProbed`
+- To: `Destroyed`
+
+### `ProbeMemberAdmissionIdentityMemberRunning`
+- From: `Running`
+- On: `ProbeMemberAdmission`(agent_identity, entry_custody)
+- Guards:
+  - `entry_without_custody`
+- Emits: `MemberAdmissionProbed`
+- To: `Running`
+
+### `ProbeMemberAdmissionIdentityMemberStopped`
+- From: `Stopped`
+- On: `ProbeMemberAdmission`(agent_identity, entry_custody)
+- Guards:
+  - `entry_without_custody`
+- Emits: `MemberAdmissionProbed`
+- To: `Stopped`
+
+### `ProbeMemberAdmissionIdentityMemberCompleted`
+- From: `Completed`
+- On: `ProbeMemberAdmission`(agent_identity, entry_custody)
+- Guards:
+  - `entry_without_custody`
+- Emits: `MemberAdmissionProbed`
+- To: `Completed`
+
+### `ProbeMemberAdmissionIdentityMemberDestroyed`
+- From: `Destroyed`
+- On: `ProbeMemberAdmission`(agent_identity, entry_custody)
+- Guards:
+  - `entry_without_custody`
 - Emits: `MemberAdmissionProbed`
 - To: `Destroyed`
 
@@ -16949,6 +17004,182 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `member_local`
 - To: `Stopped`
 
+### `RecoverIdentityEntrySeatedRunning`
+- From: `Running`
+- On: `RecoverIdentityEntry`(agent_identity, agent_runtime_id, origin)
+- Guards:
+  - `replay_not_sealed`
+  - `identity_runtime_matches`
+  - `member_local`
+- To: `Running`
+
+### `RecoverIdentityEntrySeatedStopped`
+- From: `Stopped`
+- On: `RecoverIdentityEntry`(agent_identity, agent_runtime_id, origin)
+- Guards:
+  - `replay_not_sealed`
+  - `identity_runtime_matches`
+  - `member_local`
+- To: `Stopped`
+
+### `AdoptLegacyIdentityEntryAdopted`
+- From: `Running`
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- Guards:
+  - `composition_authoritative`
+  - `not_an_entry`
+  - `member_seated`
+  - `observed_incarnation_current`
+  - `member_adoptable`
+  - `legacy_roster_member_observed`
+- Emits: `LegacyIdentityEntryAdoptionResolved`
+- To: `Running`
+
+### `AdoptLegacyIdentityEntryNameHeldByWorker`
+- From: `Running`
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- Guards:
+  - `composition_authoritative`
+  - `not_an_entry`
+  - `member_seated`
+  - `observed_incarnation_current`
+  - `member_adoptable`
+  - `legacy_roster_member_not_observed`
+- Emits: `LegacyIdentityEntryAdoptionResolved`
+- To: `Running`
+
+### `AdoptLegacyIdentityEntryNotAdoptable`
+- From: `Running`
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- Guards:
+  - `composition_authoritative`
+  - `not_an_entry`
+  - `member_seated`
+  - `observed_incarnation_current`
+  - `member_not_adoptable`
+- Emits: `LegacyIdentityEntryAdoptionResolved`
+- To: `Running`
+
+### `AdoptLegacyIdentityEntryStaleObservation`
+- From: `Running`
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- Guards:
+  - `composition_authoritative`
+  - `not_an_entry`
+  - `member_seated`
+  - `observed_incarnation_stale`
+- Emits: `LegacyIdentityEntryAdoptionResolved`
+- To: `Running`
+
+### `AdoptLegacyIdentityEntryNotSeated`
+- From: `Running`
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- Guards:
+  - `composition_authoritative`
+  - `not_an_entry`
+  - `member_not_seated`
+- Emits: `LegacyIdentityEntryAdoptionResolved`
+- To: `Running`
+
+### `AdoptLegacyIdentityEntryAlreadyAnEntry`
+- From: `Running`
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- Guards:
+  - `composition_authoritative`
+  - `identity_entry`
+- Emits: `LegacyIdentityEntryAdoptionResolved`
+- To: `Running`
+
+### `AdoptLegacyIdentityEntryNonAuthoritative`
+- From: `Running`
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- Guards:
+  - `composition_non_authoritative`
+- Emits: `LegacyIdentityEntryAdoptionResolved`
+- To: `Running`
+
+### `AdoptLegacyIdentityEntryMobNotRunningStopped`
+- From: `Stopped`
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- Emits: `LegacyIdentityEntryAdoptionResolved`
+- To: `Stopped`
+
+### `AdoptLegacyIdentityEntryMobNotRunningCompleted`
+- From: `Completed`
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- Emits: `LegacyIdentityEntryAdoptionResolved`
+- To: `Completed`
+
+### `AdoptLegacyIdentityEntryMobNotRunningDestroyed`
+- From: `Destroyed`
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- Emits: `LegacyIdentityEntryAdoptionResolved`
+- To: `Destroyed`
+
+### `ResolveAgentLaneMemberAdmissionAdmittedRunning`
+- From: `Running`
+- On: `ResolveAgentLaneMemberAdmission`(agent_identity)
+- Guards:
+  - `not_an_identity_entry`
+- Emits: `AgentLaneMemberAdmissionResolved`
+- To: `Running`
+
+### `ResolveAgentLaneMemberAdmissionAdmittedStopped`
+- From: `Stopped`
+- On: `ResolveAgentLaneMemberAdmission`(agent_identity)
+- Guards:
+  - `not_an_identity_entry`
+- Emits: `AgentLaneMemberAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveAgentLaneMemberAdmissionAdmittedCompleted`
+- From: `Completed`
+- On: `ResolveAgentLaneMemberAdmission`(agent_identity)
+- Guards:
+  - `not_an_identity_entry`
+- Emits: `AgentLaneMemberAdmissionResolved`
+- To: `Completed`
+
+### `ResolveAgentLaneMemberAdmissionAdmittedDestroyed`
+- From: `Destroyed`
+- On: `ResolveAgentLaneMemberAdmission`(agent_identity)
+- Guards:
+  - `not_an_identity_entry`
+- Emits: `AgentLaneMemberAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveAgentLaneMemberAdmissionIdentityMemberRunning`
+- From: `Running`
+- On: `ResolveAgentLaneMemberAdmission`(agent_identity)
+- Guards:
+  - `identity_entry`
+- Emits: `AgentLaneMemberAdmissionResolved`
+- To: `Running`
+
+### `ResolveAgentLaneMemberAdmissionIdentityMemberStopped`
+- From: `Stopped`
+- On: `ResolveAgentLaneMemberAdmission`(agent_identity)
+- Guards:
+  - `identity_entry`
+- Emits: `AgentLaneMemberAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveAgentLaneMemberAdmissionIdentityMemberCompleted`
+- From: `Completed`
+- On: `ResolveAgentLaneMemberAdmission`(agent_identity)
+- Guards:
+  - `identity_entry`
+- Emits: `AgentLaneMemberAdmissionResolved`
+- To: `Completed`
+
+### `ResolveAgentLaneMemberAdmissionIdentityMemberDestroyed`
+- From: `Destroyed`
+- On: `ResolveAgentLaneMemberAdmission`(agent_identity)
+- Guards:
+  - `identity_entry`
+- Emits: `AgentLaneMemberAdmissionResolved`
+- To: `Destroyed`
+
 ## Coverage
 ### Code Anchors
 - `mob_handle_surface` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/handle.rs` — identity-first public MobMachine handle surface for ensure member, reconcile, and member command routing
@@ -16956,7 +17187,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `mob_owner_bridge_cleanup_authority` (machine `MobMachine`): `crates/meerkat-mob-mcp/src/lib.rs` — MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants
 - `mob_coordination_board_authority` (machine `MobMachine`): `crates/meerkat-mob/src/coordination.rs` — MobMachine coordination board authority: record work intent, record resource claim, update coordination work intent status planned active blocked completed cancelled, update coordination resource claim status active released expired cancelled, observe coordination resource claim overlap, and the recorded/status-changed/overlap-observed coordination effects
 - `mob_operator_admission_authority` (machine `MobMachine`): `crates/meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)
-- `mob_membership_classifier_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate or admitted from machine-owned binding and pending-spawn state; compute respawn generation successor; reconcile desired members to spawn retain or retire against current bindings emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects
+- `mob_membership_classifier_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate, admitted or refused as an identity entry's name without entry custody from machine-owned binding, pending-spawn and entry state; compute respawn generation successor; reconcile desired workers to spawn retain or retire against current bindings, never an identity entry, emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects
+- `mob_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/identity_entry_admission.rs` — MobMachine identity entries realized by the actor: refuse an agent-lane member command addressed to an identity entry from the resolved agent lane member admission, and adopt a legacy member as an identity entry from the shell's observation of its spawn row, journaling the adoption before it commits; the entry is seated, local, spared by the worker reconcile, and its custody belongs to an open spawn ladder, emitting the agent lane member admission resolved and legacy identity entry adoption resolved effects
 - `mob_flow_fault_topology_escalation_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/flow.rs` — MobMachine flow-step fault, topology-edge, and supervisor-escalation classifiers owned by the flow engine: classify step output fault retry or terminal malformed json into a step fault disposition; evaluate topology edge rule allow deny or default into a policy decision verdict; and escalate to supervisor target found with a real supervisor identity or no eligible target, emitting the step output fault classified, topology edge verdict resolved, supervisor escalation requested, and supervisor escalation failed effects
 
 ### Scenarios

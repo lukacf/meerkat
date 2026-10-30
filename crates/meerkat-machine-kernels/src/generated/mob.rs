@@ -541,6 +541,58 @@ impl std::fmt::Display for AgentIdentity {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AgentLaneMemberAdmissionKind {
+    #[default]
+    #[serde(rename = "Admitted")]
+    Admitted,
+    #[serde(rename = "IdentityMember")]
+    IdentityMember,
+}
+impl AgentLaneMemberAdmissionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Admitted => "Admitted",
+            Self::IdentityMember => "IdentityMember",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AgentLaneMemberAdmissionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Admitted" => Ok(Self::Admitted),
+            "IdentityMember" => Ok(Self::IdentityMember),
+            other => Err(format!(
+                "invalid AgentLaneMemberAdmissionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AgentLaneMemberAdmissionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AgentLaneMemberAdmissionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -1980,6 +2032,52 @@ impl std::fmt::Display for IdentityAuthorityCondition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum IdentityEntryOrigin {
+    #[default]
+    #[serde(rename = "Declared")]
+    Declared,
+}
+impl IdentityEntryOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Declared => "Declared",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityEntryOrigin {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Declared" => Ok(Self::Declared),
+            other => Err(format!("invalid IdentityEntryOrigin value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityEntryOrigin {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityEntryOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum IdentityExternalCeremonyCondition {
     #[default]
     #[serde(rename = "NotRequired")]
@@ -2828,6 +2926,82 @@ impl std::fmt::Display for KickoffPhase {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LegacyIdentityEntryAdoptionKind {
+    #[default]
+    #[serde(rename = "Adopted")]
+    Adopted,
+    #[serde(rename = "AlreadyAnEntry")]
+    AlreadyAnEntry,
+    #[serde(rename = "NameHeldByWorker")]
+    NameHeldByWorker,
+    #[serde(rename = "NotAdoptable")]
+    NotAdoptable,
+    #[serde(rename = "StaleObservation")]
+    StaleObservation,
+    #[serde(rename = "NotSeated")]
+    NotSeated,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl LegacyIdentityEntryAdoptionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Adopted => "Adopted",
+            Self::AlreadyAnEntry => "AlreadyAnEntry",
+            Self::NameHeldByWorker => "NameHeldByWorker",
+            Self::NotAdoptable => "NotAdoptable",
+            Self::StaleObservation => "StaleObservation",
+            Self::NotSeated => "NotSeated",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LegacyIdentityEntryAdoptionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Adopted" => Ok(Self::Adopted),
+            "AlreadyAnEntry" => Ok(Self::AlreadyAnEntry),
+            "NameHeldByWorker" => Ok(Self::NameHeldByWorker),
+            "NotAdoptable" => Ok(Self::NotAdoptable),
+            "StaleObservation" => Ok(Self::StaleObservation),
+            "NotSeated" => Ok(Self::NotSeated),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!(
+                "invalid LegacyIdentityEntryAdoptionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LegacyIdentityEntryAdoptionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LegacyIdentityEntryAdoptionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type LiveWsEndpointUrl = meerkat_machine_schema::catalog::dsl::mob_machine::LiveWsEndpointUrl;
 #[derive(
     Debug,
@@ -3097,12 +3271,15 @@ pub enum MemberAdmissionVerdictKind {
     Admitted,
     #[serde(rename = "DuplicateRejected")]
     DuplicateRejected,
+    #[serde(rename = "IdentityMemberRejected")]
+    IdentityMemberRejected,
 }
 impl MemberAdmissionVerdictKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Admitted => "Admitted",
             Self::DuplicateRejected => "DuplicateRejected",
+            Self::IdentityMemberRejected => "IdentityMemberRejected",
         }
     }
 }
@@ -3112,6 +3289,7 @@ impl std::convert::TryFrom<&str> for MemberAdmissionVerdictKind {
         match value {
             "Admitted" => Ok(Self::Admitted),
             "DuplicateRejected" => Ok(Self::DuplicateRejected),
+            "IdentityMemberRejected" => Ok(Self::IdentityMemberRejected),
             other => Err(format!(
                 "invalid MemberAdmissionVerdictKind value `{other}`"
             )),
@@ -8055,6 +8233,8 @@ pub struct State {
     pub member_seat_session_unborn: std::collections::BTreeSet<AgentIdentity>,
     pub unborn_seat_sessions: std::collections::BTreeSet<SessionId>,
     pub member_definition_wiring_exempt: std::collections::BTreeSet<AgentIdentity>,
+    pub identity_entry_origins: std::collections::BTreeMap<AgentIdentity, IdentityEntryOrigin>,
+    pub spawn_exec_entry_custody: std::collections::BTreeSet<AgentIdentity>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -8245,6 +8425,7 @@ pub mod inputs {
         pub placed_operation_owner_session_id: Option<SessionId>,
         pub effective_profile_override_present: bool,
         pub effective_model_override_present: bool,
+        pub entry_custody: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitSpawnMembership {
@@ -9140,6 +9321,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ProbeMemberAdmission {
         pub agent_identity: AgentIdentity,
+        pub entry_custody: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ComputeRespawnGeneration {
@@ -9515,6 +9697,16 @@ pub mod inputs {
     pub struct ClassifyMemberRelease {
         pub agent_identity: AgentIdentity,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdoptLegacyIdentityEntry {
+        pub agent_identity: AgentIdentity,
+        pub generation: Generation,
+        pub legacy_roster_member: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveAgentLaneMemberAdmission {
+        pub agent_identity: AgentIdentity,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -9755,6 +9947,8 @@ pub enum Input {
     BeginMemberRotation(inputs::BeginMemberRotation),
     CommitMemberRotation(inputs::CommitMemberRotation),
     ClassifyMemberRelease(inputs::ClassifyMemberRelease),
+    AdoptLegacyIdentityEntry(inputs::AdoptLegacyIdentityEntry),
+    ResolveAgentLaneMemberAdmission(inputs::ResolveAgentLaneMemberAdmission),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -10071,6 +10265,8 @@ impl Input {
             Self::BeginMemberRotation(_) => InputKind::BeginMemberRotation,
             Self::CommitMemberRotation(_) => InputKind::CommitMemberRotation,
             Self::ClassifyMemberRelease(_) => InputKind::ClassifyMemberRelease,
+            Self::AdoptLegacyIdentityEntry(_) => InputKind::AdoptLegacyIdentityEntry,
+            Self::ResolveAgentLaneMemberAdmission(_) => InputKind::ResolveAgentLaneMemberAdmission,
         }
     }
 }
@@ -10304,6 +10500,8 @@ pub enum InputKind {
     BeginMemberRotation,
     CommitMemberRotation,
     ClassifyMemberRelease,
+    AdoptLegacyIdentityEntry,
+    ResolveAgentLaneMemberAdmission,
 }
 
 pub mod signals {
@@ -10788,6 +10986,12 @@ pub mod signals {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverIdentityEntry {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub origin: IdentityEntryOrigin,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -10881,6 +11085,7 @@ pub enum Signal {
     ResolveMemberRevivalSessionCreated(signals::ResolveMemberRevivalSessionCreated),
     RecoverMemberSeatSession(signals::RecoverMemberSeatSession),
     ExemptMemberFromDefinitionWiring(signals::ExemptMemberFromDefinitionWiring),
+    RecoverIdentityEntry(signals::RecoverIdentityEntry),
 }
 impl Signal {
     pub fn kind(&self) -> SignalKind {
@@ -11008,6 +11213,7 @@ impl Signal {
             Self::ExemptMemberFromDefinitionWiring(_) => {
                 SignalKind::ExemptMemberFromDefinitionWiring
             }
+            Self::RecoverIdentityEntry(_) => SignalKind::RecoverIdentityEntry,
         }
     }
 }
@@ -11100,6 +11306,7 @@ pub enum SignalKind {
     ResolveMemberRevivalSessionCreated,
     RecoverMemberSeatSession,
     ExemptMemberFromDefinitionWiring,
+    RecoverIdentityEntry,
 }
 
 pub mod effects {
@@ -12052,6 +12259,16 @@ pub mod effects {
         pub agent_runtime_id: AgentRuntimeId,
         pub session_id: SessionId,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LegacyIdentityEntryAdoptionResolved {
+        pub agent_identity: AgentIdentity,
+        pub verdict: LegacyIdentityEntryAdoptionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AgentLaneMemberAdmissionResolved {
+        pub agent_identity: AgentIdentity,
+        pub admission: AgentLaneMemberAdmissionKind,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -12228,6 +12445,8 @@ pub enum Effect {
     OwedMemberWakesRecorded(effects::OwedMemberWakesRecorded),
     OwedEdgeRepairsRecorded(effects::OwedEdgeRepairsRecorded),
     PersistMemberSeatSessionBorn(effects::PersistMemberSeatSessionBorn),
+    LegacyIdentityEntryAdoptionResolved(effects::LegacyIdentityEntryAdoptionResolved),
+    AgentLaneMemberAdmissionResolved(effects::AgentLaneMemberAdmissionResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -12399,6 +12618,8 @@ pub enum EffectKind {
     OwedMemberWakesRecorded,
     OwedEdgeRepairsRecorded,
     PersistMemberSeatSessionBorn,
+    LegacyIdentityEntryAdoptionResolved,
+    AgentLaneMemberAdmissionResolved,
 }
 
 pub mod command_capabilities {
@@ -14112,6 +14333,30 @@ pub enum TransitionId {
     AuthorizeSpawnProfileSeatedRunning,
     ExemptMemberFromDefinitionWiringSeatedRunning,
     ExemptMemberFromDefinitionWiringSeatedStopped,
+    ProbeMemberAdmissionIdentityMemberRunning,
+    ProbeMemberAdmissionIdentityMemberStopped,
+    ProbeMemberAdmissionIdentityMemberCompleted,
+    ProbeMemberAdmissionIdentityMemberDestroyed,
+    RecoverIdentityEntrySeatedRunning,
+    RecoverIdentityEntrySeatedStopped,
+    AdoptLegacyIdentityEntryAdopted,
+    AdoptLegacyIdentityEntryNameHeldByWorker,
+    AdoptLegacyIdentityEntryNotAdoptable,
+    AdoptLegacyIdentityEntryStaleObservation,
+    AdoptLegacyIdentityEntryNotSeated,
+    AdoptLegacyIdentityEntryAlreadyAnEntry,
+    AdoptLegacyIdentityEntryNonAuthoritative,
+    AdoptLegacyIdentityEntryMobNotRunningStopped,
+    AdoptLegacyIdentityEntryMobNotRunningCompleted,
+    AdoptLegacyIdentityEntryMobNotRunningDestroyed,
+    ResolveAgentLaneMemberAdmissionAdmittedRunning,
+    ResolveAgentLaneMemberAdmissionAdmittedStopped,
+    ResolveAgentLaneMemberAdmissionAdmittedCompleted,
+    ResolveAgentLaneMemberAdmissionAdmittedDestroyed,
+    ResolveAgentLaneMemberAdmissionIdentityMemberRunning,
+    ResolveAgentLaneMemberAdmissionIdentityMemberStopped,
+    ResolveAgentLaneMemberAdmissionIdentityMemberCompleted,
+    ResolveAgentLaneMemberAdmissionIdentityMemberDestroyed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14486,5 +14731,7 @@ pub fn initial_state() -> State {
         member_seat_session_unborn: Default::default(),
         unborn_seat_sessions: Default::default(),
         member_definition_wiring_exempt: Default::default(),
+        identity_entry_origins: Default::default(),
+        spawn_exec_entry_custody: Default::default(),
     }
 }

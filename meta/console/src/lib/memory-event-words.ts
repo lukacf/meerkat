@@ -65,12 +65,12 @@ const VERDICT_WORDS: Readonly<Record<string, string>> = {
   tombstoned: "discarded",
   keep: "kept in quarantine",
   hold: "kept in quarantine",
-  promote: "moved to team or operator memory",
+  promote: "moved to team memory",
   promote_pending_gate: "sent for approval",
 };
 
 /** A quarantine verdict in words: "discarded", "released", "kept in
- * quarantine", "moved to team or operator memory". */
+ * quarantine", "moved to team memory". */
 export function quarantineVerdictWords(verdict: string): string {
   return VERDICT_WORDS[verdict] ?? (verdict ? words(verdict) : "decided");
 }

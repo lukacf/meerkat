@@ -115,12 +115,12 @@ describe("Memory panel words", () => {
     expect(hasTitle(view, "memory-pipeline-no-grant", "Grant: memory.quarantine.review")).toBe(true);
   });
 
-  it("says a record waits to move to team or operator memory, never a promotion", () => {
+  it("says a record waits to move to team memory, never a promotion", () => {
     const view = renderPanel({ canReviewQuarantine: true, onDecideQuarantine: async () => undefined });
     openTab(view, "pipeline");
     const pipeline = text(view, "memory-pipeline");
     expect(text(view, "memory-quarantine-note").includes(
-      "Records waiting to move to team or operator memory are decided in Approvals",
+      "Records waiting to move to team memory are decided in Approvals",
     )).toBe(true);
     expect(pipeline.includes("No record is waiting to move.")).toBe(true);
     expect(/promot/i.test(pipeline)).toBe(false);

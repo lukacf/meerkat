@@ -42,7 +42,7 @@ describe("Today names memory events in plain words", () => {
       .toBe("identity:steward moved a memory record");
     expect(moved.tone).toBe("ok");
     expect(memory("memory.quarantine.verdict", { verdict: "tombstone" }).snippet).toBe("discarded");
-    expect(memory("memory.quarantine.verdict", { verdict: "promote" }).snippet).toBe("moved to team or operator memory");
+    expect(memory("memory.quarantine.verdict", { verdict: "promote" }).snippet).toBe("moved to team memory");
     expect(sentence({ id: "t", event: "memory.taint.transition", identity: "identity:steward", timestampMs: Date.now(), data: { kind: "tainted" } }))
       .toBe("identity:steward's session became untrusted");
   });

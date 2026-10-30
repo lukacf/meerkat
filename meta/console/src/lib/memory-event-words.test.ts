@@ -17,7 +17,7 @@ describe("memory events in words", () => {
       ["memory.record.promoted", { scope_kind: "realm", scope_key: "default" }, "A record moved to shared memory"],
       ["memory.quarantine.verdict", { verdict: "tombstone", rationale: "duplicate" }, "Quarantine verdict: discarded · duplicate"],
       ["memory.quarantine.verdict", { verdict: "unverifiable" }, "Quarantine verdict: unverifiable"],
-      ["memory.quarantine.verdict", { verdict: "promote" }, "Quarantine verdict: moved to team or operator memory"],
+      ["memory.quarantine.verdict", { verdict: "promote" }, "Quarantine verdict: moved to team memory"],
       ["memory.record.promoted", {}, "A record was moved"],
       ["memory.quarantine.release_blocked", { record_id: "rec-9", verdict: "release", class: "private-key" }, "Release of “Deploy key for staging” blocked · it looks like a secret"],
       ["memory.quarantine.release_blocked", { record_id: "rec-10", verdict: "promote_pending_gate" }, "Moving a quarantined record was blocked"],

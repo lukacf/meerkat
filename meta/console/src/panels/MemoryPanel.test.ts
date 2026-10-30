@@ -1526,11 +1526,11 @@ test("quarantine decision summaries say what happened and carry the record IDs a
     });
   const one = withPromotion(["gate-1"]);
   summaries.push(one);
-  assert.match(one.text, /The move to team or operator memory waiting on it was cancelled and can no longer publish/);
+  assert.match(one.text, /The move to team memory waiting on it was cancelled and can no longer publish/);
   assert.deepEqual(one.ids, [{ label: "Cancelled move", value: "gate-1" }]);
   const two = withPromotion(["gate-1", "gate-2"]);
   summaries.push(two);
-  assert.match(two.text, /The 2 moves to team or operator memory waiting on it were cancelled/);
+  assert.match(two.text, /The 2 moves to team memory waiting on it were cancelled/);
   assert.deepEqual(two.ids.map((id) => id.value), ["gate-1", "gate-2"]);
   const again = quarantineDecisionSummary({ ...released, outcome: "already_tombstoned", successor: null });
   summaries.push(again);
@@ -1570,7 +1570,7 @@ test("quarantine decision errors render typed refusals without echoing content",
   notices.push(gate);
   assert.equal(
     gate.text,
-    "Refused: this record is waiting for approval to move to team or operator memory. Decide it in Approvals. Discarding the record instead cancels the move.",
+    "Refused: this record is waiting for approval to move to team memory. Decide it in Approvals. Discarding the record instead cancels the move.",
   );
   assert.deepEqual(gate.ids, [{ label: "Waiting move", value: "gate-1" }]);
   const expiring = quarantineDecisionErrorText(

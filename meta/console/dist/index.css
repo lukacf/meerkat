@@ -13108,10 +13108,34 @@ svg[data-svg=fit],
   margin: 0;
   justify-self: center;
 }
+.pane-menu__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
 .pane-menu__id {
+  display: inline-flex;
+  justify-self: end;
+  min-width: 0;
+  max-width: 150px;
+  overflow: hidden;
+  white-space: nowrap;
   font-family: var(--mono);
   font-size: 10.5px;
-  color: var(--ink-dim);
+  font-weight: 400;
+  color: var(--ink-meta);
+}
+.pane-menu__id-head {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pane-menu__id-tail {
+  flex: none;
+  white-space: nowrap;
 }
 .pane-menu__sep {
   height: 1px;

@@ -65294,11 +65294,9 @@ function ChatPane({
           /* @__PURE__ */ (0, import_jsx_runtime75.jsxs)("div", { className: "composer__footer", children: [
             /* @__PURE__ */ (0, import_jsx_runtime75.jsxs)("span", { children: [
               "To: ",
-              /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("b", { style: { color: "var(--ink-muted)" }, children: agentLabel })
+              /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("b", { style: { color: "var(--ink-muted)" }, title: identity, children: agentLabel })
             ] }),
             voiceActive && /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: "\xB7 text to background agent" }),
-            /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: "\xB7" }),
-            /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { className: "mono", children: identity }),
             agent?.role && /* @__PURE__ */ (0, import_jsx_runtime75.jsxs)(import_jsx_runtime75.Fragment, { children: [
               /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: "\xB7" }),
               /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: agent.role })
@@ -65614,6 +65612,13 @@ function PaneView({
     }
   );
 }
+function PaneMenuIdentity({ value }) {
+  const parts = splitTechnicalId(value);
+  return /* @__PURE__ */ (0, import_jsx_runtime76.jsxs)("span", { className: "pane-menu__id", title: value, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "pane-menu__id-head", children: parts.head }),
+    parts.tail ? /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "pane-menu__id-tail", children: parts.tail }) : null
+  ] });
+}
 function PaneMenu({ agents, visibleControls, customPanels = [], onClose, onPick }) {
   const controls = [
     ["topology", "Topology"],
@@ -65636,7 +65641,7 @@ function PaneMenu({ agents, visibleControls, customPanels = [], onClose, onPick 
           "data-testid": "pane-menu-view:".concat(kind),
           children: [
             /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", {}),
-            /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { children: label }),
+            /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "pane-menu__name", children: label }),
             /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "pane-menu__id", children: "view" })
           ]
         },
@@ -65650,7 +65655,7 @@ function PaneMenu({ agents, visibleControls, customPanels = [], onClose, onPick 
           "data-testid": "pane-menu-custom-panel:".concat(panel.id),
           children: [
             /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", {}),
-            /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { children: panel.title }),
+            /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "pane-menu__name", children: panel.title }),
             /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "pane-menu__id", children: "view" })
           ]
         },
@@ -65667,8 +65672,8 @@ function PaneMenu({ agents, visibleControls, customPanels = [], onClose, onPick 
           "data-testid": "pane-menu-agent:".concat(a.member_id),
           children: [
             /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "agent__dot" }),
-            /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { children: agentDisplayTitle(a) }),
-            /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "pane-menu__id", children: a.identity || a.member_id })
+            /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "pane-menu__name", children: agentDisplayTitle(a) }),
+            /* @__PURE__ */ (0, import_jsx_runtime76.jsx)(PaneMenuIdentity, { value: a.identity || a.member_id })
           ]
         },
         a.member_id

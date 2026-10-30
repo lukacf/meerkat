@@ -1144,6 +1144,16 @@ impl DriverEntry {
         }
     }
 
+    /// The shared durability health of this driver's session, which a failed
+    /// or unreconciled durable write degrades. `None` for an ephemeral driver
+    /// or a persistent driver without durability health.
+    pub(crate) fn durability_health_handle(&self) -> Option<DurabilityHealthHandle> {
+        match self {
+            DriverEntry::Ephemeral(_) => None,
+            DriverEntry::Persistent(driver) => driver.durability_health_handle(),
+        }
+    }
+
     fn shell_driver_mut(&mut self) -> &mut EphemeralRuntimeDriver {
         match self {
             DriverEntry::Ephemeral(driver) => driver,

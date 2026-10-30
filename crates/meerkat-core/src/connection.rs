@@ -2811,8 +2811,11 @@ mod tests {
         }
     }
 
+    /// The ChatGPT backend carries only the prompt's leading System row, and
+    /// an OpenAI backend kind this version does not know fails closed: it may
+    /// be such a backend.
     #[test]
-    fn only_a_chatgpt_backend_profile_refuses_additional_leading_system_messages() {
+    fn a_chatgpt_or_unknown_openai_backend_profile_refuses_additional_leading_system_messages() {
         let backend = |provider, backend_kind: &str| BackendProfile {
             id: "backend".to_string(),
             provider,
@@ -2821,21 +2824,69 @@ mod tests {
             options: serde_json::Value::Null,
             server: None,
         };
-        assert!(
-            !backend(Provider::OpenAI, "chatgpt_backend")
-                .admits_additional_leading_system_messages()
-        );
+        for backend_kind in ["chatgpt_backend", "a_backend_this_version_does_not_know"] {
+            assert!(
+                !backend(Provider::OpenAI, backend_kind)
+                    .admits_additional_leading_system_messages(),
+                "{backend_kind}"
+            );
+        }
         for (provider, backend_kind) in [
             (Provider::OpenAI, "openai_api"),
             (Provider::OpenAI, "azure_openai"),
             (Provider::OpenAI, "copilot"),
-            (Provider::OpenAI, "a_backend_this_version_does_not_know"),
             (Provider::Anthropic, "anthropic_api"),
             (Provider::Gemini, "google_genai"),
         ] {
             assert!(
                 backend(provider, backend_kind).admits_additional_leading_system_messages(),
                 "{backend_kind}"
+            );
+        }
+    }
+
+    /// A named OpenAI binding whose backend kind this version does not know
+    /// fails closed, as one the config does not resolve: neither is known to
+    /// carry a second leading System row.
+    #[test]
+    fn an_unknown_or_unresolvable_openai_binding_admits_no_additional_leading_system_row() {
+        let config = config_with_realms(
+            r#"
+[prod]
+default_binding = "primary"
+
+[prod.backend.openai_unknown]
+provider = "openai"
+backend_kind = "a_backend_this_version_does_not_know"
+
+[prod.auth.openai_oauth]
+provider = "openai"
+auth_method = "chatgpt_oauth"
+source = { kind = "platform_default" }
+
+[prod.binding.primary]
+backend_profile = "openai_unknown"
+auth_profile = "openai_oauth"
+"#,
+        );
+        let binding = |realm: &str| AuthBindingRef {
+            realm: RealmId::parse(realm).unwrap(),
+            binding: BindingId::parse("primary").unwrap(),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        };
+        assert!(
+            resolve_explicit_auth_binding_target(&config, &binding("prod")).is_ok(),
+            "the binding resolves"
+        );
+        for realm in ["prod", "missing"] {
+            assert!(
+                !binding_admits_additional_leading_system_messages(
+                    &config,
+                    Provider::OpenAI,
+                    Some(&binding(realm)),
+                ),
+                "{realm}"
             );
         }
     }

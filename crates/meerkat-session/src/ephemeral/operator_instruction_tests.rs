@@ -40,6 +40,9 @@ struct RunProbe {
     refuse_next_run: std::sync::atomic::AtomicBool,
     /// The next System append of a turn fails.
     fail_next_system_append: std::sync::atomic::AtomicBool,
+    /// The next run fails once it started: its model read the request, then
+    /// the call fails.
+    fail_next_run_after_start: std::sync::atomic::AtomicBool,
 }
 
 impl RunProbe {
@@ -58,6 +61,11 @@ impl RunProbe {
 
     fn fail_next_system_append(&self) {
         self.fail_next_system_append
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn fail_next_run_after_start(&self) {
+        self.fail_next_run_after_start
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
@@ -133,7 +141,8 @@ impl ProbeAgent {
     }
 
     /// One run: its input row, its request (what the model would read),
-    /// the held gate, then the answer. A refused run starts nothing.
+    /// the held gate, then the answer. A refused run starts nothing; a run
+    /// that fails after it started fails once its model read the request.
     async fn run(&mut self, prompt: String) -> Result<RunResult, AgentError> {
         if self
             .probe
@@ -161,6 +170,15 @@ impl ProbeAgent {
                 .await
                 .expect("the release gate is never closed")
                 .forget();
+        }
+        if self
+            .probe
+            .fail_next_run_after_start
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AgentError::InternalError(
+                "the model call fails after the run started".to_string(),
+            ));
         }
         self.session.push(Message::BlockAssistant(
             meerkat_core::types::BlockAssistantMessage {
@@ -564,5 +582,70 @@ async fn a_turn_whose_run_never_starts_leaves_no_entry_and_the_next_run_start_ap
             .filter(|message| is_entry(message))
             .count(),
         1
+    );
+}
+
+/// A turn whose run started and then failed keeps the operator-instruction
+/// entry naming it: its model already read the entry. The agent reports
+/// whether its run started; the session task does not read that from the
+/// event stream, where this agent publishes nothing. The change is in
+/// effect, so the next run start applies nothing new.
+#[tokio::test]
+async fn a_turn_whose_run_started_and_then_failed_keeps_its_entry() {
+    let probe = Arc::new(RunProbe::default());
+    let service = EphemeralSessionService::new(
+        ProbeBuilder {
+            probe: Arc::clone(&probe),
+        },
+        1,
+    );
+    let id = service
+        .create_session(create_request())
+        .await
+        .expect("create a deferred session")
+        .session_id;
+    let receipt = service
+        .set_session_instruction_control(&id, write_tone())
+        .await
+        .expect("the write records");
+    assert_eq!(receipt.disposition, InstructionWriteDisposition::Recorded);
+
+    probe.fail_next_run_after_start();
+    service
+        .start_turn(&id, turn("fails"))
+        .await
+        .expect_err("the run fails after it started");
+    let requests = probe.requests();
+    assert_eq!(requests.len(), 1, "the failed run reached its model");
+    assert_eq!(
+        requests[0]
+            .iter()
+            .filter(|message| is_entry(message))
+            .count(),
+        1,
+        "the model read the entry"
+    );
+    let session = service.export_session(&id).await.expect("export");
+    assert_eq!(
+        session
+            .messages()
+            .iter()
+            .filter(|message| is_entry(message))
+            .count(),
+        1,
+        "the entry the model read is kept: {:?}",
+        session.messages()
+    );
+
+    service
+        .start_turn(&id, turn("next"))
+        .await
+        .expect("the next turn runs");
+    let requests = probe.requests();
+    let next = requests.last().expect("the next request");
+    assert_eq!(
+        next.iter().filter(|message| is_entry(message)).count(),
+        1,
+        "the change applied once: the next run start applies nothing new"
     );
 }

@@ -3109,6 +3109,76 @@ mod tests {
         }
     }
 
+    /// An identity a run start minted reads `Known` from its JSON, with every
+    /// field it carries. Were the core type to gain a field the wire cannot
+    /// decode, every real entry would read raw; this row fails first.
+    #[test]
+    fn a_minted_entry_identity_decodes_from_json_as_known() {
+        use meerkat_core::types::{InstructionKey, InstructionNamespace};
+
+        let write = meerkat_core::SessionInstructionWrite {
+            slot: meerkat_core::InstructionSlot {
+                namespace: InstructionNamespace::new("app.example").unwrap(),
+                key: InstructionKey::new("tone").unwrap(),
+            },
+            revision: meerkat_core::InstructionRevision::new(1).unwrap(),
+            change: meerkat_core::SessionInstructionChange::Activate {
+                body: "Answer formally.".to_string(),
+                content_sha256: None,
+            },
+        };
+        let mut session = meerkat_core::Session::new();
+        session
+            .set_session_instruction(write)
+            .expect("the write records");
+        let run_id = RunId::new();
+        let outcome = session
+            .apply_run_start_instructions(
+                meerkat_core::InstructionRunStart::FreshRun,
+                meerkat_core::InstructionLowering::MidConversation,
+                Some(run_id.clone()),
+            )
+            .expect("the run start resolves");
+        assert!(
+            matches!(
+                outcome,
+                meerkat_core::RunStartInstructionOutcome::Applied { .. }
+            ),
+            "{outcome:?}"
+        );
+        let minted = session
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::System(system) => system.instruction_entry.clone(),
+                _ => None,
+            })
+            .expect("the run start appended its entry");
+        assert_eq!(minted.run_id(), Some(&run_id));
+        assert!(!minted.active().is_empty() && !minted.changes().is_empty());
+
+        let json = serde_json::to_value(&minted).expect("the identity serializes");
+        let decoded: WireInstructionEntryIdentity =
+            serde_json::from_value(json.clone()).expect("the identity decodes");
+        assert_eq!(
+            decoded,
+            WireInstructionEntryIdentity::Known(minted.clone()),
+            "a minted identity reads as known: {json}"
+        );
+
+        // The same through a history row, as a reader of the wire decodes it.
+        let wire = WireSessionMessage::from(session.messages()[0].clone());
+        let encoded = serde_json::to_value(&wire).expect("the row serializes");
+        let read: WireSessionMessage = serde_json::from_value(encoded).expect("the row decodes");
+        match read {
+            WireSessionMessage::System {
+                instruction_entry: Some(WireInstructionEntryIdentity::Known(identity)),
+                ..
+            } => assert_eq!(identity, minted),
+            other => panic!("expected a known entry identity, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_wire_session_history_from_page_maps_block_assistant_and_tool_results() {
         let page = SessionHistoryPage {

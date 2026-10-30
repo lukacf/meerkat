@@ -532,40 +532,42 @@ fn entry_chronology_refuses_a_broken_supersedes_chain() {
     );
 }
 
+/// A generic rewrite of `start..end` with `replacement` is refused as a
+/// change of an operator-instruction entry, and the refusal changes nothing.
+fn assert_refused(session: &mut Session, start: usize, end: usize, replacement: Vec<Message>) {
+    use crate::{TranscriptEditError, TranscriptRewriteReason, TranscriptRewriteSelection};
+
+    let before = session.messages().to_vec();
+    let error = session
+        .commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start, end },
+            replacement,
+            TranscriptRewriteReason::new("attempt an entry rewrite"),
+            Some("unit-test".to_string()),
+            None,
+        )
+        .expect_err("the rewrite is refused");
+    assert!(
+        matches!(
+            &error,
+            TranscriptEditError::InvalidTranscriptShape(message)
+                if message.contains("operator instruction entr")
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        session.messages(),
+        before.as_slice(),
+        "a refusal changes nothing"
+    );
+}
+
 /// Only a run start and a compaction fold write entry rows. A generic
 /// rewrite (and a restore, which commits through the same guard) cannot
 /// erase one, move one, or mint one, even a row that would continue the
 /// entry chronology.
 #[test]
 fn generic_rewrite_cannot_mint_move_or_erase_entry_rows() {
-    use crate::{TranscriptEditError, TranscriptRewriteReason, TranscriptRewriteSelection};
-
-    fn assert_refused(session: &mut Session, start: usize, end: usize, replacement: Vec<Message>) {
-        let before = session.messages().to_vec();
-        let error = session
-            .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange { start, end },
-                replacement,
-                TranscriptRewriteReason::new("attempt an entry rewrite"),
-                Some("unit-test".to_string()),
-                None,
-            )
-            .expect_err("the rewrite is refused");
-        assert!(
-            matches!(
-                &error,
-                TranscriptEditError::InvalidTranscriptShape(message)
-                    if message.contains("operator instruction entr")
-            ),
-            "{error:?}"
-        );
-        assert_eq!(
-            session.messages(),
-            before.as_slice(),
-            "a refusal changes nothing"
-        );
-    }
-
     // [head prompt, delta 1, user turn, delta 2]
     let mut session = session_with_two_deltas();
     let rows = session.messages().to_vec();
@@ -584,6 +586,66 @@ fn generic_rewrite_cannot_mint_move_or_erase_entry_rows() {
     .unwrap()
     .expect("a non-empty set renders a snapshot");
     assert_refused(&mut session, 4, 4, vec![Message::System(snapshot)]);
+}
+
+/// An entry keeps its order among the System rows of its gap (the rows
+/// between two conversation rows) as well as its place among the
+/// conversation rows. A generic rewrite cannot put the first-run entry
+/// before the head prompt, an ordinary System row or the first version of a
+/// keyed prompt (which stands where the row it adopted stood), nor move a
+/// snapshot off the end of the leading System prefix.
+#[test]
+fn generic_rewrite_cannot_move_an_entry_among_the_system_rows_of_its_gap() {
+    // [head prompt, delta 1, user turn, delta 2]: delta 1 before the prompt.
+    let mut session = session_with_two_deltas();
+    let rows = session.messages().to_vec();
+    assert_refused(&mut session, 0, 2, vec![rows[1].clone(), rows[0].clone()]);
+
+    // [keyed head prompt, delta 1, user turn]: delta 1 before the prompt's
+    // first version.
+    let mut session = Session::new();
+    session.append_system_message("You are a careful assistant.");
+    session
+        .update_system_prompt(prompt_update(None, Some(0), "Prompt version one."))
+        .expect("the head prompt is adopted in place");
+    let entry = mint_operator_instruction_delta(
+        header(session.id(), 1),
+        vec![active("app.example", "tone", 1, "Answer in a formal tone.")],
+        vec![activate(
+            "app.example",
+            "tone",
+            1,
+            None,
+            "Answer in a formal tone.",
+        )],
+        at(),
+    )
+    .unwrap();
+    session.append_operator_instruction_entry(entry).unwrap();
+    session.push(Message::User(UserMessage::text(
+        "What is the boiling point?",
+    )));
+    let rows = session.messages().to_vec();
+    assert_refused(&mut session, 0, 2, vec![rows[1].clone(), rows[0].clone()]);
+
+    // [head prompt, context, snapshot, user turn]: the snapshot before the
+    // context row, off the end of the leading System prefix.
+    let mut session = Session::new();
+    session.append_system_message("You are a careful assistant.");
+    session.append_system_message("The user works in a laboratory.");
+    let snapshot = mint_operator_instruction_snapshot(
+        header(session.id(), 1),
+        vec![active("app.example", "tone", 1, "Answer in a formal tone.")],
+        at(),
+    )
+    .unwrap()
+    .expect("a non-empty set renders a snapshot");
+    session.append_operator_instruction_entry(snapshot).unwrap();
+    session.push(Message::User(UserMessage::text(
+        "What is the boiling point?",
+    )));
+    let rows = session.messages().to_vec();
+    assert_refused(&mut session, 1, 3, vec![rows[2].clone(), rows[1].clone()]);
 }
 
 fn prompt_update(
@@ -684,6 +746,121 @@ fn update_system_prompt_inserts_a_later_version_before_entry_rows() {
         crate::TranscriptRewriteRecord::new(commit.clone(), parent, child)
             .expect("the rewrite record validates with both of its bodies");
     }
+}
+
+/// A keyed system-prompt update adopts the ordinary head prompt an entry
+/// follows: the prompt's first version stands where the row it adopted
+/// stood, so the entry keeps its order among the System rows of its gap,
+/// and a later version is inserted before the entry. The entry rows are
+/// unchanged, and every rewrite record of the reloaded graph validates.
+#[test]
+fn update_system_prompt_adopts_the_head_prompt_an_entry_follows() {
+    // [head prompt, delta 1, user turn, delta 2]
+    let mut session = session_with_two_deltas();
+    let rows_before = session.messages().to_vec();
+    let adopted = session
+        .update_system_prompt(prompt_update(None, Some(0), "Prompt version one."))
+        .expect("the head prompt an entry follows is adopted in place");
+    assert_eq!(adopted.version, SystemPromptVersion::INITIAL);
+    let later = session
+        .update_system_prompt(prompt_update(Some(1), None, "Prompt version two."))
+        .expect("a later version commits before the entry row");
+    assert_eq!(later.version.get(), 2);
+    assert_eq!(
+        entry_rows(session.messages()),
+        entry_rows(&rows_before),
+        "the entry rows are unchanged"
+    );
+
+    let reloaded = Session::from_persisted_bytes(&session.to_persisted_bytes().unwrap())
+        .expect("the reloaded rewrite graph validates");
+    assert_eq!(reloaded.messages(), session.messages());
+    let history = reloaded
+        .validated_transcript_history_state()
+        .unwrap()
+        .expect("the session holds a rewrite graph");
+    assert_eq!(
+        history.commit_count(),
+        2,
+        "the adoption and the later version"
+    );
+    for commit in history.commits() {
+        let parent = history.materialize_rewrite_parent(commit).unwrap();
+        let child = history.materialize_rewrite_child(commit).unwrap();
+        crate::TranscriptRewriteRecord::new(commit.clone(), parent, child)
+            .expect("the rewrite record validates with both of its bodies");
+    }
+}
+
+/// The graph validator holds a rewrite record to the rule of the rewrite
+/// guard: a record whose revision moves an entry among the System rows of
+/// its gap (here the first-run entry before the head prompt) does not
+/// validate, so a graph that holds one is refused.
+#[test]
+fn rewrite_record_validation_refuses_an_entry_moved_among_its_gap() {
+    use crate::{TranscriptEditError, TranscriptRewriteReason, TranscriptRewriteSelection};
+
+    let mut session = Session::new();
+    session.append_system_message("You are a careful assistant.");
+    let entry = mint_operator_instruction_delta(
+        header(session.id(), 1),
+        vec![active("app.example", "tone", 1, "Answer in a formal tone.")],
+        vec![activate(
+            "app.example",
+            "tone",
+            1,
+            None,
+            "Answer in a formal tone.",
+        )],
+        at(),
+    )
+    .unwrap();
+    session.append_operator_instruction_entry(entry).unwrap();
+    session.push(Message::User(UserMessage::text(
+        "What is the boiling point?",
+    )));
+    // [head prompt, delta 1, user turn]: an edit of the head prompt keeps the
+    // entry where it stands, so the guard commits it.
+    let rows = session.messages().to_vec();
+    session
+        .commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+            vec![
+                Message::System(SystemMessage::new("You are a terse assistant.")),
+                rows[1].clone(),
+            ],
+            TranscriptRewriteReason::new("edit the head prompt"),
+            Some("unit-test".to_string()),
+            None,
+        )
+        .expect("an edit that keeps the entry in place commits");
+    let history = session
+        .validated_transcript_history_state()
+        .unwrap()
+        .expect("the session holds a rewrite graph");
+    let commit = history.commits().next().expect("the edit").clone();
+    let parent = history.materialize_rewrite_parent(&commit).unwrap();
+    let mut child = history.materialize_rewrite_child(&commit).unwrap();
+    crate::TranscriptRewriteRecord::new(commit.clone(), parent.clone(), child.clone())
+        .expect("the committed record validates");
+
+    // The same record, its revision holding the entry before the head prompt.
+    let digest = |messages: &[Message]| super::transcript_messages_digest(messages).unwrap();
+    child.messages.swap(0, 1);
+    child.revision = digest(&child.messages);
+    let mut moved = commit;
+    moved.revision = child.revision.clone();
+    moved.replacement_digest = digest(&child.messages[..2]);
+    let error = crate::TranscriptRewriteRecord::new(moved, parent, child)
+        .expect_err("a record that moves the entry is refused");
+    assert!(
+        matches!(
+            &error,
+            TranscriptEditError::HistoryStateMalformed(detail)
+                if detail.contains("operator instruction entry")
+        ),
+        "{error:?}"
+    );
 }
 
 /// A keyed system-prompt update cannot adopt an operator-instruction entry

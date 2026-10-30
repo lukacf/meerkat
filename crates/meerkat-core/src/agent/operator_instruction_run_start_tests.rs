@@ -35,13 +35,22 @@ fn mock_usage() -> Usage {
 }
 
 /// Answers every request with one text block and keeps every request's
-/// messages.
+/// messages. A failing client keeps the request and then fails the call, as
+/// a provider refuses a request of a run that already started.
 #[derive(Default)]
 struct RecordingClient {
     requests: Mutex<Vec<Vec<Message>>>,
+    fail: bool,
 }
 
 impl RecordingClient {
+    fn failing() -> Self {
+        Self {
+            fail: true,
+            ..Self::default()
+        }
+    }
+
     fn requests(&self) -> Vec<Vec<Message>> {
         self.requests.lock().unwrap().clone()
     }
@@ -58,6 +67,13 @@ impl AgentLlmClient for RecordingClient {
         _provider_params: Option<&meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     ) -> Result<LlmStreamResult, AgentError> {
         self.requests.lock().unwrap().push(messages.to_vec());
+        if self.fail {
+            return Err(AgentError::llm(
+                "mock",
+                meerkat_core::error::LlmFailureReason::AuthError,
+                "the provider refuses the request",
+            ));
+        }
         Ok(LlmStreamResult::new(
             vec![AssistantBlock::Text {
                 text: "done".to_string(),
@@ -103,6 +119,50 @@ impl AgentSessionStore for NoopStore {
 
     async fn load(&self, _id: &str) -> Result<Option<Session>, AgentError> {
         Ok(None)
+    }
+}
+
+/// Makes every checkpoint of a run durable, as a WholeBlob store does: it
+/// keeps the checkpointed session and issues the run's next provisional
+/// receipt. The session keeps no committed row lineage, so the session alone
+/// cannot tell that a checkpoint holds its rows.
+#[derive(Default)]
+struct WholeBlobCheckpointer {
+    checkpoints: Mutex<Vec<Session>>,
+}
+
+impl WholeBlobCheckpointer {
+    fn checkpoints(&self) -> Vec<Session> {
+        self.checkpoints.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl meerkat_core::SessionCheckpointer for WholeBlobCheckpointer {
+    async fn checkpoint_run(
+        &self,
+        session: &mut Session,
+        run_id: &meerkat_core::lifecycle::RunId,
+        previous: Option<&meerkat_core::RunCheckpointReceipt>,
+    ) -> Result<Option<meerkat_core::RunCheckpointReceipt>, AgentError> {
+        let sequence = previous.map_or(1, |previous| previous.candidate_sequence() + 1);
+        let authority = meerkat_core::WholeBlobProvisionalTailAuthority::issued(
+            session.id().clone(),
+            1,
+            "committed-blob".to_string(),
+            run_id.clone(),
+            format!("candidate-blob-{sequence}"),
+            sequence,
+        )
+        .expect("a contiguous WholeBlob authority");
+        self.checkpoints.lock().unwrap().push(session.clone());
+        let receipt = meerkat_core::RunCheckpointReceipt::issued(
+            meerkat_core::RunCheckpointAuthority::WholeBlob(authority),
+            format!("digest-{sequence}"),
+            session.messages().len() as u64,
+        )
+        .expect("a valid receipt");
+        Ok(Some(receipt))
     }
 }
 
@@ -363,6 +423,12 @@ fn request_json(messages: &[Message]) -> String {
     serde_json::to_string(messages).unwrap()
 }
 
+/// Conclude the last run start, as the session task does once the turn
+/// ends. This caller observes nothing of the run: it saw no `RunStarted`.
+fn conclude_turn(agent: &mut TestAgent) -> Result<bool, AgentError> {
+    agent.conclude_run_start_operator_instructions(false)
+}
+
 /// The session task reports a run that never started (a refusal or a veto
 /// before it, an interrupt before it began): the entry its run start
 /// appended is taken back and the recorded target restored, so the next
@@ -453,5 +519,171 @@ async fn an_entry_whose_run_never_starts_is_taken_back_and_its_change_stays_pend
             .filter(|message| is_entry(message))
             .count(),
         1
+    );
+}
+
+/// A run that started keeps its entry whatever its caller saw of the run:
+/// the agent knows its own run started. Here the run's model read the entry
+/// and then the provider refused the call, and the caller saw no
+/// `RunStarted`. The change is in effect, so the next fresh run start
+/// applies nothing.
+#[tokio::test]
+async fn an_entry_whose_run_started_and_then_failed_is_kept() {
+    let client = Arc::new(RecordingClient::failing());
+    let mut agent = build_agent(
+        conversed_session(),
+        &client,
+        InstructionLowering::MidConversation,
+    )
+    .await;
+    agent
+        .session_mut()
+        .set_session_instruction(write("tone", 1, "Answer formally."))
+        .unwrap();
+    let outcome = agent
+        .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    agent
+        .run("next".into())
+        .await
+        .expect_err("the provider refuses the run's request");
+    let requests = client.requests();
+    assert_eq!(requests.len(), 1, "the run reached its model");
+    let read = entry_identities(&requests[0]);
+    assert_eq!(read.len(), 1, "the model read the entry");
+
+    assert!(
+        !conclude_turn(&mut agent).unwrap(),
+        "the entry of a run that started is not taken back"
+    );
+    assert_eq!(
+        entry_identities(agent.session().messages()),
+        read,
+        "the entry stays as the model read it"
+    );
+    assert_eq!(
+        agent
+            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+            .unwrap(),
+        RunStartInstructionOutcome::NotNeeded,
+        "the change is in effect: nothing is pending"
+    );
+}
+
+/// A checkpoint of the run made the entry durable: the entry is never taken
+/// back, on a WholeBlob store too, whose session keeps no committed row
+/// lineage that would tell its revert so.
+#[tokio::test]
+async fn an_entry_a_run_checkpoint_made_durable_is_never_taken_back() {
+    let client = Arc::new(RecordingClient::default());
+    let checkpointer = Arc::new(WholeBlobCheckpointer::default());
+    let durable = Arc::clone(&checkpointer) as Arc<dyn meerkat_core::SessionCheckpointer>;
+    let mut agent = AgentBuilder::new()
+        .resume_session(conversed_session())
+        .with_turn_state_handle(Arc::new(
+            crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+        ))
+        .with_runtime_execution_kind_for_test(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        )
+        .with_operator_instruction_lowering(InstructionLowering::MidConversation)
+        .with_checkpointer(durable)
+        .build_standalone(Arc::clone(&client), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+    agent
+        .session_mut()
+        .set_session_instruction(write("tone", 1, "Answer formally."))
+        .unwrap();
+    let outcome = agent
+        .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    agent.run("next".into()).await.unwrap();
+    assert!(
+        checkpointer
+            .checkpoints()
+            .iter()
+            .any(|session| entry_identities(session.messages()).len() == 1),
+        "a checkpoint of the run holds the entry"
+    );
+
+    assert!(
+        !conclude_turn(&mut agent).unwrap(),
+        "an entry a checkpoint holds is not taken back"
+    );
+    let messages = agent.session().messages();
+    let entries = entry_identities(messages);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].run_id(), last_run_id(messages).as_ref());
+}
+
+/// A run id a run start reserves belongs to the run that follows it. When
+/// the turn authority already started that run, as a runtime starts the run
+/// it dispatched, the run runs under the authority's id; a later run that
+/// skips the run-start seam (a direct run) runs under an id of its own and
+/// never adopts the reservation.
+#[tokio::test]
+async fn a_later_run_that_skips_the_run_start_never_adopts_a_reserved_run_id() {
+    let client = Arc::new(RecordingClient::default());
+    let mut agent = build_agent(
+        conversed_session(),
+        &client,
+        InstructionLowering::MidConversation,
+    )
+    .await;
+    agent
+        .session_mut()
+        .set_session_instruction(write("tone", 1, "Answer formally."))
+        .unwrap();
+    let dispatched = meerkat_core::lifecycle::RunId::new();
+    let outcome = agent
+        .apply_run_start_operator_instructions(
+            InstructionRunStart::FreshRun,
+            Some(dispatched.clone()),
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    agent
+        .apply_turn_input(meerkat_core::TurnExecutionInput::StartConversationRun {
+            run_id: dispatched.clone(),
+            primitive_kind: meerkat_core::TurnPrimitiveKind::ConversationTurn,
+            admitted_content_shape: meerkat_core::ContentShape::Conversation,
+            vision_enabled: false,
+            image_tool_results_enabled: false,
+            max_extraction_retries: 0,
+        })
+        .expect("the runtime starts the run it dispatched");
+    agent.run("first".into()).await.unwrap();
+    let messages = agent.session().messages();
+    assert_eq!(
+        last_run_id(messages).as_ref(),
+        Some(&dispatched),
+        "the run runs under the id the runtime started it with"
+    );
+    assert_eq!(entry_identities(messages)[0].run_id(), Some(&dispatched));
+
+    agent
+        .run("second".into())
+        .await
+        .expect("a later run that skips the run start runs");
+    let second = last_run_id(agent.session().messages());
+    assert!(
+        second.is_some(),
+        "the later run stamps its id on its output"
+    );
+    assert_ne!(
+        second,
+        Some(dispatched),
+        "a later run never adopts a reserved run id"
     );
 }

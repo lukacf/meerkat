@@ -171,23 +171,23 @@ impl World {
         self.store.holding.store(true, Ordering::SeqCst);
     }
 
-    /// Another actor issues a child of its parent grant for each of
-    /// `children` in turn, on its own thread.
-    fn issue(&self, children: &'static [&'static str]) -> std::thread::JoinHandle<()> {
+    /// Another actor issues `child`, a child of its parent grant, on a thread
+    /// of its own. One thread per issuance: once released, an issuer never
+    /// takes the grant owner's mutex again, so it cannot win that mutex back
+    /// from a read it was released by.
+    fn issue(&self, child: &'static str) -> std::thread::JoinHandle<()> {
         let grants = Arc::clone(&self.grants);
         let parent = self.parent.clone();
         std::thread::spawn(move || {
-            for child in children {
-                grants
-                    .issue_child(
-                        &principal("issuer"),
-                        &parent,
-                        id(child),
-                        principal("helper"),
-                        ExecutionRestrictions::unrestricted(),
-                    )
-                    .expect("the child is issued");
-            }
+            grants
+                .issue_child(
+                    &principal("issuer"),
+                    &parent,
+                    id(child),
+                    principal("helper"),
+                    ExecutionRestrictions::unrestricted(),
+                )
+                .expect("the child is issued");
         })
     }
 
@@ -245,7 +245,7 @@ fn a_held_issuance_is_named_in_progress_before_it_publishes_and_until_it_complet
     let work = &world.fixture.authorization;
     assert_eq!(work.owner_change_in_progress(), None, "nothing is held yet");
     world.hold_appends();
-    let issuer = world.issue(&["held-child"]);
+    let issuer = world.issue("held-child");
     world.await_held_append();
     assert!(
         work.owner_change_in_progress().is_some(),
@@ -273,14 +273,15 @@ fn a_held_issuance_is_named_in_progress_before_it_publishes_and_until_it_complet
     );
 }
 
-/// Another actor issues two child grants on the work's own publication. The
-/// host's pure observation reaches the grant owner's mutex during each
-/// issuance's append and ends stale once that issuance published: the first
-/// read and its one rebuild both end stale. By the time the host asks, the
-/// second issuance has completed and nothing is in progress, so the
-/// settled-change wait has nothing to wait for. The stale-read wait pauses
-/// one backoff step and settles as one free rebuild, the read made again is
-/// current, and both children are issued.
+/// Another actor issues two child grants in a row on the work's own
+/// publication, each on a thread of its own that ends before the next
+/// begins. The host's pure observation reaches the grant owner's mutex
+/// during each issuance's append and ends stale once that issuance
+/// published: the first read and its one rebuild both end stale. By the
+/// time the host asks, the second issuance has completed and nothing is in
+/// progress, so the settled-change wait has nothing to wait for. The
+/// stale-read wait pauses one backoff step and settles as one free rebuild,
+/// the read made again is current, and both children are issued.
 ///
 /// RED on the base: no public wait settled this read, so the host ended
 /// stale.
@@ -288,16 +289,19 @@ fn a_held_issuance_is_named_in_progress_before_it_publishes_and_until_it_complet
 async fn a_pure_observation_behind_completed_issuances_reads_again_within_the_bound() {
     let world = World::new();
     world.hold_appends();
-    let issuer = world.issue(&["first-child", "second-child"]);
-    for read in ["the first read", "its one rebuild"] {
+    for (read, child) in [
+        ("the first read", "first-child"),
+        ("its one rebuild", "second-child"),
+    ] {
+        let issuer = world.issue(child);
         world.await_held_append();
         assert_eq!(
             world.read_meeting_the_held_issuance(),
             Read::Stale,
             "{read} meets an issuance"
         );
+        issuer.join().expect("the issuer");
     }
-    issuer.join().expect("the issuer");
 
     let work = &world.fixture.authorization;
     assert_eq!(
@@ -346,7 +350,7 @@ async fn a_pure_observation_behind_completed_issuances_reads_again_within_the_bo
 async fn a_wait_after_a_stale_read_ends_at_its_deadline_while_an_issuance_holds() {
     let world = World::new();
     world.hold_appends();
-    let issuer = world.issue(&["stuck-child"]);
+    let issuer = world.issue("stuck-child");
     world.await_held_append();
     let work = &world.fixture.authorization;
     for (budget, deadline) in [
@@ -379,7 +383,7 @@ async fn a_wait_after_a_stale_read_ends_at_its_deadline_while_an_issuance_holds(
 async fn a_cancelled_wait_after_a_stale_read_releases_nothing_because_it_holds_nothing() {
     let world = World::new();
     world.hold_appends();
-    let issuer = world.issue(&["held-child"]);
+    let issuer = world.issue("held-child");
     world.await_held_append();
     let work = &world.fixture.authorization;
     let mut churn = OwnerChangeChurn::new();

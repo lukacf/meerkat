@@ -5709,7 +5709,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         />
       );
     if (target.kind === "logs")
-      return <LogsPanel frames={activityRef.current} />;
+      return <LogsPanel frames={activityRef.current} agentDirectory={agentDirectory} />;
     if (target.kind === "access")
       return (
         <AccessPanel

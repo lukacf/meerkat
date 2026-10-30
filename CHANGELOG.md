@@ -372,8 +372,8 @@ them.
   `operator_instruction_lowering`, so code that builds the policy literally
   must set it (it is not serialized). `SessionRuntimeLlmReconfigureService`
   gains the required method
-  `live_session_has_own_operator_instruction_entries`, so an implementation
-  must answer it.
+  `live_session_own_operator_instruction_entry_placement`, so an
+  implementation must answer it.
 
 - `meerkat-core`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
   `SessionDocumentMachine` holds each session's operator-instruction state
@@ -387,7 +387,8 @@ them.
   `ReleaseInstructionTarget`, `ResolveRunStartInstructions` and
   `AuthorizeInstructionFold`, the effects `SessionInstructionStateRecovered`,
   `InstructionTargetRecorded`, `InstructionTargetRefused`,
-  `InstructionOwnerRebound`, `InstructionTargetReleased`,
+  `InstructionOwnerRebound`, `InstructionTargetReleased` (whose `was_owned`
+  says whether the releasing mob owned the target),
   `InstructionEntryAuthorized`, `InstructionEntryNotNeeded`,
   `InstructionApplicationDeferred` and `InstructionFoldAuthorized`, and the
   transitions that decide them; the machine state gains the
@@ -405,8 +406,12 @@ them.
   every other document stays at envelope 4, byte for byte, so documents of
   sessions that never use operator instructions still read on older
   binaries. The generated session persistence version authority accepts 5
-  (`SESSION_VERSION` is 5) and gains the input
-  `RestoreBaselineSessionEnvelopeVersion`. `rkat storage doctor` lists the
+  (`SESSION_VERSION` is 5): its state gains `session_envelope_baseline_version`
+  (4), the input `RestoreSessionEnvelopeVersion` gains the transition
+  `RestoreBaselineSessionEnvelopeVersion`, which restores a document written
+  at the baseline, and `meerkat_core::generated::session_persistence_version_authority`
+  gains `SESSION_ENVELOPE_BASELINE_VERSION` and
+  `session_envelope_version_for_document`. `rkat storage doctor` lists the
   sessions at envelope 5 (Info finding `operator-instruction-envelope`) in
   SQLite realms and in the runtime store of JSONL realms
   (`runtime.sqlite3`), so an operator sees what a rollback would refuse;
@@ -753,13 +758,22 @@ them.
   only in its leading prompt defers (`leading_prefix_only`) until a
   compaction at a run's first request carries the target in its snapshot,
   and a backend whose wire carries only one leading System row (the ChatGPT
-  backend, `OpenAiBackendKind::admits_additional_leading_system_messages`)
-  keeps them pending (`lowering_unavailable`), whether the session was built
+  backend, `OpenAiBackendKind::admits_additional_leading_system_messages`;
+  an OpenAI backend kind this version does not know counts as one) keeps
+  them pending (`lowering_unavailable`), whether the session was built
   there, fell back there or was switched there live. A live model change
   installs the lowering the host resolves for the new binding, so a change
-  between other bindings keeps applying instructions, and a live change onto
-  such a backend is refused while the session's transcript holds its own
-  operator-instruction entries. A compaction folds every
+  between other bindings keeps applying instructions. A model change onto a
+  target that cannot carry the entry rows the session wrote itself where
+  they stand (an entry after a conversation row on a model that lowers
+  System rows only in its leading prompt or on such a backend, an entry
+  beside another System row on such a backend) is refused typed: a live
+  change before any client for the target is built (`ValidationFailed`, and
+  the session service's own hot swap refuses it too), a sticky model
+  fallback skips the target (`request_unsupported`), and a resumed build
+  refuses (`BuildAgentError::Config`).
+  `Session::own_operator_instruction_entry_placement` says where they stand
+  (`InstructionEntryPlacement`). A compaction folds every
   entry row into one snapshot of the instructions in effect after the
   leading System prefix, and no summary request, host curator window or
   compactor input carries an instruction body; the shrink rule does not

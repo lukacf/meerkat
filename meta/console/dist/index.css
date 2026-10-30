@@ -11460,7 +11460,8 @@ svg[data-svg=fit],
 .agent__grip:active {
   cursor: grabbing;
 }
-.agent[data-dragging=true] {
+.agent[data-dragging=true],
+.agent[data-dragging=true] + .agent__actions {
   opacity: 0.5;
 }
 .agent__drop-line {

@@ -13,7 +13,7 @@ import {
   applyConsoleSidebarOrder,
   capConsoleSidebarAgentOrder,
   listConsoleSidebarAgentOrder,
-  mergeConsoleSidebarSiblingOrder,
+  moveConsoleSidebarOrderKey,
   pruneStaleSidebarStorage,
   readConsoleSidebarView,
   readSidebarStringList,
@@ -81,11 +81,14 @@ test("manual agent order lists present agents after the stored ones and keeps ab
   assert.deepEqual(listConsoleSidebarAgentOrder([], ["agent:a", "agent:a", ""]), ["agent:a"]);
 });
 
-test("a reordered sibling block returns where its first key stood and leaves other keys in place", () => {
-  const stored = ["x", "b", "y", "a", "z", "c"];
-  assert.deepEqual(mergeConsoleSidebarSiblingOrder(stored, ["c", "a", "b"]), ["x", "c", "a", "b", "y", "z"]);
-  assert.deepEqual(mergeConsoleSidebarSiblingOrder(["x", "y"], ["b", "a"]), ["x", "y", "b", "a"]);
-  assert.deepEqual(mergeConsoleSidebarSiblingOrder(stored, []), stored);
+test("a move takes one key to its new place among its siblings and leaves every other key in place", () => {
+  const listed = ["x", "b", "y", "a", "z", "c"];
+  // Siblings b, a, c become c, b, a: c goes right before b, its new successor.
+  assert.deepEqual(moveConsoleSidebarOrderKey(listed, "c", ["c", "b", "a"]), ["x", "c", "b", "y", "a", "z"]);
+  // Siblings b, a, c become b, c, a: a goes right after c, its new predecessor.
+  assert.deepEqual(moveConsoleSidebarOrderKey(listed, "a", ["b", "c", "a"]), ["x", "b", "y", "z", "c", "a"]);
+  assert.deepEqual(moveConsoleSidebarOrderKey(["x", "y"], "b", ["b"]), ["x", "y", "b"], "an unlisted lone key goes last");
+  assert.deepEqual(moveConsoleSidebarOrderKey(listed, "q", ["b", "a"]), listed);
 });
 
 test("manual agent order cap drops the oldest absent keys first and never a present agent", () => {

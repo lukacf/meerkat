@@ -1403,6 +1403,7 @@ test("sidebar agent moves change only the moved siblings and list every shown ag
   const present = ["agent:a", "agent:b", "agent:c", "agent:d", "agent:x", "agent:y"];
   const first = __sidebarTest.sidebarAgentOrderAfterMove({
     stored: [],
+    agents: [],
     present,
     siblings: ["agent:a", "agent:b", "agent:c", "agent:d"],
     dragged: "agent:d",
@@ -1414,6 +1415,7 @@ test("sidebar agent moves change only the moved siblings and list every shown ag
 
   const second = __sidebarTest.sidebarAgentOrderAfterMove({
     stored: first!,
+    agents: [],
     present,
     siblings: ["agent:x", "agent:y"],
     dragged: "agent:y",
@@ -1425,6 +1427,7 @@ test("sidebar agent moves change only the moved siblings and list every shown ag
 
   const keepsAbsent = __sidebarTest.sidebarAgentOrderAfterMove({
     stored: ["agent:gone", "agent:b", "agent:a"],
+    agents: [],
     present: ["agent:a", "agent:b"],
     siblings: ["agent:b", "agent:a"],
     dragged: "agent:a",
@@ -1441,6 +1444,7 @@ test("sidebar agent moves change only the moved siblings and list every shown ag
   ]) {
     assert.equal(__sidebarTest.sidebarAgentOrderAfterMove({
       stored: [],
+      agents: [],
       present,
       siblings: ["agent:a", "agent:b"],
       inputSource: "pointer",
@@ -1544,6 +1548,22 @@ function randomOrderRoster(rand: () => number, count: number): ConsoleAgent[] {
   return agents;
 }
 
+// The keys a move lists first, as the component lists them: the category
+// order, whichever view is shown.
+function categoryOrderKeys(agents: ConsoleAgent[], grouping: ConsoleAgentListConfig, stored: string[] = []): string[] {
+  const order = {
+    sortBy: "manual" as const,
+    rank: new Map(stored.map((key, index) => [key, index] as const)),
+    lastActivity: () => undefined,
+  };
+  const grouped = __sidebarTest.groupSidebarAgents(agents, grouping, { order });
+  return __sidebarTest.sidebarCategorySequence(grouped, grouping).map((row) => __sidebarTest.sidebarAgentOrderKey(row.agent));
+}
+
+function agentRowKeys(rows: ReturnType<typeof sortedRows>): string[] {
+  return rows.flatMap((row) => row.kind === "agent" ? [__sidebarTest.sidebarAgentOrderKey(row.row.agent)] : []);
+}
+
 function agentKeysByContainer(rows: ReturnType<typeof sortedRows>): Map<string, string[]> {
   const byContainer = new Map<string, string[]>();
   for (const row of rows) {
@@ -1573,7 +1593,7 @@ function checkRandomMoves(seed: number, inputSource: "keyboard" | "pointer"): { 
     for (let step = 0; step < 6; step += 1) {
       const options = { grouping, pinnedAgentIds, flat };
       const before = agentKeysByContainer(sortedRows(agents, { ...options, order: stored }));
-      const present = [...before.values()].flat();
+      const present = categoryOrderKeys(agents, grouping, stored);
       const movable = [...before.entries()].filter(([, keys]) => keys.length > 1);
       if (movable.length === 0) break;
       const [container, siblings] = pick(movable);
@@ -1588,6 +1608,7 @@ function checkRandomMoves(seed: number, inputSource: "keyboard" | "pointer"): { 
       expected.splice(expected.indexOf(target) + (up ? 0 : 1), 0, dragged);
       const next = __sidebarTest.sidebarAgentOrderAfterMove({
         stored,
+        agents,
         present,
         siblings,
         dragged,
@@ -1632,6 +1653,140 @@ test("sidebar pointer drops in random rosters land as announced and leave other 
   assert.deepEqual(failures.slice(0, 5), []);
 });
 
+test("sidebar a first move in either view flips no pair it did not move in the other view (random rosters)", () => {
+  const rand = seededRandom(2718);
+  const pick = <T,>(values: T[]): T => values[Math.floor(rand() * values.length)]!;
+  const failures: string[] = [];
+  let checked = 0;
+  for (let round = 0; round < 200; round += 1) {
+    const agents = randomOrderRoster(rand, 4 + Math.floor(rand() * 14));
+    const grouping: ConsoleAgentListConfig = rand() < 0.5
+      ? { group_by: ["group"] }
+      : { group_by: ["group"], subgroup_by: ["labels.org"], collapse_single_subgroup: false };
+    const pinnedAgentIds = new Set(rand() < 0.5 ? agents.filter(() => rand() < 0.15).map((agent) => agent.identity!) : []);
+    const present = categoryOrderKeys(agents, grouping);
+    for (const flat of [false, true]) {
+      const rows = sortedRows(agents, { grouping, pinnedAgentIds, flat });
+      const containers = [...agentKeysByContainer(rows).entries()].filter(([, keys]) => keys.length > 1);
+      if (containers.length === 0) continue;
+      const [, siblings] = pick(containers);
+      const index = Math.floor(rand() * siblings.length);
+      const dragged = siblings[index]!;
+      const next = __sidebarTest.sidebarAgentOrderAfterMove({
+        stored: [],
+        agents,
+        present,
+        siblings,
+        dragged,
+        target: pick(siblings.filter((_, other) => other !== index)),
+        where: rand() < 0.5 ? "before" : "after",
+        inputSource: "pointer",
+      });
+      if (!next) continue;
+      // The moved agent and its nested agents move together; every other
+      // pair must keep its order in the view not shown.
+      const parentOf = new Map(rows.flatMap((row) => row.kind === "agent"
+        ? [[row.row.agent.member_id, row.row.parentMemberId] as const]
+        : []));
+      const draggedId = agents.find((agent) => agent.identity === dragged)!.member_id;
+      const movedWith = (id: string): boolean => {
+        for (let current: string | null | undefined = id; current; current = parentOf.get(current)) {
+          if (current === draggedId) return true;
+        }
+        return false;
+      };
+      const otherView = (order: string[]) => sortedRows(agents, { grouping, pinnedAgentIds, flat: !flat, order })
+        .flatMap((row) => row.kind === "agent" && !movedWith(row.row.agent.member_id) ? [row.row.agent.member_id] : []);
+      checked += 1;
+      const before = otherView([]).join();
+      const after = otherView(next).join();
+      if (before !== after) failures.push(`round ${round}, a move in the ${flat ? "flat" : "category"} view: ${before} became ${after}`);
+    }
+  }
+  assert.ok(checked > 150, `the rosters gave enough first moves to check (${checked})`);
+  assert.deepEqual(failures.slice(0, 5), []);
+});
+
+test("sidebar Group None lists the category order flattened while nothing is stored", () => {
+  const agents = [
+    teamAgent("alpha", "Alpha"),
+    teamAgent("bravo", "Bravo"),
+    teamAgent("mike", "Mike", { group: "Ops" }),
+    teamAgent("zulu", "Zulu", { group: "Ops" }),
+  ];
+
+  assert.deepEqual(agentRowIds(sortedRows(agents)), ["mike", "zulu", "alpha", "bravo"], "Ops comes before Team");
+  assert.deepEqual(agentRowIds(sortedRows(agents, { flat: true })), ["mike", "zulu", "alpha", "bravo"]);
+  assert.deepEqual(
+    agentRowIds(sortedRows([...agents, teamAgent("echo", "Echo", { group: "Ops" })], { flat: true, order: ["agent:bravo", "agent:alpha"] })),
+    ["bravo", "alpha", "echo", "mike", "zulu"],
+    "agents not yet stored follow the stored ones in the category order",
+  );
+});
+
+test("sidebar a first move in either view keeps the other view's order apart from the moved agent", () => {
+  const agents = [
+    teamAgent("alpha", "Alpha"),
+    teamAgent("bravo", "Bravo"),
+    teamAgent("mike", "Mike", { group: "Ops" }),
+    teamAgent("zulu", "Zulu", { group: "Ops" }),
+  ];
+  const present = categoryOrderKeys(agents, teamGrouping);
+  assert.deepEqual(present, ["agent:mike", "agent:zulu", "agent:alpha", "agent:bravo"]);
+
+  const fromCategory = __sidebarTest.sidebarAgentOrderAfterMove({
+    stored: [],
+    agents,
+    present,
+    siblings: ["agent:alpha", "agent:bravo"],
+    dragged: "agent:bravo",
+    target: "agent:alpha",
+    where: "before",
+    inputSource: "keyboard",
+  });
+  assert.deepEqual(agentRowIds(sortedRows(agents, { flat: true, order: fromCategory! })), ["mike", "zulu", "bravo", "alpha"]);
+
+  const fromFlat = __sidebarTest.sidebarAgentOrderAfterMove({
+    stored: [],
+    agents,
+    present,
+    siblings: agentRowKeys(sortedRows(agents, { flat: true })),
+    dragged: "agent:zulu",
+    target: "agent:mike",
+    where: "before",
+    inputSource: "keyboard",
+  });
+  assert.deepEqual(agentRowIds(sortedRows(agents, { order: fromFlat! })), ["zulu", "mike", "alpha", "bravo"]);
+  assert.deepEqual(agentRowIds(sortedRows(agents, { flat: true, order: fromFlat! })), ["zulu", "mike", "alpha", "bravo"]);
+});
+
+test("sidebar an agent stored by member id keeps its place when another container moves", () => {
+  // z was stored before it had an identity, so the list holds its member id.
+  const agents = [
+    teamAgent("b", "Bravo"),
+    teamAgent("z", "Zulu"),
+    teamAgent("x", "Xray", { group: "Other" }),
+    teamAgent("y", "Yankee", { group: "Other" }),
+  ];
+  const stored = ["z", "agent:b"];
+  const team = (order: string[]) => sortedRows(agents, { order }).flatMap((row) =>
+    row.kind === "agent" && row.bucket === "Team" ? [row.row.agent.member_id] : []);
+  assert.deepEqual(team(stored), ["z", "b"]);
+
+  const next = __sidebarTest.sidebarAgentOrderAfterMove({
+    stored,
+    agents,
+    present: ["agent:x", "agent:y", "agent:z", "agent:b"],
+    siblings: ["agent:x", "agent:y"],
+    dragged: "agent:y",
+    target: "agent:x",
+    where: "before",
+    inputSource: "keyboard",
+  });
+  assert.deepEqual(team(next!), ["z", "b"]);
+  assert.deepEqual(next, ["agent:z", "agent:b", "agent:y", "agent:x"], "the member id key became the identity key in place");
+});
+
 test("sidebar subgroups and pins keep separate containers", () => {
   const agents = [
     opsAgent({ id: "cto-a", label: "CTO A", group: "initiatives", scope: "cto", role: "initiative", identity: "initiative:cto-a" }),
@@ -1673,7 +1828,7 @@ test("sidebar Group None lists every agent in one list, keeping Pinned on top an
 
   const flat = sortedRows(agents, { grouping, flat: true });
   assert.deepEqual(flat.filter((row) => row.kind !== "agent").map((row) => row.kind), []);
-  assert.deepEqual(agentRowIds(flat), ["a1", "b1", "b2", "p"]);
+  assert.deepEqual(agentRowIds(flat), ["a1", "p", "b1", "b2"], "the category order flattened");
   const child = flat.find((row) => row.kind === "agent" && row.row.agent.member_id === "b2");
   assert.equal(child?.kind === "agent" && child.row.depth, 1);
 

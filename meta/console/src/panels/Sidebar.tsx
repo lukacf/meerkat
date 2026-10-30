@@ -15,7 +15,7 @@ import {
   applyConsoleSidebarOrder as applySidebarOrder,
   capConsoleSidebarAgentOrder,
   listConsoleSidebarAgentOrder,
-  mergeConsoleSidebarSiblingOrder,
+  moveConsoleSidebarOrderKey,
   normalizeConsoleNavigationModel,
   normalizeConsoleSidebarGroupBy,
   normalizeConsoleSidebarSortBy,
@@ -399,6 +399,8 @@ export const __sidebarTest = {
   sidebarAgentOrderKey,
   sidebarAgentContainer,
   sidebarAgentOrderAfterMove,
+  sidebarStoredOrderKeys,
+  sidebarCategorySequence,
   agentSubtreeEnd,
   compareAgentNames,
   compareBySidebarSort,
@@ -586,7 +588,12 @@ function depthForAgent(a: ConsoleAgent, parentById: Map<string, string>): number
   return depth;
 }
 
-function compareRows(host: ConsoleAgent | null, orderSubgroups = false, order?: SidebarSortContext) {
+function compareRows(
+  host: ConsoleAgent | null,
+  orderSubgroups = false,
+  order?: SidebarSortContext,
+  defaultRank?: ReadonlyMap<string, number>,
+) {
   return (a: AgentRow, b: AgentRow): number => {
     if (orderSubgroups && a.subgroup !== b.subgroup) {
       if (!a.subgroup) return 1;
@@ -595,6 +602,11 @@ function compareRows(host: ConsoleAgent | null, orderSubgroups = false, order?: 
     }
     const chosen = order ? compareBySidebarSort(order, a.agent, b.agent) : 0;
     if (chosen !== 0) return chosen;
+    if (defaultRank) {
+      const byDefault = (defaultRank.get(a.agent.member_id) ?? Number.MAX_SAFE_INTEGER)
+        - (defaultRank.get(b.agent.member_id) ?? Number.MAX_SAFE_INTEGER);
+      if (byDefault !== 0) return byDefault;
+    }
     if (host) {
       if (a.agent.member_id === host.member_id) return -1;
       if (b.agent.member_id === host.member_id) return 1;
@@ -754,6 +766,7 @@ function orderRowsPreorder(
   host: ConsoleAgent | null,
   orderSubgroups = false,
   order?: SidebarSortContext,
+  defaultRank?: ReadonlyMap<string, number>,
 ): AgentRow[] {
   const byParent = new Map<string, AgentRow[]>();
   const rowById = new Map(rows.map((row) => [row.agent.member_id, row]));
@@ -767,7 +780,7 @@ function orderRowsPreorder(
       roots.push(row);
     }
   }
-  const sortRows = compareRows(host, orderSubgroups, order);
+  const sortRows = compareRows(host, orderSubgroups, order, defaultRank);
   roots.sort(sortRows);
   for (const children of byParent.values()) children.sort(sortRows);
 
@@ -819,6 +832,9 @@ interface SidebarGroupingOptions {
   /** One list instead of categories: every agent in one section, no subgroups. */
   flat?: boolean;
   order?: SidebarSortContext;
+  /** The stored category and subgroup orders, which the flat list's default follows. */
+  sectionOrder?: string[];
+  subgroupOrder?: string[];
 }
 
 /** The roster's agents placed in their sections and under their parents, not yet ordered. */
@@ -832,7 +848,6 @@ interface SidebarClassification {
 function classifySidebarAgents(
   filtered: ConsoleAgent[],
   config?: ConsoleAgentListConfig,
-  flat = false,
 ): SidebarClassification {
   const rowsByBucket = new Map<string, AgentRow[]>();
   const host = filtered.find(isCommanderLike) || null;
@@ -844,10 +859,8 @@ function classifySidebarAgents(
   }
   for (const a of filtered) {
     const childOfHost = parentById.has(a.member_id);
-    const key = flat
-      ? FLAT_SECTION_NAME
-      : configuredAgentGroup(a, config, parentById, byId) || bucketForAgent(a, parentById, byId);
-    const subgroup = flat ? null : configuredAgentSubgroup(a, config, parentById, byId);
+    const key = configuredAgentGroup(a, config, parentById, byId) || bucketForAgent(a, parentById, byId);
+    const subgroup = configuredAgentSubgroup(a, config, parentById, byId);
     if (!rowsByBucket.has(key)) rowsByBucket.set(key, []);
     rowsByBucket.get(key)!.push({
       agent: a,
@@ -861,7 +874,18 @@ function classifySidebarAgents(
     rowsByBucket,
     parentById,
     host,
-    orderSubgroups: !flat && configuredSelectors(config, "subgroup_by").length > 0,
+    orderSubgroups: configuredSelectors(config, "subgroup_by").length > 0,
+  };
+}
+
+/** The flat list's classification: every agent in one section, without subgroups, nested as before. */
+function flattenSidebarClassification(classified: SidebarClassification): SidebarClassification {
+  const rows = Array.from(classified.rowsByBucket.values()).flat().map((row) => ({ ...row, subgroup: null }));
+  return {
+    rowsByBucket: rows.length > 0 ? new Map([[FLAT_SECTION_NAME, rows]]) : new Map(),
+    parentById: classified.parentById,
+    host: classified.host,
+    orderSubgroups: false,
   };
 }
 
@@ -870,12 +894,47 @@ function classifySidebarAgents(
  * apart from the classification, which walks the whole roster for every
  * agent, so a re-sort (a new last activity, a manual move) stays cheap.
  */
-function orderSidebarGroups(classified: SidebarClassification, order?: SidebarSortContext): Map<string, AgentRow[]> {
+function orderSidebarGroups(
+  classified: SidebarClassification,
+  order?: SidebarSortContext,
+  defaultRank?: ReadonlyMap<string, number>,
+): Map<string, AgentRow[]> {
   const grouped = new Map<string, AgentRow[]>();
   for (const [key, rows] of classified.rowsByBucket.entries()) {
-    grouped.set(key, orderRowsPreorder(rows, classified.parentById, classified.host, classified.orderSubgroups, order));
+    grouped.set(
+      key,
+      orderRowsPreorder(rows, classified.parentById, classified.host, classified.orderSubgroups, order, defaultRank),
+    );
   }
   return grouped;
+}
+
+/**
+ * The category view's agents in the order it lists them: its sections in
+ * their order, each section's subgroups in theirs, a pinned agent at its
+ * place in its category. With nothing stored this is the flat list's order
+ * too, and a move lists every agent in it first, so either view's first
+ * move stores the same list and the other view keeps its order apart from
+ * the moved agent.
+ */
+function sidebarCategorySequence(
+  grouped: Map<string, AgentRow[]>,
+  config?: ConsoleAgentListConfig,
+  sectionOrder?: string[],
+  subgroupOrder?: string[],
+): AgentRow[] {
+  return applySidebarOrder(orderedSectionNames(grouped, config), sectionOrder)
+    .flatMap((bucket) => orderRowsBySubgroupOrder(grouped.get(bucket) || [], bucket, subgroupOrder));
+}
+
+/** The flat list, ordered by the chosen sort and, where it leaves two agents equal, by the category order. */
+function orderFlatSidebarGroup(
+  classified: SidebarClassification,
+  categorySequence: AgentRow[],
+  order?: SidebarSortContext,
+): Map<string, AgentRow[]> {
+  const defaultRank = new Map(categorySequence.map((row, index) => [row.agent.member_id, index] as const));
+  return orderSidebarGroups(flattenSidebarClassification(classified), order, defaultRank);
 }
 
 function groupSidebarAgents(
@@ -883,7 +942,11 @@ function groupSidebarAgents(
   config?: ConsoleAgentListConfig,
   options: SidebarGroupingOptions = {},
 ): Map<string, AgentRow[]> {
-  return orderSidebarGroups(classifySidebarAgents(filtered, config, options.flat === true), options.order);
+  const classified = classifySidebarAgents(filtered, config);
+  const grouped = orderSidebarGroups(classified, options.order);
+  if (options.flat !== true) return grouped;
+  const sequence = sidebarCategorySequence(grouped, config, options.sectionOrder, options.subgroupOrder);
+  return orderFlatSidebarGroup(classified, sequence, options.order);
 }
 
 function orderedSectionNames(grouped: Map<string, AgentRow[]>, config?: ConsoleAgentListConfig): string[] {
@@ -973,13 +1036,34 @@ function reorderSidebarOrderWithNavigationModel(
 }
 
 /**
+ * The stored order with each agent's key brought up to date: an agent
+ * stored by its member id before it had an identity keeps that place under
+ * its identity key, so listing it again does not move it to the end.
+ */
+function sidebarStoredOrderKeys(stored: readonly string[], agents: readonly ConsoleAgent[]): string[] {
+  const storedKeys = new Set(stored);
+  const renamed = new Map<string, string>();
+  for (const agent of agents) {
+    const key = sidebarAgentOrderKey(agent);
+    if (key !== agent.member_id && storedKeys.has(agent.member_id) && !storedKeys.has(key)) {
+      renamed.set(agent.member_id, key);
+    }
+  }
+  return renamed.size === 0 ? [...stored] : stored.map((key) => renamed.get(key) ?? key);
+}
+
+/**
  * The stored manual order after moving `dragged` before or after `target`
- * among `siblings` (the keys of one container, in shown order). Every shown
- * agent (`present`, in shown order) is listed first, so the move changes the
- * order of the moved siblings only, in every view. `null` when nothing moves.
+ * among `siblings` (the keys of one container, in shown order). Every agent
+ * is listed first, those not yet stored in the category order (`present`,
+ * the keys of {@link sidebarCategorySequence}), so the first move fixes that
+ * order for every agent in both views. Only the dragged key then moves, so
+ * a move changes the order of only the pairs that include the moved agent,
+ * in either view. `null` when nothing moves.
  */
 function sidebarAgentOrderAfterMove(args: {
   stored: readonly string[];
+  agents: readonly ConsoleAgent[];
   present: readonly string[];
   siblings: readonly string[];
   dragged: string;
@@ -990,8 +1074,8 @@ function sidebarAgentOrderAfterMove(args: {
   const siblings = [...args.siblings];
   const moved = reorderSidebarOrderWithNavigationModel(siblings, args.dragged, args.target, args.where, args.inputSource);
   if (moved.length !== siblings.length || moved.every((key, index) => key === siblings[index])) return null;
-  const listed = listConsoleSidebarAgentOrder(args.stored, args.present);
-  return capConsoleSidebarAgentOrder(mergeConsoleSidebarSiblingOrder(listed, moved), new Set(args.present));
+  const listed = listConsoleSidebarAgentOrder(sidebarStoredOrderKeys(args.stored, args.agents), args.present);
+  return capConsoleSidebarAgentOrder(moveConsoleSidebarOrderKey(listed, args.dragged, moved), new Set(args.present));
 }
 
 function collectPinnedRows(rows: AgentRow[], pinnedAgentIds: Set<string> | undefined): Set<string> {
@@ -1862,11 +1946,43 @@ export const Sidebar = React.memo(function Sidebar({
     });
   }, [agents, q, activityFilter]);
 
-  const classified = React.useMemo(
-    () => classifySidebarAgents(filtered, grouping, flat),
-    [filtered, flat, grouping],
+  const sectionOrderStorageKey = React.useMemo(
+    () => sidebarStorageKey(SIDEBAR_SECTION_ORDER_STORAGE_PREFIX, storageNamespace),
+    [storageNamespace],
   );
-  const grouped = React.useMemo(() => orderSidebarGroups(classified, sortContext), [classified, sortContext]);
+  const subgroupOrderStorageKey = React.useMemo(
+    () => sidebarStorageKey(SIDEBAR_SUBGROUP_ORDER_STORAGE_PREFIX, storageNamespace),
+    [storageNamespace],
+  );
+  const [sectionOrder, setSectionOrder] = React.useState<string[]>(() => {
+    return readSidebarStringList(localSidebarStorage(), sectionOrderStorageKey) || [];
+  });
+  React.useEffect(() => {
+    setSectionOrder(readSidebarStringList(localSidebarStorage(), sectionOrderStorageKey) || []);
+  }, [sectionOrderStorageKey]);
+  const [subgroupOrder, setSubgroupOrder] = React.useState<string[]>(() => {
+    return readSidebarStringList(localSidebarStorage(), subgroupOrderStorageKey) || [];
+  });
+  React.useEffect(() => {
+    setSubgroupOrder(readSidebarStringList(localSidebarStorage(), subgroupOrderStorageKey) || []);
+  }, [subgroupOrderStorageKey]);
+  const classified = React.useMemo(() => classifySidebarAgents(filtered, grouping), [filtered, grouping]);
+  // The category view's rows. The flat list needs them only for Manual,
+  // where they give its default order and the one list both views store.
+  const categoryGrouped = React.useMemo(
+    () => (flat && view.sortBy !== "manual" ? null : orderSidebarGroups(classified, sortContext)),
+    [classified, flat, sortContext, view.sortBy],
+  );
+  const categorySequence = React.useMemo(
+    () => (categoryGrouped && view.sortBy === "manual"
+      ? sidebarCategorySequence(categoryGrouped, grouping, sectionOrder, subgroupOrder)
+      : []),
+    [categoryGrouped, grouping, sectionOrder, subgroupOrder, view.sortBy],
+  );
+  const grouped = React.useMemo(
+    () => (!flat && categoryGrouped ? categoryGrouped : orderFlatSidebarGroup(classified, categorySequence, sortContext)),
+    [categoryGrouped, categorySequence, classified, flat, sortContext],
+  );
   const familyPinIdsByMemberId = React.useMemo(() => sidebarFamilyPinIdsByMemberId(grouped), [grouped]);
   const sectionNames = React.useMemo(
     () => flat
@@ -1886,14 +2002,6 @@ export const Sidebar = React.memo(function Sidebar({
     () => sidebarStorageKey(SUBGROUP_COLLAPSE_STORAGE_PREFIX, storageNamespace),
     [storageNamespace],
   );
-  const sectionOrderStorageKey = React.useMemo(
-    () => sidebarStorageKey(SIDEBAR_SECTION_ORDER_STORAGE_PREFIX, storageNamespace),
-    [storageNamespace],
-  );
-  const subgroupOrderStorageKey = React.useMemo(
-    () => sidebarStorageKey(SIDEBAR_SUBGROUP_ORDER_STORAGE_PREFIX, storageNamespace),
-    [storageNamespace],
-  );
   const [collapsedSections, setCollapsedSections] = React.useState<Set<string>>(() => {
     return collapsedSectionsForStorage(grouping, sectionCollapseStorageKey);
   });
@@ -1906,18 +2014,6 @@ export const Sidebar = React.memo(function Sidebar({
   React.useEffect(() => {
     setCollapsedSubgroups(collapsedSubgroupsForStorage(subgroupCollapseStorageKey));
   }, [subgroupCollapseStorageKey]);
-  const [sectionOrder, setSectionOrder] = React.useState<string[]>(() => {
-    return readSidebarStringList(localSidebarStorage(), sectionOrderStorageKey) || [];
-  });
-  React.useEffect(() => {
-    setSectionOrder(readSidebarStringList(localSidebarStorage(), sectionOrderStorageKey) || []);
-  }, [sectionOrderStorageKey]);
-  const [subgroupOrder, setSubgroupOrder] = React.useState<string[]>(() => {
-    return readSidebarStringList(localSidebarStorage(), subgroupOrderStorageKey) || [];
-  });
-  React.useEffect(() => {
-    setSubgroupOrder(readSidebarStringList(localSidebarStorage(), subgroupOrderStorageKey) || []);
-  }, [subgroupOrderStorageKey]);
   const customSidebarButtons = React.useMemo(
     () => (customButtons || []).filter((button) => button.id && button.label && (button.control || button.href || button.panel)),
     [customButtons],
@@ -1977,12 +2073,13 @@ export const Sidebar = React.memo(function Sidebar({
     });
     setOrderAnnouncement(`Moved subgroup ${sidebarSubgroupStorageLabel(draggedId)} ${where} ${sidebarSubgroupStorageLabel(target)}.`);
   }, [subgroupIdsForBucket, subgroupOrderStorageKey]);
-  // Every shown agent's key, in shown order: a move lists them all first,
-  // so it changes the order of the moved agents only, in every view.
-  const presentAgentKeys = React.useMemo(() => {
-    const sections = flat ? sectionNames : applySidebarOrder(sectionNames, sectionOrder);
-    return sections.flatMap((bucket) => grouped.get(bucket) || []).map((row) => sidebarAgentOrderKey(row.agent));
-  }, [flat, grouped, sectionNames, sectionOrder]);
+  // Every agent's key in the category order, whichever view is shown: a
+  // move lists them all first, so either view's first move stores the same
+  // list and the other view keeps its order apart from the moved agent.
+  const presentAgentKeys = React.useMemo(
+    () => categorySequence.map((row) => sidebarAgentOrderKey(row.agent)),
+    [categorySequence],
+  );
   // Why agents cannot be reordered right now, or null when they can.
   const agentReorderBlocked = view.sortBy !== "manual"
     ? "Choose Sort: Manual to reorder agents."
@@ -2002,6 +2099,7 @@ export const Sidebar = React.memo(function Sidebar({
     );
     const next = sidebarAgentOrderAfterMove({
       stored: agentOrder,
+      agents,
       present: presentAgentKeys,
       siblings: siblings.map((row) => sidebarAgentOrderKey(row.row.agent)),
       dragged: draggedId,
@@ -2018,7 +2116,7 @@ export const Sidebar = React.memo(function Sidebar({
     const labelOf = (key: string) =>
       siblings.find((row) => sidebarAgentOrderKey(row.row.agent) === key)?.row.agent.label || key;
     setOrderAnnouncement(`Moved ${labelOf(draggedId)} ${where === "before" ? "above" : "below"} ${labelOf(target)}.`);
-  }, [agentOrder, agentOrderStorageKey, presentAgentKeys]);
+  }, [agentOrder, agentOrderStorageKey, agents, presentAgentKeys]);
   const handleSectionOrderKeyDown = React.useCallback((event: React.KeyboardEvent<HTMLElement>, bucket: string) => {
     if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
     const ordered = applySidebarOrder(sectionNames, sectionOrder);

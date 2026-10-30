@@ -133,8 +133,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the agents of its category, subgroup or parent (its nested agents move with
   it), and the move is announced. Group (Category or None) and Sort (Manual,
   Name or Last activity) controls under the search box choose a categorized or
-  a flat list, kept in the manual order, by name (numbers in order) or with the
-  most recently active agents first. The manual order, the view and the pins
+  a flat list (in the category order until an agent is moved), kept in the
+  manual order, by name (numbers in order) or with the most recently active
+  agents first. The manual order, the view and the pins
   are kept in the browser per user and console, and an `[agent_list]`
   configuration edit no longer resets them; pins an earlier console kept carry
   over once. An agent row's second line now reads as the agent's role or group

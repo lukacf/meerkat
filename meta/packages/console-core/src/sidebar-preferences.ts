@@ -198,31 +198,33 @@ export function listConsoleSidebarAgentOrder(stored: readonly string[], present:
 }
 
 /**
- * Writes one reordered set of siblings into a stored manual order: their keys
- * leave their old places and return as one block, in the new order, where the
- * first of them stood (at the end when none was stored). Keys outside the
- * block keep their places.
+ * Moves one key of a listed manual order so that its siblings read in the
+ * order `siblingsAfter`: the key goes right after its new predecessor among
+ * them, or right before its new successor when it becomes the first. Every
+ * other key keeps its place, so a move changes the order of only the pairs
+ * that include the moved key. A key that is not among the siblings changes
+ * nothing.
  */
-export function mergeConsoleSidebarSiblingOrder(stored: readonly string[], block: readonly string[]): string[] {
-  const blockKeys = new Set(block);
-  const rest: string[] = [];
-  let insertAt = -1;
-  for (const key of stored) {
-    if (blockKeys.has(key)) {
-      if (insertAt < 0) insertAt = rest.length;
-      continue;
-    }
-    rest.push(key);
-  }
-  const at = insertAt < 0 ? rest.length : insertAt;
-  return [...rest.slice(0, at), ...block, ...rest.slice(at)];
+export function moveConsoleSidebarOrderKey(
+  listed: readonly string[],
+  key: string,
+  siblingsAfter: readonly string[],
+): string[] {
+  const at = siblingsAfter.indexOf(key);
+  if (at < 0) return [...listed];
+  const rest = listed.filter((candidate) => candidate !== key);
+  const predecessor = at > 0 ? rest.indexOf(siblingsAfter[at - 1]!) : -1;
+  if (predecessor >= 0) return [...rest.slice(0, predecessor + 1), key, ...rest.slice(predecessor + 1)];
+  const successor = at + 1 < siblingsAfter.length ? rest.indexOf(siblingsAfter[at + 1]!) : -1;
+  if (successor >= 0) return [...rest.slice(0, successor), key, ...rest.slice(successor)];
+  return [...rest, key];
 }
 
 /**
  * Bounds a stored manual order to the larger of
  * {@link SIDEBAR_AGENT_ORDER_MIN_CAPACITY} and twice the present roster,
- * dropping the oldest keys of agents not present first. Present agents are
- * never dropped.
+ * dropping keys of agents not present, the first-listed first (a key's place
+ * in the list is its rank, not its age). Present agents are never dropped.
  */
 export function capConsoleSidebarAgentOrder(order: readonly string[], present: ReadonlySet<string>): string[] {
   const capacity = Math.max(SIDEBAR_AGENT_ORDER_MIN_CAPACITY, present.size * 2);

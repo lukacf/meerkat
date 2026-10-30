@@ -284,7 +284,7 @@ export {
   applyConsoleSidebarOrder,
   capConsoleSidebarAgentOrder,
   listConsoleSidebarAgentOrder,
-  mergeConsoleSidebarSiblingOrder,
+  moveConsoleSidebarOrderKey,
   normalizeConsoleSidebarGroupBy,
   normalizeConsoleSidebarSortBy,
   pruneStaleSidebarStorage,

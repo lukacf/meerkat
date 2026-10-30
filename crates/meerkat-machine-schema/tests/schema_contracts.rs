@@ -97,6 +97,11 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             // verdict. Record-scoped, so the store persists one machine state
             // per council.
             "TemporaryCouncilLifecycleMachine",
+            // Tool grant owns ONE scoped tool grant: issuance against a
+            // maximum lifetime, expiry at a supplied clock, revocation before
+            // the deadline, and use admission. Record-scoped and clock-free,
+            // so the store persists one machine state per grant.
+            "ToolGrantLifecycleMachine",
         ]
     );
 

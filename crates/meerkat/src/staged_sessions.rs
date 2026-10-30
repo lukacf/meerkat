@@ -288,6 +288,11 @@ impl GeneratedStagedSessionAuthority {
 pub struct StagedSlot {
     authority: GeneratedStagedSessionAuthority,
     payload: StagedPayload,
+    /// The scoped tool grant gate the staged build names, kept from staging
+    /// until the slot is removed after the session's first commit: a
+    /// promotion takes the build config, never this copy, and an abandoned
+    /// promotion restores both.
+    grant_gated_tools: meerkat_core::tool_grant::GrantGatedTools,
     pub labels: Option<BTreeMap<String, String>>,
     /// Prompt supplied at `session/create` time when the initial turn is
     /// deferred. Prepended to the first `turn/start` prompt on promotion.
@@ -319,6 +324,7 @@ impl StagedSlot {
         }
         let keep_alive = build_config.keep_alive;
         let has_comms_name = build_config.comms_name.is_some();
+        let grant_gated_tools = build_config.grant_gated_tools.clone().unwrap_or_default();
         Ok(Self {
             authority: GeneratedStagedSessionAuthority::new(
                 id,
@@ -330,6 +336,7 @@ impl StagedSlot {
             payload: StagedPayload::Staged {
                 build_config: Box::new(build_config),
             },
+            grant_gated_tools,
             labels,
             deferred_prompt,
             deferred_injected_context,
@@ -511,6 +518,19 @@ impl StagedSessionRegistry {
         let slots = self.slots.read().await;
         let slot = slots.get(id)?;
         slot.authority.keep_alive()
+    }
+
+    /// The scoped tool grant gate the staged build names, read without
+    /// promoting it: empty when the build gates nothing. It is answered for
+    /// as long as the slot exists, staged, promoting or closing, so through
+    /// the session's whole first turn; the slot is removed only after that
+    /// turn's first commit. `None` when no slot exists for `id`.
+    pub async fn grant_gated_tools(
+        &self,
+        id: &SessionId,
+    ) -> Option<meerkat_core::tool_grant::GrantGatedTools> {
+        let slots = self.slots.read().await;
+        slots.get(id).map(|slot| slot.grant_gated_tools.clone())
     }
 
     /// Apply a keep-alive override to a staged session before its first turn
@@ -796,6 +816,7 @@ impl StagedSessionRegistry {
             return false;
         }
         let updated_at_secs = updated_at_secs.max(slot.updated_at_secs);
+        slot.grant_gated_tools = build_config.grant_gated_tools.clone().unwrap_or_default();
         slot.payload = StagedPayload::Staged {
             build_config: Box::new(build_config),
         };

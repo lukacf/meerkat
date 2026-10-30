@@ -345,6 +345,7 @@ pub struct ExecutionPolicyGatedDispatcher<T: AgentToolDispatcher + ?Sized> {
     policy: ToolExecutionPolicy,
     consequence_policy: Option<crate::BoundToolConsequencePolicy>,
     dispatch_admission: Option<Arc<dyn ToolDispatchAdmission>>,
+    tool_grant_gate: Option<crate::tool_grant::ToolGrantGate>,
 }
 
 impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
@@ -355,7 +356,23 @@ impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
             policy,
             consequence_policy: None,
             dispatch_admission: None,
+            tool_grant_gate: None,
         }
+    }
+
+    /// Attach the build's scoped tool grant gate.
+    ///
+    /// A call of a grant-gated name is handed to the inner dispatcher only
+    /// when a live grant admits it. The admission is the gate's last check:
+    /// it runs after the dispatch admissions, the static policy, the
+    /// consequence policy and any governed entry staging, and nothing awaits
+    /// between its clock comparison and the hand-off. A refusal is a
+    /// `policy_denied` tool error with a `tool_grant_*` code. An ungated name
+    /// never consults the grants.
+    #[must_use]
+    pub fn with_tool_grant_gate(mut self, gate: crate::tool_grant::ToolGrantGate) -> Self {
+        self.tool_grant_gate = Some(gate);
+        self
     }
 
     /// Attach the already validated host policy binding to the same outermost gate.
@@ -412,6 +429,29 @@ impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
         } else {
             ToolError::not_found(name)
         }
+    }
+
+    /// The grant gate's admission of one call: `Ok` for an ungated name or
+    /// a gated name a live grant admits. The seam reads the clock after its
+    /// own awaits, so the caller hands the call on with no await in between.
+    async fn admit_grant_gated_call(
+        &self,
+        call: ToolCallView<'_>,
+        context: Option<&ToolDispatchContext>,
+    ) -> Result<(), ToolError> {
+        let Some(gate) = self.tool_grant_gate.as_ref() else {
+            return Ok(());
+        };
+        if !gate.is_gated(call.name) {
+            return Ok(());
+        }
+        gate.admit_call(crate::tool_grant::ToolGrantCall {
+            name: call.name,
+            call_id: call.id,
+            run_id: context.and_then(ToolDispatchContext::run_id),
+        })
+        .await
+        .map_err(|refusal| refusal.into_tool_error(call.name))
     }
 
     async fn evaluate_consequence_policy(
@@ -651,6 +691,12 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
         self.inner.pending_catalog_sources()
     }
 
+    /// The gate adjudicates scoped tool grants when it carries a grant gate;
+    /// otherwise as far as its inner dispatcher does.
+    fn adjudicates_tool_grants(&self) -> bool {
+        self.tool_grant_gate.is_some() || self.inner.adjudicates_tool_grants()
+    }
+
     fn execution_binding_fingerprint(
         &self,
         tool_name: &str,
@@ -727,6 +773,13 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
             // dispatcher ran.
             Err(refused) => return Err(refused.not_dispatched()),
         };
+        // The grant gate's admission is the last await before the hand-off.
+        if let Err(refused) = self.admit_grant_gated_call(call, None).await {
+            return Err(custody
+                .settle_refused(call, None, refused)
+                .await
+                .not_dispatched());
+        }
         let result = if self.policy.requires_mutation_declaration() {
             let mut context = ToolDispatchContext::default();
             context.require_read_only_execution();
@@ -753,6 +806,16 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
             // dispatcher ran.
             Err(refused) => return Err(refused.not_dispatched()),
         };
+        // The grant gate's admission is the last await before the hand-off.
+        if let Err(refused) = self
+            .admit_grant_gated_call(call, Some(&*dispatch_context))
+            .await
+        {
+            return Err(custody
+                .settle_refused(call, Some(context), refused)
+                .await
+                .not_dispatched());
+        }
         let result = self
             .inner
             .dispatch_with_context(call, &dispatch_context)
@@ -781,6 +844,16 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                 // inner dispatcher ran.
                 Err(refused) => return Err(refused.not_dispatched()),
             };
+        // The grant gate's admission is the last await before the hand-off.
+        if let Err(refused) = self
+            .admit_grant_gated_call(call, Some(&*dispatch_context))
+            .await
+        {
+            return Err(custody
+                .settle_refused(call, Some(context), refused)
+                .await
+                .not_dispatched());
+        }
         let result = self
             .inner
             .dispatch_resolved_with_context(call, &dispatch_context, plan)
@@ -831,6 +904,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                 policy: owned.policy,
                 consequence_policy: owned.consequence_policy,
                 dispatch_admission: owned.dispatch_admission,
+                tool_grant_gate: owned.tool_grant_gate,
             });
             Ok(if bound {
                 BindOutcome::Bound(gated)
@@ -844,6 +918,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                     policy: owned.policy,
                     consequence_policy: owned.consequence_policy,
                     dispatch_admission: owned.dispatch_admission,
+                    tool_grant_gate: owned.tool_grant_gate,
                 },
             )))
         }
@@ -2777,5 +2852,186 @@ pub(crate) mod tests {
         );
         assert!(second.outcomes.lock().unwrap().is_empty());
         assert!(inner.dispatched().is_empty());
+    }
+
+    // ── Scoped tool grant gate ───────────────────────────────────────────
+
+    /// A session's grants over a host clock the test moves: one grant opens
+    /// every gated name until `deadline`. It records each call it was asked
+    /// to admit.
+    struct ClockedGrants {
+        clock: Arc<std::sync::atomic::AtomicU64>,
+        deadline: u64,
+        asked: Mutex<Vec<String>>,
+    }
+
+    impl ClockedGrants {
+        fn new(clock: &Arc<std::sync::atomic::AtomicU64>, deadline: u64) -> Self {
+            Self {
+                clock: Arc::clone(clock),
+                deadline,
+                asked: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tool_grant::SessionToolGrants for ClockedGrants {
+        async fn open_names(
+            &self,
+            gated: &crate::tool_grant::GatedToolTable,
+        ) -> Result<ToolNameSet, crate::tool_grant::ToolGrantRefusal> {
+            Ok(if self.clock.load(Ordering::SeqCst) < self.deadline {
+                gated.gated_names().into_iter().collect()
+            } else {
+                ToolNameSet::new()
+            })
+        }
+
+        async fn admit_call(
+            &self,
+            _gated: &crate::tool_grant::GatedToolTable,
+            call: crate::tool_grant::ToolGrantCall<'_>,
+        ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+            self.asked.lock().unwrap().push(call.name.to_string());
+            // The seam's own await (its row read) comes before its clock read.
+            tokio::task::yield_now().await;
+            if self.clock.load(Ordering::SeqCst) < self.deadline {
+                Ok(())
+            } else {
+                Err(crate::tool_grant::ToolGrantRefusal::Expired {
+                    grant_id: crate::tool_grant::ToolGrantId::mint(),
+                    expires_at_ms: self.deadline,
+                })
+            }
+        }
+    }
+
+    /// A dispatch admission the gate awaits before its grant check: while it
+    /// is awaited, the host clock reaches the grant's deadline.
+    struct ClockAdvancingAdmission {
+        clock: Arc<std::sync::atomic::AtomicU64>,
+        to: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolDispatchAdmission for ClockAdvancingAdmission {
+        async fn await_dispatch_admission(
+            &self,
+            _call: ToolCallView<'_>,
+            _context: Option<&ToolDispatchContext>,
+            _effect_kind: crate::LiveBridgeEffectKind,
+        ) -> Result<(), ToolError> {
+            tokio::task::yield_now().await;
+            self.clock.store(self.to, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn tool_grant_gate(
+        grants: Arc<ClockedGrants>,
+        gated: &[&str],
+    ) -> crate::tool_grant::ToolGrantGate {
+        crate::tool_grant::ToolGrantGate::new(
+            grants,
+            crate::tool_grant::GatedToolTable::new(
+                std::collections::BTreeMap::new(),
+                gated
+                    .iter()
+                    .map(|name| crate::types::ToolName::from(*name))
+                    .collect(),
+            ),
+        )
+    }
+
+    fn assert_grant_refusal(error: &ToolError, code: &str) {
+        match error.primary_error() {
+            ToolError::PolicyDenied { denial } => assert_eq!(denial.code, code),
+            other => panic!("expected a policy_denied grant refusal, got {other:?}"),
+        }
+    }
+
+    /// The grant is live when the call enters the gate, but the gate's
+    /// earlier await (a dispatch admission) carries the clock to the
+    /// deadline: the grant check runs after it, at the deadline, and the
+    /// inner dispatcher never runs.
+    #[tokio::test]
+    async fn grant_gate_refuses_a_call_whose_adjudication_falls_after_the_deadline() {
+        let clock = Arc::new(std::sync::atomic::AtomicU64::new(1_000));
+        let grants = Arc::new(ClockedGrants::new(&clock, 2_000));
+        let inner = Arc::new(SpyDispatcher::new(&["shell"]));
+        let gated = ExecutionPolicyGatedDispatcher::new(
+            Arc::clone(&inner),
+            ToolExecutionPolicy::unrestricted(),
+        )
+        .with_dispatch_admission(Arc::new(ClockAdvancingAdmission {
+            clock: Arc::clone(&clock),
+            to: 2_000,
+        }))
+        .with_tool_grant_gate(tool_grant_gate(Arc::clone(&grants), &["shell"]));
+
+        let error = dispatch_named(&gated, "shell")
+            .await
+            .expect_err("a call adjudicated at the deadline is refused");
+        assert_grant_refusal(&error, crate::tool_grant::TOOL_GRANT_EXPIRED_CODE);
+
+        clock.store(1_000, Ordering::SeqCst);
+        let error = dispatch_named_with_context(&gated, "shell")
+            .await
+            .expect_err("the context entry adjudicates after its staging too");
+        assert_grant_refusal(&error, crate::tool_grant::TOOL_GRANT_EXPIRED_CODE);
+
+        assert!(
+            inner.dispatched().is_empty(),
+            "the inner dispatcher never runs for a refused grant"
+        );
+        assert_eq!(grants.asked(), ["shell", "shell"]);
+
+        // Without the late clock, the same gate hands the call on.
+        let admitted = ExecutionPolicyGatedDispatcher::new(
+            Arc::clone(&inner),
+            ToolExecutionPolicy::unrestricted(),
+        )
+        .with_tool_grant_gate(tool_grant_gate(Arc::clone(&grants), &["shell"]));
+        clock.store(1_999, Ordering::SeqCst);
+        dispatch_named(&admitted, "shell")
+            .await
+            .expect("a call adjudicated before the deadline is handed on");
+        assert_eq!(inner.dispatched(), ["shell"]);
+    }
+
+    #[tokio::test]
+    async fn ungated_names_never_consult_the_grant_gate() {
+        let clock = Arc::new(std::sync::atomic::AtomicU64::new(5_000));
+        // Every grant is past its deadline: a consulted gate would refuse.
+        let grants = Arc::new(ClockedGrants::new(&clock, 1_000));
+        let inner = Arc::new(SpyDispatcher::new(&["shell", "read_file"]));
+        let gated = ExecutionPolicyGatedDispatcher::new(
+            Arc::clone(&inner),
+            ToolExecutionPolicy::unrestricted(),
+        )
+        .with_tool_grant_gate(tool_grant_gate(Arc::clone(&grants), &["shell"]));
+
+        dispatch_named(&gated, "read_file")
+            .await
+            .expect("an ungated name is handed on");
+        dispatch_named_with_context(&gated, "read_file")
+            .await
+            .expect("an ungated name is handed on with a context");
+        assert_eq!(inner.dispatched(), ["read_file", "read_file"]);
+        assert!(
+            grants.asked().is_empty(),
+            "the grants are never read for an ungated name"
+        );
+
+        let error = dispatch_named(&gated, "shell")
+            .await
+            .expect_err("the gated name is refused");
+        assert_grant_refusal(&error, crate::tool_grant::TOOL_GRANT_EXPIRED_CODE);
+        assert_eq!(grants.asked(), ["shell"]);
     }
 }

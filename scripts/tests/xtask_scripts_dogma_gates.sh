@@ -94,6 +94,15 @@ for grant_input in crates/meerkat-authorization/src/grants/mod.rs crates/meerkat
     bad "machine-authority-changed ignored grant authority input $grant_input"
   fi
 done
+# The scoped tool grant machine's production owner and its service apply the
+# generated ToolGrantLifecycleMachine inputs.
+for tool_grant_input in crates/meerkat-runtime/src/tool_grant/dsl.rs crates/meerkat-runtime/src/tool_grant/service.rs; do
+  if scripts/machine-authority-changed -- "$tool_grant_input" >/dev/null; then
+    ok "machine-authority-changed protects tool grant authority input $tool_grant_input"
+  else
+    bad "machine-authority-changed ignored tool grant authority input $tool_grant_input"
+  fi
+done
 for poster_input in scripts/machine-posters/generate-machine-posters.mjs docs/internal/machine-posters/mob_machine.html crates/xtask/src/machine_alphabet.rs scripts/machine-posters-changed; do
   if scripts/machine-posters-changed -- "$poster_input" >/dev/null; then
     ok "machine-posters-changed routes poster input $poster_input to the poster gate"
@@ -379,6 +388,9 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # property violated.
 # source_credential_publication_audit.sh (auth) requires each of its five
 # reachability witnesses violated.
+# tool_grant_expiry_audit.sh (tool_grant_lifecycle) requires its eight
+# witnesses violated, and with --mutants each seeded defect's invariant or
+# action property violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -633,6 +645,19 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessWindowRenewed is violated."' \
   'echo "Error: Invariant NotAuditWitnessRefusedValueBlocked is violated."' \
   'echo "Error: Invariant NotAuditWitnessLoggedOutValueBlocked is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExpiredByTimer is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExpiredAtDispatch is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExpiredWhileDownSettledOnRead is violated."' \
+  'echo "Error: Invariant NotAuditWitnessAdmittedOneTickBeforeDeadline is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRollbackAfterExpiryStillRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRevokedThenRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRevokeAfterDeadlineRecordsExpiry is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUnpersistedRefusalThenAdmitted is violated."' \
+  'echo "Error: Invariant AuditExpiryNotEarly is violated."' \
+  'echo "Error: Invariant AuditNoAdmitAtOrAfterDeadline is violated."' \
+  'echo "Error: Action property AuditTerminalLatched is violated."' \
+  'echo "Error: Invariant AuditTerminalNeverAdmits is violated."' \
+  'echo "Error: Invariant AuditVisibleOnlyWhileLive is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

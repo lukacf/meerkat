@@ -459,6 +459,20 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "WireProvisionApiKeyResult",
     "WireSessionTranscriptRevision",
     "WireSessionTranscriptRevisionList",
+    # Scoped tool grants (`tool_grants/*`). The records precede the params and
+    # results that carry them, so those reference them by name.
+    "WireToolGrant",
+    "WireUnreadableToolGrant",
+    "WireToolGrantAuditRow",
+    "WireUnreadableToolGrantAuditRow",
+    "GrantToolParams",
+    "GrantToolResult",
+    "RevokeToolGrantParams",
+    "RevokeToolGrantResult",
+    "ListToolGrantsParams",
+    "ListToolGrantsResult",
+    "ToolGrantAuditParams",
+    "ToolGrantAuditResult",
 ]
 
 PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
@@ -484,16 +498,30 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireAuthLogoutResult",
     "WireAuthStatusResult",
     "WireLoginCancelled",
+    # Scoped tool grant vocabulary. Every alias the audit event union names
+    # precedes it: the generated Python aliases evaluate in roster order. The
+    # request subject and target are closed; the result ones are tolerant.
+    "ToolGrantSubjectRequest",
+    "ToolGrantTargetRequest",
+    "WireToolGrantSubject",
+    "WireToolGrantTarget",
+    "WireToolGrantIssuer",
+    "WireToolGrantStatus",
+    "WireToolGrantExpiryDriver",
+    "WireToolGrantRefusalKind",
+    "WireToolGrantAuditEvent",
 ]
 
-# Request unions (serde-untagged, flattened targets) whose schemas live in the
-# params roster rather than the wire roster.
+# Request unions whose schemas live in the params roster rather than the wire
+# roster: the auth ones are serde-untagged with flattened targets.
 PARAMS_UNION_ALIAS_TYPES = {
     "AuthLogoutParams",
     "AuthStatusParams",
     "LoginCancelParams",
     "LoginCompleteParams",
     "LoginStartParams",
+    "ToolGrantSubjectRequest",
+    "ToolGrantTargetRequest",
 }
 
 MCP_LIVE_CONTRACT_TYPES = [

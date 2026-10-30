@@ -302,12 +302,20 @@ not treat an agent's ability to call a model-visible tool as an operator API.
 | Live audio | Placed mob-member WebSocket controls | No | Session `live/*` and the member `mob/member_live_*` family support WebSocket/WebRTC; the member's own live host serves the transport or refuses it | No |
 | Multi-host mobs | Admin and observation | Observation only | Admin and observation | Placement plus observation only |
 | Temporary councils | No | No | No | No |
+| Scoped tool grants | No | No | No | No |
 | Provider credential management | Yes | Yes | Yes | No |
 
 Shared wire types do not grant exposure. In particular, durable member role
 migration is absent from every public CLI, REST, JSON-RPC, MCP, and generated
 SDK spawn request even though the private remote-host bridge shares schema
 types with public artifacts.
+
+Scoped tool grants are a Rust API: a build marks tool names grant-gated, and
+`MeerkatMachine::grant_tool`, `revoke_tool_grant`, `list_tool_grants` and
+`read_tool_grant_audit` manage the grants that open them (see
+[Scoped tool grants](/concepts/tools#scoped-tool-grants)). Grants persist with
+the runtime store; with the in-memory store, as on Web/WASM, they last only for
+the process.
 
 Temporary councils are exposed only as the `council` tool in
 `AgentMobToolSurface`, beside `delegate` and `fork_off`. Its authority is the

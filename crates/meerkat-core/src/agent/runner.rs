@@ -458,6 +458,20 @@ where
     T: AgentToolDispatcher + ?Sized + 'static,
     S: AgentSessionStore + ?Sized,
 {
+    /// Whether a call of `name` passes the visibility precheck to the dispatch
+    /// gate: the name is grant-gated and only its closed grant gate hides it.
+    /// The dispatch gate then adjudicates the grants, so every refusal of a
+    /// gated name has one site.
+    pub(crate) fn call_reaches_tool_grant_gate(&self, name: &str) -> bool {
+        self.tool_grant_gate
+            .as_ref()
+            .is_some_and(|gate| gate.is_gated(name))
+            && self
+                .tool_scope
+                .hidden_only_by_closed_grant_gate(name)
+                .unwrap_or(false)
+    }
+
     /// Stage an external tool visibility filter update for subsequent turns.
     pub fn stage_external_tool_filter(
         &mut self,
@@ -1348,9 +1362,14 @@ where
             .map_err(|err| AgentError::InternalError(err.to_string()))?
             .into_iter()
             .collect::<ToolNameSet>();
-        if let Err(error) =
+        // A gated name hidden only by its closed grant gate goes on to the
+        // dispatch gate, which adjudicates the grants: one refusal site.
+        let precheck = if self.call_reaches_tool_grant_gate(call.name.as_str()) {
+            Ok(())
+        } else {
             precheck_visible_tool_call(self.tools.as_ref(), &visible_tool_names, call.name.as_str())
-        {
+        };
+        if let Err(error) = precheck {
             return Ok(crate::ops::terminal_tool_outcome_for_error(call.id, error));
         }
         // An external call belongs to no round of the agent's loop: it
@@ -3644,6 +3663,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             client: isolated_client,
             tools: Arc::clone(&self.tools),
             tool_scope: self.tool_scope.clone(),
+            tool_grant_gate: self.tool_grant_gate.clone(),
             store: Arc::clone(&self.store),
             session: snapshot,
             budget: self.budget.fork_shared_accounting(),

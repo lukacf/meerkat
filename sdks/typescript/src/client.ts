@@ -209,6 +209,8 @@ import type {
   EventsSnapshotResult as RpcEventsSnapshotResult,
   ForkSessionAtParams as RpcForkSessionAtParams,
   ForkSessionReplaceParams as RpcForkSessionReplaceParams,
+  GrantToolParams as RpcGrantToolParams,
+  GrantToolResult as RpcGrantToolResult,
   HelpRequest as RpcHelpRequest,
   HelpResponse as RpcHelpResponse,
   InjectSystemContextParams as RpcInjectSystemContextParams,
@@ -219,6 +221,8 @@ import type {
   SessionInputStateResult as RpcSessionInputStateResult,
   ListSessionsParams as RpcListSessionsParams,
   ListSessionsResult as RpcListSessionsResult,
+  ListToolGrantsParams as RpcListToolGrantsParams,
+  ListToolGrantsResult as RpcListToolGrantsResult,
   LiveCommitInputResult as RpcLiveCommitInputResult,
   LiveInterruptResult as RpcLiveInterruptResult,
   LiveSendInputResult as RpcLiveSendInputResult,
@@ -263,6 +267,8 @@ import type {
   ReadSessionTranscriptRevisionParams as RpcReadSessionTranscriptRevisionParams,
   RealmIdParams as RpcRealmIdParams,
   RestoreSessionTranscriptRevisionParams as RpcRestoreSessionTranscriptRevisionParams,
+  RevokeToolGrantParams as RpcRevokeToolGrantParams,
+  RevokeToolGrantResult as RpcRevokeToolGrantResult,
   RewriteSessionTranscriptParams as RpcRewriteSessionTranscriptParams,
   RuntimeHostCapabilities as RpcRuntimeHostCapabilities,
   RuntimeHostHealth as RpcRuntimeHostHealth,
@@ -275,6 +281,8 @@ import type {
   SessionPeerResponseTerminalParams as RpcSessionPeerResponseTerminalParams,
   SessionTranscriptRewriteResult as RpcSessionTranscriptRewriteResult,
   SystemPromptUpdateResult as RpcSystemPromptUpdateResult,
+  ToolGrantAuditParams as RpcToolGrantAuditParams,
+  ToolGrantAuditResult as RpcToolGrantAuditResult,
   UpdateSystemPromptParams as RpcUpdateSystemPromptParams,
   WireDeviceCompleteResult as RpcWireDeviceCompleteResult,
   WireProvisionApiKeyResult as RpcWireProvisionApiKeyResult,
@@ -1450,6 +1458,7 @@ export class MeerkatClient {
     prompt: string | ContentBlock[],
     options?: SessionOptions,
   ): Promise<Session> {
+    this.requireGrantGateSupport(options);
     const params = MeerkatClient.buildCreateParams(prompt, options);
     this.optOutOfTurnSessionEvents(params);
     const raw = await this.request("session/create", params);
@@ -1470,6 +1479,7 @@ export class MeerkatClient {
       throw new MeerkatError("NOT_CONNECTED", "Client not connected");
     }
 
+    this.requireGrantGateSupport(options);
     const params = MeerkatClient.buildCreateParams(prompt, options);
     this.requestId++;
     const requestId = this.requestId;
@@ -1527,6 +1537,7 @@ export class MeerkatClient {
     prompt: string | ContentBlock[],
     options?: SessionOptions,
   ): Promise<DeferredSession> {
+    this.requireGrantGateSupport(options);
     const params = MeerkatClient.buildCreateParams(prompt, options);
     params.initial_turn = "deferred";
     const raw = await this.request("session/create", params);
@@ -1612,6 +1623,23 @@ export class MeerkatClient {
       throw new CapabilityUnavailableError(
         "CAPABILITY_UNAVAILABLE",
         `idempotencyKey needs a server contract >= ${minimum.join(".")}; `
+          + `this server reports ${this._serverContractVersion || "none"}`,
+      );
+    }
+  }
+
+  /**
+   * Refuse a grant gate before sending it to a server that would drop it:
+   * before contract 0.9.8 `session/create` ignores `grant_gated_tools` and
+   * builds the session with the gated tools ungated.
+   */
+  private requireGrantGateSupport(options?: SessionOptions): void {
+    if (options?.grantGatedTools == null) return;
+    const minimum = [0, 9, 8];
+    if (!this.serverContractAtLeast(minimum)) {
+      throw new CapabilityUnavailableError(
+        "CAPABILITY_UNAVAILABLE",
+        `grantGatedTools needs a server contract >= ${minimum.join(".")}; `
           + `this server reports ${this._serverContractVersion || "none"}`,
       );
     }
@@ -2168,6 +2196,101 @@ export class MeerkatClient {
     params: RpcApprovalDecideParams,
   ): Promise<RpcApprovalRecord> {
     return this.request("approval/decide", params);
+  }
+
+  /**
+   * Grant one of a session's grant-gated tool names, or a gated built-in tool
+   * family, for a bounded window: `{ durationMs }` from the server's clock or
+   * `{ expiresAtMs }` (UNIX ms), at most the server's maximum lifetime. The
+   * session's build must gate the target (`SessionOptions.grantGatedTools`);
+   * a family grant's `target.names` are the names the server took for it.
+   * Throws `INVALID_ARGS` unless the target names exactly one of `tool` and
+   * `family`, and the window exactly one of `durationMs` and `expiresAtMs`.
+   */
+  async grantTool(
+    sessionId: string,
+    target: { tool: string; family?: never } | { family: string; tool?: never },
+    window:
+      | { durationMs: number; expiresAtMs?: never }
+      | { expiresAtMs: number; durationMs?: never },
+    options?: { reason?: string },
+  ): Promise<RpcGrantToolResult> {
+    const { tool, family } = target as { tool?: string; family?: string };
+    if ((tool === undefined) === (family === undefined)) {
+      throw new MeerkatError(
+        "INVALID_ARGS",
+        "grantTool needs exactly one of target.tool and target.family",
+      );
+    }
+    const { durationMs, expiresAtMs } = window as { durationMs?: number; expiresAtMs?: number };
+    if ((durationMs === undefined) === (expiresAtMs === undefined)) {
+      throw new MeerkatError(
+        "INVALID_ARGS",
+        "grantTool needs exactly one of window.durationMs and window.expiresAtMs",
+      );
+    }
+    const params: RpcGrantToolParams = {
+      subject: { kind: "session", session_id: sessionId },
+      target:
+        tool !== undefined
+          ? { kind: "tool", name: tool }
+          : { kind: "family", family: family as string },
+    };
+    if (durationMs !== undefined) {
+      params.duration_ms = durationMs;
+    } else {
+      params.expires_at_ms = expiresAtMs;
+    }
+    if (options?.reason !== undefined) params.reason = options.reason;
+    return this.request("tool_grants/grant", params);
+  }
+
+  /**
+   * Revoke a scoped tool grant before its deadline. Idempotent: revoking a
+   * grant that already ended answers it as it stands, with `changed` false.
+   */
+  async revokeToolGrant(
+    grantId: string,
+    options?: { reason?: string },
+  ): Promise<RpcRevokeToolGrantResult> {
+    const params: RpcRevokeToolGrantParams = { grant_id: grantId };
+    if (options?.reason !== undefined) params.reason = options.reason;
+    return this.request("tool_grants/revoke", params);
+  }
+
+  /**
+   * List a session's scoped tool grants, each due grant settled as expired
+   * first. Ended (expired or revoked) grants are listed only with
+   * `includeEnded`; `unreadable` names any stored grant the server cannot
+   * read.
+   */
+  async listToolGrants(
+    sessionId: string,
+    options?: { includeEnded?: boolean },
+  ): Promise<RpcListToolGrantsResult> {
+    const params: RpcListToolGrantsParams = {
+      subject: { kind: "session", session_id: sessionId },
+    };
+    if (options?.includeEnded !== undefined) params.include_ended = options.includeEnded;
+    return this.request("tool_grants/list", params);
+  }
+
+  /**
+   * Read a page of the audit log of a session's scoped tool grants, in
+   * sequence order. While the result carries `next_sequence`, pass it as the
+   * next page's `afterSequence`. A row the server cannot read is named in
+   * `unreadable`.
+   */
+  async toolGrantAudit(
+    sessionId: string,
+    options?: { afterSequence?: number; limit?: number },
+  ): Promise<RpcToolGrantAuditResult> {
+    const params: RpcToolGrantAuditParams = {
+      subject: { kind: "session", session_id: sessionId },
+    };
+    if (options?.afterSequence !== undefined) params.after_sequence = options.afterSequence;
+    if (options?.limit !== undefined) params.limit = options.limit;
+    return this.request("tool_grants/audit", params);
   }
 
   async listArtifacts(
@@ -8857,6 +8980,7 @@ export class MeerkatClient {
     if (options.enableMob != null) params.enable_mob = options.enableMob;
     if (options.enableWebSearch != null) params.enable_web_search = options.enableWebSearch;
     if (options.toolFilter != null) params.tool_filter = options.toolFilter;
+    if (options.grantGatedTools != null) params.grant_gated_tools = options.grantGatedTools;
     if (options.keepAlive != null) params.keep_alive = options.keepAlive;
     if (options.commsName) params.comms_name = options.commsName;
     if (options.peerMeta != null) params.peer_meta = options.peerMeta;

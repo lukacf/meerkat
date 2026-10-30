@@ -331,6 +331,11 @@ depend on it.
   scopes for flow runs and identity statuses.
 - Realm-wide maps are `Record` scopes, one per entry, such as one runtime per
   continuation key.
+- Each scoped tool grant is a `Record` scope of the family `tg`: its head holds
+  the grant's stored row and the key of the subject it is filed under. Each
+  subject's grant audit log is a `Record` scope of the family `tga`, whose rows
+  are the audit rows; it is read on its first use in a process, never at open.
+  A grant's lifecycle change and its audit row commit in one batch.
 - Chunks of large values are scopes of their own.
 
 A realm therefore holds a few scopes per session and per mob, and listing

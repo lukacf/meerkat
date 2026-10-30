@@ -157,6 +157,7 @@ pub mod tool_catalog;
 pub mod tool_consequence_policy;
 pub mod tool_execution;
 pub mod tool_execution_policy;
+pub mod tool_grant;
 pub mod tool_process;
 pub mod tool_scope;
 pub mod transcript_replay;
@@ -656,6 +657,12 @@ pub use tool_execution::{
 pub use tool_execution_policy::{
     ExecutionPolicyGatedDispatcher, ToolDispatchAdmission, ToolExecutionPolicy,
     ToolExecutionPolicyError, ToolMutationClass,
+};
+pub use tool_grant::{
+    GatedToolTable, GrantGateRefusal, GrantGatedTools, SessionToolGrants, TOOL_GRANT_EXPIRED_CODE,
+    TOOL_GRANT_REQUIRED_CODE, TOOL_GRANT_REVOKED_CODE, TOOL_GRANT_UNAVAILABLE_CODE, ToolGrantCall,
+    ToolGrantGate, ToolGrantId, ToolGrantIdError, ToolGrantIssuer, ToolGrantRecord,
+    ToolGrantRefusal, ToolGrantSubject, ToolGrantSubjectKey, ToolGrantTarget,
 };
 pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,

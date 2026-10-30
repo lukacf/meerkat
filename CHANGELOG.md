@@ -196,6 +196,46 @@ them.
   `Unavailable`. A host that matched the unavailable answer for this
   contention matches the refusal to rebuild instead, or uses the waiting
   forms (see Added).
+- `meerkat-core`: `service::SessionBuildOptions` gains `grant_gated_tools`,
+  `SessionTooling` gains `grant_gated`, and `SessionToolVisibilityState` gains
+  `tool_grant_gated_names` and `tool_grant_open_names` (struct literals need
+  them; `Default` fills them). Metadata persisted before reads as before: the
+  fields default to empty. `AgentBuildPolicyError` gains
+  `ToolGrantGateWithoutAdjudication`: an agent with a scoped tool grant gate
+  requires a dispatcher whose `adjudicates_tool_grants` answers true.
+- `meerkat`: `AgentBuildConfig` gains `grant_gated_tools`, and
+  `BuildAgentError` gains `GrantGate(GrantGateBuildError)`, where
+  `GrantGateBuildError` is core's `tool_grant::GrantGateRefusal`.
+  `BuildAgentError` is exhaustive, so a downstream exhaustive match needs the
+  arm. A session service surfaces the refusal as the typed
+  `AgentError::ToolGrantGateRefused`: an invalid-params error whose data is
+  `{"kind": "tool_grant_gate_refused", "tool_grant_gate_refusal": ...}`.
+- `meerkat-rpc`: `handlers::session::CreateSessionParams` gains
+  `grant_gated_tools` (`Option<meerkat_contracts::WireGrantGatedTools>`); a
+  struct literal needs it.
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
+  MeerkatMachine gains the scoped tool grant gate (see Added).
+  `MeerkatMachineState` (meerkat-machine-schema and meerkat-runtime) and the
+  kernel `generated::meerkat` `State` gain the public fields
+  `tool_grant_gated_names` and `tool_grant_open_names`. `MeerkatMachineInput`
+  (meerkat-machine-schema and meerkat-runtime), `MeerkatMachineInputVariant`
+  and the kernel `generated::meerkat` `Input` and `InputKind` gain
+  `ReplaceToolGrantGate { gated }` and `ApplyToolGrantOpenSet { open }`,
+  appended last, and `MeerkatMachineRuntimeInternalInput`
+  (meerkat-machine-schema and meerkat-runtime) gains `ReplaceToolGrantGate`
+  and `ApplyToolGrantOpenSet`. The kernel `generated::meerkat::TransitionId`
+  gains `ReplaceToolGrantGateIdle`, `ReplaceToolGrantGateAttached`,
+  `ReplaceToolGrantGateRunning`, `ReplaceToolGrantGateRetired`,
+  `ReplaceToolGrantGateStopped`, `ApplyToolGrantOpenSetChangedIdle`,
+  `ApplyToolGrantOpenSetChangedAttached`,
+  `ApplyToolGrantOpenSetChangedRunning`,
+  `ApplyToolGrantOpenSetChangedRetired`,
+  `ApplyToolGrantOpenSetChangedStopped`,
+  `ApplyToolGrantOpenSetUnchangedIdle`,
+  `ApplyToolGrantOpenSetUnchangedAttached`,
+  `ApplyToolGrantOpenSetUnchangedRunning`,
+  `ApplyToolGrantOpenSetUnchangedRetired` and
+  `ApplyToolGrantOpenSetUnchangedStopped`.
 
 ### Added
 
@@ -330,6 +370,119 @@ them.
   `GovernedHelperChildIssuance::issue_or_recover_after_owner_change` waits
   the same way on the dispatch and entered paths, and answers `Unavailable`
   only past the bounds; its prepared path does not wait.
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
+  canonical `ToolGrantLifecycleMachine` (catalog
+  `catalog::dsl::tool_grant_lifecycle`, kernel
+  `generated::tool_grant_lifecycle`, production owner
+  `meerkat_runtime::tool_grant::dsl`) owns one scoped tool grant's issuance
+  against a maximum lifetime, expiry at a supplied clock, revocation before
+  the deadline and the admission of each use. It is record-scoped and reads no
+  clock: every input carries the host's time observation. Expired and revoked
+  grants are terminal, and a revoke at or after the deadline records the
+  expiry. A bounded TLC audit
+  (`specs/machines/tool_grant_lifecycle/tool_grant_expiry_audit`) checks the
+  deadline timer, the model-request boundary, the gated dispatch, reads,
+  revocation, crash and restart, and one host clock rollback against the
+  generated model, with reachability witnesses and seeded defects.
+- `meerkat-core`, `meerkat-runtime`, `meerkat`: scoped tool grants. A build
+  marks built-in tool families and tool names grant-gated
+  (`SessionBuildOptions::grant_gated_tools`,
+  `AgentBuildConfig::grant_gated_tools`,
+  `meerkat_core::tool_grant::GrantGatedTools`): a gated name is mounted, a
+  gated family as if enabled, but hidden from the model and refused at
+  dispatch until a live grant opens it. A grant opens only names the build
+  gated; every other tool constraint still applies. The session records its
+  gate, and a resume that names none restores it. The factory refuses a gate
+  no grant could honour (`GrantGateBuildError`: an unknown family, a gated
+  family the build disables, a gated family none of whose tools the build
+  mounts, a gated name the build does not mount and no pending source could
+  provide, a gated name no tool source provides, a name the build's tool
+  policy refuses, a build without the runtime's grant service). A gate that
+  covers `web_search` disables the provider's native tools for the session,
+  so provider-native search that session or turn provider params ask for is
+  stripped from every request and the gated tool is the only search path.
+  `meerkat::tool_family_names`
+  answers the names a built-in family can provide.
+  `meerkat_runtime::tool_grant::ToolGrantService` issues, revokes, lists and
+  audits grants over a `RuntimeStore`, reachable on the runtime as
+  `MeerkatMachine::grant_tool`, `revoke_tool_grant`, `list_tool_grants` and
+  `read_tool_grant_audit`; a grant's window is at most the host policy's
+  maximum lifetime (`ToolGrantPolicy`, 24 hours by default). Every
+  model-request boundary opens the gated names a live grant admits, through
+  the session's `SessionToolGrants` on its runtime bindings and the
+  MeerkatMachine gate inputs, under the invariant
+  `tool_grant_open_names_are_gated`. `ExecutionPolicyGatedDispatcher` gains
+  `with_tool_grant_gate`, which adjudicates each gated call again as the last
+  check before the hand-off, so a call at or after the deadline is refused
+  even when the tool was shown. `AgentToolDispatcher` gains
+  `adjudicates_tool_grants` (default false; true on a gated dispatcher with a
+  grant gate), and an agent builder refuses a grant gate over a dispatcher
+  that does not adjudicate grants. A refusal is a `policy_denied` tool error
+  with the code `tool_grant_required`, `tool_grant_expired`,
+  `tool_grant_revoked` or `tool_grant_unavailable`; a gate that cannot read
+  its grants stays closed. Each runtime's deadline driver expires its served
+  sessions' grants on time without waking or registering anything, and a list
+  or audit read settles due grants of any session without loading it. A grant
+  row this binary cannot read (written by a newer binary, or damaged) admits
+  nothing and blocks none of its subject's readable grants: a list reports it
+  (`ToolGrantListing::unreadable`), and a revoke of it is refused. An audit
+  row this binary cannot read is reported in its page
+  (`ToolGrantAuditPage::unreadable`, logged) and the rest of the page is
+  served.
+  `RuntimeStore` gains `load_tool_grant`, `list_tool_grants`,
+  `put_tool_grant_if_absent`, `compare_and_put_tool_grant`,
+  `append_tool_grant_audit` and `read_tool_grant_audit`, whose defaults answer
+  `Unsupported`. The SQLite store keeps grants and their audit rows in the
+  schema domain `runtime-tool-grants`, created by the first write of a grant
+  or audit row (a refused call's audit row is one) and left alone by binaries
+  that do not know it; the in-memory store keeps them
+  for the process; the host store SPI keeps them in the record scope families
+  `tg` and `tga`. Lifecycle audit rows (`granted`, `expired`, `revoked`)
+  commit with the grant's change, and `refused` rows append. The storage
+  doctor knows the new domain. `ToolVisibilityOwner` gains
+  `replace_tool_grant_gate` and `apply_tool_grant_open_set`, whose defaults
+  accept only an empty gate.
+- `meerkat-rpc`, `meerkat-contracts`, `meerkat-runtime`, `meerkat`, Python and
+  TypeScript SDKs: scoped tool grants over JSON-RPC. `session/create` takes
+  `grant_gated_tools` (`{"families": [...], "tools": [...]}`; a field the gate
+  does not know is refused), and a gate no grant could honour fails the
+  session's build with invalid params whose data is
+  `{"kind": "tool_grant_gate_refused", "tool_grant_gate_refusal": ...}` (a
+  deferred create reports it at its first turn). `tool_grants/grant`,
+  `tool_grants/revoke`, `tool_grants/list` and `tool_grants/audit` manage a
+  session's grants without loading, registering or waking it. A grant opens a
+  tool name or a built-in family the session gates (the server fills in the
+  family's names) for exactly one of `duration_ms` and `expires_at_ms`, and
+  reads the gate from the session's staged build before or during its first
+  turn, and from its persisted metadata after. A revoke is idempotent and reports
+  `changed`; a list settles due grants as expired first, lists ended grants
+  only with `include_ended` and reports rows the server cannot read; an audit
+  read pages by `sequence` (`after_sequence`, `limit` up to 1000,
+  `next_sequence`) and names a row it cannot read in `unreadable`. List and
+  audit do not check that the session exists, so an archived session's grants
+  stay auditable. An `identity` subject is refused as capability unavailable,
+  and the stock governed stdio pipe serves neither these methods nor
+  `grant_gated_tools`. `meerkat-contracts` adds `GrantToolParams`,
+  `GrantToolResult`, `RevokeToolGrantParams`, `RevokeToolGrantResult`,
+  `ListToolGrantsParams`, `ListToolGrantsResult`, `ToolGrantAuditParams`,
+  `ToolGrantAuditResult`, `ToolGrantSubjectRequest`, `ToolGrantTargetRequest`,
+  `WireGrantGatedTools`, `WireToolGrant`, `WireToolGrantSubject`,
+  `WireToolGrantTarget`, `WireToolGrantIssuer`, `WireToolGrantStatus`,
+  `WireToolGrantAuditRow`, `WireToolGrantAuditEvent`,
+  `WireToolGrantExpiryDriver`, `WireToolGrantRefusalKind`,
+  `WireUnreadableToolGrant` and `WireUnreadableToolGrantAuditRow`. A request's
+  subject and target (`ToolGrantSubjectRequest`, `ToolGrantTargetRequest`)
+  refuse a kind or a field the server does not know, and every vocabulary a
+  result carries decodes a value a later version adds as `unknown`. A grant or
+  revoke that concurrent writers keep changing answers `SESSION_BUSY`.
+  `meerkat-runtime` adds `tool_grant::wire`, the
+  projection of grants, listings and audit rows onto them, and `meerkat`'s
+  `StagedSessionRegistry` gains `grant_gated_tools`. Python (`grant_tool`,
+  `revoke_tool_grant`, `list_tool_grants`, `tool_grant_audit`, and
+  `grant_gated_tools` on the create methods) and TypeScript (`grantTool`,
+  `revokeToolGrant`, `listToolGrants`, `toolGrantAudit` and
+  `SessionOptions.grantGatedTools`) wrap them; both refuse to send a gate to a
+  server older than contract 0.9.8, which would build the session ungated.
 
 ### Fixed
 
@@ -479,6 +632,35 @@ them.
   `PolicyChanged` with the change, and the next attempt answers
   `PolicyUnavailable` if the failure persists. Nothing waits: the answer is
   returned at once, as before.
+- `meerkat-core`: an agent whose provider-native tools are disabled
+  (`ProviderNativeToolPolicy::DisableAll`, which a governed build or a grant
+  gate covering `web_search` sets) no longer sends a provider-native tool,
+  such as native web search, that its provider params or a fallback model's
+  request defaults ask for. Before, only a turn's own request params were
+  stripped: a model fallback attempt (and its retries) carried the fallback
+  model's defaults, and a compaction summary request used the provider params
+  the client was built with. The strip now applies to every model attempt and
+  to the summary request.
+
+### Changed
+
+- `meerkat-core`: a `policy_denied` tool error's model-facing message now
+  reads `Tool call denied (<code>): <message>` from the denial itself, for an
+  application consequence policy and a scoped tool grant gate alike, instead
+  of naming the application policy over a debug rendering of the denial.
+
+### Upgrade notes
+
+- A session's grant gate is recorded in its tooling metadata, which a binary
+  older than scoped tool grants does not read: such a binary resumes a gated
+  session with its gated tools ungated. Upgrade every host that serves gated
+  sessions before relying on a gate, and do not roll a host that served gated
+  sessions back to an older binary. Grant rows and their audit log live in the
+  `runtime-tool-grants` schema domain, which an older binary leaves alone.
+- An `rkat-rpc` older than scoped tool grants ignores `session/create`
+  `grant_gated_tools` and builds the session with those tools ungated. A
+  JSON-RPC client that is not one of the SDKs (which refuse) must check the
+  server's contract version (0.9.8 or later) before sending a gate.
 
 ## [0.9.7] - 2026-10-28
 

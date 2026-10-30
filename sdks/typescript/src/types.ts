@@ -1502,6 +1502,16 @@ export interface SessionOptions {
   enableMob?: boolean;
   enableWebSearch?: boolean;
   toolFilter?: WireToolFilter;
+  /**
+   * Scoped tool grant gate: built-in tool families and tool names the session
+   * mounts hidden and refuses at dispatch until `grantTool` opens them. The
+   * client sends it only to a server whose contract (0.9.8 or later) takes
+   * it: an older server would build the session with these tools ungated.
+   */
+  grantGatedTools?: {
+    readonly families?: readonly string[];
+    readonly tools?: readonly string[];
+  };
   keepAlive?: boolean;
   commsName?: string;
   peerMeta?: Record<string, unknown>;

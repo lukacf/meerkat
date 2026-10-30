@@ -908,6 +908,63 @@ impl RuntimeStore for BodyReadCountingRuntimeStore {
             .revoke_mob_host_binding(mob_id, expected_binding_json, receipt_json)
             .await
     }
+
+    async fn load_tool_grant(&self, grant_id: &str) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+        self.inner.load_tool_grant(grant_id).await
+    }
+
+    async fn list_tool_grants(
+        &self,
+        subject_key: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
+        self.inner.list_tool_grants(subject_key).await
+    }
+
+    async fn put_tool_grant_if_absent(
+        &self,
+        grant_id: &str,
+        subject_key: &str,
+        record_json: &[u8],
+        audit_rows: &[Vec<u8>],
+    ) -> Result<bool, RuntimeStoreError> {
+        self.inner
+            .put_tool_grant_if_absent(grant_id, subject_key, record_json, audit_rows)
+            .await
+    }
+
+    async fn compare_and_put_tool_grant(
+        &self,
+        grant_id: &str,
+        subject_key: &str,
+        expected_json: &[u8],
+        next_json: &[u8],
+        audit_rows: &[Vec<u8>],
+    ) -> Result<bool, RuntimeStoreError> {
+        self.inner
+            .compare_and_put_tool_grant(grant_id, subject_key, expected_json, next_json, audit_rows)
+            .await
+    }
+
+    async fn append_tool_grant_audit(
+        &self,
+        subject_key: &str,
+        audit_rows: &[Vec<u8>],
+    ) -> Result<(), RuntimeStoreError> {
+        self.inner
+            .append_tool_grant_audit(subject_key, audit_rows)
+            .await
+    }
+
+    async fn read_tool_grant_audit(
+        &self,
+        subject_key: &str,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(u64, Vec<u8>)>, RuntimeStoreError> {
+        self.inner
+            .read_tool_grant_audit(subject_key, after, limit)
+            .await
+    }
 }
 
 #[cfg(test)]

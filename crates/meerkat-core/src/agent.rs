@@ -2932,6 +2932,16 @@ pub trait AgentToolDispatcher: Send + Sync {
         Arc::from([])
     }
 
+    /// Whether this dispatcher adjudicates scoped tool grants: it hands a
+    /// grant-gated call to its tool only when a live grant admits it, as
+    /// `ExecutionPolicyGatedDispatcher::with_tool_grant_gate` does. An agent
+    /// with a grant gate requires it, since its visibility precheck lets a
+    /// closed gated name through to this one refusal site. The default
+    /// adjudicates nothing.
+    fn adjudicates_tool_grants(&self) -> bool {
+        false
+    }
+
     /// Execute a tool call, returning the transcript result and any async operations.
     ///
     /// The `ToolDispatchOutcome` separates transcript data (`result`) from
@@ -4374,6 +4384,10 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
         self.inner.pending_catalog_sources()
     }
 
+    fn adjudicates_tool_grants(&self) -> bool {
+        self.inner.adjudicates_tool_grants()
+    }
+
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
         self.inner.poll_external_updates().await
     }
@@ -5233,6 +5247,10 @@ where
     client: Arc<C>,
     tools: Arc<T>,
     tool_scope: ToolScope,
+    /// The build's scoped tool grant gate: each model-request boundary opens
+    /// the gated names a live grant admits. The dispatch gate carries the
+    /// same binding and adjudicates every gated call again.
+    pub(crate) tool_grant_gate: Option<crate::tool_grant::ToolGrantGate>,
     store: Arc<S>,
     session: Session,
     budget: Budget,

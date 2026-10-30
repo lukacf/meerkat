@@ -1118,6 +1118,49 @@ where
             .then(|| Arc::clone(controller.client()))
     }
 
+    /// `provider_params` under the session's provider-native tool policy:
+    /// `DisableAll` strips every provider-native tool from the request's own
+    /// copy, whichever attempt sends it (a turn's first request, a retry or a
+    /// fallback model's attempt), so no native tool rides any request.
+    fn provider_params_under_native_tool_policy(
+        &self,
+        provider_params: Option<ProviderParamsOverride>,
+    ) -> Option<ProviderParamsOverride> {
+        let mut provider_params = provider_params;
+        if matches!(
+            self.config.provider_native_tools,
+            crate::ProviderNativeToolPolicy::DisableAll
+        ) && let Some(params) = provider_params.as_mut()
+        {
+            params.clear_provider_native_tools();
+        }
+        provider_params
+    }
+
+    /// The per-call provider params of a compaction summary request. Under a
+    /// `DisableAll` provider-native tool policy, it is the session's provider
+    /// tag with every provider-native tool stripped, so the client's own
+    /// build-time tag (which may name native search) does not apply.
+    /// Otherwise `None`: the client uses its own.
+    fn compaction_provider_params(&self) -> Option<ProviderParamsOverride> {
+        if !matches!(
+            self.config.provider_native_tools,
+            crate::ProviderNativeToolPolicy::DisableAll
+        ) {
+            return None;
+        }
+        let tag = match self.config.provider_params.effective_params() {
+            Ok(params) => params.provider_tag,
+            Err(_) => self.config.provider_params.params.provider_tag.clone(),
+        }?;
+        let mut params = ProviderParamsOverride {
+            provider_tag: Some(tag),
+            ..ProviderParamsOverride::default()
+        };
+        params.clear_provider_native_tools();
+        Some(params)
+    }
+
     fn prepare_authorized_model_attempt(
         &self,
         messages: Arc<Vec<Message>>,
@@ -1127,6 +1170,7 @@ where
         provider_params: Option<ProviderParamsOverride>,
         authorization: Option<crate::LlmRequestAuthorization>,
     ) -> Result<Arc<dyn crate::AgentLlmRequestAttempt>, AgentError> {
+        let provider_params = self.provider_params_under_native_tool_policy(provider_params);
         if authorization.as_ref().is_some_and(|authorization| {
             authorization.usage()
                 == crate::authorization::ModelAuthorizationUse::ControllerInference
@@ -4666,6 +4710,7 @@ where
                                     request_pressure: provider_request_pressure,
                                     parent_revision,
                                     summarization_budget,
+                                    provider_params: self.compaction_provider_params(),
                                     wait_report: self.refusal_wait_report(
                                         self.tool_dispatch_context.run_id().cloned(),
                                         crate::authorization::OperationRefusalSurface::Compaction,
@@ -7443,6 +7488,67 @@ where
         ctx.tool_call_count += 1;
         Ok(Some(async_ops))
     }
+    /// Boundary step: the grant gate opens the gated names a live grant
+    /// admits now. A gate that cannot read its grants, or whose open set the
+    /// visibility owner refuses, closes every gated name and warns; the run
+    /// goes on with the gated names hidden until the next boundary.
+    async fn apply_tool_grant_open_set_at_boundary(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+        gate: &crate::tool_grant::ToolGrantGate,
+    ) {
+        let failure = match gate.open_names().await {
+            Ok(open) => self
+                .tool_scope
+                .apply_tool_grant_open_set(open.into_inner().into_iter().collect())
+                .err()
+                .map(|error| {
+                    tracing::warn!(
+                        error = %error,
+                        "the visibility owner refused the tool grant open set"
+                    );
+                    "the tool grant open set was refused"
+                }),
+            Err(refusal) => {
+                tracing::warn!(
+                    error = %refusal,
+                    "tool grants could not be read at the model-request boundary"
+                );
+                Some(refusal.code())
+            }
+        };
+        let Some(failure) = failure else {
+            return;
+        };
+        // The empty set is within every gate.
+        if let Err(error) = self.tool_scope.apply_tool_grant_open_set(BTreeSet::new()) {
+            tracing::warn!(error = %error, "failed to close the tool grant gate");
+        }
+        let status_info = ToolConfigChangeStatus::warning_failed_closed(format!(
+            "tool grants unavailable ({failure}); tools available by grant stay closed"
+        ));
+        let payload = ToolConfigChangedPayload::new(
+            ToolConfigChangeOperation::Reload,
+            "tool_grants",
+            status_info,
+        )
+        .with_applied_at_turn(Some(ctx.turn_count))
+        .with_domain(Some(ToolConfigChangeDomain::ToolScope));
+        emit_phase_event!(
+            self,
+            ctx,
+            AgentEvent::ToolConfigChanged {
+                payload: payload.clone(),
+            }
+        );
+        self.session.push(synthetic_notice_block_message(
+            SystemNoticeKind::ToolScopeWarning,
+            "Tool grants could not be checked; tools available by grant stay closed until the next boundary."
+                .to_string(),
+            crate::types::SystemNoticeBlock::ToolConfig { payload },
+        ));
+    }
+
     /// Boundary step 4: apply tool scope staged updates atomically at
     /// the CallingLlm boundary and project the visible tool set.
     async fn apply_calling_llm_tool_scope(
@@ -7480,6 +7586,12 @@ where
                 catalog_mode,
             );
             let previous_visibility_state = self.tool_scope.visibility_state().ok();
+            // The grant gate opens the gated names a live grant admits before
+            // the staged visibility promotes, so the projected set and its
+            // change event include them.
+            if let Some(gate) = self.tool_grant_gate.clone() {
+                self.apply_tool_grant_open_set_at_boundary(ctx, &gate).await;
+            }
             let apply_result = match self.tool_scope.promote_staged_visibility() {
                 Ok(visibility_state) => {
                     if let Some(previous_visibility_state) = previous_visibility_state.as_ref() {
@@ -7543,17 +7655,34 @@ where
                         .iter()
                         .cloned()
                         .collect::<BTreeSet<_>>();
-                    let hidden_deferred_names = if matches!(catalog_mode, ToolCatalogMode::Deferred)
-                    {
-                        current_catalog
-                            .as_ref()
-                            .map(|catalog| {
-                                hidden_deferred_catalog_names(catalog.as_ref(), &visible_names_set)
-                            })
-                            .unwrap_or_default()
-                    } else {
-                        BTreeSet::new()
-                    };
+                    let hidden_deferred_names: BTreeSet<crate::types::ToolName> =
+                        if matches!(catalog_mode, ToolCatalogMode::Deferred) {
+                            // A gated name its closed grant gate hides cannot
+                            // be loaded from the deferred catalog, so the
+                            // notice never offers it; it appears once a live
+                            // grant opens it.
+                            let closed_grant_gated_names = self
+                                .tool_scope
+                                .visibility_state()
+                                .map(|visibility_state| {
+                                    visibility_state.closed_tool_grant_gated_names()
+                                })
+                                .unwrap_or_default();
+                            current_catalog
+                                .as_ref()
+                                .map(|catalog| {
+                                    hidden_deferred_catalog_names(
+                                        catalog.as_ref(),
+                                        &visible_names_set,
+                                    )
+                                })
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter(|name| !closed_grant_gated_names.contains(name))
+                                .collect()
+                        } else {
+                            BTreeSet::new()
+                        };
                     let pending_catalog_sources =
                         if matches!(catalog_mode, ToolCatalogMode::Deferred) {
                             current_pending_catalog_sources
@@ -9489,11 +9618,19 @@ where
                 continue;
             }
 
-            if let Err(error) = precheck_visible_tool_call(
-                tools_ref.as_ref(),
-                &visible_tool_names,
-                tc.name.as_str(),
-            ) {
+            // A gated name hidden only by its closed grant gate goes on to the
+            // dispatch gate, which adjudicates the grants and refuses it there:
+            // one refusal site, one error shape and one audit row.
+            let precheck = if self.call_reaches_tool_grant_gate(tc.name.as_str()) {
+                Ok(())
+            } else {
+                precheck_visible_tool_call(
+                    tools_ref.as_ref(),
+                    &visible_tool_names,
+                    tc.name.as_str(),
+                )
+            };
+            if let Err(error) = precheck {
                 if matches!(
                     error,
                     ToolError::AccessDenied { .. } | ToolError::NotFound { .. }
@@ -13854,6 +13991,111 @@ mod tests {
         );
         assert!(memory_store.staged.lock().unwrap().is_empty());
         assert_eq!(memory_store.aborted.lock().unwrap().len(), 1);
+    }
+
+    /// Records the provider tag each request resolves to, as a provider
+    /// adapter does: the per-call params' tag, else the tag the client was
+    /// built with. Answers the compaction summary request with a summary.
+    #[cfg(feature = "workspace-tests")]
+    struct CompactionTagRecordingClient {
+        built_with: Option<crate::lifecycle::run_primitive::ProviderTag>,
+        seen: Mutex<Vec<(bool, Option<crate::lifecycle::run_primitive::ProviderTag>)>>,
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for CompactionTagRecordingClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let compaction = messages
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::User(user) => Some(user.text_content()),
+                    _ => None,
+                })
+                .is_some_and(|text| text == "COMPACT NOW");
+            let resolved = provider_params
+                .and_then(|params| params.provider_tag.clone())
+                .or_else(|| self.built_with.clone());
+            self.seen.lock().unwrap().push((compaction, resolved));
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: if compaction { "durable summary" } else { "ok" }.to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                normalized_test_usage(self, Usage::default()),
+            ))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::OpenAI
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    /// A compaction summary request under a `DisableAll` provider-native
+    /// tool policy carries no native tool, though the session's provider
+    /// params, and the tag its client was built with, ask for native search:
+    /// the request gets a stripped per-call copy of the session's tag.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_compaction_request_under_disable_all_carries_no_native_search() {
+        use crate::lifecycle::run_primitive::{
+            OpaqueProviderBody, OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+        };
+
+        let native_search = ProviderTag::OpenAi(OpenAiProviderTag {
+            web_search: Some(OpaqueProviderBody::from_value(
+                &serde_json::json!({"type": "web_search"}),
+            )),
+            ..Default::default()
+        });
+        let client = Arc::new(CompactionTagRecordingClient {
+            built_with: Some(native_search.clone()),
+            seen: Mutex::new(Vec::new()),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .budget(BudgetLimits::unlimited().with_max_tokens(2_000))
+            .compactor(Arc::new(DiscardingCompactor::new(1)))
+            .provider_native_tool_policy(crate::ProviderNativeToolPolicy::DisableAll)
+            .provider_params(ProviderParamsOverride {
+                provider_tag: Some(native_search),
+                ..Default::default()
+            })
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        agent.run("second".into()).await.unwrap();
+
+        let seen = client.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.iter().filter(|(compaction, _)| *compaction).count(),
+            1,
+            "one compaction summary request: {seen:?}"
+        );
+        for (compaction, tag) in &seen {
+            let web_search = match tag {
+                Some(ProviderTag::OpenAi(tag)) => tag.web_search.as_ref(),
+                _ => None,
+            };
+            assert!(
+                web_search.is_none(),
+                "no request carries native search (compaction request: {compaction}): {seen:?}"
+            );
+        }
     }
 
     #[cfg(feature = "workspace-tests")]
@@ -20017,6 +20259,115 @@ mod tests {
         }
     }
 
+    /// A build whose grant gate covers `web_search` disables provider-native
+    /// tools (the factory's rule). A turn's provider params reach the agent as
+    /// the request policy of its LLM reconfigure; when they ask for native
+    /// search again, the narrow-only policy keeps it disabled. Native search
+    /// never rides a request, from the session's params or a turn's, so the
+    /// gated `web_search` tool stays the only search path.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_turns_native_search_params_are_stripped_under_a_grant_gated_web_search() {
+        use crate::lifecycle::run_primitive::{
+            OpaqueProviderBody, OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+        };
+
+        /// A session with no live grant.
+        struct NoLiveGrant;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
+            async fn open_names(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn admit_call(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+                _call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+        }
+
+        let native_search = || ProviderParamsOverride {
+            provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                web_search: Some(OpaqueProviderBody::from_value(
+                    &serde_json::json!({"type": "web_search"}),
+                )),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let gate = crate::tool_grant::ToolGrantGate::new(
+            Arc::new(NoLiveGrant) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            crate::tool_grant::GatedToolTable::new(
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::from([crate::types::ToolName::from("web_search")]),
+            ),
+        );
+        let dispatcher = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(NoTools),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        let client = Arc::new(RecordingLlmClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate)
+            .provider_native_tool_policy(crate::ProviderNativeToolPolicy::DisableAll)
+            .provider_params(native_search())
+            .build_standalone(client.clone(), dispatcher, Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(1);
+
+        agent
+            .run(
+                "the session's params ask for native search"
+                    .to_string()
+                    .into(),
+            )
+            .await
+            .expect("the request reaches the LLM");
+
+        agent
+            .replace_client_with_request_policy(
+                client.clone(),
+                crate::SessionLlmRequestPolicy {
+                    model: "turn-model".to_string(),
+                    credential_identity: None,
+                    provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    provider_params: Some(native_search()),
+                    provider_tool_defaults: None,
+                },
+            )
+            .expect("the turn's request policy is admitted");
+        agent
+            .run("a turn's params ask for it again".to_string().into())
+            .await
+            .expect("the request reaches the LLM");
+
+        let seen_params = client.seen_params();
+        assert_eq!(seen_params.len(), 2);
+        for params in seen_params {
+            let Some(ProviderTag::OpenAi(openai)) = params.and_then(|params| params.provider_tag)
+            else {
+                panic!("expected typed OpenAI provider parameters");
+            };
+            assert!(
+                openai.web_search.is_none(),
+                "native search never rides a request under a gated web_search"
+            );
+        }
+    }
+
     fn explicit_hot_swap_identity(model: &str) -> crate::SessionLlmIdentity {
         crate::SessionLlmIdentity {
             model: model.to_string(),
@@ -21850,6 +22201,322 @@ mod tests {
             )
             .await;
         }
+    }
+
+    /// An agent's grant gate lets a closed gated name through its visibility
+    /// precheck to the dispatcher, the gated name's one refusal site. A
+    /// dispatcher that does not adjudicate tool grants would run the call's
+    /// tool instead, so the build refuses the pair; the same gate over a
+    /// grant-adjudicating dispatcher builds.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_grant_gate_over_a_dispatcher_that_does_not_adjudicate_grants_is_refused() {
+        /// A session with no live grant.
+        struct NoLiveGrant;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
+            async fn open_names(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn admit_call(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+                _call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+        }
+
+        let gate = crate::tool_grant::ToolGrantGate::new(
+            Arc::new(NoLiveGrant) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            crate::tool_grant::GatedToolTable::new(
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::from([crate::types::ToolName::from("deploy")]),
+            ),
+        );
+
+        let refused = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate.clone())
+            .try_build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(crate::agent::builder::AgentBuildPolicyError::ToolGrantGateWithoutAdjudication)
+            ),
+            "a gate over a dispatcher that does not adjudicate grants is refused"
+        );
+
+        let adjudicating = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(NoTools),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        assert!(
+            with_test_turn_state_handle(AgentBuilder::new())
+                .with_tool_visibility_owner(explicit_test_visibility_owner())
+                .with_tool_grant_gate(gate)
+                .try_build_standalone(Arc::new(StaticLlmClient), adjudicating, Arc::new(NoopStore))
+                .await
+                .is_ok(),
+            "the same gate over a grant-adjudicating dispatcher builds"
+        );
+    }
+
+    /// A model call naming a gated tool that its closed gate hides passes the
+    /// visibility precheck to the dispatch gate, the gated name's one refusal
+    /// site. The grants are adjudicated exactly once, and that adjudication
+    /// is where the runtime's grant service appends the refusal's audit row.
+    /// The call is refused as `policy_denied` with `tool_grant_required`, its
+    /// body never runs, and its ungated sibling still executes.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_call_to_a_closed_gated_name_is_refused_once_by_the_gate_and_audited() {
+        /// A session with no live grant. It records every boundary read and
+        /// every call it adjudicates.
+        struct NoLiveGrant {
+            boundaries: Mutex<u32>,
+            adjudicated: Mutex<Vec<(String, String)>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
+            async fn open_names(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                *self.boundaries.lock().unwrap() += 1;
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn admit_call(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+                call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                self.adjudicated
+                    .lock()
+                    .unwrap()
+                    .push((call.call_id.to_string(), call.name.to_string()));
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+        }
+
+        struct RecordingDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+            dispatched: Mutex<Vec<(String, String)>>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for RecordingDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                self.dispatched
+                    .lock()
+                    .unwrap()
+                    .push((call.id.to_string(), call.name.to_string()));
+                Ok(crate::ops::ToolDispatchOutcome::from(ToolResult::new(
+                    call.id.to_string(),
+                    "ok".to_string(),
+                    false,
+                )))
+            }
+        }
+
+        /// Calls the hidden gated tool and an ungated sibling, then ends.
+        struct GatedCallClient {
+            call_count: Mutex<u32>,
+            observed_messages: Mutex<Vec<Vec<Message>>>,
+            observed_tools: Mutex<Vec<Vec<String>>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for GatedCallClient {
+            async fn stream_response(
+                &self,
+                messages: &[Message],
+                tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                self.observed_messages
+                    .lock()
+                    .unwrap()
+                    .push(messages.to_vec());
+                self.observed_tools
+                    .lock()
+                    .unwrap()
+                    .push(tools.iter().map(|tool| tool.name.to_string()).collect());
+                let mut calls = self.call_count.lock().unwrap();
+                let response = if *calls == 0 {
+                    super::LlmStreamResult::new(
+                        ["call-deploy", "call-open"]
+                            .into_iter()
+                            .zip(["deploy", "open_tool"])
+                            .map(|(id, name)| AssistantBlock::ToolUse {
+                                id: id.to_string(),
+                                name: name.into(),
+                                args: serde_json::value::RawValue::from_string("{}".to_string())
+                                    .expect("static raw value should parse"),
+                                meta: None,
+                            })
+                            .collect(),
+                        StopReason::ToolUse,
+                        normalized_test_usage(self, Usage::default()),
+                    )
+                } else {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::Text {
+                            text: "done".to_string(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                        normalized_test_usage(self, Usage::default()),
+                    )
+                };
+                *calls += 1;
+                Ok(response)
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        let inner = Arc::new(RecordingDispatcher {
+            tools: ["deploy", "open_tool"]
+                .into_iter()
+                .map(|name| {
+                    Arc::new(ToolDef::new(
+                        name,
+                        format!("{name} fixture"),
+                        serde_json::json!({ "type": "object" }),
+                    ))
+                })
+                .collect(),
+            dispatched: Mutex::new(Vec::new()),
+        });
+        let grants = Arc::new(NoLiveGrant {
+            boundaries: Mutex::new(0),
+            adjudicated: Mutex::new(Vec::new()),
+        });
+        let gate = crate::tool_grant::ToolGrantGate::new(
+            Arc::clone(&grants) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            crate::tool_grant::GatedToolTable::new(
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::from([crate::types::ToolName::from("deploy")]),
+            ),
+        );
+        let dispatcher = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::clone(&inner),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        let client = Arc::new(GatedCallClient {
+            call_count: Mutex::new(0),
+            observed_messages: Mutex::new(Vec::new()),
+            observed_tools: Mutex::new(Vec::new()),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate)
+            .build_standalone(client.clone(), dispatcher, Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel(256);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            agent.run_with_events("deploy it".to_string().into(), tx),
+        )
+        .await
+        .expect("run must complete promptly after the refusal")
+        .expect("a refused gated call is operation-local feedback");
+        while rx.try_recv().is_ok() {}
+
+        assert_eq!(result.turns, 2);
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            *grants.adjudicated.lock().unwrap(),
+            [("call-deploy".to_string(), "deploy".to_string())],
+            "the dispatch gate adjudicates the gated call exactly once"
+        );
+        assert_eq!(
+            *inner.dispatched.lock().unwrap(),
+            [("call-open".to_string(), "open_tool".to_string())],
+            "only the ungated sibling enters a tool body"
+        );
+        assert!(
+            *grants.boundaries.lock().unwrap() >= 2,
+            "every model-request boundary reads the grants"
+        );
+        for tools in client.observed_tools.lock().unwrap().iter() {
+            assert!(
+                tools.iter().all(|name| name != "deploy"),
+                "the closed gated name is hidden from every model request"
+            );
+            assert!(tools.iter().any(|name| name == "open_tool"));
+        }
+
+        let observations = client.observed_messages.lock().unwrap();
+        let follow_up_results = observations[1]
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResults { results, .. } => Some(results),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            follow_up_results
+                .iter()
+                .map(|result| result.tool_use_id.as_str())
+                .collect::<Vec<_>>(),
+            ["call-deploy", "call-open"],
+            "the next model request receives both results in call order"
+        );
+        let refused = follow_up_results[0];
+        let expected = crate::ops::terminal_tool_outcome_for_error(
+            "call-deploy",
+            crate::tool_grant::ToolGrantRefusal::Required.into_tool_error("deploy"),
+        );
+        assert!(refused.is_error);
+        assert_eq!(refused.content, expected.result.content);
+        let payload: serde_json::Value =
+            serde_json::from_str(&crate::types::text_content(&refused.content))
+                .expect("a grant refusal uses the canonical feedback envelope");
+        assert_eq!(payload["error"], "policy_denied");
+        assert_eq!(payload["data"]["code"], "tool_grant_required");
+        assert!(!follow_up_results[1].is_error);
     }
 
     /// A model call naming a tool absent from every catalog is typed
@@ -25832,6 +26499,101 @@ mod tests {
         assert!(
             payload.settled(),
             "an applied catalog delta is a settled fact"
+        );
+    }
+
+    /// The deferred catalog notice never offers a gated name its closed grant
+    /// gate hides: such a name cannot be loaded until a live grant opens it,
+    /// so the boundary lists only the loadable deferred tools.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn deferred_catalog_notice_never_offers_a_closed_gated_name() {
+        /// A session with no live grant.
+        struct NoLiveGrant;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
+            async fn open_names(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn admit_call(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+                _call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+        }
+
+        let gate = crate::tool_grant::ToolGrantGate::new(
+            Arc::new(NoLiveGrant) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            crate::tool_grant::GatedToolTable::new(
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::from([crate::types::ToolName::from(
+                    "deferred_tool_two",
+                )]),
+            ),
+        );
+        let tools = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(DeferredLoadDispatcher::new()),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        let client = Arc::new(DeferredLoadVisibilityClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate)
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(2);
+
+        let result = agent.run("prompt".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            client.seen_tools(),
+            vec![
+                vec!["tool_catalog_load".to_string()],
+                vec!["deferred_tool".to_string(), "tool_catalog_load".to_string()],
+            ]
+        );
+
+        let deferred_notices = agent
+            .session()
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::SystemNotice(notice)
+                    if notice.kind == SystemNoticeKind::ToolScope
+                        && notice.body.as_deref().is_some_and(|body| {
+                            body.starts_with("Deferred catalog changed at turn boundary:")
+                        }) =>
+                {
+                    notice.body.clone()
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            deferred_notices.first().map(String::as_str),
+            Some(
+                "Deferred catalog changed at turn boundary: new deferred tools available: \
+                 deferred_tool"
+            ),
+            "{deferred_notices:?}"
+        );
+        assert!(
+            deferred_notices
+                .iter()
+                .all(|body| !body.contains("deferred_tool_two")),
+            "the closed gated name is never offered: {deferred_notices:?}"
         );
     }
 
@@ -32601,6 +33363,9 @@ mod tests {
         call_count: std::sync::atomic::AtomicUsize,
         mismatched_fallback_tag: bool,
         reject_target_compile: bool,
+        /// Fail the first call (retryable) and answer the second: a plain
+        /// turn whose first request falls back to the target model.
+        fail_first_call: bool,
         target_profile: crate::ModelProfileWitness,
         seen_max_tokens: Mutex<Vec<u32>>,
         seen_provider_params:
@@ -32642,6 +33407,7 @@ mod tests {
                 call_count: std::sync::atomic::AtomicUsize::new(0),
                 mismatched_fallback_tag: false,
                 reject_target_compile: false,
+                fail_first_call: false,
                 target_profile,
                 seen_max_tokens: Mutex::new(Vec::new()),
                 seen_provider_params: Mutex::new(Vec::new()),
@@ -32726,6 +33492,28 @@ mod tests {
                 .call_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 + 1;
+
+            if self.fail_first_call {
+                return match call {
+                    1 => Err(AgentError::llm(
+                        "openai",
+                        crate::error::LlmFailureReason::ProviderError(
+                            crate::error::LlmProviderError::retryable(
+                                crate::error::LlmProviderErrorKind::ServerOverloaded,
+                                serde_json::json!({"message": "primary retryable failure"}),
+                            ),
+                        ),
+                        "primary retryable failure",
+                    )),
+                    2 => Ok(normalized_test_result(
+                        self,
+                        text_response("fallback answer"),
+                    )),
+                    _ => Err(AgentError::InternalError(
+                        "ExtractionFallbackOverrideClient: unexpected extra call".to_string(),
+                    )),
+                };
+            }
 
             match call {
                 1 => Ok(normalized_test_result(self, text_response("main answer"))),
@@ -33192,6 +33980,75 @@ mod tests {
                 );
             }
             other => panic!("expected Anthropic fallback extraction params, got {other:?}"),
+        }
+    }
+
+    /// A model fallback attempt under a `DisableAll` provider-native tool
+    /// policy carries no native tool, though the fallback target's request
+    /// policy asks for native search: every attempt is prepared through the
+    /// strip, the fallback's and the retries' included.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_fallback_attempt_under_disable_all_carries_no_native_search() {
+        use crate::lifecycle::run_primitive::ProviderTag;
+        use crate::retry::RetryPolicy;
+
+        let registry = Arc::new(extraction_fallback_registry());
+        let target_profile = registry
+            .profile_witness_for_provider(crate::Provider::Anthropic, "claude-backup")
+            .expect("same-registry fallback profile");
+        let client = Arc::new(ExtractionFallbackOverrideClient {
+            fail_first_call: true,
+            ..ExtractionFallbackOverrideClient::with_target_profile(target_profile)
+        });
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new().max_tokens_per_turn(1024),
+            explicit_hot_swap_session("gpt-primary"),
+        )
+        .provider_native_tool_policy(crate::ProviderNativeToolPolicy::DisableAll)
+        .with_effective_model_registry(Arc::clone(&registry))
+        .with_tool_visibility_owner(generated_visibility_owner)
+        .with_model_routing_handle(model_routing)
+        .retry_policy(RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            multiplier: 1.0,
+            call_timeout: None,
+            stream_inactivity_timeout: None,
+        })
+        .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+
+        let result = agent
+            .run("answer after a fallback".to_string().into())
+            .await
+            .expect("the fallback attempt answers");
+        assert_eq!(result.text, "fallback answer");
+
+        let seen_params = client.seen_provider_params();
+        assert_eq!(
+            seen_params.len(),
+            2,
+            "expected the failed primary call and the fallback attempt"
+        );
+        match seen_params[1]
+            .as_ref()
+            .and_then(|params| params.provider_tag.as_ref())
+        {
+            Some(ProviderTag::Anthropic(tag)) => assert_eq!(
+                tag.web_search, None,
+                "the fallback attempt must not carry the target policy's native search"
+            ),
+            None => {}
+            other => panic!("expected Anthropic fallback params, got {other:?}"),
         }
     }
 

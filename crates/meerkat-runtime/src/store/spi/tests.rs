@@ -656,6 +656,48 @@ async fn mob_host_bindings_follow_the_sqlite_store() {
 
 // Unrun until the candidate's validation.
 #[tokio::test]
+async fn tool_grant_rows_follow_the_sqlite_store_and_survive_a_reopen() {
+    let host = Arc::new(TestHost::new());
+    let opened = open(&host).await;
+    crate::store::tool_grant_store_tests::tool_grant_rows_conform(&opened.1).await;
+    let reopened = reopen(&host, opened).await;
+    let store = &reopened.1;
+    assert_eq!(
+        store.load_tool_grant("g1").await.unwrap(),
+        Some(b"next".to_vec())
+    );
+    assert_eq!(
+        store.list_tool_grants("s:a").await.unwrap(),
+        vec![
+            ("g1".to_string(), b"next".to_vec()),
+            ("g2".to_string(), b"two".to_vec()),
+        ]
+    );
+    // The audit log loads on its first use after the reopen, and an append
+    // continues after its rows.
+    store
+        .append_tool_grant_audit("s:a", &[b"after-reopen".to_vec()])
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .read_tool_grant_audit("s:a", Some(4), 10)
+            .await
+            .unwrap(),
+        vec![(5, b"after-reopen".to_vec())]
+    );
+    assert_eq!(
+        store
+            .read_tool_grant_audit("s:a", None, 10)
+            .await
+            .unwrap()
+            .len(),
+        6
+    );
+}
+
+// Unrun until the candidate's validation.
+#[tokio::test]
 async fn controller_custody_refuses_while_a_commit_is_in_flight() {
     let host = Arc::new(TestHost::new());
     let (_realm, store) = open(&host).await;

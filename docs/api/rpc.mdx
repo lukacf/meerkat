@@ -155,6 +155,10 @@ of this full catalog.
 | `approval/list` | Approval | `ApprovalListParams` | `ApprovalListResult` | List approval audit records |
 | `approval/get` | Approval | `ApprovalGetParams` | `ApprovalRecord` | Get one approval audit record |
 | `approval/decide` | Approval | `ApprovalDecideParams` | `ApprovalRecord` | Record an approval audit decision |
+| `tool_grants/grant` | Tool grants | `GrantToolParams` | `GrantToolResult` | Grant a session's grant-gated tool name or built-in tool family for a bounded window |
+| `tool_grants/revoke` | Tool grants | `RevokeToolGrantParams` | `RevokeToolGrantResult` | Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it |
+| `tool_grants/list` | Tool grants | `ListToolGrantsParams` | `ListToolGrantsResult` | List a session's scoped tool grants, each due grant settled as expired first |
+| `tool_grants/audit` | Tool grants | `ToolGrantAuditParams` | `ToolGrantAuditResult` | Read a page of the audit log of a session's scoped tool grants |
 | `events/latest_cursor` | Events | `EventsLatestCursorParams` | `EventsLatestCursorResult` | Read the latest replay cursor for a typed event scope |
 | `events/list_since` | Events | `EventsListSinceParams` | `EventsListSinceResult` | List replayable events after a typed cursor |
 | `events/snapshot` | Events | `EventsSnapshotParams` | `EventsSnapshotResult` | Read a point-in-time snapshot with its replay cursor |
@@ -812,6 +816,17 @@ During execution, `session/event` notifications are emitted (see
 
 <ParamField body="provider_params" type="object | null" default="null">
   Provider-specific parameters (e.g., thinking config, reasoning effort).
+</ParamField>
+
+<ParamField body="grant_gated_tools" type="object | null" default="null">
+  Scoped tool grant gate, `{"families": [...], "tools": [...]}`: built-in tool
+  families and tool names the session mounts hidden and refuses at dispatch
+  until a live grant opens them (see [Scoped tool grants](#scoped-tool-grants)).
+  The session records its gate. A field the gate does not know is an invalid
+  parameter, and a gate no grant could honour (an unknown or disabled family,
+  a name nothing mounts) fails the session's build with invalid params whose
+  `data` is `{"kind": "tool_grant_gate_refused", "tool_grant_gate_refusal":
+  {...}}`; a deferred create reports it at its first `turn/start`.
 </ParamField>
 
 #### Response fields
@@ -2022,6 +2037,104 @@ a decision on an approval the pipe never presented is refused.
   }
 }
 ```
+
+## Scoped tool grants
+
+A session created with `grant_gated_tools` mounts its gated tool families and
+names hidden: the model is not shown them and every call is refused until a
+live grant opens them (see [scoped tool grants](/concepts/tools#scoped-tool-grants)).
+`tool_grants/grant`, `tool_grants/revoke`, `tool_grants/list` and
+`tool_grants/audit` manage a session's grants. They read and write grant rows
+only: no method loads, registers or wakes the session.
+
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 40,
+  "method": "tool_grants/grant",
+  "params": {
+    "subject": {"kind": "session", "session_id": "01936f8a-7b2c-7000-8000-000000000001"},
+    "target": {"kind": "family", "family": "shell"},
+    "duration_ms": 3600000,
+    "reason": "incident response"
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 40,
+  "result": {
+    "grant": {
+      "grant_id": "0b6f9f5e-8f3d-4a51-9a52-3c1f6d1e2a10",
+      "subject": {"kind": "session", "session_id": "01936f8a-7b2c-7000-8000-000000000001"},
+      "target": {"kind": "family", "family": "shell", "names": ["monitor_start", "shell", "shell_job_cancel", "shell_job_status", "shell_jobs"]},
+      "issuer": {"kind": "operator"},
+      "reason": "incident response",
+      "status": "active",
+      "issued_at_ms": 1761735600000,
+      "expires_at_ms": 1761739200000
+    }
+  }
+}
+```
+
+- **`tool_grants/grant`** opens a `target` for the `subject` session: a tool
+  name (`{"kind": "tool", "name": ...}`) the session gates by name or through a
+  gated family, or a family the session gates (`{"kind": "family", "family":
+  ...}`; the server fills in `names` with the names the family can provide, so
+  omit them). Exactly one of `duration_ms` and `expires_at_ms` (UNIX ms)
+  bounds the grant, at most the host's maximum lifetime (24 hours by default).
+  A session before or during its first turn is granted from its staged build.
+  A gate no grant could honour fails the session's build, which a deferred
+  create reports at its first `turn/start`.
+- **`tool_grants/revoke`** ends a grant before its deadline. It is idempotent:
+  revoking a grant that already ended answers it as it stands, and `changed`
+  says whether this revoke ended it. A revoke at or after the deadline records
+  the expiry instead.
+- **`tool_grants/list`** answers the session's grants, each due one settled as
+  `expired` first. Ended grants (`expired`, `revoked`) are listed only with
+  `include_ended`; `unreadable` names any stored grant this server cannot read
+  (written by a newer version, or damaged), which opens nothing.
+- **`tool_grants/audit`** answers a page of the session's audit log, `granted`,
+  `expired` (with the `driver` that observed it: `timer`, `boundary`,
+  `dispatch`, `read` or `revoke`), `revoked` and `refused` rows, in `sequence`
+  order after `after_sequence`. `limit` defaults to 100 rows and caps at 1000;
+  a full page carries `next_sequence`, the next page's `after_sequence`. A row
+  this server cannot read is named in `unreadable` with its `sequence`, and the
+  rest of the page is served.
+
+List and audit read the session's grant rows without checking that the
+session exists: an archived session's grants stay listable and auditable, and
+a session id with no grants, or one no session has, answers empty.
+
+A grant's `status` is `active`, `expired` or `revoked`; `requested` and
+`declined` are reserved for grant requests. A request's `subject` and `target`
+refuse a kind or a field this server does not know (invalid params), so a
+request is never read as wider than it asked. Every vocabulary a result
+carries (subject and target kind, status, issuer, audit event kind, expiry
+driver, refusal reason) decodes a value a later version adds as `unknown`,
+which this server never sends.
+
+Errors use the standard codes: invalid params for a window that is past,
+empty, longer than the maximum or given twice or not at all, a target the
+session does not gate, family `names` in a request, and an unknown or
+malformed grant id; `SESSION_NOT_FOUND` for a grant to a session that does not
+exist or is archived; `SESSION_BUSY` when concurrent writers changed the grant
+under a grant or revoke twice, which a retry resolves; capability unavailable
+for an `identity` subject (this server grants to sessions only) or a store
+without grant support.
+
+The stock governed stdio pipe serves a fixed method set: it does not serve the
+`tool_grants/*` methods, and its `session/create` refuses `grant_gated_tools`
+as an unsupported parameter.
+
+<Warning>
+`rkat-rpc` does not authenticate the caller of these methods: a grant's issuer
+is recorded as an operator without a caller. Authorize grant administration in
+the trusted host or an authenticated proxy before forwarding the call.
+</Warning>
 
 ## Schedules, WorkGraph, and multi-host mobs
 

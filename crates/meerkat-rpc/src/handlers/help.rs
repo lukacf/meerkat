@@ -84,6 +84,7 @@ fn help_create_session_params(
         enable_mob: Some(false),
         enable_web_search: Some(false),
         tool_filter: None,
+        grant_gated_tools: None,
         enable_workgraph: Some(false),
         budget_limits: None,
         provider_params: None,

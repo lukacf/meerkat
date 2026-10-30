@@ -4229,9 +4229,30 @@ pub struct SessionToolVisibilityState {
     pub requested_witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub filter_witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
+    /// The names this build marked grant-gated: hidden until a live scoped
+    /// tool grant opens them. Recomputed on every build, like
+    /// `policy_base_filter`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tool_grant_gated_names: BTreeSet<ToolName>,
+    /// The gated names a live grant opened at the last model-request
+    /// boundary. Persisted with the rest of the projection, so the durable
+    /// projection stays the generated owner's exact one, but never restored:
+    /// every build clears it, so a restored session starts closed until its
+    /// first boundary adjudicates its grants.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tool_grant_open_names: BTreeSet<ToolName>,
 }
 
 impl SessionToolVisibilityState {
+    /// The gated names no live grant opened: hidden from the model.
+    #[must_use]
+    pub fn closed_tool_grant_gated_names(&self) -> BTreeSet<ToolName> {
+        self.tool_grant_gated_names
+            .difference(&self.tool_grant_open_names)
+            .cloned()
+            .collect()
+    }
+
     /// Deterministic projection of the generated CallingLlm visibility
     /// boundary. This is a comparison witness only: semantic promotion still
     /// belongs to the generated visibility owner.
@@ -10188,6 +10209,14 @@ pub struct SessionTooling {
     /// Active skills at session creation time (for deterministic resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_skills: Option<Vec<crate::skills::SkillKey>>,
+    /// The tool families and names this session's builds mark grant-gated:
+    /// a gated name stays hidden and refused until a live scoped tool grant
+    /// opens it. A resume restores it.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::tool_grant::GrantGatedTools::is_empty"
+    )]
+    pub grant_gated: crate::tool_grant::GrantGatedTools,
 }
 
 impl From<&Session> for SessionMeta {

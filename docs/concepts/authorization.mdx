@@ -74,6 +74,11 @@ one of a set of owners. A parent grant can then fix the application while each
 child grant names the exact session resource it needs; a child that names a
 resource of another owner permits nothing.
 
+A [scoped tool grant](/concepts/tools#scoped-tool-grants) is a different
+thing: it opens, for a bounded time, tool names a session's build marked
+grant-gated, and confers no authority of its own. A call it opens still needs
+every permission this page describes.
+
 ## Check the operation that will actually run
 
 The adapter retains an immutable binding with the actual request or execution

@@ -4258,6 +4258,7 @@ impl MockSessionService {
                         .map(|b| b.application_tool_policy.clone())
                         .unwrap_or(meerkat_core::ApplicationToolPolicyBinding::Unmanaged),
                     active_skills: build.and_then(|b| b.preload_skills.clone()),
+                    grant_gated: Default::default(),
                 },
                 keep_alive: build.map(|b| b.keep_alive).unwrap_or(false),
                 comms_name: build.and_then(|b| b.comms_name.clone()),
@@ -43463,6 +43464,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                     meerkat_core::skills::SkillName::parse("mob-communication")
                         .expect("valid skill name"),
                 )]),
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: Some(test_comms_name("worker", "w-1")),
@@ -69551,6 +69553,7 @@ impl RealCommsSessionService {
                             .map(|options| options.application_tool_policy.clone())
                             .unwrap_or(meerkat_core::ApplicationToolPolicyBinding::Unmanaged),
                         active_skills: build.and_then(|options| options.preload_skills.clone()),
+                        grant_gated: Default::default(),
                     },
                     keep_alive: build.map(|options| options.keep_alive).unwrap_or(false),
                     comms_name: build.and_then(|options| options.comms_name.clone()),

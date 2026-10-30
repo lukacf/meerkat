@@ -508,6 +508,33 @@ if run_part audits-f; then
   TLC_WORKERS="${tlc_workers}" "${source_credential_publication_audit}" "${SOURCE_CREDENTIAL_PUBLICATION_AUDIT_MAX_STEPS:-5}"
 fi
 
+# Scoped tool grant expiry (the ToolGrantLifecycleMachine deadline guards,
+# the deadline timer, the boundary that shows a gated name, the dispatch
+# gate's fresh admission and the expiry write it makes after a refusal or
+# loses, revocation, reads that settle a due grant without loading the
+# session, crash, restart and one bounded clock rollback) spans the shell's
+# use of the machine, which the machine's own ci sweep cannot see. A
+# hand-written audit over the same generated model drives one grant with
+# deadline 2 on a clock in 0..3, under every generated invariant plus five
+# invariants and one action property (no call handed on at or after the
+# deadline or after the grant ended; a persisted end is latched across crash,
+# restart and rollback; expiry is never early; revocation precedes the
+# deadline; a visible name was shown before the deadline). It requires its
+# eight witnesses reached and refuses six seeded defects (--mutants): an
+# early expiry guard, an inclusive admission guard, a dispatch that reuses
+# the boundary's verdict, a restart that revives an ended grant, a revoked
+# grant handed on, and a boundary that trusts the stored phase. 6 steps reach
+# every witness.
+tool_grant_expiry_audit="${workspace_root}/specs/machines/tool_grant_lifecycle/tool_grant_expiry_audit.sh"
+if [[ ! -x "${tool_grant_expiry_audit}" ]]; then
+  echo "error: tool grant expiry audit runner is missing from workspace runfiles: ${tool_grant_expiry_audit}" >&2
+  exit 1
+fi
+if run_part audits-f; then
+  echo "running bounded tool grant expiry TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${tool_grant_expiry_audit}" "${TOOL_GRANT_EXPIRY_AUDIT_MAX_STEPS:-6}" --mutants
+fi
+
 # The MobMachine member lifecycle (roster recovery and reset, session
 # binding, progress observations, the local Retire arms, RetireMember, the
 # session ingress detach, the runtime retirement, destroy and archive
@@ -769,7 +796,9 @@ run_machine_verify() {
 # audits-f = live media health 147-171, requeue-across-stop 122-147,
 # live-context causal-tail batch with --mutants 98-122, generation high-water
 # with --mutants 56-71: 423-511 s, plus the AuthMachine source-credential
-# publication audit, added after these measurements;
+# publication audit, added after these measurements, and the tool grant
+# expiry audit with --mutants (not yet measured; fourteen runs over a small
+# model that does not extend meerkat_machine);
 # audits-g = member residency without its mutants, alone: on the push its
 # eight whole-space runs took 165 s and its first 23 of 32 witness runs 173 s
 # before the job timeout cut it off, about 430 s in all, and about 525 s on

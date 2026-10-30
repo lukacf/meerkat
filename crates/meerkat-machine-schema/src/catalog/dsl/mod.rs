@@ -47,6 +47,7 @@ pub mod session_document;
 pub mod session_persistence_version_authority;
 pub mod session_turn_admission;
 pub mod temporary_council_lifecycle;
+pub mod tool_grant_lifecycle;
 pub mod work_attention_lifecycle;
 pub mod work_execution_lifecycle;
 pub mod work_item_admission;
@@ -181,6 +182,8 @@ pub const FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
 pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::temporary_council_lifecycle";
+pub const TOOL_GRANT_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
+pub const TOOL_GRANT_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "tool_grant::dsl";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_MODULE: &str = "meerkat_machine::dsl";
 pub const RUNTIME_DELIVERY_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
@@ -3390,6 +3393,12 @@ runtime_internal_inputs!(
         // of a recovered registration it placed.
         ResolveEmptyResumeRetirement,
         ClaimCompositionResidency,
+        // The scoped tool grant gate: the visibility owner installs each
+        // build's gate and applies the open set the grant service
+        // adjudicated at each model-request boundary. No caller can ask for
+        // either.
+        ReplaceToolGrantGate,
+        ApplyToolGrantOpenSet,
     ]
 );
 
@@ -5266,6 +5275,64 @@ pub fn temporary_council_lifecycle_schema_metadata() -> MachineSchemaMetadata {
         ],
         vec![],
     )
+}
+
+/// Canonical ToolGrantLifecycleMachine: one scoped tool grant's issuance,
+/// expiry at a supplied clock, revocation and use admission. Record-scoped
+/// and clock-free.
+pub fn dsl_tool_grant_lifecycle_machine() -> MachineSchema {
+    tool_grant_lifecycle_schema_metadata()
+        .attach_to(tool_grant_lifecycle::ToolGrantLifecycleMachineState::schema())
+}
+
+pub fn dsl_tool_grant_lifecycle_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_tool_grant_lifecycle_machine(),
+        TOOL_GRANT_LIFECYCLE_PRODUCTION_RUST_CRATE,
+        TOOL_GRANT_LIFECYCLE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+/// Named-type bindings for the scoped tool grant record machine: the end
+/// reason carried by the state and the two typed refusal vocabularies its
+/// verdict effects carry.
+pub fn tool_grant_lifecycle_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum("ToolGrantEndReason", &["Deadline", "Revoked"]),
+            NamedTypeBinding::string_enum("ToolGrantUseRefusal", &["Expired", "Revoked"]),
+            NamedTypeBinding::string_enum(
+                "ToolGrantIssueRefusal",
+                &["InvalidWindow", "AlreadyIssued"],
+            ),
+        ],
+        vec![],
+    )
+    .with_tlc_model(tool_grant_lifecycle_tlc_model())
+}
+
+/// The scoped tool grant machine's explicit TLC model. Every input carries
+/// unsigned times, which the generated model explores over the three values
+/// `0..2`: a grant issued at 0 or 1 with a deadline of 1 or 2 is observed
+/// before, at and after its deadline. Every arm is reached within four
+/// steps (issue, end, issue again), so the CI run requires each of them,
+/// the `IssueRefusedIssued*` arms of an ended grant included, to generate a
+/// state.
+fn tool_grant_lifecycle_tlc_model() -> crate::MachineTlcModel {
+    let no_samples = || crate::MachineTlcProfile {
+        named_values: std::collections::BTreeMap::new(),
+    };
+    crate::MachineTlcModel {
+        ci: no_samples(),
+        deep: no_samples(),
+        ci_limits: crate::MachineTlcStateLimits {
+            step_limit: 4,
+            seq_limit: 1,
+            set_limit: 1,
+            map_limit: 1,
+        },
+        require_ci_transition_coverage: true,
+    }
 }
 
 pub fn dsl_work_execution_lifecycle_machine() -> MachineSchema {

@@ -30,6 +30,7 @@ pub mod skills;
 mod spec_digest;
 mod stream_read;
 pub mod supervisor_bridge;
+mod tool_grant;
 mod usage;
 mod workgraph;
 
@@ -324,6 +325,14 @@ pub use supervisor_bridge::{
     decode_bridge_command, supervisor_bridge_current_protocol_version,
     supervisor_bridge_default_protocol_version, supervisor_bridge_protocol_version_supported,
     supervisor_bridge_supported_protocol_versions,
+};
+pub use tool_grant::{
+    GrantToolParams, GrantToolResult, ListToolGrantsParams, ListToolGrantsResult,
+    RevokeToolGrantParams, RevokeToolGrantResult, ToolGrantAuditParams, ToolGrantAuditResult,
+    ToolGrantSubjectRequest, ToolGrantTargetRequest, WireGrantGatedTools, WireToolGrant,
+    WireToolGrantAuditEvent, WireToolGrantAuditRow, WireToolGrantExpiryDriver, WireToolGrantIssuer,
+    WireToolGrantRefusalKind, WireToolGrantStatus, WireToolGrantSubject, WireToolGrantTarget,
+    WireUnreadableToolGrant, WireUnreadableToolGrantAuditRow,
 };
 pub use usage::{WireTurnUsage, WireUsage};
 pub use workgraph::{WorkEventsResult, WorkItemsResult};

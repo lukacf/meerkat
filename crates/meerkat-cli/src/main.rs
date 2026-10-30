@@ -15344,6 +15344,7 @@ async fn run_agent(
             mob_tools: mob_tools_factory,
             auth_binding,
             mob_member_binding: None,
+            grant_gated_tools: None,
         };
         build.apply_generated_create_only_mob_operator_access(
             meerkat_core::ToolCategoryOverride::from_effective(effective_mob),
@@ -29046,6 +29047,7 @@ default_model = "gemma"
             spawn_tool_access_policy: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             active_skills: None,
+            grant_gated: Default::default(),
         };
 
         apply_yolo_tooling_override(&mut tooling);

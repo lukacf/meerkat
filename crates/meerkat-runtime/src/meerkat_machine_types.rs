@@ -1219,6 +1219,10 @@ meerkat_machine_runtime_internal_inputs!(
         StageVisibilityFilter,
         SurfaceSetRemovalTimeout,
         ReplaceVisibilityState,
+        // The scoped tool grant gate: each build's gate and each boundary's
+        // adjudicated open set, applied by the visibility owner.
+        ReplaceToolGrantGate,
+        ApplyToolGrantOpenSet,
     ],
     DeferredSessionLifecycle => [
         AbandonDeferredSessionPromotion,

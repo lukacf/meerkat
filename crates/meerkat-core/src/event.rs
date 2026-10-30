@@ -553,7 +553,8 @@ impl From<&AgentError> for AgentErrorClass {
             AgentError::BuildError(_)
             | AgentError::SessionIdentityInUse(_)
             | AgentError::DeclaredToolUnknown(_)
-            | AgentError::ToolArtifactRefused(_) => Self::Build,
+            | AgentError::ToolArtifactRefused(_)
+            | AgentError::ToolGrantGateRefused(_) => Self::Build,
             AgentError::AuthReauthRequired { .. } => Self::Auth,
             AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. } => {
                 Self::CallbackPending

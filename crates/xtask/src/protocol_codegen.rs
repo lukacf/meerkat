@@ -5586,9 +5586,9 @@ fn emit_session_document_helper(
 }
 
 /// The natives the SessionDocumentMachine DSL calls, with the semantics the
-/// generated TLA operator (`MapSet`) and the machine-schema authority give
-/// them. Each is a pure construction; every decision stays in the
-/// transitions.
+/// generated TLA operators, the kernel oracle and the machine-schema
+/// authority give them. Each is a pure construction; every decision stays in
+/// the transitions.
 fn emit_session_document_native_helpers(out: &mut String) -> Result<()> {
     writeln!(
         out,
@@ -5624,6 +5624,28 @@ fn emit_session_document_native_helpers(out: &mut String) -> Result<()> {
         "            total.saturating_add(bytes.get(slot).copied().unwrap_or(0))"
     )?;
     writeln!(out, "        }})")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "/// The entries of one slot set's map whose slot is Active in `effect`:"
+    )?;
+    writeln!(
+        out,
+        "/// what an application puts in effect. A slot `effect` holds Absent, or"
+    )?;
+    writeln!(out, "/// does not name, is left out.")?;
+    writeln!(out, "fn session_document_instruction_active_slots<V>(")?;
+    writeln!(out, "    effect: BTreeMap<String, InstructionEffect>,")?;
+    writeln!(out, "    values: BTreeMap<String, V>,")?;
+    writeln!(out, ") -> BTreeMap<String, V> {{")?;
+    writeln!(out, "    values")?;
+    writeln!(out, "        .into_iter()")?;
+    writeln!(
+        out,
+        "        .filter(|(slot, _)| effect.get(slot) == Some(&InstructionEffect::Active))"
+    )?;
+    writeln!(out, "        .collect()")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
     Ok(())

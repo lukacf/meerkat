@@ -1317,6 +1317,8 @@ impl Session {
                 "a recorded operator instruction target names its mob".to_string(),
             ));
         }
+        // A fast path: the session-document authority refuses a snapshot
+        // over the slot limit too.
         if record.slots.len() > MAX_OPERATOR_INSTRUCTION_SLOTS {
             return Err(InstructionWriteError::SlotLimitExceeded);
         }
@@ -1406,6 +1408,9 @@ impl Session {
                     max_bytes: MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES,
                 })
             }
+            WriteVerdict::Refused(document::InstructionWriteRefusal::SlotLimitExceeded) => {
+                Err(InstructionWriteError::SlotLimitExceeded)
+            }
             WriteVerdict::Refused(other) => Err(InstructionWriteError::Malformed(
                 InstructionStateError::MalformedState(format!(
                     "the session-document authority refused a record with {other:?}"
@@ -1463,7 +1468,6 @@ impl Session {
         let bodies = InstructionBodies::from_sources(state.as_ref(), &effective);
         let mut document = InstructionDocument::seed(state.as_ref(), &effective)?;
         let key = document.key();
-        let held = document.owner_kind();
         let effects = document
             .authority
             .release_instruction_target(key, mob_id.to_owned())
@@ -1488,19 +1492,21 @@ impl Session {
             }
             None => {}
         }
-        if !effects.iter().any(|effect| {
-            matches!(
-                effect,
-                document::SessionDocumentEffect::InstructionTargetReleased
-            )
-        }) {
+        // The authority's verdict says whether the releasing mob owned the
+        // target; a target no owner held writes nothing.
+        let Some(was_owned) = effects.iter().find_map(|effect| match effect {
+            document::SessionDocumentEffect::InstructionTargetReleased { was_owned } => {
+                Some(*was_owned)
+            }
+            _ => None,
+        }) else {
             return Err(InstructionWriteError::Malformed(
                 InstructionStateError::MalformedState(
                     "the session-document authority emitted no release verdict".to_string(),
                 ),
             ));
-        }
-        if held != document::InstructionTargetOwner::Mob {
+        };
+        if !was_owned {
             return Ok(InstructionReleaseDisposition::AlreadyUnowned);
         }
         let next = document.recorded_state(InstructionTargetOwner::Unowned, &bodies)?;

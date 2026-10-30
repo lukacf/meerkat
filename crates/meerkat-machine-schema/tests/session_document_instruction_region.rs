@@ -694,11 +694,12 @@ fn a_record_from_another_mob_is_refused_until_the_owning_mob_releases_the_target
     );
 
     // The owning mob releases: the target empties and is unowned, and the
-    // release applies nothing by itself.
+    // release applies nothing by itself. The verdict says the target was
+    // owned.
     let transition = apply(&mut authority, release("mob-a"));
     assert_eq!(
         transition.effects(),
-        [Effect::InstructionTargetReleased].as_slice()
+        [Effect::InstructionTargetReleased { was_owned: true }].as_slice()
     );
     assert_eq!(owner(&authority), Some(InstructionTargetOwner::Unowned));
     assert_eq!(owner_mob(&authority).as_deref(), Some(""));
@@ -1217,11 +1218,13 @@ fn rebind_takes_an_unowned_target_and_a_session_target_only_for_a_mob() {
 
 #[test]
 fn only_the_owning_mob_releases_a_target() {
+    // A target no owner holds answers "already unowned": the verdict says
+    // it was not owned, and nothing changes.
     let mut authority = seeded(&Seed::empty());
     assert_verdict_only(
         &mut authority,
         release("mob-a"),
-        &[Effect::InstructionTargetReleased],
+        &[Effect::InstructionTargetReleased { was_owned: false }],
     );
     let mut authority = seeded(&Seed::session_owned(
         2,

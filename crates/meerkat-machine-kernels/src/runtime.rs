@@ -1380,6 +1380,9 @@ impl GeneratedMachineKernel {
             "session_document_instruction_active_bytes" => {
                 self.eval_session_document_instruction_active_bytes(args, transition_name)
             }
+            "session_document_instruction_active_slots" => {
+                self.eval_session_document_instruction_active_slots(args, transition_name)
+            }
             _ => Err(self.eval_error(transition_name, format!("unknown helper `{helper}`"))),
         }
     }
@@ -1441,6 +1444,42 @@ impl GeneratedMachineKernel {
             }
         }
         Ok(KernelValue::U64(total))
+    }
+
+    /// The entries of a slot map whose slot is Active in `effect`: what an
+    /// application puts in effect. A slot `effect` holds Absent, or does not
+    /// name, is left out.
+    fn eval_session_document_instruction_active_slots(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [effect, values]: [KernelValue; 2] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "session_document_instruction_active_slots expects two args",
+            )
+        })?;
+        let effect = effect
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let values = values
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let mut active_slots = BTreeMap::new();
+        for (slot, value) in values {
+            let Some(slot_effect) = effect.get(&slot) else {
+                continue;
+            };
+            let active = slot_effect
+                .as_named_variant("InstructionEffect")
+                .map_err(|error| self.eval_error(transition_name, error))?
+                == "Active";
+            if active {
+                active_slots.insert(slot, value);
+            }
+        }
+        Ok(KernelValue::Map(active_slots))
     }
 
     fn eval_meerkat_machine_session_id_matches_string(

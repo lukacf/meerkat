@@ -4440,6 +4440,12 @@ fn infer_expr_type(
         Expr::Call { helper, .. } if helper == "session_document_instruction_active_bytes" => {
             Some(TypeRef::U64)
         }
+        // The Active entries of a slot map: the type of the map it filters.
+        Expr::Call { helper, args } if helper == "session_document_instruction_active_slots" => {
+            args.get(1).and_then(|values| {
+                infer_expr_type(values, field_types, helper_returns, binding_types)
+            })
+        }
         Expr::Call { helper, .. } if helper == "runtime_delivery_recipient_outcomes_after_set" => {
             Some(TypeRef::Map(
                 Box::new(TypeRef::String),
@@ -10882,6 +10888,23 @@ impl<'a> MachineTlaCompiler<'a> {
             out,
             "    IN SessionDocumentInstructionActiveBytesOver(DOMAIN slot_effect)"
         );
+        // The entries of a slot map whose slot is Active: what an
+        // application puts in effect (the Rust authorities agree).
+        writeln!(
+            out,
+            "{}(slot_effect, slot_values) ==",
+            self.scoped_helper_name("session_document_instruction_active_slots")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [instruction_slot \\in {{candidate_slot \\in DOMAIN slot_values :"
+        );
+        pushln!(
+            out,
+            "            candidate_slot \\in DOMAIN slot_effect /\\ slot_effect[candidate_slot] = \"Active\"}}"
+        );
+        pushln!(out, "        |-> slot_values[instruction_slot]]");
     }
 
     fn render_meerkat_machine_native_helpers(&self, out: &mut String) {

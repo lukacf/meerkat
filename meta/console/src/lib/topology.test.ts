@@ -629,24 +629,19 @@ test("a topology node selects its roster agent from an endpoint key or a plain i
   assert.equal(topologyNodeAgent(agents, "mk1|incident-command-center|unknown") === undefined, true);
 });
 
-test("the topology's team is the runtime's own mob, or a shared console's one runtime's", () => {
-  // A runtime's console: its experience names the runtime's mob.
-  assert.equal(topologyTeamKey({ runtime_id: "ops-team" }), "ops-team");
-  assert.equal(topologyTeamKey({ runtime_id: " ops-team " }), "ops-team");
-  // A shared console names no team itself; its one registered runtime does.
-  const runtime = (label: string) => ({ key: `runtime-${label}`, label, namespace: label, memory: false, workgraph: false });
-  assert.equal(
-    topologyTeamKey({ runtime_id: "console-aggregator", panel_runtimes: [runtime("foresight-studio")] }),
-    "foresight-studio",
-  );
-  // Several teams, none, or nothing that names one: the root reads "Team".
-  assert.equal(
-    topologyTeamKey({ runtime_id: "console-aggregator", panel_runtimes: [runtime("alpha"), runtime("beta")] }),
-    undefined,
-  );
-  assert.equal(topologyTeamKey({ runtime_id: "console-aggregator", panel_runtimes: [] }), undefined);
-  assert.equal(topologyTeamKey({ runtime_id: "console-aggregator" }), undefined);
-  assert.equal(topologyTeamKey({ runtime_id: "  " }), undefined);
+test("the topology's team is the mob the experience names, never the runtime id", () => {
+  assert.equal(topologyTeamKey({ topology: { live_snapshot: { mob_id: "ops-team" } } }), "ops-team");
+  assert.equal(topologyTeamKey({ topology: { live_snapshot: { mob_id: " ops-team " } } }), "ops-team");
+  // A runtime id keys a runtime, and a shared console's panel runtimes key
+  // its stores: neither names the topology's team, so the root reads "Team".
+  const runtimeOnly = {
+    runtime_id: "ops-team",
+    panel_runtimes: [{ key: "runtime-ops", label: "ops-team", namespace: "ops", memory: false, workgraph: false }],
+    topology: { live_snapshot: { nodes: [], node_count: 0 } },
+  };
+  assert.equal(topologyTeamKey(runtimeOnly), undefined);
+  assert.equal(topologyTeamKey({ topology: { live_snapshot: { mob_id: "  " } } }), undefined);
+  assert.equal(topologyTeamKey({ topology: {} }), undefined);
   assert.equal(topologyTeamKey({}), undefined);
   assert.equal(topologyTeamKey(null), undefined);
 });

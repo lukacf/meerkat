@@ -197,6 +197,86 @@ async fn shared_console_exposes_registered_native_panels_and_removes_stale_scope
     Ok(())
 }
 
+/// A shared console names the mob its topology shows only while one runtime
+/// is registered: that runtime's mob, as `topology.live_snapshot.mob_id`.
+/// Over two runtimes the topology spans their teams and names none, and with
+/// none registered there is no team.
+#[tokio::test]
+async fn shared_console_names_the_topology_mob_only_over_one_registered_runtime()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use axum::{body::Body, http::Request};
+    use meerkat_meta::console_aggregator::{
+        AllowAllConsoleVisibilityPolicy, ConsoleRuntimeRegistration, MetaConsoleAggregator,
+    };
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    async fn topology_mob_id(app: axum::Router) -> serde_json::Value {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/console/experience")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), 200);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let experience: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+        experience["topology"]["live_snapshot"]["mob_id"].clone()
+    }
+
+    async fn team_runtime(
+        mob_id: &str,
+    ) -> Result<Arc<meerkat_meta::UnifiedRuntime>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Arc::new(
+            meerkat_meta::UnifiedRuntime::builder()
+                .definition(meerkat_mob::MobDefinition::from_toml(&format!(
+                    "[mob]\nid = '{mob_id}'\n[profiles.worker]\nmodel = 'gpt-6-astra'\n"
+                ))?)
+                .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+                .build()
+                .await?,
+        ))
+    }
+
+    fn registration(
+        key: &str,
+        runtime: &Arc<meerkat_meta::UnifiedRuntime>,
+    ) -> ConsoleRuntimeRegistration {
+        ConsoleRuntimeRegistration {
+            runtime_key: key.into(),
+            identity_namespace: key.into(),
+            runtime: runtime.clone(),
+            visibility_policy: Arc::new(AllowAllConsoleVisibilityPolicy),
+        }
+    }
+
+    let aggregator = MetaConsoleAggregator::in_memory();
+    let app = meerkat_meta::http_console::console_json_router_with_aggregator(
+        decision_state(false),
+        aggregator.clone(),
+    );
+    assert_eq!(topology_mob_id(app.clone()).await, serde_json::Value::Null);
+
+    let repository = team_runtime("repository-team").await?;
+    aggregator.register_runtime(registration("repository", &repository));
+    assert_eq!(topology_mob_id(app.clone()).await, json!("repository-team"));
+
+    let release = team_runtime("release-team").await?;
+    aggregator.register_runtime(registration("release", &release));
+    assert_eq!(topology_mob_id(app.clone()).await, serde_json::Value::Null);
+
+    aggregator.unregister_runtime("repository");
+    assert_eq!(topology_mob_id(app).await, json!("release-team"));
+    repository.mob_handle().stop().await?;
+    release.mob_handle().stop().await?;
+    Ok(())
+}
+
 #[test]
 fn console_voice_is_unavailable_without_an_authenticated_voice_host() {
     for require_app_auth in [false, true] {

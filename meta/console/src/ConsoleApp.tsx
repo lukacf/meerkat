@@ -5645,9 +5645,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         />
       );
     if (target.kind === "topology") {
-      // The Roles root names the team the map shows, by its mob id in words
-      // and the id as its tooltip: never the console's or the sidebar's
-      // title, which name the console. "Team" when no one team is known.
+      // The Roles root names the team the map shows, by the mob id the
+      // experience names (topology.live_snapshot.mob_id) in words, with the
+      // id as its tooltip: never the console's or the sidebar's title, which
+      // name the console, nor the runtime id. "Team" when none is named.
       const teamKey = topologyTeamKey(experience);
       return (
         <TopologyPanel

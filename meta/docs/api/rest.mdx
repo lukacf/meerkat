@@ -98,6 +98,13 @@ something done to the agent. The field is advisory: a row without it has no
 known activity, and reading it wakes no agent. A row answered pending (below)
 keeps it, since the frame log answers it, not the read model.
 
+`topology.live_snapshot.mob_id` is the id of the mob whose members the
+topology shows, when one mob is known: a runtime's console reports its own
+mob, and a shared console the mob of its one registered runtime. It is absent
+on a shared console over several runtimes or none, and from a snapshot a host
+builds without it. The console names the topology's team from it, never from
+`runtime_id`.
+
 `health_overview.live_snapshot.running` is the mob owner's answer when the
 experience is read. A console served from the console aggregator answers for
 its registered runtimes: `true` only while every registered runtime's mob is

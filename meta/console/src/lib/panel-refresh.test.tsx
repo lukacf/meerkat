@@ -275,20 +275,20 @@ describe("Topology roles root", () => {
     return named;
   }
 
+  const withMobId = (mob_id: string) => ({ topology: { live_snapshot: { nodes: [], node_count: 0, mob_id } } });
   const panelRuntime = (label: string) => ({ key: `runtime-${label}`, label, namespace: label, memory: false, workgraph: false });
 
-  it("names the team by its mob id in words, never the console's title", async () => {
-    expect(await rolesRoot({ runtime_id: "ops-team" })).toEqual({ name: "Ops team", title: "ops-team" });
+  it("names the team by the mob id the experience names, in words, never the console's title", async () => {
+    expect(await rolesRoot(withMobId("ops-team"))).toEqual({ name: "Ops team", title: "ops-team" });
+    expect(await rolesRoot({ runtime_id: "console-aggregator", ...withMobId("foresight-studio") }))
+      .toEqual({ name: "Foresight studio team", title: "foresight-studio" });
   });
 
-  it("names a shared console's one team, and reads Team over several", async () => {
+  it("reads Team when the experience names no mob, whatever its runtime id says", async () => {
+    expect(await rolesRoot({ runtime_id: "ops-team" })).toEqual({ name: "Team", title: null });
     expect(await rolesRoot({
       runtime_id: "console-aggregator",
       panel_runtimes: [panelRuntime("foresight-studio")],
-    })).toEqual({ name: "Foresight studio team", title: "foresight-studio" });
-    expect(await rolesRoot({
-      runtime_id: "console-aggregator",
-      panel_runtimes: [panelRuntime("alpha"), panelRuntime("beta")],
     })).toEqual({ name: "Team", title: null });
   });
 });

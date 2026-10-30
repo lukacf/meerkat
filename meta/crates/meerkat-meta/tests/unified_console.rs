@@ -556,6 +556,31 @@ async fn live_snapshot_keeps_configured_modules_even_when_runtime_members_differ
     assert_mob_stop_allows_boundary_cancel(shutdown.mob_stop);
 }
 
+/// A runtime's console names the mob its topology shows: the experience
+/// carries the runtime's own mob id as `topology.live_snapshot.mob_id`.
+#[tokio::test]
+async fn runtime_console_topology_names_the_mob_it_serves() {
+    let fixture = build_runtime_fixture().await;
+    spawn_named_members(&fixture.runtime, &["triage"]).await;
+    let mob_id = fixture.runtime.mob_handle().mob_id().to_string();
+    assert!(
+        mob_id.starts_with("phase-h1-console-mob-"),
+        "the fixture's mob: {mob_id}"
+    );
+
+    let app = fixture
+        .runtime
+        .build_reference_app_router(decision_state(false));
+    let console_json = get_console_experience(&app).await;
+    assert_eq!(
+        console_json["topology"]["live_snapshot"]["mob_id"],
+        json!(mob_id)
+    );
+
+    let shutdown = fixture.runtime.shutdown().await;
+    assert_mob_stop_allows_boundary_cancel(shutdown.mob_stop);
+}
+
 #[tokio::test]
 async fn reconcile_spawns_colon_identities_and_member_rows_keep_public_alias() {
     // meerkat 0.7's MemberCommsName is fail-closed: roster member ids must not

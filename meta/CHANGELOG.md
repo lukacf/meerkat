@@ -154,6 +154,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   default that reports none; a store that wraps another must forward it. The
   console aggregator reads an agent through it once, on its first read, and
   then keeps its time in memory from the frames it appends.
+- `/console/experience` `topology.live_snapshot` carries `mob_id`, the id of
+  the mob whose members the topology shows: on a runtime's console its own
+  mob, and on a shared console the mob of its one registered runtime (absent
+  over several runtimes or none). `ConsoleLiveSnapshot` gains `mob_id`
+  (`None` from `ConsoleLiveSnapshot::new`), which a host that builds its own
+  snapshot sets to name its team.
 
 ### Changed
 
@@ -198,8 +204,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`router:main` reads "Router main"), the same on every surface, and raw
   identities, keys, grants and IDs moved to tooltips, copy actions and
   technical details. The Topology's Roles view is rooted at the team the
-  console serves, named from its id in words (`ops-team` reads "Ops team"),
-  or "Team" when a shared console holds several. Approval risk tiers read
+  experience names (`topology.live_snapshot.mob_id`, in words: `ops-team`
+  reads "Ops team"), or "Team" when it names none. Approval risk tiers read
   in words (R0 Minimal, R1 Low,
   R2 Elevated, R3 High): the chip reads "High risk", the audit "Risk: High
   (R3)", and a missing tier "Unknown". The panels say the memory store's

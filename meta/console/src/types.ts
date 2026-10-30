@@ -333,6 +333,12 @@ export interface ConsoleExperience {
     live_snapshot?: {
       nodes?: ConsoleTopologyNode[];
       node_count?: number;
+      /**
+       * The id of the mob whose members the topology shows, when one mob is
+       * known: a runtime's console names its own mob, a shared console its
+       * one registered runtime's. Absent names no team.
+       */
+      mob_id?: string;
     };
   }>;
   health_overview?: ConsoleExperienceSection<{

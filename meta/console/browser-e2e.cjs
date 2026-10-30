@@ -3265,7 +3265,7 @@ async function runTopologyUnavailableBrowserProof() {
 }
 
 async function runTopologyRoleChipPaneReuseBrowserProof() {
-  const server = await startMockConsoleServer({ includeToolOnlyWorker: true });
+  const server = await startMockConsoleServer({ includeToolOnlyWorker: true, includeImageAgent: true });
   let browser;
   try {
     browser = await launchBrowser();
@@ -3275,7 +3275,7 @@ async function runTopologyRoleChipPaneReuseBrowserProof() {
     await page.getByTestId("topology-panel").waitFor({ timeout: 10_000 });
     await page.getByTestId("topology-view:roles").click();
     const panes = page.locator('[data-testid^="pane:"]');
-    for (const identity of ["identity:luka", "legacy-router", "tool-only-worker"]) {
+    for (const identity of ["legacy-router", "tool-only-worker", "image-agent"]) {
       await page.getByTestId(`topology-node:${identity}`).click();
       await page.getByTestId(`chat-pane:${identity}`).waitFor({ timeout: 10_000 });
       assert.equal(await panes.count(), 2, `opening ${identity} from Topology must keep two panes`);
@@ -3287,7 +3287,7 @@ async function runTopologyRoleChipPaneReuseBrowserProof() {
         "the chat pane takes focus",
       );
     }
-    await page.getByTestId("topology-node:tool-only-worker").click();
+    await page.getByTestId("topology-node:image-agent").click();
     assert.equal(await panes.count(), 2, "a chip for the agent already shown focuses its pane");
     process.stdout.write("browser topology role chips reuse one chat pane ok\n");
   } finally {

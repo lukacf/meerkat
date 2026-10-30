@@ -955,6 +955,28 @@ mod tests {
             .await
             .unwrap()
     }
+    // A governed realm's terminal owner takes the governed native owner, as the
+    // standalone continuation reopens it; `owner` opens ordinarily, which Core
+    // refuses for a governed realm (`RealmGoverned`).
+    async fn governed_owner(root: &Path, storage: ResolvedStorage) -> TerminalConnectors {
+        let native = crate::stdio::tests::realm_native_owner(&storage).await;
+        let persistence = ProviderAuthPersistence::new(
+            Arc::new(FileTokenStore::new(root.join("credentials"))),
+            Arc::new(FileLockCoordinator::new(root.join("credential-locks"))),
+        );
+        let mut startup = SessionStartup {
+            storage,
+            config: meerkat::Config::default(),
+            factory: meerkat::AgentFactory::new(root.join("factory"))
+                .with_provider_auth_persistence(persistence),
+            persistence: Some(native),
+            connector_auth: None,
+            standalone: None,
+        };
+        Box::pin(TerminalConnectors::open(&mut startup))
+            .await
+            .unwrap()
+    }
     #[derive(Clone, Default)]
     struct Seen(Arc<std::sync::Mutex<Vec<u8>>>);
     impl Seen {
@@ -1526,7 +1548,7 @@ mod tests {
             .await
             .unwrap();
             let (_, reviewed_generation) = owned(&selected).await.unwrap();
-            let mut owner = owner(root.path(), selected.clone()).await;
+            let mut owner = governed_owner(root.path(), selected.clone()).await;
             let session = SessionId::new();
             let (approvals, mut presenter) =
                 LocalApprovals::create_paired_host(root.path()).unwrap();
@@ -1630,6 +1652,9 @@ mod tests {
             assert!(approvals.check_session(&session).is_ok());
             assert_eq!(owned(&selected).await.unwrap(), before);
             assert!(credential_artifact(&root.path().join("credentials")) == credentials);
+            // As main does after setup closes, drop the terminal owner and its
+            // realm execution custody before native administration.
+            drop(owner);
             // The queued action has not been finalized. A separate public
             // native revoke, awaited outside an observer timeout, proves its
             // original target selection survived review unchanged.

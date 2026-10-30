@@ -432,9 +432,12 @@ them.
   generation, and a member whose session lives in memory only moves to a
   fresh session instead. A role change with no migration declared holds the
   member: every wake of it is refused `HostPreparationPending`; a Live
-  member's run starts are held (`HostRunStartHoldReason::HostPreparation`),
-  so its run in flight finishes, never preempted, and no new run starts
-  under its previous role; it is released when idle; the explicit resume
+  local member's run starts are held
+  (`HostRunStartHoldReason::HostPreparation`), so its run in flight
+  finishes, never preempted, and no new run starts under its previous role
+  (a placed member's runs start on its member host, which the hold does not
+  reach, so a Live placed member keeps serving until an apply ends the
+  hold); it is released when idle; the explicit resume
   leaves it alone; and the entry reads name the hold
   (`IdentityEntryView::host_preparation`,
   `HostPreparationCause::RoleMigrationUndeclared`). An apply that restores

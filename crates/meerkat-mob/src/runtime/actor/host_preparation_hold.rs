@@ -4,7 +4,7 @@
 //!
 //! MobMachine refuses every wake of a held member, but a Live member serves
 //! its deliveries without a wake. So the actor holds the run starts of each
-//! held member's session with the typed reason
+//! held local member's session with the typed reason
 //! [`meerkat_runtime::RunStartHoldReason::HostPreparation`], staged, so that
 //! a registration of the session applies it too
 //! ([`crate::MobHandle::members_holding_run_starts`] lists the member under
@@ -15,7 +15,13 @@
 //! verdict (`ClassifyMemberRelease`), which leaves it Dormant, and the role
 //! hold refuses its next wake. When MobMachine ends the hold (an apply that
 //! restores the role, the step that commits the new role, a retirement, the
-//! destroy, the mob's reset), the actor releases the run-start hold.
+//! destroy, the mob's reset), the actor releases the run-start hold. A
+//! release that fails keeps the member in the actor's ledger, and every loop
+//! boundary tries it again until it succeeds.
+//!
+//! A placed member's runs start on its member host, which this mob's runtime
+//! holds do not reach: its role hold refuses its wakes, and a Live placed
+//! member keeps serving under its previous role until an apply ends the hold.
 //!
 //! Level-triggered: the held sessions are derived from the machine state each
 //! time and are never journaled. After a restart no member is Live, and the
@@ -71,7 +77,9 @@ impl MobActor {
             .map(|(identity, session)| (identity.clone(), session.clone()))
             .collect();
         for (identity, session_id) in ended {
-            self.host_preparation_holds.remove(&identity);
+            // The ledger keeps the member until its release succeeds: a
+            // failed release is tried again at the next loop boundary, never
+            // left held.
             if let Err(error) = self
                 .provisioner
                 .release_member_run_starts(
@@ -85,10 +93,11 @@ impl MobActor {
                     mob_id = %self.definition.id,
                     agent_identity = %identity,
                     %error,
-                    "releasing the run-start hold of a member whose role hold ended failed"
+                    "releasing a member's run-start hold failed; the next loop boundary tries again"
                 );
                 continue;
             }
+            self.host_preparation_holds.remove(&identity);
             // A kickoff a Shutdown kept for the member waited for this
             // release, as it waits for a host's.
             if self.roster.read().await.get(&identity).is_some() {
@@ -97,7 +106,9 @@ impl MobActor {
         }
 
         for (identity, session_id) in held {
-            if self.host_preparation_holds.get(&identity) == Some(&session_id) {
+            // Held already, or a hold of its previous session still waits
+            // for its release: that one goes first.
+            if self.host_preparation_holds.contains_key(&identity) {
                 continue;
             }
             if let Err(error) = self

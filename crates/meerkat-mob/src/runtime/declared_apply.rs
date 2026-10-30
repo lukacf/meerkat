@@ -8,8 +8,8 @@
 //! session when it has one), a same-session restamp
 //! ([`super::MobHandle::respawn_member`]), a rotation
 //! ([`super::MobHandle::rotate_member`]) or the hold of an undeclared role
-//! move (its wakes refused, a Live member's run starts held until it is
-//! released when idle). A complete roster is then sealed
+//! move (its wakes refused, a Live local member's run starts held until it
+//! is released when idle). A complete roster is then sealed
 //! (`SealDeclaredRoster`): every Declared entry it does not list is unlisted,
 //! and its member is retired, the end of the retirement ending the entry.
 //!
@@ -221,9 +221,12 @@ pub enum DeclaredEntryOutcome {
     /// The roster moves the member from role `from` to role `to` without a
     /// declared migration: the member is held until an apply declares the
     /// move or restores the role. Every wake of it is refused, and a Live
-    /// member starts no new run (its run starts are held,
+    /// local member starts no new run (its run starts are held,
     /// [`crate::HostRunStartHoldReason::HostPreparation`]): its run in
-    /// flight finishes, and it is released when idle. The hold ends in the
+    /// flight finishes, and it is released when idle. A placed member's runs
+    /// start on its member host, which this mob's run-start holds do not
+    /// reach: a Live placed member keeps serving under its previous role
+    /// until an apply ends the hold. The hold ends in the
     /// step that commits the declared role (the restamp or rotation of a
     /// later apply), not at that apply's verdict. An identity no member holds
     /// whose seat would resume a session last built under `from` is not
@@ -558,10 +561,17 @@ impl super::MobHandle {
     ///   for the member to be idle: a busy member is deferred.
     /// - A role change with no migration declared is held
     ///   ([`crate::HostPreparationCause::RoleMigrationUndeclared`]): every
-    ///   wake of the member is refused, and a Live member's run starts are
-    ///   held ([`crate::HostRunStartHoldReason::HostPreparation`]), so its
-    ///   run in flight finishes, never preempted, no new run starts under its
-    ///   previous role, and the mob releases it when idle. The explicit
+    ///   wake of the member is refused, and a Live local member's run starts
+    ///   are held ([`crate::HostRunStartHoldReason::HostPreparation`]), so
+    ///   its run in flight finishes, never preempted, no new run starts under
+    ///   its previous role, and the mob releases it when idle. A placed
+    ///   member's runs start on its member host, which these holds do not
+    ///   reach: a Live placed member keeps serving under its previous role
+    ///   until an apply ends the hold. On a session service without the
+    ///   retained metadata seam, an archived session's role cannot be read,
+    ///   so a revival on it is refused typed (`SessionError::Unsupported`);
+    ///   the host's `Fresh` first-boot request starts the identity's fresh
+    ///   life instead. The explicit
     ///   resume leaves it alone. An apply that restores the role ends the
     ///   hold at its verdict; one that declares the move ends it in the step
     ///   that commits the new role, so a deferred or refused restamp keeps it.
@@ -909,8 +919,10 @@ impl super::MobHandle {
     /// The role `session_id` was last built under, as its owner records it
     /// (archived sessions included). `None` for a session no build created,
     /// or one that records no role. A service without the retained metadata
-    /// seam answers through the ordinary metadata read, which sees no
-    /// archived session.
+    /// seam is read through its ordinary metadata read, which sees only a
+    /// session that is not archived: a session it does not see is refused
+    /// typed (`SessionError::Unsupported`), never read as one with no role,
+    /// unless MobMachine records that no build created it.
     async fn resume_session_role(
         &self,
         session_id: &SessionId,
@@ -921,11 +933,26 @@ impl super::MobHandle {
             .await
         {
             Ok(metadata) => metadata,
-            Err(meerkat_core::service::SessionError::Unsupported(_)) => self
-                .session_service
-                .load_persisted_session_metadata(session_id)
-                .await
-                .map_err(MobError::SessionError)?,
+            Err(meerkat_core::service::SessionError::Unsupported(reason)) => {
+                let metadata = self
+                    .session_service
+                    .load_persisted_session_metadata(session_id)
+                    .await
+                    .map_err(MobError::SessionError)?;
+                let never_built = super::boot_plan::domain_seat_session_never_born(
+                    &self.machine_state_watch_rx.borrow(),
+                    session_id,
+                );
+                if metadata.is_none() && !never_built {
+                    return Err(MobError::SessionError(
+                        meerkat_core::service::SessionError::Unsupported(format!(
+                            "the role session {session_id} was last built under cannot be \
+                             read without the retained metadata seam: {reason}"
+                        )),
+                    ));
+                }
+                metadata
+            }
             Err(error) => return Err(MobError::SessionError(error)),
         };
         Ok(metadata

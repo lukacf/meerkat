@@ -13,9 +13,9 @@
 # model still reads neither counter anywhere else, and fails otherwise. It
 # checks nine runs, each over its whole space with TLC coverage, in five
 # parts (--part entry: the entry and lifecycle runs; apply: the apply run;
-# legacy: the legacy and resume runs; roles: the roles and hold runs;
-# hosted: the held and placed runs; all of them by default; --part <run>
-# checks one run):
+# legacy: the legacy run; roles: the roles and hold runs; hosted: the held,
+# placed and resume runs; all of them by default; --part <run> checks one
+# run):
 #
 # - entry (identity_entry_audit.tla; three identities, two runtime ids, fence
 #   tokens 1..2, generations 0..1, two sessions): a replayed member and a
@@ -156,9 +156,9 @@ part_of() {
   case "$1" in
     entry|lifecycle) echo entry ;;
     apply) echo apply ;;
-    legacy|resume) echo legacy ;;
+    legacy) echo legacy ;;
     roles|hold) echo roles ;;
-    held|placed) echo hosted ;;
+    held|placed|resume) echo hosted ;;
     *) return 1 ;;
   esac
 }

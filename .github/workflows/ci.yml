@@ -936,7 +936,7 @@ jobs:
   # runs stay there (179 s and 212 s locally with 4 workers), a ninth
   # (audits-l) for the identity entry audit's entry part (260 s locally), and
   # four (audits-k, audits-m, audits-n, audits-o) for its declared apply's
-  # apply, legacy, roles and hosted parts (170, 244, 186 and 116 s locally
+  # apply, legacy, roles and hosted parts (170, 219, 186 and 142 s locally
   # with 4 workers); none of these seven is measured on a hosted runner yet.
   # The `machine-verify --all` sweep stays on nightly, the release gate and
   # the release-tag graph.

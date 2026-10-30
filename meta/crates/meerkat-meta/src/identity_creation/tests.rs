@@ -2073,6 +2073,7 @@ fn entry_facts(binding_digest: Sha256Digest) -> CreatedEntryFacts {
         profile: "assistant".to_owned(),
         model: "claude-opus-5-5".to_owned(),
         creator: lead().requester,
+        creator_live_tools: Some(lead().live_tools),
     }
 }
 
@@ -2112,6 +2113,44 @@ fn update_spec(set: UpdateSetSpec) -> UpdateIdentitySpec {
         set,
         rebind: false,
     }
+}
+
+#[test]
+fn a_host_update_checks_tools_against_the_creators_live_tools() {
+    let entry = entry_facts(current_binding());
+    let host = RequesterFacts::host("gateway");
+    let tools = |tools: &[&str]| {
+        update_spec(UpdateSetSpec {
+            tools: Some(tools.iter().map(|tool| (*tool).to_owned()).collect()),
+            ..UpdateSetSpec::default()
+        })
+    };
+    // notes_write is in the ceiling but not held by the agent creator: the
+    // host's update cannot seal it past the creator's bound.
+    assert_eq!(
+        update(&host, &entry, &tools(&["notes_write"]))
+            .unwrap_err()
+            .kind,
+        IdentityRefusalKind::ExceedsCreator {
+            tools: vec!["notes_write".to_owned()]
+        }
+    );
+    assert!(update(&host, &entry, &tools(&["search"])).is_ok());
+
+    // An unresolved creator lets nothing through but the floor.
+    let unresolved = CreatedEntryFacts {
+        creator_live_tools: None,
+        ..entry
+    };
+    assert_eq!(
+        update(&host, &unresolved, &tools(&["search"]))
+            .unwrap_err()
+            .kind,
+        IdentityRefusalKind::ExceedsCreator {
+            tools: vec!["search".to_owned()]
+        }
+    );
+    assert!(update(&host, &unresolved, &tools(&["notes_read"])).is_ok());
 }
 
 #[test]

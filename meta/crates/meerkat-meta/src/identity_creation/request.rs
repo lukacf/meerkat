@@ -26,7 +26,7 @@ use super::policy::{
 use super::refusal::{
     IdentityRefusal, IdentityRefusalKind, LimitKind, NameTakenBy, RequestProblem,
 };
-use super::template::{MobProfiles, TemplateBinding, resolve_binding};
+use super::template::{CreatorBound, MobProfiles, TemplateBinding, resolve_binding};
 
 /// The host surface of the console. A console requester is the host on
 /// this surface, and creates only from the console's templates.
@@ -253,6 +253,10 @@ pub struct CreatedEntryFacts {
     pub model: String,
     /// Who created it.
     pub creator: Requester,
+    /// The creating agent's tools now, when it is an agent that resolves;
+    /// `None` when it does not resolve. Unused for a host or human creator.
+    /// An update checks tools against it, whoever updates.
+    pub creator_live_tools: Option<BTreeSet<String>>,
 }
 
 /// Host-attested facts about where a request came from: provenance only,
@@ -970,28 +974,46 @@ fn authority_fields(
     Ok(fields.clone())
 }
 
-/// The tools a request asks for when it names none: every tool of the
-/// ceiling the creating agent holds, and the floor; for the host or a
-/// human, the ceiling.
-fn default_tools(template: &Template, requester: &RequesterFacts) -> BTreeSet<String> {
+/// The creator side of a create: the requesting agent's tools, or no
+/// bound for the host or a human.
+fn requester_bound(requester: &RequesterFacts) -> CreatorBound<'_> {
     match requester.requester.kind() {
-        CreatorKind::Agent => template
-            .ceiling()
-            .iter()
-            .filter(|tool| requester.live_tools.contains(*tool) || template.floor().contains(*tool))
-            .cloned()
-            .collect(),
-        CreatorKind::Host | CreatorKind::Human => template.ceiling().clone(),
+        CreatorKind::Agent => CreatorBound::Live(&requester.live_tools),
+        CreatorKind::Host | CreatorKind::Human => CreatorBound::Unbounded,
     }
 }
 
+/// The creator side of an update, whoever updates: the entry's agent
+/// creator's tools now (nothing when it does not resolve), or no bound for
+/// a host or human creator.
+fn entry_creator_bound(entry: &CreatedEntryFacts) -> CreatorBound<'_> {
+    match entry.creator.kind() {
+        CreatorKind::Agent => entry
+            .creator_live_tools
+            .as_ref()
+            .map_or(CreatorBound::Unresolved, CreatorBound::Live),
+        CreatorKind::Host | CreatorKind::Human => CreatorBound::Unbounded,
+    }
+}
+
+/// The tools a request asks for when it names none: every tool of the
+/// ceiling the creator side lets through, and the floor.
+fn default_tools(template: &Template, creator: CreatorBound<'_>) -> BTreeSet<String> {
+    template
+        .ceiling()
+        .iter()
+        .filter(|tool| template.floor().contains(*tool) || creator.holds(tool))
+        .cloned()
+        .collect()
+}
+
 /// The sealed tools of a request, checked against the template's ceiling
-/// and the creating agent's tools. In strict mode an excess is refused; in
-/// consequence mode each excess item is a consequence. Returns whether any
-/// excess was stated.
+/// and the creator side (`creator`). In strict mode an excess is refused;
+/// in consequence mode each excess item is a consequence. Returns whether
+/// any excess was stated.
 fn sealed_tools(
     template: &Template,
-    requester: &RequesterFacts,
+    creator: CreatorBound<'_>,
     requested: Option<&[String]>,
     identity: &str,
     field: &str,
@@ -999,19 +1021,14 @@ fn sealed_tools(
 ) -> Result<(BTreeSet<String>, bool), IdentityRefusal> {
     let sealed: BTreeSet<String> = match requested {
         Some(tools) => tools.iter().cloned().collect(),
-        None => default_tools(template, requester),
+        None => default_tools(template, creator),
     };
     let outside_template: Vec<String> = sealed.difference(template.ceiling()).cloned().collect();
-    let not_held: Vec<String> = match requester.requester.kind() {
-        CreatorKind::Agent => sealed
-            .iter()
-            .filter(|tool| {
-                !requester.live_tools.contains(*tool) && !template.floor().contains(*tool)
-            })
-            .cloned()
-            .collect(),
-        CreatorKind::Host | CreatorKind::Human => Vec::new(),
-    };
+    let not_held: Vec<String> = sealed
+        .iter()
+        .filter(|tool| !template.floor().contains(*tool) && !creator.holds(tool))
+        .cloned()
+        .collect();
     let excess = !outside_template.is_empty() || !not_held.is_empty();
     match template.excess() {
         ExcessMode::Strict if !outside_template.is_empty() => Err(refused(
@@ -1326,7 +1343,7 @@ pub fn normalize_create(
         }
         let (tools, excess) = sealed_tools(
             template,
-            requester,
+            requester_bound(requester),
             spec.tools.as_deref(),
             &identity,
             &format!("{path}.tools"),
@@ -1535,7 +1552,7 @@ pub fn normalize_update(
         Some(tools) => {
             let (sealed, excess) = sealed_tools(
                 template,
-                requester,
+                entry_creator_bound(entry),
                 Some(tools.as_slice()),
                 &entry.identity,
                 "set.tools",

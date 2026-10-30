@@ -250,6 +250,19 @@ pub enum CreatorBound<'a> {
     Unresolved,
 }
 
+impl CreatorBound<'_> {
+    /// Whether the creator side lets `tool` through: always without a
+    /// creator bound, when the agent creator holds it now, and never for an
+    /// unresolved one.
+    pub fn holds(self, tool: &str) -> bool {
+        match self {
+            Self::Unbounded => true,
+            Self::Live(live) => live.contains(tool),
+            Self::Unresolved => false,
+        }
+    }
+}
+
 /// A created identity's effective tools: `(sealed & ceiling & creator) |
 /// (sealed & floor) | (sealed & approved_excess)`. `sealed` is the tools
 /// its accepted request named; `approved_excess` the excess items a human

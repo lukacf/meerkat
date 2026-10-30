@@ -192,7 +192,7 @@ describe("empty shared-console panels", () => {
     fireEvent.click(memory);
     expect(await view.findByText("No teams are running.")).toBeTruthy();
     expect(view.getByText("Finish setting up a team to inspect its memory and work graph.")).toBeTruthy();
-    expect(view.queryByRole("combobox", { name: "Memory mob" })).toBeNull();
+    expect(view.queryByRole("combobox", { name: "Memory team" })).toBeNull();
     fireEvent.click(view.getByRole("button", { name: "WorkGraph", exact: true }));
     expect(await view.findByRole("heading", { name: "WorkGraph", exact: true })).toBeTruthy();
     expect(view.getByText("No teams are running.")).toBeTruthy();
@@ -224,7 +224,10 @@ describe("empty shared-console panels", () => {
     }));
     await waitFor(() => expect(queries().length).toBeGreaterThan(0));
     expect(view.queryByText("No teams are running.")).toBeNull();
-    expect(view.getByRole("combobox", { name: name === "Memory" ? "Memory mob" : "Work Graph mob" })).toHaveValue("alpha");
+    expect(view.getByRole("combobox", { name: name === "Memory" ? "Memory team" : "Work Graph team" })).toHaveValue("alpha");
+    // The picker's visible label says team, not mob.
+    const picker = view.getByRole("combobox", { name: name === "Memory" ? "Memory team" : "Work Graph team" });
+    expect(picker.closest(".cc-field")?.querySelector("label")?.textContent).toBe("Team");
     for (const [input] of queries()) expect(input.params?.runtime_key).toBe("alpha");
     view.unmount();
   });
@@ -315,7 +318,7 @@ describe("manual memory detail refresh", () => {
       fireEvent.click(view.getByTestId("memory-refresh"));
       await waitFor(() => expect(view.getByTestId("memory-error")).toHaveTextContent("record refresh unavailable"));
       expect(view.getByTestId("memory-detail")).toHaveTextContent(/injected 1.*recalled 1/);
-      expect(view.getByRole("combobox", { name: "Memory mob" })).toHaveValue("alpha");
+      expect(view.getByRole("combobox", { name: "Memory team" })).toHaveValue("alpha");
 
       detailError = false;
       count = 2;
@@ -352,13 +355,13 @@ describe("manual memory detail refresh", () => {
       releaseDetail = undefined;
       fireEvent.click(view.getByTestId("memory-refresh"));
       await waitFor(() => expect(releaseDetail).toBeDefined());
-      fireEvent.change(view.getByRole("combobox", { name: "Memory mob" }), { target: { value: "beta" } });
+      fireEvent.change(view.getByRole("combobox", { name: "Memory team" }), { target: { value: "beta" } });
       expect(view.queryByTestId("memory-detail")).toBeNull();
-      fireEvent.change(view.getByRole("combobox", { name: "Memory mob" }), { target: { value: "alpha" } });
+      fireEvent.change(view.getByRole("combobox", { name: "Memory team" }), { target: { value: "alpha" } });
       await act(async () => releaseDetail?.());
       await view.findByTestId("memory-tab:holdings");
       expect(view.queryByTestId("memory-detail")).toBeNull();
-      expect(view.getByRole("combobox", { name: "Memory mob" })).toHaveValue("alpha");
+      expect(view.getByRole("combobox", { name: "Memory team" })).toHaveValue("alpha");
     } finally {
       view.unmount();
     }

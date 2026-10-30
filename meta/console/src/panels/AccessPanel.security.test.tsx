@@ -580,3 +580,24 @@ describe("plain words", () => {
     expect(view.getByLabelText("Admins").getAttribute("data-testid")).toBe("access-admins-input");
   });
 });
+
+describe("Console access words", () => {
+  it("names people and services, never subjects, and says plainly what the rules leave out", () => {
+    const view = render(<AccessPanel {...props()} />);
+    const intro = view.container.querySelector(".access-panel__intro")?.textContent ?? "";
+    expect(intro.includes("do not give anyone access to agents' tools, data sources or connected accounts")).toBe(true);
+    expect(/native tool|connected-account permissions/.test(intro)).toBe(false);
+    const words = () => view.container.textContent ?? "";
+
+    fireEvent.click(screen.getByTestId("access-tab:groups"));
+    expect(words().includes("Email addresses or service names, separated by commas.")).toBe(true);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    fireEvent.click(screen.getByTestId("access-rule-new"));
+    expect(words().includes("People and services")).toBe(true);
+    expect(words().includes("With no groups and no people or services, the rule covers everyone.")).toBe(true);
+    expect(/\bsubjects?\b/i.test(words())).toBe(false);
+    fireEvent.click(screen.getByTestId("access-tab:preview"));
+    expect(screen.getByLabelText("Person or service").getAttribute("data-testid")).toBe("access-preview-subject");
+    expect(/\bsubjects?\b/i.test(words())).toBe(false);
+  });
+});

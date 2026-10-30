@@ -559,7 +559,7 @@ export function AccessPanel({
         />
         <TextField
           label="Members"
-          hint="Subjects, separated by commas."
+          hint="Email addresses or service names, separated by commas."
           testId="access-group-members"
           value={groupMembersDraft}
           onChange={(value) => { if (!groupBase) setGroupBase(captureBase()); setGroupMembersDraft(value); }}
@@ -623,14 +623,14 @@ export function AccessPanel({
           placeholder="ops"
         />
         <TextField
-          label="Subjects"
-          hint="Email addresses, separated by commas."
+          label="People and services"
+          hint="Email addresses or service names, separated by commas."
           value={ruleDraft.subjects}
           onChange={(value) => setRuleDraft({ ...ruleDraft, subjects: value })}
           placeholder="alice@example.com"
         />
       </div>
-      <p className="access-panel__form-note">With no groups and no subjects the rule covers everyone.</p>
+      <p className="access-panel__form-note">With no groups and no people or services, the rule covers everyone.</p>
       <SectionHeader as="h4" id={actionsLabelId} label="What" className="access-panel__form-head" />
       <div className="access-panel__actions" role="group" aria-labelledby={actionsLabelId}>
         {actions.map((action) => {
@@ -719,7 +719,7 @@ export function AccessPanel({
         divider={false}
       />
       <p className="access-panel__intro">
-        Manage who can see and do what in this console and the runtime behind it. These rules do not grant native tool, source or connected-account permissions.
+        Manage who can see and do what in this console and the runtime behind it. These rules do not give anyone access to agents' tools, data sources or connected accounts.
       </p>
       <PanelTabs<Tab>
         ariaLabel="Console access sections"
@@ -970,7 +970,7 @@ export function AccessPanel({
               </p>
               <div className="access-panel__form">
                 <TextField
-                  label="Subject"
+                  label="Person or service"
                   testId="access-preview-subject"
                   inputRef={previewSubjectInput}
                   value={previewSubject}

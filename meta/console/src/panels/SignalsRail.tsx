@@ -1,5 +1,6 @@
 import React from "react";
-import { describeMemoryTimelineEvent, stripPeerTransportScaffold } from "../lib/adapters";
+import { stripPeerTransportScaffold } from "../lib/adapters";
+import { describeMemoryEventForPeople } from "../lib/memory-event-words";
 import { describeFailure } from "../lib/failure-summary";
 import { memberKickoffNotice, memberKickoffPhaseLabel, type MemberKickoffNotice } from "@console-core";
 import type { ConsoleFrame, ConsoleRailFilterPresetConfig } from "../types";
@@ -376,7 +377,7 @@ function signalFromFrame(
       return { ...base, label: "Route changed", detail: truncate(textFromValue(data.reason) || "Routing updated") };
     default:
       if (frame.event.startsWith("memory.")) {
-        return memorySignal(frame, data, base);
+        return memorySignal(frame, data, base, displayName);
       }
       return null;
   }
@@ -392,8 +393,11 @@ function memorySignal(
   frame: ConsoleFrame,
   data: Record<string, unknown>,
   base: Omit<Signal, "label" | "detail">,
+  displayName: NameResolver,
 ): Signal | null {
-  const detail = truncate(describeMemoryTimelineEvent(frame.event, data));
+  // Agents by name and plain words; the technical line stays in the shared
+  // describeMemoryTimelineEvent for the transcript and audits.
+  const detail = truncate(describeMemoryEventForPeople(frame.event, data, { agentName: displayName }));
   const warning = (label: string): Signal => ({ ...base, severity: "warning", label, detail });
   const info = (label: string): Signal => ({ ...base, severity: "info", label, detail });
 
@@ -401,25 +405,25 @@ function memorySignal(
     case "memory.write.quarantined":
       return warning("Memory write quarantined");
     case "memory.taint.transition":
-      return data.kind === "tainted" ? warning("Session memory tainted") : null;
+      return data.kind === "tainted" ? warning("Session became untrusted") : null;
     case "memory.budget.denied":
-      return warning("Memory budget denied");
+      return warning("Memory budget reached");
     case "memory.hygiene.blocked":
-      return warning("Memory hygiene blocked");
+      return warning("Memory tidy-up blocked");
     case "memory.quarantine.release_blocked":
       return warning("Quarantine release blocked");
     case "memory.conflict.signal":
-      return warning("Memory conflict");
+      return warning("Conflicting memories");
     case "memory.dream.completed":
       return info("Memory dream completed");
     case "memory.record.promoted":
       return info("Memory record promoted");
     case "memory.harvest.completed":
-      return info("Memory harvest completed");
+      return info("Retired agent's memory summarized");
     case "memory.quarantine.verdict":
       return info("Quarantine verdict");
     case "memory.promotion.pending_gate":
-      return info("Promotion awaiting gate");
+      return info("Promotion waiting for approval");
     default:
       // memory.dream.started/skipped, memory.hygiene.proposed/applied/skipped,
       // memory.distill.timed_out, and any other subtype are not shown.

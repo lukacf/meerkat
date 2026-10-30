@@ -91,6 +91,7 @@ export default defineConfig({
       "console/src/panels/RosterPanel.test.tsx",
       "console/src/panels/AgentDetailsPanel.test.tsx",
       "console/src/panels/TimelinePanel.test.tsx",
+      "console/src/lib/memory-event-words.test.ts",
       "console/src/lib/operator-panel-integration.test.tsx",
       "packages/console-components/src/conversation/conversation-message-group.test.tsx",
       "packages/console-components/src/conversation/context-selection.test.tsx",

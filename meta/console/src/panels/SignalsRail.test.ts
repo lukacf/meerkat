@@ -200,7 +200,7 @@ test("signals rail surfaces blocked quarantine releases as a warning with adapte
   assert.equal(signal?.severity, "warning");
   assert.equal(
     signal?.detail,
-    "Quarantine release blocked for m-42 · matches secret pattern api_key",
+    "Release of a quarantined record blocked · it looks like a secret",
   );
 });
 
@@ -347,4 +347,29 @@ test("signals rail names who sent a turn: a scheduled run, a connector, another 
   assert.ok(titles.includes("An operator asked Nightly Monitor"), JSON.stringify(titles));
   assert.ok(titles.includes("You asked Nightly Monitor"), JSON.stringify(titles));
   assert.equal(titles.filter((title) => title.startsWith("You asked")).length, 1, JSON.stringify(titles));
+});
+
+test("signals rail memory lines lead with names and plain words, not keys", () => {
+  const directory = createAgentDirectory([{ id: "identity:research-analyst", label: "Research Analyst" }]);
+  const now = Date.now();
+  const frames: ConsoleFrame[] = [
+    {
+      id: "write-quarantined",
+      event: "memory.write.quarantined",
+      identity: "identity:research-analyst",
+      timestampMs: now,
+      data: { realm: "default", author: "identity:research-analyst", reason: "session tainted by configured untrusted tool" },
+    },
+    {
+      id: "promoted",
+      event: "memory.record.promoted",
+      identity: "identity:research-analyst",
+      timestampMs: now - 1_000,
+      data: { realm: "default", scope_kind: "mob", scope_key: "main", gated: true },
+    },
+  ];
+  const details = buildSignalGroupsForTest(frames, directory).map((group) => group.detail);
+  assert.ok(details.includes("A memory write from Research Analyst was quarantined · session tainted by configured untrusted tool"), JSON.stringify(details));
+  assert.ok(details.includes("A record moved to team memory after approval"), JSON.stringify(details));
+  assert.ok(!details.some((detail) => /identity:|mob:main/.test(detail)), JSON.stringify(details));
 });

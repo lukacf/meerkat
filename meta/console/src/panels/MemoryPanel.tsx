@@ -44,6 +44,7 @@ import {
   type Tone,
 } from "../../../packages/console-components/src/panel-kit";
 import { describeMemoryTimelineEvent } from "../lib/adapters";
+import { describeMemoryEventForPeople } from "../lib/memory-event-words";
 import { errorMessage, jsonRpcErrorCode } from "../lib/errors";
 import type {
   ConsoleFrame,
@@ -3105,11 +3106,15 @@ function AuditRunRow({
 /// pause-on-scroll / N-behind / auto-unfreeze discipline.
 export function MemoryLiveStrip({
   frames,
+  recordTitles,
   onPivot,
 }: {
   frames: ConsoleFrame[];
+  /** Record titles by memory id, so events name records people know. */
+  recordTitles?: ReadonlyMap<string, string>;
   onPivot: (realm: string | undefined, recordId: string) => void;
 }): React.JSX.Element {
+  const directory = useAgentDirectory();
   // Live-follow discipline: scrolling away from the top freezes the visible
   // list; "N behind · Jump to live" resumes. Frames dedupe by id so
   // snapshot_complete replays never double-render.
@@ -3158,7 +3163,12 @@ export function MemoryLiveStrip({
                 ? (frame.data as Record<string, unknown>)
                 : {};
             const pivot = memoryFramePivot(frame);
-            const text = describeMemoryTimelineEvent(frame.event, data);
+            // Names and record titles lead; the exact technical line is the
+            // tooltip.
+            const text = describeMemoryEventForPeople(frame.event, data, {
+              agentName: (key) => agentDisplayName(key, directory),
+              recordTitle: (memoryId) => recordTitles?.get(memoryId),
+            });
             return (
               <ListRow
                 key={frame.id}
@@ -3166,7 +3176,7 @@ export function MemoryLiveStrip({
                 className="memory-live__row"
                 testId={`memory-live-row:${frame.id}`}
                 title={text}
-                titleAttr={text}
+                titleAttr={describeMemoryTimelineEvent(frame.event, data)}
                 meta={
                   <>
                     {pivot ? (
@@ -4168,6 +4178,7 @@ export function MemoryPanel({
 
         <MemoryLiveStrip
           frames={memoryFrames}
+          recordTitles={recordTitles}
           onPivot={(realm, recordId) => void onSelectRecord(realm, recordId)}
         />
       </div>

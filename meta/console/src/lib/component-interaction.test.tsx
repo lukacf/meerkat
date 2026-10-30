@@ -16,8 +16,10 @@ import {
   ConsoleSidebar,
   ConversationRichContent,
   ConversationTranscript,
+  AgentDirectoryProvider,
   WorkGraphCard,
   __workGraphCardUiState,
+  createAgentDirectory,
 } from "@console-components";
 import { groupCopyText } from "../../../packages/console-components/src/conversation/conversation-message-group";
 import { buildSidebarViewState, buildWorkGraphOperatorResultFrame, mapFramesToTimelineEntries } from "./adapters";
@@ -270,6 +272,50 @@ test("stock Sidebar keyboard reorder preserves virtual scroll and restores focus
     );
     const live = dom.window.document.querySelector("[data-testid='sidebar-reorder-live']");
     assert.equal(live?.textContent, "Moved section Group 12 after Group 13.");
+  } finally {
+    root.unmount();
+    globalThis.window = previousWindow;
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
+test("MemoryLiveStrip rows lead with names and record titles; the raw line is the tooltip", async () => {
+  const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>");
+  const previousWindow = globalThis.window;
+  const previousDocument = globalThis.document;
+  globalThis.window = dom.window as unknown as Window & typeof globalThis;
+  globalThis.document = dom.window.document;
+  const rootElement = dom.window.document.getElementById("root");
+  assert.ok(rootElement);
+  const root = createRoot(rootElement);
+  const directory = createAgentDirectory([{ id: "identity:research-analyst", label: "Research Analyst" }]);
+  const frames = [
+    {
+      id: "blocked",
+      event: "memory.quarantine.release_blocked",
+      timestampMs: Date.now(),
+      data: { realm: "default", record_id: "mem-42", verdict: "release", class: "api_key" },
+    },
+    {
+      id: "promoted",
+      event: "memory.record.promoted",
+      timestampMs: Date.now() - 1_000,
+      data: { realm: "default", scope_kind: "identity", scope_key: "identity:research-analyst" },
+    },
+  ] as ConsoleFrame[];
+  try {
+    flushSync(() => {
+      root.render(
+        <AgentDirectoryProvider directory={directory}>
+          <MemoryLiveStrip frames={frames} onPivot={() => undefined} recordTitles={new Map([["mem-42", "Upstream API token"]])} />
+        </AgentDirectoryProvider>,
+      );
+    });
+    const title = (id: string) => dom.window.document.querySelector(`[data-testid='memory-live-row:${id}'] .cc-row__title`);
+    assert.equal(title("blocked")?.textContent, "Release of \u201cUpstream API token\u201d blocked · it looks like a secret");
+    assert.equal(title("blocked")?.getAttribute("title"), "Quarantine release blocked for mem-42 · matches secret pattern api_key");
+    assert.equal(title("promoted")?.textContent, "A record moved to Research Analyst's memory");
   } finally {
     root.unmount();
     globalThis.window = previousWindow;

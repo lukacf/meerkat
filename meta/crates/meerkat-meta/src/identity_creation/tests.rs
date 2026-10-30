@@ -2560,6 +2560,81 @@ fn escaping_round_trips_and_neutralizes_markup() {
     );
 }
 
+/// The characters render-v1 writes as `\u{XXXX}`, as inclusive ranges of
+/// code points. Changing the set is render-v2.
+const HIDDEN_V1: [(u32, u32); 46] = [
+    (0x0000, 0x001F),
+    (0x007F, 0x00A0),
+    (0x00AD, 0x00AD),
+    (0x034F, 0x034F),
+    (0x0600, 0x0605),
+    (0x061C, 0x061C),
+    (0x06DD, 0x06DD),
+    (0x070F, 0x070F),
+    (0x0890, 0x0891),
+    (0x08E2, 0x08E2),
+    (0x115F, 0x1160),
+    (0x1680, 0x1680),
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180F),
+    (0x2000, 0x200F),
+    (0x2028, 0x202F),
+    (0x205F, 0x206F),
+    (0x2800, 0x2800),
+    (0x3000, 0x3000),
+    (0x3164, 0x3164),
+    (0xE000, 0xF8FF),
+    (0xFDD0, 0xFDEF),
+    (0xFE00, 0xFE0F),
+    (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0),
+    (0xFFF0, 0xFFFB),
+    (0xFFFE, 0xFFFF),
+    (0x110BD, 0x110BD),
+    (0x110CD, 0x110CD),
+    (0x13430, 0x1343F),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0x1FFFE, 0x1FFFF),
+    (0x2FFFE, 0x2FFFF),
+    (0x3FFFE, 0x3FFFF),
+    (0x4FFFE, 0x4FFFF),
+    (0x5FFFE, 0x5FFFF),
+    (0x6FFFE, 0x6FFFF),
+    (0x7FFFE, 0x7FFFF),
+    (0x8FFFE, 0x8FFFF),
+    (0x9FFFE, 0x9FFFF),
+    (0xAFFFE, 0xAFFFF),
+    (0xBFFFE, 0xBFFFF),
+    (0xCFFFE, 0xCFFFF),
+    (0xDFFFE, 0xE0FFF),
+    (0xEFFFE, 0x10_FFFF),
+];
+
+#[test]
+fn the_escape_sets_are_frozen_for_render_v1() {
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    for character in (0..=0x10_FFFF_u32).filter_map(char::from_u32) {
+        if !is_hidden(character) {
+            continue;
+        }
+        let code = u32::from(character);
+        match ranges.last() {
+            Some(&(start, end)) if end + 1 == code => {
+                let last = ranges.len() - 1;
+                ranges[last] = (start, code);
+            }
+            _ => ranges.push((code, code)),
+        }
+    }
+    assert_eq!(ranges, HIDDEN_V1);
+    let markup: String = (0..=0x10_FFFF_u32)
+        .filter_map(char::from_u32)
+        .filter(|character| is_markup(*character))
+        .collect();
+    assert_eq!(markup, "&*<>[]_`|~");
+}
+
 #[test]
 fn a_rendering_past_its_limit_is_refused() {
     let mut request = golden_create();

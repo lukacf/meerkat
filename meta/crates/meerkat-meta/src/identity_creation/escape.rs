@@ -19,6 +19,11 @@
 //! Decoding accepts exactly the encoder's output: a raw character the
 //! encoder would have escaped, or an escape it would not have written, is
 //! refused.
+//!
+//! Both sets are part of render-v1's bytes. The executor renders a request
+//! again when it runs, so a set that changed in between would change the
+//! rendering of a held request and close its decision. They are frozen (a
+//! row pins every hidden range): changing either is render-v2.
 
 /// Whether `character` can form markup in a presenter that interprets it.
 pub(crate) fn is_markup(character: char) -> bool {
@@ -60,7 +65,7 @@ pub(crate) fn is_hidden(character: char) -> bool {
                 | 0xFE00..=0xFE0F
                 | 0xFEFF
                 | 0xFFA0
-                | 0xFFF9..=0xFFFB
+                | 0xFFF0..=0xFFFB
                 | 0x110BD
                 | 0x110CD
                 | 0x13430..=0x1343F

@@ -284,9 +284,11 @@ runtimes that run session and mob work. Without it they take 8 MiB, or
 `RUST_MIN_STACK` when that asks for more; with neither set nothing changes.
 
 **Do:** correct an invalid `RKAT_WORKER_STACK_BYTES` before you upgrade: it
-now fails every operation that needs these runtimes. The turns of
-runtime-backed mob members run on the cleanup runtime's two workers, so keep
-member tools non-blocking.
+now fails every operation that needs these runtimes. Through 0.9.8 the turns
+of runtime-backed mob members run on the cleanup runtime's two workers, so
+keep member tools non-blocking there. From 0.9.9 they run on the host's
+runtime, the runtime of the task that provisions the member (see the 0.9.9
+changelog).
 
 ### Consent on stock governed realms
 

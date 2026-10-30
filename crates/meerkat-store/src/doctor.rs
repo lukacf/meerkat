@@ -4601,6 +4601,72 @@ mod tests {
         assert!(codes(&diagnosis).contains(&FINDING_SESSION_DOCUMENT_UNDECODABLE));
     }
 
+    /// Before a rollback an operator needs the sessions a release without
+    /// operator instructions refuses: the doctor lists the heads (and the
+    /// head-less documents) written at the operator-instruction envelope,
+    /// and nothing else.
+    #[tokio::test]
+    async fn sessions_at_the_operator_instruction_envelope_are_listed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "envelopes", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let plain_id = Session::new().id().clone();
+        let instructed_id = Session::new().id().clone();
+        let headless_id = Session::new().id().clone();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session_heads (
+                    session_id TEXT PRIMARY KEY, version INTEGER, strand TEXT,
+                    head_revision TEXT, message_count INTEGER, rewrite_count INTEGER,
+                    total_tokens INTEGER, created_at_ms INTEGER, updated_at_ms INTEGER,
+                    metadata_json TEXT, head_json BLOB, cas_token TEXT)",
+            )
+            .unwrap();
+            for (id, version) in [(&plain_id, 4), (&instructed_id, 5)] {
+                conn.execute(
+                    "INSERT INTO session_heads (session_id, version, strand, head_revision, \
+                     message_count, rewrite_count, total_tokens, created_at_ms, updated_at_ms, \
+                     metadata_json, head_json, cas_token) \
+                     VALUES (?1, ?2, 'root', 'digest', 0, 0, 0, 0, 0, '{}', '{}', 'cas')",
+                    rusqlite::params![id.to_string(), version],
+                )
+                .unwrap();
+            }
+            // A head-less WholeBlob document at envelope 5.
+            conn.execute(
+                "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, message_count, \
+                 total_tokens, metadata_json, session_json) VALUES (?1, 0, 0, 0, 0, '{}', ?2)",
+                rusqlite::params![
+                    headless_id.to_string(),
+                    br#"{"version":5,"messages":[]}"#.as_slice()
+                ],
+            )
+            .unwrap();
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let listed = finding(&diagnosis, FINDING_OPERATOR_INSTRUCTION_ENVELOPE)
+            .expect("operator-instruction envelope finding");
+        assert_eq!(listed.severity, FindingSeverity::Info);
+        assert_eq!(listed.realm.as_deref(), Some("envelopes"));
+        assert!(
+            listed.message.contains("2 session(s)"),
+            "{}",
+            listed.message
+        );
+        assert!(listed.message.contains(&instructed_id.to_string()));
+        assert!(listed.message.contains(&headless_id.to_string()));
+        assert!(
+            !listed.message.contains(&plain_id.to_string()),
+            "a session at the baseline envelope is not listed: {}",
+            listed.message
+        );
+    }
+
     #[tokio::test]
     async fn headless_strand_rows_are_not_misread_as_inline_history() {
         let temp = tempfile::tempdir().unwrap();

@@ -752,7 +752,9 @@ bounds.
   resolve a lineage inside the caller's own observation of the publication and
   return `LineageResolutionRefusal::Changed` when an owner change published
   during the resolution (classify it as a stale read) or `Refused` with the
-  refusal the standalone resolution reports. A standalone
+  refusal the standalone resolution reports. A caller with no enclosing
+  observation whose answer can say "ask again" uses them too and classifies
+  `Changed` as a change of policy, as native admission does. A standalone
   `LocalGrantAuthority::resolve_lineage` still reports a concurrent change as
   `GrantRefusal::Unavailable`.
 - In the native runtime that stale read is `ReprepareRequired`. A grant-backed
@@ -760,8 +762,14 @@ bounds.
   ceilings of work that names other originals (a helper's source). Controller
   admission refuses with `ReprepareRequired`, which the runtime driver reports as
   `RuntimeDriverError::ControllerReadinessUnavailable` with
-  `ControllerReadinessFailure::PolicyChanged`. A review read, which reads its
-  material once by design, refuses as stale (`ToolError::AuthorizationRefused`
+  `ControllerReadinessFailure::PolicyChanged`. Native admission of a scoped
+  original (`ScopedOriginalIngress`, which reads the admitted original's own
+  grant-lineage mandate and the liveness of each contributor it names), the
+  retained-resume check (`ScopedRetainedResume`) and
+  `require_source_original_live` called outside an exclusion of owner changes
+  answer a change one of those reads meets with readiness `PolicyChanged` as
+  well. A review read, which reads its material once by design, refuses as
+  stale (`ToolError::AuthorizationRefused`
   with `ReprepareRequired`) instead of an unavailable review context, and a
   fresh attempt reads it again. `AgentInstallationGrant` reports a change it
   meets while reading the agent's lineage as `McpAttachmentRefusal::NotCurrent`.

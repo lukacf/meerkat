@@ -151,6 +151,10 @@ Map typed errors before rendering text:
   `ControllerReadinessFailure::PolicyChanged`, a review read refuses as stale
   instead of reporting an unavailable review context, and a configured MCP
   attachment's per-agent grant check answers `McpAttachmentRefusal::NotCurrent`.
+  Native admission of a scoped original (its own grant-lineage mandate and each
+  named contributor's liveness) and a retained resume report a change they meet
+  as `ControllerReadinessFailure::PolicyChanged` too, and so does
+  `require_source_original_live` called outside an exclusion of owner changes.
   A governed helper's admission fence and a helper child issuance answer
   `Unavailable` rather than `Denied` when their check refuses to rebuild. A
   poisoned publication, failed durable grant custody and a clock failure still

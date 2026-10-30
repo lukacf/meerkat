@@ -128,6 +128,12 @@ pub struct ConsoleLiveSnapshot {
     /// ([`crate::unobserved`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unobserved: Option<UnobservedFacts>,
+    /// Each listed identity's newest console activity, in milliseconds since
+    /// the epoch, keyed by console identity: the console frame log's newest
+    /// frame of the identity acting. Advisory: an identity without an entry
+    /// has no known activity. Reading it enters no member, so it wakes none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_activity_ms: BTreeMap<String, u64>,
 }
 
 fn console_member_console_identity(member: &ConsoleMember) -> &str {
@@ -168,7 +174,35 @@ impl ConsoleLiveSnapshot {
             unobserved: running
                 .is_none()
                 .then(|| UnobservedFacts::new(UnobservedReason::NotObserved, &["running"])),
+            last_activity_ms: BTreeMap::new(),
         }
+    }
+
+    /// The snapshot with each identity's last console activity
+    /// ([`Self::last_activity_ms`]).
+    #[must_use]
+    pub(crate) fn with_last_activity_ms(mut self, last_activity_ms: BTreeMap<String, u64>) -> Self {
+        self.last_activity_ms = last_activity_ms;
+        self
+    }
+
+    /// The console identities this snapshot lists: each member's console
+    /// identity and each agent's identity (its member id when it has none),
+    /// sorted and without repeats.
+    pub(crate) fn listed_identities(&self) -> Vec<String> {
+        let mut identities = BTreeSet::new();
+        for member in &self.members {
+            identities.insert(console_member_console_identity(member).to_string());
+        }
+        for agent in &self.agents {
+            identities.insert(
+                agent
+                    .identity
+                    .clone()
+                    .unwrap_or_else(|| agent.member_id.clone()),
+            );
+        }
+        identities.into_iter().collect()
     }
 }
 
@@ -285,14 +319,41 @@ pub(crate) fn handle_console_rest_json_route_with_pending_rows(
     workgraph_available: bool,
     pending: &BTreeSet<String>,
 ) -> ConsoleRestJsonResponse {
+    match authorize_console_rest_json_route(decisions, fences, request) {
+        Ok(resolved_auth) => render_console_rest_json_route(
+            decisions,
+            fences,
+            request,
+            resolved_auth.as_ref(),
+            live_snapshot,
+            access,
+            memory_panel_available,
+            workgraph_available,
+            pending,
+        ),
+        Err(refused) => refused,
+    }
+}
+
+/// The route and credential checks of
+/// [`handle_console_rest_json_route_with_pending_rows`], alone: the caller's
+/// resolved authentication (`None` where the console does not require it
+/// and none was presented), or the response that refuses the request. A
+/// caller with reads that only a served request needs runs this first and
+/// then [`render_console_rest_json_route`] with its answer.
+pub(crate) fn authorize_console_rest_json_route(
+    decisions: &RuntimeDecisionState,
+    fences: &ConsoleSessionFences,
+    request: &ConsoleRestJsonRequest,
+) -> Result<Option<ConsoleAccessRequest>, ConsoleRestJsonResponse> {
     let (base_path, query_params) = split_path_and_query(&request.path);
     if request.method != "GET"
         || (base_path != CONSOLE_MODULES_ROUTE && base_path != CONSOLE_EXPERIENCE_ROUTE)
     {
-        return ConsoleRestJsonResponse {
+        return Err(ConsoleRestJsonResponse {
             status: 404,
             body: serde_json::json!({"error":"not_found"}),
-        };
+        });
     }
 
     let resolved_auth = match resolve_console_auth(decisions, request.auth.as_ref(), &query_params)
@@ -302,13 +363,13 @@ pub(crate) fn handle_console_rest_json_route_with_pending_rows(
         }) {
         Ok(auth) => auth,
         Err(error) => {
-            return ConsoleRestJsonResponse {
+            return Err(ConsoleRestJsonResponse {
                 status: 401,
                 body: serde_json::json!({
                     "error":"unauthorized",
                     "reason": console_auth_error_reason(&error),
                 }),
-            };
+            });
         }
     };
 
@@ -317,32 +378,49 @@ pub(crate) fn handle_console_rest_json_route_with_pending_rows(
             if let Err(error) =
                 enforce_console_route_access(&decisions.auth, &decisions.console, auth)
             {
-                return ConsoleRestJsonResponse {
+                return Err(ConsoleRestJsonResponse {
                     status: 401,
                     body: serde_json::json!({
                         "error":"unauthorized",
                         "reason": auth_error_reason(&error),
                     }),
-                };
+                });
             }
         }
         None if decisions.console.require_app_auth => {
-            return ConsoleRestJsonResponse {
+            return Err(ConsoleRestJsonResponse {
                 status: 401,
                 body: serde_json::json!({
                     "error":"unauthorized",
                     "reason":"missing_credentials",
                 }),
-            };
+            });
         }
         None => {}
     }
+    Ok(resolved_auth)
+}
 
+/// The response to a request [`authorize_console_rest_json_route`] accepted,
+/// given the authentication it resolved.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_console_rest_json_route(
+    decisions: &RuntimeDecisionState,
+    fences: &ConsoleSessionFences,
+    request: &ConsoleRestJsonRequest,
+    resolved_auth: Option<&ConsoleAccessRequest>,
+    live_snapshot: Option<&ConsoleLiveSnapshot>,
+    access: Option<&AccessController>,
+    memory_panel_available: bool,
+    workgraph_available: bool,
+    pending: &BTreeSet<String>,
+) -> ConsoleRestJsonResponse {
+    let (base_path, query_params) = split_path_and_query(&request.path);
     // Subject for ABAC. When app auth is not required the auth resolver
     // returns None without looking at credentials; still identify callers
     // that *did* present a valid token so per-user grants apply on
     // auth-optional consoles. Invalid tokens fall back to anonymous.
-    let mut access_subject = resolved_auth.as_ref().map(|auth| auth.email.clone());
+    let mut access_subject = resolved_auth.map(|auth| auth.email.clone());
     if access_subject.is_none()
         && access.is_some()
         && !decisions.console.require_app_auth
@@ -709,15 +787,16 @@ const PENDING_TOPOLOGY_WITHHELD_FIELDS: &[&str] =
 /// The sidebar row of an identity answered pending: its identity binding
 /// moved and the read model had not re-collected it by the refresh deadline.
 /// It carries only what the owners answer now (the identity runtime's
-/// session and the runtime machine's bounded run state), the identity and
-/// the typed marker: state "unknown", fail-closed affordances (no send, no
-/// retire; a respawn resolves its target live). Visibility and access
-/// already decided on the walked facts, so a policy that matches them still
-/// applies.
+/// session, the runtime machine's bounded run state and the console frame
+/// log's last activity), the identity and the typed marker: state
+/// "unknown", fail-closed affordances (no send, no retire; a respawn
+/// resolves its target live). Visibility and access already decided on the
+/// walked facts, so a policy that matches them still applies.
 fn pending_sidebar_record(
     member: &ConsoleMember,
     console_identity: &str,
     response_phase: Option<&Option<String>>,
+    last_activity_ms: Option<u64>,
     is_read_only: bool,
     is_aggregate_console: bool,
 ) -> Value {
@@ -747,6 +826,11 @@ fn pending_sidebar_record(
     });
     if let Some(phase) = response_phase {
         record["response_phase"] = serde_json::json!(phase);
+    }
+    // The console frame log answers this, not the read model, so a pending
+    // row keeps it.
+    if let Some(at) = last_activity_ms {
+        record["last_activity_ms"] = serde_json::json!(at);
     }
     record
 }
@@ -838,6 +922,7 @@ fn build_console_experience_contract(
                             member,
                             console_identity,
                             response_phases.get(console_identity).copied(),
+                            live_snapshot.last_activity_ms.get(console_identity).copied(),
                             is_read_only,
                             is_aggregate_console,
                         );
@@ -914,6 +999,9 @@ fn build_console_experience_contract(
                     if let Some(phase) = response_phases.get(console_identity) {
                         record["response_phase"] = serde_json::json!(phase);
                     }
+                    if let Some(at) = live_snapshot.last_activity_ms.get(console_identity) {
+                        record["last_activity_ms"] = serde_json::json!(at);
+                    }
                     if let Some(source) = side_chat_of {
                         record["side_chat_of"] = serde_json::json!(source);
                     }
@@ -974,6 +1062,14 @@ fn build_console_experience_contract(
                         "response_phase".to_string(),
                         serde_json::json!(response_phase),
                     );
+                }
+                if let Some(at) = live_snapshot.last_activity_ms.get(
+                    agent
+                        .identity
+                        .as_deref()
+                        .unwrap_or(agent.member_id.as_str()),
+                ) {
+                    record.insert("last_activity_ms".to_string(), serde_json::json!(at));
                 }
                 if is_aggregate_console {
                     record.insert("addressable".to_string(), Value::Bool(true));
@@ -1105,7 +1201,7 @@ fn build_console_experience_contract(
                 "supported_scopes": ["mob", "agent"],
             },
             "list_item_contract": {
-                "fields": ["agent_id", "member_id", "identity", "label", "kind", "role", "state", "progress", "model_capabilities", "response_phase", "wired_to", "labels", "group", "addressable", "affordances", "watched", "alertLevel", "degraded", "degradedReason"],
+                "fields": ["agent_id", "member_id", "identity", "label", "kind", "role", "state", "progress", "model_capabilities", "response_phase", "last_activity_ms", "wired_to", "labels", "group", "addressable", "affordances", "watched", "alertLevel", "degraded", "degradedReason"],
                 "agent_id_field": "agent_id",
                 "member_id_field": "member_id",
                 "group_by_field": "group",
@@ -1376,6 +1472,9 @@ fn build_identity_status_rows(sidebar_agents: &[Value], pending: &BTreeSet<Strin
             }
             if let Some(response_phase) = agent.get("response_phase") {
                 row["response_phase"] = response_phase.clone();
+            }
+            if let Some(at) = agent.get("last_activity_ms").and_then(Value::as_u64) {
+                row["last_activity_ms"] = Value::from(at);
             }
             if let Some(model_capabilities) = agent.get("model_capabilities") {
                 row["model_capabilities"] = model_capabilities.clone();
@@ -2357,6 +2456,97 @@ fn auth_error_reason(error: &DecisionPolicyError) -> &'static str {
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
+mod last_activity_tests {
+    use super::*;
+    use crate::decisions::ConsolePolicy;
+    use serde_json::Value;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn member(identity: &str) -> ConsoleMember {
+        ConsoleMember {
+            agent_identity: identity.to_string(),
+            role: "analyst".to_string(),
+            state: "active".to_string(),
+            model_capabilities: ConsoleModelCapabilities::default(),
+            runtime_mode: None,
+            session_id: None,
+            wired_to: Vec::new(),
+            labels: BTreeMap::new(),
+            progress: None,
+        }
+    }
+
+    fn rows_by_identity(rows: &Value) -> BTreeMap<String, Value> {
+        rows.as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| {
+                (
+                    row["identity"].as_str().expect("identity").to_string(),
+                    row.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// The experience renders each identity's last activity where it renders
+    /// the identity's other facts: the sidebar row and the identity_status and
+    /// health rows. An identity without one carries none, which reads unknown.
+    /// A pending row keeps it: the console frame log answers it, not the read
+    /// model whose facts a pending row withholds.
+    #[test]
+    fn experience_rows_carry_last_activity_and_leave_unknown_absent() {
+        let snapshot = ConsoleLiveSnapshot::new(
+            Some("mob-a".to_string()),
+            Some(true),
+            Vec::new(),
+            Vec::new(),
+            vec![member("router"), member("delivery"), member("moved")],
+            true,
+        )
+        .with_last_activity_ms(BTreeMap::from([
+            ("router".to_string(), 1_700_000_000_000),
+            ("moved".to_string(), 1_700_000_000_500),
+        ]));
+        assert_eq!(
+            snapshot.listed_identities(),
+            vec![
+                "delivery".to_string(),
+                "moved".to_string(),
+                "router".to_string()
+            ],
+        );
+
+        let pending = BTreeSet::from(["moved".to_string()]);
+        let body =
+            build_console_experience_contract(&[], &snapshot, &ConsolePolicy::default(), &pending);
+        for path in [
+            "/agent_sidebar/live_snapshot/agents",
+            "/identity_status/rows",
+            "/health_overview/live_snapshot/identities",
+        ] {
+            let rows = rows_by_identity(body.pointer(path).expect(path));
+            let last_activity = |identity: &str| {
+                rows.get(identity)
+                    .map(|row| row.get("last_activity_ms").cloned())
+            };
+            assert_eq!(
+                last_activity("router"),
+                Some(Some(Value::from(1_700_000_000_000_u64))),
+                "{path}"
+            );
+            assert_eq!(last_activity("delivery"), Some(None), "{path}");
+            assert_eq!(
+                last_activity("moved"),
+                Some(Some(Value::from(1_700_000_000_500_u64))),
+                "{path}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
 mod access_priming_tests {
     use super::*;
     use crate::access::{ACTION_AGENT_VIEW, AccessControlConfig, AccessEffect, AccessRule};
@@ -2439,6 +2629,7 @@ mod access_priming_tests {
             members: vec![member("scout", "worker", "public")],
             has_mob_runtime: true,
             unobserved: None,
+            last_activity_ms: BTreeMap::new(),
         };
         // The first poll records the roster.
         prime_access_attributes(&controller, &snapshot);

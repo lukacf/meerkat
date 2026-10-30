@@ -87,6 +87,7 @@ export default defineConfig({
       "console/src/panels/PendingStack.test.tsx",
       "console/src/panels/transcript-window.test.ts",
       "console/src/panels/Sidebar.activity.test.tsx",
+      "console/src/panels/Sidebar.order.test.tsx",
       "console/src/panels/OperatorPanel.test.tsx",
       "console/src/panels/RosterPanel.test.tsx",
       "console/src/panels/AgentDetailsPanel.test.tsx",

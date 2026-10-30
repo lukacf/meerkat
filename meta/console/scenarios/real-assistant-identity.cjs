@@ -143,7 +143,7 @@ async function assistantIdentity(host) {
     result.navigations.push({ reload, requestedUrl: fixture.baseUrl + hostRoute, actualUrl: page.url() });
     assert.equal(new URL(page.url()).origin, fixture.baseUrl, "identity scenario stays on the fixture origin");
     assert.equal(new URL(page.url()).pathname, hostRoute, "identity scenario opens the selected host route");
-    if (host !== "shared" && !await pane().count()) await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: /router:main/ }).first().click();
+    if (host !== "shared" && !await pane().count()) await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: /router:main|Router main/ }).first().click();
     await page.locator('[data-testid="console-transport-status"][data-phase="live"]').waitFor();
     await composer().waitFor(); allowance = null;
     if (host === "embedded") {

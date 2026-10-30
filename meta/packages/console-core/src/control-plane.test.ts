@@ -81,6 +81,20 @@ test("normalizeIdentityStatusRow and response phase trim data without inventing 
   assert.equal(normalizeResponsePhase("thinking"), null);
 });
 
+test("normalizeIdentityStatusRow keeps an advisory last activity time and drops a malformed one", () => {
+  const row = (last_activity_ms: unknown) => normalizeIdentityStatusRow({
+    identity: "router:main",
+    state: "active",
+    addressability: "addressable",
+    last_activity_ms,
+  });
+
+  assert.equal(row(1_700_000_000_000)?.last_activity_ms, 1_700_000_000_000);
+  for (const malformed of [undefined, null, -1, Number.NaN, "1700000000000"]) {
+    assert.equal(row(malformed) !== null && "last_activity_ms" in row(malformed)!, false, String(malformed));
+  }
+});
+
 test("normalizeIdentityStatusRow carries the machine-owned progress projection", () => {
   const row = normalizeIdentityStatusRow({
     identity: "domain:network",

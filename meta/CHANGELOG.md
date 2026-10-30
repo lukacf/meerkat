@@ -128,6 +128,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`ConflictingConfiguration`): the builder composes its own
   (`agent_customizer`).
 
+- The Console's roster can be ordered by hand: drag an agent by the grip that
+  shows on hover, or focus it and press Alt+Up or Alt+Down, to move it among
+  the agents of its category, subgroup or parent (its nested agents move with
+  it), and the move is announced. Group (Category or None) and Sort (Manual,
+  Name or Last activity) controls under the search box choose a categorized or
+  a flat list (in the category order until an agent is moved), kept in the
+  manual order, by name (numbers in order) or with the most recently active
+  agents first. The manual order, the view and the pins
+  are kept in the browser per user and console, and an `[agent_list]`
+  configuration edit no longer resets them; pins an earlier console kept carry
+  over once. An agent row's second line now reads as the agent's role or group
+  and its status in words or its last activity (`Router · active 3 min ago`);
+  its identity moved to the row's tooltip and a copy action, and an agent
+  without a display name is named by its identity in words (`router:main`
+  reads "Router main") or, for a generated id, by its kind and a short suffix.
+
+- `/console/experience` sidebar, `identity_status` and `health_overview` rows
+  carry `last_activity_ms`, the newest time the console's frame log recorded
+  the agent acting (a live runtime event, a console send or a tool
+  application, not a lifecycle record, an interaction failure or a memory
+  event), found among the agent's newest 512 frames. It is advisory (absent
+  means unknown) and reading it wakes no agent. `ConsoleLogStore` gains
+  `latest_activity_times`, with a default that reports none; a store that
+  wraps another must forward it.
+
 ### Changed
 
 - `meta/fork_helper` on the Console answers a source agent the console's

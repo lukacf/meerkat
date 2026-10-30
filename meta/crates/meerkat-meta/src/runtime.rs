@@ -59,6 +59,8 @@ mod session_store;
 mod supervisor;
 
 pub use bootstrap::{start_meta_runtime, start_meta_runtime_with_options};
+#[cfg(test)]
+pub(crate) use console_ingress::handle_console_rest_json_route_with_pending_rows;
 /// Applies no session fence; use the routers a [`crate::UnifiedRuntime`] builds,
 /// or the `_under_session_fences` variant
 /// ([`validate_console_token_under_session_fences`]).
@@ -76,9 +78,10 @@ pub use console_ingress::{
     validate_console_token_under_session_fences,
 };
 pub(crate) use console_ingress::{
-    ConsoleCallerVerification, ResolvedConsoleCaller, console_member_access_attributes,
-    fold_console_member_attributes, handle_console_rest_json_route_with_pending_rows,
-    resolve_authorized_console_caller_from_token, session_fence_first_accepted_iat,
+    ConsoleCallerVerification, ResolvedConsoleCaller, authorize_console_rest_json_route,
+    console_member_access_attributes, fold_console_member_attributes,
+    render_console_rest_json_route, resolve_authorized_console_caller_from_token,
+    session_fence_first_accepted_iat,
 };
 pub use event_transport::normalize_event_line;
 pub(crate) use gating::is_legacy_sequential_pending_id;

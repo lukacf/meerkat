@@ -108,7 +108,7 @@ async function durableSteer(host, persistedBackgroundJob = false) {
   async function open(reload = false) {
     allowance = "navigation";
     if (reload) await page.reload(); else await page.goto(fixture.baseUrl + (host === "shared" ? "/shared" : "/scoped"));
-    if (host === "stock" && !await pane().count()) await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: /router:main/ }).first().click();
+    if (host === "stock" && !await pane().count()) await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: /router:main|Router main/ }).first().click();
     if (host === "shared") await page.getByRole("combobox", { name: "Agent", exact: true }).selectOption(identity);
     await page.locator('[data-testid="console-transport-status"][data-phase="live"]').waitFor();
     await composer().waitFor();

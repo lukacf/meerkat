@@ -265,7 +265,7 @@ async function startupLineage(host) {
     allowance = "initialization";
     if (reload) await page.reload(); else await page.goto(fixture.baseUrl + (host === "shared" ? "/shared" : "/console"));
     if (host === "stock" && !await pane().count()) {
-      await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: /router:main/ }).first().click();
+      await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: /router:main|Router main/ }).first().click();
     }
     if (host === "shared") await page.getByRole("combobox", { name: "Agent", exact: true }).selectOption(agentIdentity);
     await page.locator('[data-testid="console-transport-status"][data-phase="live"]').waitFor();

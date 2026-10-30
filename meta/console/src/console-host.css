@@ -1279,6 +1279,20 @@ svg[data-svg="fit"],
 .sidebar__activity-filters button:hover { color: var(--ink); background: var(--bg-hover); }
 .sidebar__activity-filters button[aria-pressed="true"] { color: var(--ink); background: var(--bg-elev-2); box-shadow: inset 0 0 0 1px var(--line); }
 .sidebar__activity-filters button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sidebar__view { display: flex; gap: 6px; margin-top: 8px; }
+.sidebar__view-control {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--ink-dim);
+}
+.sidebar__view-control select {
+  flex: 1; min-width: 0;
+  padding: 3px 4px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-elev-1); color: var(--ink);
+  font: inherit; font-size: 11px;
+}
+.sidebar__view-control select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .sidebar__search input::placeholder { color: var(--ink-faint); }
 .sidebar__search input:focus { outline: none; border-color: var(--line-strong); background: var(--bg-elev-2); }
@@ -1638,12 +1652,52 @@ svg[data-svg="fit"],
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .agent[data-state="retired"] .agent__name { color: var(--ink-dim); }
-.agent__id {
-  font-family: var(--mono);
-  font-size: 10.5px;
+.agent__detail {
+  display: flex;
+  min-width: 0;
+  font-size: 11px;
   color: var(--ink-dim);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.agent__detail-kind { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.agent__detail-separator { white-space: pre; }
+.agent__detail-status { flex: none; }
+/* Manual order: a grip on hover or focus, and a line where the row lands. */
+.agent__grip {
+  position: absolute;
+  left: 1px;
+  top: 50%;
+  width: 8px;
+  height: 18px;
+  transform: translateY(-50%);
+  cursor: grab;
+  touch-action: none;
+  opacity: 0;
+  color: var(--ink-faint);
+  background-image: radial-gradient(currentColor 1px, transparent 1.4px);
+  background-size: 4px 4px;
+  transition: opacity 120ms ease;
+}
+.agent:hover .agent__grip,
+.agent:focus-visible .agent__grip { opacity: 1; }
+/* Without hover (touch screens) the grip always shows. */
+@media (hover: none) {
+  .agent__grip { opacity: 1; }
+}
+.agent__grip:hover { color: var(--ink-muted); }
+.agent__grip:active { cursor: grabbing; }
+.agent[data-dragging="true"] { opacity: 0.5; }
+.agent__drop-line {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+  pointer-events: none;
+}
+.agent__drop-line[data-where="before"] { top: 1px; }
+.agent__drop-line[data-where="after"] { bottom: 1px; }
 .agent__badges {
   display: flex;
   flex-wrap: wrap;
@@ -1682,6 +1736,7 @@ svg[data-svg="fit"],
   color: var(--ink-dim);
 }
 .agent__actions {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -1719,6 +1774,44 @@ svg[data-svg="fit"],
   stroke: currentColor;
   fill: none;
   stroke-width: 1.8;
+}
+/* The copy action shows just left of the pin while the pointer is on the
+   row's actions (the pin, or the copy action itself) or the row has keyboard
+   focus. It sits over the end of the name, so it moves nothing and covers
+   neither the pin nor the pulse and inbox count, and a click on the row's
+   name, even in a narrow roster, never lands on it. */
+.agent__copy {
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  display: none;
+  border-radius: var(--r-sm);
+  background: var(--bg-elev-1);
+}
+.agent__actions:hover .agent__copy,
+.agent:focus-visible .agent__copy,
+.agent__copy:focus-within { display: inline-flex; }
+.agent__copy .cc-copy-btn {
+  width: 24px;
+  height: 24px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+.agent__copy .cc-copy-btn:hover,
+.agent__copy .cc-copy-btn:focus-visible {
+  color: var(--ink-muted);
+  border-color: var(--line);
+  background: var(--bg-elev-1);
+}
+.agent__copy .cc-copy-btn[data-copied="true"] {
+  color: var(--ok);
+  background: transparent;
+  box-shadow: none;
 }
 .agent__pulse {
   display: flex; align-items: flex-end; gap: 1.5px;

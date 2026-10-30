@@ -38,6 +38,78 @@ impl ConsoleSendDedupeDurability {
     }
 }
 
+/// How many of an identity's newest frames
+/// [`ConsoleLogStore::latest_activity_times`] looks through for one that
+/// records the identity acting. The bound keeps each identity's read to one
+/// short index seek; an identity whose newest acting frame sits behind more
+/// frames than this reads unknown.
+const LATEST_ACTIVITY_SCAN_FRAMES: usize = 512;
+
+/// The frame sources that record an identity acting: live runtime events,
+/// console sends and tool applications.
+const ACTIVITY_SOURCE_KINDS: [ConsoleFrameSourceKind; 3] = [
+    ConsoleFrameSourceKind::ConsoleEvent,
+    ConsoleFrameSourceKind::Send,
+    ConsoleFrameSourceKind::ToolApplication,
+];
+
+/// Live event kinds that record something done to an identity, not the
+/// identity acting: operator lifecycle records and interaction failures.
+const NON_ACTIVITY_EVENT_KINDS: [&str; 5] = [
+    "identity_respawned",
+    "identity_retired",
+    "identity_reset",
+    "identity_deleted",
+    "interaction_failed",
+];
+
+/// The kind prefix of member memory events, which record the memory
+/// pipeline's work rather than the member acting.
+const MEMORY_EVENT_KIND_PREFIX: &str = "memory.";
+
+fn is_activity_source(kind: &ConsoleFrameSourceKind) -> bool {
+    ACTIVITY_SOURCE_KINDS.contains(kind)
+}
+
+/// Whether a frame records its identity acting, told apart by the frame's
+/// source and kind columns alone (no payload is read).
+fn is_activity_frame(frame: &ConsoleFrame) -> bool {
+    is_activity_source(&frame.source.kind)
+        && !NON_ACTIVITY_EVENT_KINDS.contains(&frame.kind.as_str())
+        && !frame.kind.starts_with(MEMORY_EVENT_KIND_PREFIX)
+}
+
+/// A comma-separated list of SQL string literals, for fixed values only.
+fn sql_string_list<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
+    values
+        .into_iter()
+        .map(|value| format!("'{value}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One identity's newest activity time: a seek through
+/// `idx_console_frames_identity_cursor` to its newest frames, never a scan
+/// of the log. It applies [`is_activity_frame`] in SQL.
+fn latest_activity_sql() -> String {
+    let sources = sql_string_list(
+        ACTIVITY_SOURCE_KINDS
+            .iter()
+            .map(ConsoleFrameSourceKind::as_str),
+    );
+    let excluded = sql_string_list(NON_ACTIVITY_EVENT_KINDS);
+    format!(
+        "SELECT timestamp_ms FROM (
+             SELECT cursor_seq, timestamp_ms, source_kind, kind FROM console_frames
+             WHERE identity = ?1 ORDER BY cursor_seq DESC LIMIT ?2
+         )
+         WHERE source_kind IN ({sources})
+           AND kind NOT IN ({excluded})
+           AND kind NOT GLOB '{MEMORY_EVENT_KIND_PREFIX}*'
+         ORDER BY cursor_seq DESC LIMIT 1"
+    )
+}
+
 /// Storage retains complete frames, including private member provenance, across
 /// append, lookup, status changes and reopen. Serde frame serialization is the
 /// storage representation; use aggregator projections for transport output.
@@ -96,6 +168,25 @@ pub trait ConsoleLogStore: Send + Sync {
         _limit: usize,
     ) -> ConsoleLogResult<Vec<ConsoleFrame>> {
         Ok(Vec::new())
+    }
+
+    /// The newest activity time of each named identity, in milliseconds since
+    /// the epoch: the `timestamp_ms` of its newest frame that records the
+    /// identity acting (a live runtime event, a console send or a tool
+    /// application), looked for among its newest 512 frames. Frames rebuilt
+    /// from session history or synthesized by the console are stamped when the
+    /// console observes them, so they do not count; nor do operator lifecycle
+    /// records (respawn, retire, reset, delete), interaction failures and
+    /// member memory events, which record something done to the identity. An
+    /// identity without such a frame is absent. Stores that cannot answer keep
+    /// the default and report none, so every identity's activity reads as
+    /// unknown. A store that wraps another must forward this method, or the
+    /// console silently reads every agent's activity as unknown.
+    async fn latest_activity_times(
+        &self,
+        _identities: &[String],
+    ) -> ConsoleLogResult<HashMap<String, u64>> {
+        Ok(HashMap::new())
     }
 
     /// Whether the dedupe records above survive a gateway restart. Stores
@@ -448,6 +539,32 @@ impl ConsoleLogStore for InMemoryConsoleLogStore {
             .take(limit)
             .cloned()
             .collect())
+    }
+
+    async fn latest_activity_times(
+        &self,
+        identities: &[String],
+    ) -> ConsoleLogResult<HashMap<String, u64>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| boxed_error("console log lock poisoned"))?;
+        let mut times = HashMap::new();
+        for identity in identities {
+            let Some(seqs) = state.identity_to_seqs.get(identity) else {
+                continue;
+            };
+            let newest = seqs
+                .iter()
+                .rev()
+                .take(LATEST_ACTIVITY_SCAN_FRAMES)
+                .filter_map(|seq| state.frames.get(seq))
+                .find(|frame| is_activity_frame(frame));
+            if let Some(frame) = newest {
+                times.insert(identity.clone(), frame.timestamp_ms);
+            }
+        }
+        Ok(times)
     }
 
     async fn compact_message_deltas(
@@ -1139,6 +1256,39 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
             params![window, limit],
         )?;
         Ok(frames.into_iter().filter(is_unsettled_send_frame).collect())
+    }
+
+    async fn latest_activity_times(
+        &self,
+        identities: &[String],
+    ) -> ConsoleLogResult<HashMap<String, u64>> {
+        if identities.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let scan_limit = i64::try_from(LATEST_ACTIVITY_SCAN_FRAMES).unwrap_or(i64::MAX);
+        let sql = latest_activity_sql();
+        let _fence = self.operation_fence()?;
+        let mut times = HashMap::with_capacity(identities.len());
+        for identity in identities {
+            // The connection is held for one identity at a time, so frame
+            // appends interleave with a large roster's read instead of
+            // waiting for all of it.
+            let timestamp: Option<i64> = {
+                let conn = self
+                    .conn
+                    .lock()
+                    .map_err(|_| boxed_error("console log lock poisoned"))?;
+                let mut statement = conn.prepare_cached(&sql).map_err(into_boxed)?;
+                statement
+                    .query_row(params![identity, scan_limit], |row| row.get(0))
+                    .optional()
+                    .map_err(into_boxed)?
+            };
+            if let Some(timestamp) = timestamp.and_then(|value| u64::try_from(value).ok()) {
+                times.insert(identity.clone(), timestamp);
+            }
+        }
+        Ok(times)
     }
 
     async fn latest_cursor(&self) -> ConsoleLogResult<Option<ConsoleCursor>> {
@@ -1993,6 +2143,125 @@ mod tests {
             run_id: None,
             parent_frame_id: None,
             caused_by_frame_id: None,
+        }
+    }
+
+    fn activity_frame(
+        dedupe_key: &str,
+        identity: &str,
+        timestamp_ms: u64,
+        source: ConsoleFrameSourceKind,
+    ) -> NewConsoleFrame {
+        let mut frame = sample_frame(dedupe_key, identity);
+        frame.timestamp_ms = timestamp_ms;
+        frame.source.kind = source;
+        frame
+    }
+
+    fn event_frame(
+        dedupe_key: &str,
+        identity: &str,
+        timestamp_ms: u64,
+        kind: &str,
+    ) -> NewConsoleFrame {
+        let mut frame = activity_frame(
+            dedupe_key,
+            identity,
+            timestamp_ms,
+            ConsoleFrameSourceKind::ConsoleEvent,
+        );
+        frame.kind = kind.to_string();
+        frame
+    }
+
+    /// The last-activity read takes each identity's newest frame of the
+    /// identity acting. Frames rebuilt from session history or synthesized by
+    /// the console are stamped when the console observes them, so they do not
+    /// count; nor do lifecycle records, interaction failures and memory
+    /// events, which record something done to the identity. An identity with
+    /// only such frames reads unknown.
+    #[tokio::test]
+    async fn latest_activity_times_take_each_identitys_newest_acting_frame() {
+        let stores: Vec<Box<dyn ConsoleLogStore>> = vec![
+            Box::new(InMemoryConsoleLogStore::new()),
+            Box::new(SqliteConsoleLogStore::in_memory().expect("sqlite store")),
+        ];
+        for store in stores {
+            for frame in [
+                activity_frame(
+                    "router-event",
+                    "router",
+                    100,
+                    ConsoleFrameSourceKind::ConsoleEvent,
+                ),
+                activity_frame(
+                    "router-history",
+                    "router",
+                    300,
+                    ConsoleFrameSourceKind::SessionHistory,
+                ),
+                activity_frame(
+                    "delivery-send",
+                    "delivery",
+                    50,
+                    ConsoleFrameSourceKind::Send,
+                ),
+                activity_frame(
+                    "delivery-tool",
+                    "delivery",
+                    70,
+                    ConsoleFrameSourceKind::ToolApplication,
+                ),
+                activity_frame(
+                    "archivist-history",
+                    "archivist",
+                    400,
+                    ConsoleFrameSourceKind::SessionHistory,
+                ),
+                activity_frame(
+                    "notices-synthetic",
+                    "notices",
+                    500,
+                    ConsoleFrameSourceKind::Synthetic,
+                ),
+                activity_frame(
+                    "bystander-event",
+                    "bystander",
+                    600,
+                    ConsoleFrameSourceKind::ConsoleEvent,
+                ),
+                event_frame("router-retired", "router", 700, "identity_retired"),
+                event_frame("router-memory", "router", 710, "memory.record.promoted"),
+                event_frame("delivery-failed", "delivery", 720, "interaction_failed"),
+                event_frame("retiree-reset", "retiree", 730, "identity_reset"),
+                event_frame("retiree-respawned", "retiree", 740, "identity_respawned"),
+                event_frame("retiree-deleted", "retiree", 750, "identity_deleted"),
+            ] {
+                store.append_if_absent(frame).await.expect("append");
+            }
+            let identities = [
+                "router",
+                "delivery",
+                "archivist",
+                "notices",
+                "retiree",
+                "missing",
+            ]
+            .map(str::to_string);
+            assert_eq!(
+                store
+                    .latest_activity_times(&identities)
+                    .await
+                    .expect("activity"),
+                HashMap::from([("router".to_string(), 100), ("delivery".to_string(), 70)]),
+            );
+            assert_eq!(
+                store
+                    .latest_activity_times(&[])
+                    .await
+                    .expect("no identities"),
+                HashMap::new(),
+            );
         }
     }
 

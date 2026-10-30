@@ -148,12 +148,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   carry `last_activity_ms`, the newest time the console's frame log recorded
   the agent acting (a live runtime event, a console send or a tool
   application, not a lifecycle record, an interaction failure or a memory
-  event). It is advisory (absent means unknown) and reading it wakes no
-  agent. `ConsoleLogStore` gains `latest_activity_times`, which finds each
-  named agent's newest acting frame however many frames are newer, with a
-  default that reports none; a store that wraps another must forward it. The
-  console aggregator reads an agent through it once, on its first read, and
-  then keeps its time in memory from the frames it appends.
+  event). It is advisory (absent means unknown) and reading it wakes no agent.
+  `ConsoleLogStore` gains `latest_activity_times`, which finds each named
+  agent's newest acting frame however many frames are newer, with a default
+  that reports none; a store that wraps another must forward it. The console
+  aggregator reads an agent through it on its first read, 256 agents per call,
+  and again only after an operator retires or deletes the agent, after its
+  in-memory bound (32,768 agents, or twice the most agents one read listed)
+  evicts the agent, or after a clear; in between it keeps the time in memory
+  from the frames it appends. A frame appended to the store directly, not
+  through the aggregator, is not reflected for an agent it has already read.
 - `/console/experience` `topology.live_snapshot` carries `mob_id`, the id of
   the mob whose members the topology shows: on a runtime's console its own
   mob, and on a shared console the mob of its one registered runtime (absent
@@ -197,26 +201,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   builds use.
 - The Console's panels are redesigned in the app's visual language, on one
   shared set of rows, chips, tabs, sections and empty, loading and error
-  states: Approvals, Memory, WorkGraph, Topology, Routing, Console access,
-  the Roster, an agent's details and schedules, Health, Logs and the
-  Signals rail, with tones that keep a 4.5:1 contrast in every theme. Names come first: an agent is
-  shown by its display name or, without one, by its identity in words
+  states: Approvals, Memory, WorkGraph, Topology, Routing, Console access, the
+  Roster, an agent's details and schedules, Health, Logs and the Signals rail,
+  with tones that keep a 4.5:1 contrast in every theme. Names come first: an
+  agent is shown by its display name or, without one, by its identity in words
   (`router:main` reads "Router main"), the same on every surface, and raw
   identities, keys, grants and IDs moved to tooltips, copy actions and
   technical details. The Topology's Roles view is rooted at the team the
   experience names (`topology.live_snapshot.mob_id`, in words: `ops-team`
-  reads "Ops team"), or "Team" when it names none. Approval risk tiers read
-  in words (R0 Minimal, R1 Low,
-  R2 Elevated, R3 High): the chip reads "High risk", the audit "Risk: High
-  (R3)", and a missing tier "Unknown". The panels say the memory store's
-  terms in everyday words (a record is "given to agents", "replaced" or
-  "discarded", and a missing permission reads "No access"). For keyboard
-  and screen reader users, no control sits inside another (a row with its
-  own actions makes its title the row's button), the WorkGraph graph is one
-  tab stop with the arrow keys, Home and End moving between its nodes, panel
-  tabs are tied to the panels they show, an opened detail takes the focus
-  and Back returns it, and headings no longer skip levels. The roster's manual
-  order, Group and Sort are described under Added.
+  reads "Ops team"), or "Team" when it names none. Approval risk tiers read in
+  words (R0 Minimal, R1 Low, R2 Elevated, R3 High): the chip reads "High
+  risk", the audit "Risk: High (R3)", and a missing tier "Unknown". The panels
+  say the memory store's terms in everyday words (a record is "given to
+  agents", "replaced" or "discarded", and a missing permission reads "No
+  access"). For keyboard and screen reader users, no control sits inside
+  another (a row with its own actions makes its title the row's button), the
+  WorkGraph graph is one tab stop with the arrow keys, Home and End moving
+  between its nodes, panel tabs are tied to the panels they show, an opened
+  detail takes the focus and Back returns it, and headings no longer skip
+  levels. The roster's manual order, Group and Sort are described under Added.
 
 ### Fixed
 

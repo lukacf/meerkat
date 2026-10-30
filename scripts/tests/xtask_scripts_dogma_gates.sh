@@ -387,6 +387,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # input_controller_hold_audit.sh requires its nine witnesses violated, and
 # with --mutants each seeded defect's property or the generated
 # input_controller_holds_are_kept_unstaged_governed_inputs invariant violated.
+# durable_decision_audit.sh requires a final distinct-state count at or above
+# its floor, a coverage block in which each of its covered actions (of module
+# durable_decision_audit) generated a state, its thirteen witnesses violated,
+# and with --mutants each seeded defect's invariant violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -644,6 +648,32 @@ printf '%s\n' \
   'echo "Error: Action property AuditResumedRunWaitsForDestination is violated."' \
   'echo "Error: Action property AuditResumedRunBindsItsDestination is violated."' \
   'echo "Error: Invariant input_controller_holds_are_kept_unstaged_governed_inputs is violated."' \
+  'for action in AuditHoldHuman AuditHoldReview AuditHoldRefusedWindow AuditHoldRefusedSelfReview AuditHoldReplayed AuditHoldConflict AuditPresentAtDeadline AuditPresentRefusedSubjectChanged AuditPresentRefusedIncomplete AuditPresentToApprover AuditPresentRefusedWrongApproverAudience AuditPresentToReviewer AuditPresentRefusedWrongReviewerAudience AuditPresentRefusedNotOpen AuditDecideAtDeadline AuditDecideRefusedReviewStage AuditDecideRefusedEvidenceRequired AuditDecideRefusedSubjectChanged AuditDecideRefusedNotEligible AuditDecideRefusedSelfApproval AuditDecideRefusedPresentationIncomplete AuditDecideApproved AuditDecideRejected AuditDecideRefusedNotOpen AuditReviewAtDeadline AuditReviewRefusedHumanStage AuditReviewRefusedWrongReviewer AuditReviewRefusedEvidenceRequired AuditReviewRefusedSubjectChanged AuditReviewRefusedPresentationIncomplete AuditReviewAllowed AuditReviewDenied AuditReviewEscalated AuditReviewRefusedNotOpen AuditWithdrawAtDeadline AuditWithdrawByHost AuditWithdrawByRequester AuditWithdrawRefusedNotRequester AuditWithdrawRefusedNotOpen AuditExpireOpenDue AuditExpireOpenNotDue AuditExpireApprovedDue AuditExpireApprovedSettlementOwed AuditExpireApprovedNotDue AuditExpireSettled AuditAuthorizeExecution AuditAuthorizeExecutionAtDeadline AuditAuthorizeExecutionRefusedSettlementOwed AuditAuthorizeExecutionRefusedBinding AuditAuthorizeExecutionRefusedNotApproved AuditReleaseExecution AuditReleaseExecutionAtDeadline AuditReleaseExecutionRefusedNotAuthorized AuditReleaseExecutionRefusedNotApproved AuditRecordExecuted AuditRecordExecutedRefusedNotAuthorized AuditRecordExecutedRefusedBinding AuditRecordExecutedReplayed AuditRecordExecutedReplayRefusedBinding AuditRecordExecutedRefusedNotApproved AuditCloseRefused AuditCloseRefusedWithPermit AuditCloseRefusedAtDeadline AuditCloseRefusedNotApproved AuditSettleNoticeDelivered AuditSettleNoticeFailed AuditSettleNoticeReplayed AuditSettleNoticeRefused AuditSettleNoticeRefusedNotEnded AuditCommit; do echo "<$action line 1, col 1 to line 1, col 2 of module durable_decision_audit>: 1:1"; done' \
+  'echo "Error: Invariant NotAuditWitnessHumanApprovalExecutedAndNoticed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRetriedAfterRelease is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExecutionRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessEscalatedThenHumanApproved is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStaleDigestThenApproved is violated."' \
+  'echo "Error: Invariant NotAuditWitnessDecideAtDeadlineExpires is violated."' \
+  'echo "Error: Invariant NotAuditWitnessWithdrawnThenDecideRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSelfApprovalThenAnotherApproves is violated."' \
+  'echo "Error: Invariant NotAuditWitnessCommitThenRecordReplayed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHoldReplayedAndConflicting is violated."' \
+  'echo "Error: Invariant NotAuditWitnessPermitAcrossDeadlineExecuted is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReleaseAfterDeadlineExpires is violated."' \
+  'echo "Error: Invariant NotAuditWitnessAuthorizeAtDeadlineRefused is violated."' \
+  'echo "Error: Invariant AuditTerminalsLatch is violated."' \
+  'echo "Error: Invariant AuditApprovalIsAttested is violated."' \
+  'echo "Error: Invariant AuditRejectionIsAttested is violated."' \
+  'echo "Error: Invariant AuditExecutedOnlyFromApprovedWithHeldBinding is violated."' \
+  'echo "Error: Invariant AuditExpiryOnlyAtTheDeadline is violated."' \
+  'echo "Error: Invariant AuditApprovedExpiresOnlyWithoutPermit is violated."' \
+  'echo "Error: Invariant AuditWithdrawOnlyOpenByRequesterOrHost is violated."' \
+  'echo "Error: Invariant AuditSealedFieldsNeverChange is violated."' \
+  'echo "Error: Invariant AuditNoticeOwedOnceAtTheEnd is violated."' \
+  'echo "Error: Invariant AuditNoPermitAtOrAfterDeadline is violated."' \
+  'echo "Error: Invariant AuditReleaseClearsPermit is violated."' \
+  'echo "Error: Invariant AuditCommittedIsSettleable is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
@@ -710,7 +740,7 @@ lane_part_output() {
 audit_lines() {
   grep -E '^running (bounded .* TLC audit|member [a-z]+ TLC audit|MobMachine arm coverage gate)$' | sort
 }
-audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-h"
+audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-h audits-j"
 shard_outputs="$(mktemp -d)"
 failed_parts=""
 idle_shards=""

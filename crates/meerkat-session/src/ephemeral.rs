@@ -2549,6 +2549,32 @@ enum SessionCommand {
             >,
         >,
     },
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    SetSessionInstructionControl {
+        write: meerkat_core::SessionInstructionWrite,
+        reply_tx: oneshot::Sender<
+            Result<
+                Result<
+                    meerkat_core::SessionInstructionReceipt,
+                    meerkat_core::service::SessionInstructionError,
+                >,
+                AgentError,
+            >,
+        >,
+    },
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    RecordInstructionTargetControl {
+        record: meerkat_core::InstructionTargetRecord,
+        reply_tx: oneshot::Sender<
+            Result<
+                Result<
+                    meerkat_core::InstructionRecordReceipt,
+                    meerkat_core::service::SessionInstructionError,
+                >,
+                AgentError,
+            >,
+        >,
+    },
     PrepareHeadCanonicalRuntimeBoundary {
         request: HeadCanonicalRuntimeBoundaryPrepareRequest,
         reply_tx: oneshot::Sender<Result<PreparedHeadCanonicalRuntimeBoundary, AgentError>>,
@@ -4200,6 +4226,43 @@ pub trait SessionAgent: Send {
         Err(meerkat_core::InstructionActivationError::Unsupported(
             "this session agent does not expose the canonical Session document".to_string(),
         ))
+    }
+
+    /// Record one session-owned operator-instruction write in the
+    /// actor-owned canonical Session document. It changes the recorded
+    /// target only; the next fresh run start applies it.
+    fn set_session_instruction_control(
+        &mut self,
+        _write: meerkat_core::SessionInstructionWrite,
+    ) -> Result<
+        meerkat_core::SessionInstructionReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable)
+    }
+
+    /// Record a mob member's operator-instruction snapshot in the
+    /// actor-owned canonical Session document.
+    fn record_instruction_target_control(
+        &mut self,
+        _record: meerkat_core::InstructionTargetRecord,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable)
+    }
+
+    /// At a turn's run start, after its start disposition is resolved and
+    /// before any input of the run is appended: apply the session's pending
+    /// operator instructions when the session-document authority authorizes
+    /// it. An agent without a canonical Session document applies nothing.
+    fn apply_run_start_operator_instructions(
+        &mut self,
+        _run_start: meerkat_core::InstructionRunStart,
+        _run_id: Option<meerkat_core::lifecycle::RunId>,
+    ) -> Result<meerkat_core::RunStartInstructionOutcome, meerkat_core::error::AgentError> {
+        Ok(meerkat_core::RunStartInstructionOutcome::NotNeeded)
     }
 
     async fn prepare_head_canonical_runtime_boundary(
@@ -7623,6 +7686,52 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             })
     }
 
+    /// Send one session-owned operator-instruction write to the live actor,
+    /// which records it in its canonical Session document. The actor serves
+    /// no command while a turn runs, so a write never lands inside a run.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) async fn set_session_instruction_control(
+        &self,
+        id: &SessionId,
+        write: meerkat_core::SessionInstructionWrite,
+    ) -> Result<
+        meerkat_core::SessionInstructionReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let command_tx = self.session_command_tx(id).await?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::SetSessionInstructionControl { write, reply_tx })
+            .await
+            .map_err(|_| session_task_exited())?;
+        reply_rx
+            .await
+            .map_err(|_| session_task_dropped_reply())?
+            .map_err(SessionError::Agent)?
+    }
+
+    /// Send a mob member's operator-instruction snapshot to the live actor.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) async fn record_instruction_target_control(
+        &self,
+        id: &SessionId,
+        record: meerkat_core::InstructionTargetRecord,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let command_tx = self.session_command_tx(id).await?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::RecordInstructionTargetControl { record, reply_tx })
+            .await
+            .map_err(|_| session_task_exited())?;
+        reply_rx
+            .await
+            .map_err(|_| session_task_dropped_reply())?
+            .map_err(SessionError::Agent)?
+    }
+
     pub async fn prepare_head_canonical_runtime_boundary(
         &self,
         id: &SessionId,
@@ -9749,6 +9858,15 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
     }
 }
 
+/// An ephemeral session keeps no durable session document, so its operator
+/// instructions refuse with `durability_unavailable` (the trait defaults).
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl<B: SessionAgentBuilder + 'static> meerkat_core::service::SessionServiceInstructionExt
+    for EphemeralSessionService<B>
+{
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for EphemeralSessionService<B> {
@@ -10826,6 +10944,14 @@ async fn drain_session_task_commands<A: SessionAgent>(
             SessionCommand::ActivateInstructionControl { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(AgentError::Cancelled));
             }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::SetSessionInstructionControl { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(AgentError::Cancelled));
+            }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::RecordInstructionTargetControl { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(AgentError::Cancelled));
+            }
             SessionCommand::PrepareHeadCanonicalRuntimeBoundary { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(AgentError::Cancelled));
             }
@@ -11100,6 +11226,9 @@ async fn session_task<A: SessionAgent>(
                     resume_receipt,
                     resume_interrupted_calls,
                 } = *run_context;
+                // The run an operator-instruction entry names, kept before a
+                // resumed run's dispatch consumes the run id.
+                let instruction_run_id = dispatched_run_id.clone();
                 let work_authorization = runtime.work_authorization;
                 let metadata = runtime.turn_metadata;
                 let render_metadata = metadata
@@ -11506,16 +11635,39 @@ async fn session_task<A: SessionAgent>(
                 match begin_outcome {
                     Ok((BeginOutcome::Running, projection)) => {
                         control.state_tx.send_replace(projection);
+                        // Operator instructions apply at a fresh run start,
+                        // before any input of the run: the session-document
+                        // authority decides, and the one coalesced entry lands
+                        // at the tail (after a pending tail the run continues
+                        // from). A resumed run applies nothing.
+                        let instruction_run_start = match disposition {
+                            StartTurnDisposition::RunContentTurn
+                            | StartTurnDisposition::RunPending => {
+                                meerkat_core::InstructionRunStart::FreshRun
+                            }
+                            StartTurnDisposition::ResumeRun => {
+                                meerkat_core::InstructionRunStart::ResumeRun
+                            }
+                            StartTurnDisposition::NoPendingBoundary => {
+                                meerkat_core::InstructionRunStart::NoRun
+                            }
+                        };
                         // A resumed run's batch carries the system prompts its
                         // original start already appended: the provisional
                         // tail its actor was seeded from holds them, so they
                         // are not appended a second time.
-                        let system_append = if system_messages.is_empty()
-                            || matches!(disposition, StartTurnDisposition::ResumeRun)
-                        {
-                            Ok(())
-                        } else {
-                            agent.append_system_messages(system_messages)
+                        let system_append = match agent.apply_run_start_operator_instructions(
+                            instruction_run_start,
+                            instruction_run_id,
+                        ) {
+                            Err(error) => Err(error),
+                            Ok(_)
+                                if system_messages.is_empty()
+                                    || matches!(disposition, StartTurnDisposition::ResumeRun) =>
+                            {
+                                Ok(())
+                            }
+                            Ok(_) => agent.append_system_messages(system_messages),
                         };
                         if let Err(error) = system_append {
                             let _ = agent.set_turn_tool_overlay(None);
@@ -12715,6 +12867,22 @@ async fn session_task<A: SessionAgent>(
                         last_assistant_text: snap.last_assistant_text,
                     });
                 }
+                let _ = reply_tx.send(result);
+            }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::SetSessionInstructionControl { write, reply_tx } => {
+                let result = match control.archive_snapshot_gate.enter_apply() {
+                    Ok(_gate) => Ok(agent.set_session_instruction_control(write)),
+                    Err(error) => Err(AgentError::InternalError(error.to_string())),
+                };
+                let _ = reply_tx.send(result);
+            }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::RecordInstructionTargetControl { record, reply_tx } => {
+                let result = match control.archive_snapshot_gate.enter_apply() {
+                    Ok(_gate) => Ok(agent.record_instruction_target_control(record)),
+                    Err(error) => Err(AgentError::InternalError(error.to_string())),
+                };
                 let _ = reply_tx.send(result);
             }
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -16896,6 +17064,20 @@ mod inline_video_admission_tests {
         }
         drop(replacement_guard);
     }
+}
+
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+fn session_task_exited() -> SessionError {
+    SessionError::Agent(AgentError::InternalError(
+        "Session task has exited".to_string(),
+    ))
+}
+
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+fn session_task_dropped_reply() -> SessionError {
+    SessionError::Agent(AgentError::InternalError(
+        "Session task dropped the reply channel".to_string(),
+    ))
 }
 
 #[cfg(test)]

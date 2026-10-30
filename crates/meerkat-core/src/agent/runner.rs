@@ -235,7 +235,10 @@ fn run_input_from_admitted_pending_tail(
     messages: &[Message],
     admitted_tail: ObservedSessionTailKind,
 ) -> Result<RunInput, AgentError> {
-    match (admitted_tail, messages.last()) {
+    match (
+        admitted_tail,
+        crate::pending_continuation::last_non_entry_message(messages),
+    ) {
         (ObservedSessionTailKind::User, Some(Message::User(user)))
             if user.has_non_text_content() =>
         {
@@ -1165,6 +1168,10 @@ where
         self.tool_application_observations
             .refresh(self.session.messages());
         self.active_model_profile = Some(target_profile);
+        // The swap's witness is the model's catalog row, not the model as the
+        // new binding's backend serves it: operator instructions claim only
+        // the leading System prefix until a build resolves that.
+        self.operator_instruction_lowering = Some(crate::InstructionLowering::LeadingPrefixOnly);
         Ok(())
     }
 
@@ -3730,6 +3737,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             pending_callback_async_ops: None,
             effective_model_registry: self.effective_model_registry.clone(),
             active_model_profile: self.active_model_profile.clone(),
+            operator_instruction_lowering: self.operator_instruction_lowering,
             runtime_execution_kind_required: false,
             runtime_execution_kind: None,
             runtime_started_run_id: None,

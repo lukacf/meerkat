@@ -2297,6 +2297,9 @@ where
             })?;
         self.apply_llm_request_policy(pending.request_policy);
         self.active_model_profile = Some(pending.target_profile);
+        // A fallback witness is judged as the target's binding serves it:
+        // the operator-instruction lowering derives from it.
+        self.operator_instruction_lowering = None;
         self.session = pending.next_session;
         self.tool_application_observations
             .refresh(self.session.messages());
@@ -2878,6 +2881,9 @@ where
             }
             self.apply_llm_request_policy(switch.request_policy);
             self.active_model_profile = Some(switch.target_profile);
+            // A fallback witness is judged as the target's binding serves it:
+            // the operator-instruction lowering derives from it.
+            self.operator_instruction_lowering = None;
             self.session = next_session;
             self.tool_application_observations
                 .refresh(self.session.messages());

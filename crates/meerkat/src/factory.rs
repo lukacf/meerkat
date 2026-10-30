@@ -9724,6 +9724,12 @@ impl AgentFactory {
         if let Some(max_turns) = config.agent.max_turns {
             builder = builder.max_turns(max_turns);
         }
+        // Operator instructions lower as the session's model is served by its
+        // backend (`ModelRegistry::profile_for_identity`): the ChatGPT
+        // backend narrows a model that carries mid-conversation System rows.
+        builder = builder.with_operator_instruction_lowering(
+            meerkat_core::InstructionLowering::for_resolved_profile(model_profile.as_ref()),
+        );
 
         if let Some(defaults) = provider_request_defaults_for(
             provider,

@@ -458,6 +458,24 @@ pub enum InstructionLowering {
     Unavailable,
 }
 
+impl InstructionLowering {
+    /// The lowering of a model as its backend serves it
+    /// (`ModelRegistry::profile_for_identity`): a model that lowers ordered
+    /// System rows after conversation rows takes an entry anywhere; any other
+    /// model, and one without a resolved profile, takes one only inside the
+    /// leading System prefix, which every wire carries as its system
+    /// instructions.
+    #[must_use]
+    pub fn for_resolved_profile(profile: Option<&crate::model_profile::ModelProfile>) -> Self {
+        match profile {
+            Some(profile) if profile.supports_mid_conversation_system_messages => {
+                Self::MidConversation
+            }
+            _ => Self::LeadingPrefixOnly,
+        }
+    }
+}
+
 impl From<InstructionLowering> for document::InstructionLowering {
     fn from(value: InstructionLowering) -> Self {
         match value {
@@ -1048,7 +1066,7 @@ impl Session {
     /// transcript tail. The entry and the cleared pending bodies persist with
     /// the run's commits; a run that commits nothing leaves the changes
     /// pending for the next run start.
-    pub(crate) fn apply_run_start_instructions(
+    pub fn apply_run_start_instructions(
         &mut self,
         run_start: InstructionRunStart,
         lowering: InstructionLowering,

@@ -19210,6 +19210,245 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 }
 
+/// One operator-instruction control: a session-owned write or a mob record.
+enum OperatorInstructionControl {
+    Set(meerkat_core::SessionInstructionWrite),
+    Record(meerkat_core::InstructionTargetRecord),
+}
+
+/// The receipt of one operator-instruction control.
+enum OperatorInstructionReceipt {
+    Set(meerkat_core::SessionInstructionReceipt),
+    Record(meerkat_core::InstructionRecordReceipt),
+}
+
+impl OperatorInstructionReceipt {
+    /// Whether the control changed the session document. A duplicate write
+    /// or an already recorded generation changes nothing and writes nothing.
+    fn changed(&self) -> bool {
+        match self {
+            Self::Set(receipt) => {
+                receipt.disposition == meerkat_core::InstructionWriteDisposition::Recorded
+            }
+            Self::Record(receipt) => {
+                receipt.disposition == meerkat_core::InstructionRecordDisposition::Recorded
+            }
+        }
+    }
+}
+
+impl OperatorInstructionControl {
+    fn apply(
+        self,
+        session: &mut Session,
+    ) -> Result<OperatorInstructionReceipt, meerkat_core::service::SessionInstructionError> {
+        match self {
+            Self::Set(write) => session
+                .set_session_instruction(write)
+                .map(OperatorInstructionReceipt::Set)
+                .map_err(meerkat_core::service::SessionInstructionError::from),
+            Self::Record(record) => session
+                .record_instruction_target(record)
+                .map(OperatorInstructionReceipt::Record)
+                .map_err(meerkat_core::service::SessionInstructionError::from),
+        }
+    }
+}
+
+fn unsupported_instruction_profile(
+    profile: RuntimeSessionPersistenceProfile,
+    id: &SessionId,
+) -> SessionError {
+    SessionError::Agent(AgentError::InternalError(format!(
+        "unsupported runtime session persistence profile {profile} while recording operator \
+         instructions for session {id}"
+    )))
+}
+
+impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
+    /// Record one operator-instruction control in a session's document.
+    ///
+    /// A live session's actor applies it and the actor boundary commits it,
+    /// under the session's turn-finalization boundary, so it never lands
+    /// inside a run. A dormant session is written store-only under its
+    /// hosting claim: nothing is built, materialized or registered. Every
+    /// lock it takes is the session's own and none is realm-wide, so records
+    /// of different sessions proceed in parallel. A control that changes
+    /// nothing writes nothing.
+    async fn operator_instruction_control(
+        &self,
+        id: &SessionId,
+        control: OperatorInstructionControl,
+    ) -> Result<OperatorInstructionReceipt, meerkat_core::service::SessionInstructionError> {
+        let persistence_profile = self.runtime_store.session_persistence_profile();
+        let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
+        let _projection_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
+        if let Some(gate) = self.existing_gate_for_session(id).await {
+            let cancelled = *gate.cancelled.lock().await;
+            if cancelled {
+                return Err(SessionError::NotFound { id: id.clone() }.into());
+            }
+        }
+
+        if self.inner.has_live_session(id).await? {
+            if self
+                .session_archived_by_authority_with_terminal(id, None)
+                .await?
+            {
+                return Err(SessionError::NotFound { id: id.clone() }.into());
+            }
+            let receipt = match control {
+                OperatorInstructionControl::Set(write) => self
+                    .inner
+                    .set_session_instruction_control(id, write)
+                    .await
+                    .map(OperatorInstructionReceipt::Set)?,
+                OperatorInstructionControl::Record(record) => self
+                    .inner
+                    .record_instruction_target_control(id, record)
+                    .await
+                    .map(OperatorInstructionReceipt::Record)?,
+            };
+            if !receipt.changed() {
+                return Ok(receipt);
+            }
+            let persisted = match persistence_profile {
+                RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                    match self.inner.export_session(id).await {
+                        Ok(session) => self.save_normalized_session(session).await.map(|_| ()),
+                        Err(error) => Err(error),
+                    }
+                }
+                RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                    match self
+                        .prepare_runtime_boundary(id, "operator instruction control", None)
+                        .await
+                    {
+                        Ok(prepared) => self
+                            .commit_prepared_head_canonical_actor_boundary(
+                                id,
+                                "operator instruction control",
+                                prepared,
+                            )
+                            .await
+                            .map(|_| ()),
+                        Err(error) => Err(error),
+                    }
+                }
+                profile => Err(unsupported_instruction_profile(profile, id)),
+            };
+            if let Err(error) = persisted {
+                let _ = self.discard_live_session_unfenced(id).await;
+                return Err(error.into());
+            }
+            return Ok(receipt);
+        }
+
+        // A store-only write takes the session's hosting claim before any
+        // strict read: a session another runtime owner hosts is refused
+        // (ServedElsewhere), and nothing here wakes it. Under the claim, an
+        // earlier incarnation's open run is settled first.
+        let hosting = self.grant_session_hosting(id)?;
+        self.settle_earlier_run_before_store_only_write(id, &hosting)
+            .await?;
+        let Some(mut session) = self
+            .load_persisted_session_for_control(id, "operator instruction control")
+            .await?
+        else {
+            self.checkpointer_gates.lock().await.remove(id);
+            return Err(SessionError::NotFound { id: id.clone() }.into());
+        };
+        if self.session_archived_by_authority(id, &session).await? {
+            return Err(SessionError::NotFound { id: id.clone() }.into());
+        }
+        let receipt = control.apply(&mut session)?;
+        if !receipt.changed() {
+            return Ok(receipt);
+        }
+        match persistence_profile {
+            RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                self.save_normalized_session(session).await?;
+            }
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                self.persist_detached_head_canonical_session(
+                    session,
+                    "store-only operator instruction control",
+                )
+                .await?;
+            }
+            profile => return Err(unsupported_instruction_profile(profile, id).into()),
+        }
+        Ok(receipt)
+    }
+}
+
+#[async_trait]
+impl<B: SessionAgentBuilder + 'static> meerkat_core::service::SessionServiceInstructionExt
+    for PersistentSessionService<B>
+{
+    async fn set_session_instruction(
+        &self,
+        id: &SessionId,
+        write: meerkat_core::SessionInstructionWrite,
+    ) -> Result<
+        meerkat_core::SessionInstructionReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        match self
+            .operator_instruction_control(id, OperatorInstructionControl::Set(write))
+            .await?
+        {
+            OperatorInstructionReceipt::Set(receipt) => Ok(receipt),
+            OperatorInstructionReceipt::Record(_) => {
+                Err(SessionError::Agent(AgentError::InternalError(
+                    "an operator-instruction write answered with a record receipt".to_string(),
+                ))
+                .into())
+            }
+        }
+    }
+
+    async fn record_instruction_target(
+        &self,
+        id: &SessionId,
+        record: meerkat_core::InstructionTargetRecord,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        match self
+            .operator_instruction_control(id, OperatorInstructionControl::Record(record))
+            .await?
+        {
+            OperatorInstructionReceipt::Record(receipt) => Ok(receipt),
+            OperatorInstructionReceipt::Set(_) => {
+                Err(SessionError::Agent(AgentError::InternalError(
+                    "an operator-instruction record answered with a write receipt".to_string(),
+                ))
+                .into())
+            }
+        }
+    }
+
+    async fn read_session_instructions(
+        &self,
+        id: &SessionId,
+    ) -> Result<
+        meerkat_core::service::SessionInstructionRead,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let session = self
+            .load_authoritative_session(id)
+            .await?
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let target = session.instruction_target_state()?;
+        let effective =
+            meerkat_core::effective_operator_instructions(session.id(), session.messages())
+                .map_err(meerkat_core::InstructionStateError::MalformedHistory)?;
+        Ok(meerkat_core::service::SessionInstructionRead { target, effective })
+    }
+}
+
 #[async_trait]
 impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSessionService<B> {
     async fn append_system_context(

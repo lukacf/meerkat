@@ -565,6 +565,41 @@ impl SessionAgent for FactoryAgent {
         self.agent.session_mut().activate_instruction(request)
     }
 
+    fn set_session_instruction_control(
+        &mut self,
+        write: meerkat_core::SessionInstructionWrite,
+    ) -> Result<
+        meerkat_core::SessionInstructionReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        self.agent
+            .session_mut()
+            .set_session_instruction(write)
+            .map_err(meerkat_core::service::SessionInstructionError::from)
+    }
+
+    fn record_instruction_target_control(
+        &mut self,
+        record: meerkat_core::InstructionTargetRecord,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        self.agent
+            .session_mut()
+            .record_instruction_target(record)
+            .map_err(meerkat_core::service::SessionInstructionError::from)
+    }
+
+    fn apply_run_start_operator_instructions(
+        &mut self,
+        run_start: meerkat_core::InstructionRunStart,
+        run_id: Option<meerkat_core::lifecycle::RunId>,
+    ) -> Result<meerkat_core::RunStartInstructionOutcome, meerkat_core::error::AgentError> {
+        self.agent
+            .apply_run_start_operator_instructions(run_start, run_id)
+    }
+
     fn stage_external_tool_filter(
         &mut self,
         filter: meerkat_core::ToolFilter,

@@ -22,6 +22,7 @@ mod extraction;
 mod hook_impl;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod hooks_behavior_tests;
+mod instruction_run_start;
 #[cfg(test)]
 mod observation_barrier_tests;
 #[cfg(all(test, feature = "workspace-tests"))]
@@ -5445,6 +5446,11 @@ where
     /// Registry-minted facts for the active model. This replaces client-local
     /// capability/limit projections as the durable source used by later turns.
     pub(crate) active_model_profile: Option<crate::ModelProfileWitness>,
+    /// How the active model carries an operator-instruction entry, as the
+    /// build resolved it from the model as its backend serves it. `None`
+    /// derives it from [`Self::active_model_profile`]; a hot swap, whose
+    /// witness is the catalog row, narrows it to the leading prefix.
+    pub(crate) operator_instruction_lowering: Option<crate::InstructionLowering>,
     /// True when the runtime control plane must stamp execution kind metadata.
     pub(crate) runtime_execution_kind_required: bool,
     /// Resources this agent's construction handed over that must be released

@@ -7748,6 +7748,12 @@ impl MeerkatMachine {
     /// waiters that leave after it spawn nothing, since its settlement is
     /// theirs too. Without a cleanup runtime the next ready-gated caller
     /// settles inline instead.
+    ///
+    /// The other callers that leave a degraded session without settling it
+    /// hand off the same way: an input admission whose store write degraded
+    /// the session (past its deadline, or answered with an error), and the
+    /// reload-required discard of a registration whose runtime loop is still
+    /// attached.
     fn hand_off_degraded_gate_settlement(&self, session_id: &SessionId, gate: SessionMutationGate) {
         #[cfg(test)]
         self.test_degraded_gate_settlement_hand_offs

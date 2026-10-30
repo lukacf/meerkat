@@ -109,6 +109,20 @@ export function summarizeRuleResources(rule: ConsoleAccessRule): string {
   return parts.length > 0 ? parts.join(" · ") : "all agents";
 }
 
+/** A rule's title: its description, or "Unnamed rule". The rule ID is
+ * secondary: a muted line under the title. */
+export function ruleTitle(rule: Pick<ConsoleAccessRule, "description">): string {
+  return rule.description?.trim() || "Unnamed rule";
+}
+
+/** The delete confirmation: the rule by its description (or as unnamed),
+ * with its ID only as the parenthetical that tells two rules apart. */
+export function ruleDeleteConfirmText(rule: Pick<ConsoleAccessRule, "id" | "description">): string {
+  const description = rule.description?.trim();
+  const which = description ? `the rule "${description}" (ID ${rule.id})` : `this unnamed rule (ID ${rule.id})`;
+  return `Delete ${which}? Access it grants (or denies) stops immediately.`;
+}
+
 interface RuleDraft {
   id: string;
   description: string;
@@ -179,6 +193,8 @@ export const __accessTest = {
   summarizeRuleResources,
   ruleFromDraft,
   emptyRuleDraft,
+  ruleTitle,
+  ruleDeleteConfirmText,
 };
 
 const TAB_LABELS: Record<Tab, string> = {
@@ -250,7 +266,8 @@ function SubjectRow({ subject, actions }: { subject: string; actions?: React.Rea
 }
 
 /** A rule as a card: what it does in words, who it covers, what it allows
- * or denies and where. The rule ID stays available as a secondary line. */
+ * or denies and where. A rule without a description is an "Unnamed rule";
+ * the rule ID is always a muted secondary line. */
 function RuleCard({
   rule,
   actions,
@@ -261,7 +278,7 @@ function RuleCard({
   const directory = useAgentDirectory();
   const deny = rule.effect === "deny";
   const description = rule.description?.trim() || "";
-  const title = description || rule.id;
+  const title = ruleTitle(rule);
   const groups = rule.groups ?? [];
   const subjects = rule.subjects ?? [];
   const agents = rule.agents ?? [];
@@ -290,10 +307,10 @@ function RuleCard({
   return (
     <div className="access-panel__rule" data-effect={deny ? "deny" : "allow"} data-testid={`access-rule:${rule.id}`}>
       <div className="access-panel__rule-head">
-        <h3 className="access-panel__rule-title" title={title}>{title}</h3>
+        <h3 className="access-panel__rule-title" title={description || `Rule ${rule.id}`}>{title}</h3>
         <Chip tone={deny ? "crit" : "ok"}>{deny ? "Deny" : "Allow"}</Chip>
       </div>
-      {description ? <TechnicalId value={rule.id} label="Rule ID" copy={false} className="access-panel__rule-id" /> : null}
+      <TechnicalId value={rule.id} label="Rule ID" copy={false} className="access-panel__rule-id" />
       <KeyValueList
         items={[
           { label: "Who", value: who },
@@ -701,7 +718,7 @@ export function AccessPanel({
         divider={false}
       />
       <p className="access-panel__intro">
-        Manage access to Meta console and runtime surfaces. These rules do not grant native tool, source or connected-account permissions.
+        Manage who can see and do what in this console and the runtime behind it. These rules do not grant native tool, source or connected-account permissions.
       </p>
       <PanelTabs<Tab>
         ariaLabel="Console access sections"
@@ -754,8 +771,8 @@ export function AccessPanel({
               >
                 <p className="access-panel__text">
                   {enabled
-                    ? "Deny by default: every console caller only sees and operates what a rule (or admin standing) grants."
-                    : "Access control is configured but not enforced. Enabling requires at least one admin subject."}
+                    ? "Deny by default: everyone using this console sees and does only what a rule allows. Admins can do everything."
+                    : "Access control is set up but not enforced. Turning it on needs at least one admin."}
                 </p>
               </PanelSection>
               <PanelSection
@@ -771,7 +788,7 @@ export function AccessPanel({
                 ) : null}
               >
                 <p className="access-panel__text access-panel__text--inset">
-                  Admin subjects bypass every rule and manage this configuration.
+                  Admins can do everything, whatever the rules say, and manage these settings.
                 </p>
                 {adminsDraft === null ? (
                   admins.length === 0 ? (
@@ -785,7 +802,7 @@ export function AccessPanel({
                   <div className="access-panel__inset">
                     <div className="access-panel__form">
                       <TextField
-                        label="Admin subjects"
+                        label="Admins"
                         hint="Separated by commas."
                         testId="access-admins-input"
                         value={adminsDraft}
@@ -927,7 +944,7 @@ export function AccessPanel({
                               variant="danger"
                               data-testid={`access-rule-delete:${rule.id}`}
                               onClick={() => {
-                                if (window.confirm(`Delete rule "${rule.id}"? Access it grants (or denies) stops immediately.`)) {
+                                if (window.confirm(ruleDeleteConfirmText(rule))) {
                                   void mutate("immediate", captureBase(), base => onDeleteRule(rule.id, base));
                                 }
                               }}

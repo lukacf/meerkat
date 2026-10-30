@@ -506,3 +506,60 @@ describe("permission words", () => {
     expect((screen.getByRole("option", { name: "custom.current.action" }) as HTMLOptionElement).value).toBe("custom.current.action");
   });
 });
+
+describe("plain words", () => {
+  it("titles a rule without a description as an unnamed rule, with its ID as muted detail", () => {
+    const input = props();
+    const unnamed = {
+      id: "deny-lifecycle-outside-ops",
+      effect: "deny" as const,
+      actions: ["agent.view"],
+      match_labels: { org: "payments" },
+    };
+    render(<AccessPanel {...input} config={{ ...input.config, rules: [unnamed] }} />);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    const card = screen.getByTestId("access-rule:deny-lifecycle-outside-ops");
+    expect(card.querySelector("h3")?.textContent).toBe("Unnamed rule");
+    expect(card.querySelector(".access-panel__rule-id")?.textContent?.includes("deny-lifecycle-outside-ops")).toBe(true);
+    // The operator's own selector text stays as written.
+    expect(Array.from(card.querySelectorAll(".cc-chip"), (chip) => chip.textContent).includes("org=payments")).toBe(true);
+
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    fireEvent.click(screen.getByTestId("access-rule-delete:deny-lifecycle-outside-ops"));
+    expect(confirm.mock.calls[0]?.[0]).toBe(
+      "Delete this unnamed rule (ID deny-lifecycle-outside-ops)? Access it grants (or denies) stops immediately.",
+    );
+    expect(input.onDeleteRule).not.toHaveBeenCalled();
+  });
+
+  it("shows a described rule's ID as muted detail too, and confirms its delete by description", () => {
+    const input = props();
+    const rule = { id: "ops-view-all", description: "Ops can see every agent", effect: "allow" as const, actions: ["agent.view"] };
+    render(<AccessPanel {...input} config={{ ...input.config, rules: [rule] }} />);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    const card = screen.getByTestId("access-rule:ops-view-all");
+    expect(card.querySelector("h3")?.textContent).toBe("Ops can see every agent");
+    expect(card.querySelector(".access-panel__rule-id")?.textContent?.includes("ops-view-all")).toBe(true);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    fireEvent.click(screen.getByTestId("access-rule-delete:ops-view-all"));
+    expect(confirm.mock.calls[0]?.[0]).toBe(
+      'Delete the rule "Ops can see every agent" (ID ops-view-all)? Access it grants (or denies) stops immediately.',
+    );
+  });
+
+  it("explains enforcement and admins in plain words", () => {
+    const input = props();
+    const view = render(<AccessPanel {...input} />);
+    const text = view.getByTestId("access-panel").textContent ?? "";
+    expect(text.includes("Manage who can see and do what in this console and the runtime behind it.")).toBe(true);
+    expect(text.includes("everyone using this console sees and does only what a rule allows")).toBe(true);
+    expect(text.includes("Admins can do everything, whatever the rules say, and manage these settings.")).toBe(true);
+    expect(/console caller|admin standing|Admin subjects|runtime surfaces/.test(text)).toBe(false);
+    view.rerender(<AccessPanel {...input} config={{ ...input.config, enabled: false }} />);
+    const off = view.getByTestId("access-panel").textContent ?? "";
+    expect(off.includes("Access control is set up but not enforced. Turning it on needs at least one admin.")).toBe(true);
+    expect(/admin subject/i.test(off)).toBe(false);
+    fireEvent.click(view.getByTestId("access-edit-admins"));
+    expect(view.getByLabelText("Admins").getAttribute("data-testid")).toBe("access-admins-input");
+  });
+});

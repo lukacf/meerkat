@@ -1816,6 +1816,28 @@ impl ApprovalService {
         self
     }
 
+    /// Test-only: whether a writer holds the owner's state now (a review
+    /// input under its reservation, or a decision).
+    #[cfg(test)]
+    pub(crate) fn state_write_held(&self) -> bool {
+        self.state.is_locked_exclusive()
+    }
+
+    /// Test-only: read the owner's state as a concurrent approval read
+    /// (`get`, `list`) does, on the calling thread: report the read through
+    /// `held` once it holds it, and hold it until `release` answers or its
+    /// sender is dropped.
+    #[cfg(test)]
+    pub(crate) fn read_state_until(
+        &self,
+        held: &std::sync::mpsc::Sender<()>,
+        release: &std::sync::mpsc::Receiver<()>,
+    ) {
+        let _read = self.state.read();
+        let _ = held.send(());
+        let _ = release.recv();
+    }
+
     /// Issue a fresh, never-reused attempt bound to the exact operation and
     /// its original admitted work, through the same non-blocking reservation:
     /// a held owner refuses locally (`Contended`) at once with no attempt

@@ -989,7 +989,11 @@ impl LocalGrantAuthority {
     ///
     /// For a host commit gated on current native facts (for example a
     /// WorkGraph admission fence). `operation` must not mutate any owner on
-    /// this publication and must not await.
+    /// this publication and must not await. While it runs, a governed step
+    /// of work on this publication refuses to rebuild
+    /// (`OperationRefusalKind::ReprepareRequired`) and the work's
+    /// `owner_change_in_progress` names this hold, so a waiting step waits
+    /// for its end.
     ///
     /// # Errors
     /// [`PublicationError::Unavailable`] when the publication is held,

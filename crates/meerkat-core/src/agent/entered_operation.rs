@@ -11,7 +11,10 @@
 use std::fmt;
 use std::sync::Arc;
 
-use super::{GovernedDispatchOperation, ToolDispatchContext, governed_malformed};
+use super::{
+    GovernedDispatchOperation, StepOwnerChangeWait, ToolDispatchContext, governed_malformed,
+    refuses_to_rebuild,
+};
 use crate::ToolCallView;
 use crate::approval::review::{EnteredBasis, EnteredSteps, ReviewOwnerError, ReviewedEntryCustody};
 use crate::authorization::{
@@ -54,6 +57,14 @@ use crate::generated::approval_lifecycle::ApprovalLifecycleRejectionReason;
 /// decision's validity window, intersected by the owners with the current
 /// decision's own.
 ///
+/// Each step is synchronous and decided once. Its waiting forms
+/// ([`Self::run_if_current_within_after_owner_change`],
+/// [`Self::issue_child_if_current_within_after_owner_change`]) wait out a
+/// step refused to rebuild (an owner change in progress, or another actor's
+/// hold of the work owners' exclusion) within the call's remaining tool time
+/// and decide it again. Like every step they never spend, so a reviewed
+/// entry stays spent exactly once however often a step waits.
+///
 /// Which context and decision: the operation may be taken from the
 /// dispatch's context or from the refreshed context
 /// [`ToolDispatchContext::enter_reviewed_effect_held`] returned when its
@@ -95,6 +106,17 @@ enum EnteredReview {
 const _: () = {
     const fn send_and_sync<T: Send + Sync>() {}
     send_and_sync::<EnteredDispatchOperation>();
+};
+
+// The waiting steps' futures are `Send`, so a tool body (an `async_trait`
+// future on native targets) or a spawned task can await them.
+#[cfg(not(target_arch = "wasm32"))]
+const _: fn(&GovernedDispatchOperation, &EnteredDispatchOperation) = |operation, entered| {
+    fn send<T: Send>(_: T) {}
+    send(operation.run_if_current_within_after_owner_change(&(), || {}));
+    send(operation.issue_child_if_current_within_after_owner_change(&(), &()));
+    send(entered.run_if_current_within_after_owner_change(&(), || {}));
+    send(entered.issue_child_if_current_within_after_owner_change(&(), &()));
 };
 
 impl fmt::Debug for EnteredDispatchOperation {
@@ -178,18 +200,20 @@ impl EnteredDispatchOperation {
     /// - `MalformedFacts`: the run's custody no longer matches (an ended run,
     ///   in the native runtime composition), or the operation's facts no
     ///   longer bind.
-    /// - `ReprepareRequired`: the owners need a rebuild; a later step may
-    ///   succeed.
+    /// - `ReprepareRequired`: the owners need a rebuild, or (the native work
+    ///   owner) another actor holds their exclusion now; a later step may
+    ///   succeed, and [`Self::run_if_current_within_after_owner_change`]
+    ///   waits for it.
     ///
     /// A malformed `further` is refused as the work owner decides: the native
     /// owner answers `OperationAuthorizationUnavailable` for a `further` that
     /// is not its `FurtherOriginals`. `OperationAuthorizationUnavailable` also
-    /// answers contention (a held review owner or work owner), owners that
-    /// cannot answer now, and a work authorization that does not implement
-    /// the entered step. A step never answers `ReviewUnsatisfied`,
-    /// `ReviewUnavailable` or `OperationObservationUnavailable`. The governed
-    /// helper fence and child issuance built on the witness answer `Denied`
-    /// for every `AuthorizationRefused` here except `ReprepareRequired`, and
+    /// answers contention for the review owner, owners that cannot answer
+    /// now, and a work authorization that does not implement the entered
+    /// step. A step never answers `ReviewUnsatisfied`, `ReviewUnavailable` or
+    /// `OperationObservationUnavailable`. The governed helper fence and child
+    /// issuance built on the witness answer `Denied` for every
+    /// `AuthorizationRefused` here except `ReprepareRequired`, and
     /// `Unavailable` otherwise.
     pub fn run_if_current_within(
         &self,
@@ -251,6 +275,103 @@ impl EnteredDispatchOperation {
                 entered_tier,
             )
         })
+    }
+
+    /// [`Self::run_if_current_within`], waiting out what refused it to
+    /// rebuild (`ReprepareRequired`): an owner change in progress on the
+    /// work's own publication, or another actor's hold of the work owners'
+    /// exclusion, which the native work owner refuses that way and names
+    /// through `WorkAuthorization::owner_change_in_progress`. After each such
+    /// refusal it waits for the change to complete, within the bounds of
+    /// [`crate::authorization::OwnerChangeChurn`] and never past the call's
+    /// remaining tool time (`ToolDispatchContext::remaining_tool_time`),
+    /// then takes the step again; with no change in progress at that read
+    /// (the holder may have finished in between) it pauses one backoff step
+    /// and takes it again. Every retry is one of the step's free rebuilds,
+    /// all within one deadline set at its first wait. Each wait is traced at
+    /// site `tool_step` and reported as the call's to the host's operation
+    /// refusal observer.
+    ///
+    /// Each attempt is the synchronous step itself, decided afresh: it
+    /// releases the work owners' exclusion, every owner lock, the run's
+    /// custody read and the review owner's admission of the step before it
+    /// returns, so nothing is held across a wait. Like every step it never
+    /// spends, never runs a review and never requests consent. `operation`
+    /// runs at most once, inside the attempt that answers `Ok`, under the
+    /// owners' exclusion, and must not await. Shell synchronization only: no
+    /// machine input.
+    ///
+    /// # Errors
+    /// As [`Self::run_if_current_within`], once the bounds are spent: the
+    /// last attempt's answer, `ReprepareRequired` included; `operation` did
+    /// not run.
+    pub async fn run_if_current_within_after_owner_change(
+        &self,
+        further: &(dyn std::any::Any + Send + Sync),
+        operation: impl FnOnce(),
+    ) -> Result<(), crate::ToolError> {
+        let mut wait = StepOwnerChangeWait::new(
+            &self.0.operation.context,
+            &self.0.operation.work,
+            "tool_step",
+        );
+        let mut operation = Some(operation);
+        loop {
+            let answer = self.run_if_current_within(further, &mut || {
+                if let Some(run) = operation.take() {
+                    run();
+                }
+            });
+            // An attempt whose operation ran is the step's answer, whatever
+            // it says: the operation never runs twice.
+            let rebuild = operation.is_some() && refuses_to_rebuild(&answer);
+            if rebuild && wait.again().await {
+                continue;
+            }
+            return answer;
+        }
+    }
+
+    /// [`Self::issue_child_if_current_within`], waiting out what refused it
+    /// to rebuild, as [`Self::run_if_current_within_after_owner_change`]
+    /// does (site `tool_child_issuance`). An attempt that answers `Ok`
+    /// carries the grant owner's typed outcome, which callers must keep; an
+    /// attempt that refused appended nothing, and the next one may recover
+    /// or issue the intended child under its stable id. It never spends.
+    ///
+    /// # Errors
+    /// As [`Self::issue_child_if_current_within`], once the bounds are spent;
+    /// nothing was issued for this step.
+    pub async fn issue_child_if_current_within_after_owner_change(
+        &self,
+        further: &(dyn std::any::Any + Send + Sync),
+        intent: &(dyn std::any::Any + Send + Sync),
+    ) -> Result<Box<dyn std::any::Any + Send>, crate::ToolError> {
+        let mut wait = StepOwnerChangeWait::new(
+            &self.0.operation.context,
+            &self.0.operation.work,
+            "tool_child_issuance",
+        );
+        self.issue_child_waiting(&mut wait, further, intent).await
+    }
+
+    /// The waiting issuance's attempts under `wait`, the waiting state of
+    /// the step it serves: the dispatch's own waiting issuance goes on here
+    /// after its first issuance under the entry refused to rebuild and its
+    /// wait settled, with the bounds that wait already spent.
+    pub(super) async fn issue_child_waiting(
+        &self,
+        wait: &mut StepOwnerChangeWait<'_>,
+        further: &(dyn std::any::Any + Send + Sync),
+        intent: &(dyn std::any::Any + Send + Sync),
+    ) -> Result<Box<dyn std::any::Any + Send>, crate::ToolError> {
+        loop {
+            let answer = self.issue_child_if_current_within(further, intent);
+            if refuses_to_rebuild(&answer) && wait.again().await {
+                continue;
+            }
+            return answer;
+        }
     }
 
     /// One step: the exact operation's current decision, core's tier check,

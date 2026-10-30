@@ -234,7 +234,8 @@ fi
 # settlement and an abandon that keep it, a hold that ignores the input's
 # phase, a release that clears every hold, a resume that ignores the
 # destination and a resume that keeps the previous staged run and context.
-# 14 steps reach every witness. It runs alone in shard audits-h.
+# 14 steps reach every witness. It runs in shard audits-h, with the identity
+# entry audit.
 input_controller_hold_audit="${workspace_root}/specs/machines/meerkat_machine/input_controller_hold_audit.sh"
 if [[ ! -x "${input_controller_hold_audit}" ]]; then
   echo "error: input controller hold audit runner is missing from workspace runfiles: ${input_controller_hold_audit}" >&2
@@ -709,7 +710,7 @@ if [[ ! -x "${identity_entry_audit}" ]]; then
   echo "error: identity entry audit runner is missing from workspace runfiles: ${identity_entry_audit}" >&2
   exit 1
 fi
-if run_part audits-c; then
+if run_part audits-h; then
   echo "running bounded identity entry TLC audit"
   TLC_WORKERS="${tlc_workers}" "${identity_entry_audit}" --mutants
 fi
@@ -862,11 +863,7 @@ run_machine_verify() {
 # on the rest of its shard), live delegation steer 37-51: 405-586 s;
 # audits-c = run-start hold 209-256, materialization-rollback keep with
 # --mutants 212-259, live worker start after close 20-27, approval
-# entered-step with --mutants 16-24: 457-566 s; plus the identity entry
-# audit with --mutants, added after these measurements: its two whole-space
-# runs (entry and lifecycle), twenty witnesses and ten mutants took about
-# 175 s locally with 8 TLC workers, more on the hosted runner's 4; the hosted
-# shard is measured at validation;
+# entered-step with --mutants 16-24: 457-566 s;
 # audits-d = durable-tail recovery ownership with --mutants 179-233,
 # live-context outbox 122-153, peer request maps with --mutants 93-131,
 # live-context result barrier with --mutants 27-37: 421-554 s;
@@ -889,10 +886,16 @@ run_machine_verify() {
 # eight whole-space runs 140 s of TLC time, the seat run 67 s of it), where
 # the same lane took about 230 s before; the hosted shard has not been
 # measured again;
-# audits-h = input controller hold with --mutants, alone: its safety run
-# (1617 distinct states at 14 steps), nine witness runs and nine
-# single-worker mutant runs took 100 s on a 4-worker local run, not yet
-# measured on a hosted runner.
+# audits-h = input controller hold with --mutants: its safety run (1617
+# distinct states at 14 steps), nine witness runs and nine single-worker
+# mutant runs took 100 s on a 4-worker local run; and the identity entry
+# audit with --mutants, moved here from audits-c (2026-10-30) because it would
+# take that shard past 10 minutes on a hosted runner: its two whole-space runs
+# (entry and lifecycle), twenty witnesses and ten mutants took about 195 s
+# locally with 4 TLC workers. Locally, with 4 TLC workers and the eight
+# shards in parallel, audits-h took 298 s and audits-c 273 s, where audits-c
+# took 455 s with the identity entry audit; neither shard is measured on a
+# hosted runner yet.
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
 # inside the 1080 s execution budget even on a runner 1.6x slower than the
 # faster ones here. As three shards these audits ran 13-18 minutes (audits-a),

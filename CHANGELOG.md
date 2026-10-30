@@ -116,7 +116,9 @@ them.
   These turns end when the host's runtime stops. A stop in the middle of a
   turn is crash-equivalent: the interrupted input and the queued ones stay
   non-terminal, nothing is written for them after the stop, and the next
-  start resumes them. A turn whose session task panicked, or whose actor
+  start resumes them. An input that reaches the session after the stop, from
+  a part of the process that outlives the host's runtime, waits for the next
+  start the same way. A turn whose session task panicked, or whose actor
   the service retired, still fails with its error, and so does a turn its
   caller drives directly rather than through the runtime (see Upgrade notes
   and Fixed).
@@ -222,6 +224,15 @@ them.
   waits for an attached loop's handoff.
 
 ### Added
+
+- `meerkat-session`, `meerkat-mob`:
+  `PersistentSessionService::runtime_turn_lost_its_host_runtime` answers
+  whether a session's task ended with the runtime it ran on, and then degrades
+  the session's registration to a cold reload, so the runtime loop leaves the
+  session's work to its next registration. `MobSessionService` gains the same
+  method, provided and answering `false`; the stock persistent service
+  overrides it, and a member's runtime executor asks it before the steps ahead
+  of a turn that need the live actor (see Fixed and Upgrade notes).
 
 - `meerkat-runtime`: `PromptInput::detached_job_completed_with_handling`
   admits a completion notice under the handling its producer declares,
@@ -431,28 +442,33 @@ them.
   Size the workers of the runtime a mob or a session runtime runs on for its
   sessions' turns, as for the turns of the sessions the host creates directly.
 
-- `meerkat-session`, `meerkat-rpc`: a host runtime that stops in the middle of
-  a runtime-backed session's turn is now crash-equivalent. The session's task
-  runs on the host's runtime (a member's, a session an RPC session runtime
-  serves, or one the host creates directly through a runtime-backed service),
-  but its runtime loop runs on Core's `meerkat-runtime-serving` runtime and
-  outlives the host's. The loop met the lost task as a failed apply and, after
-  the host was gone, recorded a failed run, replayed the run's inputs until it
-  abandoned them (`MaxAttemptsExhausted`) and discarded the run's provisional
-  tail. An executor stop would not have kept them either: it ends every
-  non-terminal input as stopped. Now the session service, or the RPC session
-  runtime for a turn it promotes or rebuilds, degrades the session's
-  registration to require a cold reload from durable state before the loop
-  sees the lost turn, the degradation an undiscardable failed-run tail already
-  takes. The loop's failure handling then finds no driver authority and ends
-  within its bound without writing anything for the session: no failed run,
-  replay, stop terminal or unregister, and no tail discard. The interrupted
-  and queued inputs stay non-terminal, and the session's next registration, in
-  this process (the same machine reloads the degraded registration) or in the
-  next one, recovers and resumes the run once. A turn whose session task
-  panicked, or whose actor the service retired, still fails with its error,
-  and so does a turn its caller drives directly rather than through the
-  runtime.
+- `meerkat-session`, `meerkat-rpc`, `meerkat-mob`, `meerkat`: a host runtime
+  that stops in the middle of a runtime-backed session's turn, or while the
+  session is idle, is now crash-equivalent. The session's task runs on the
+  host's runtime (a member's, a session an RPC session runtime serves, or one
+  the host creates directly through a runtime-backed service), but its runtime
+  loop runs on Core's `meerkat-runtime-serving` runtime and outlives the
+  host's. The loop met the lost task as a failed apply and, after the host was
+  gone, recorded a failed run, replayed the run's inputs until it abandoned
+  them (`MaxAttemptsExhausted`) and discarded the run's provisional tail; an
+  input that reached an idle session after the stop met the same end when a
+  step ahead of its turn needed the live actor (a per-turn LLM reconfigure or
+  hot swap, the realization of a committed model-routing handoff). An executor
+  stop would not have kept the inputs either: it ends every non-terminal input
+  as stopped. Now the session service, the runtime executors before those
+  steps, and the RPC session runtime for a turn it promotes or rebuilds
+  degrade the session's registration to require a cold reload from durable
+  state before the loop sees the lost task, the degradation an undiscardable
+  failed-run tail already takes. The loop's failure handling then finds no
+  driver authority and ends within its bound without writing anything for the
+  session: no failed run, replay, stop terminal or unregister, and no tail
+  discard; the teardown watcher checks for that degradation before an
+  unregister the loop asks for. The interrupted and queued inputs stay
+  non-terminal, and the session's next registration, in this process (the same
+  machine reloads the degraded registration) or in the next one, recovers and
+  resumes the run once. A turn whose session task panicked, or whose actor the
+  service retired, still fails with its error, and so does a turn its caller
+  drives directly rather than through the runtime.
 
 - `meerkat-runtime`: an admitted governed resume of retained work (for
   example a consent notice) that a graceful requeue stop kept, or that a
@@ -603,6 +619,12 @@ them.
   embedder that builds its own runtime sets the size with that runtime's
   builder (`tokio::runtime::Builder::thread_stack_size`).
 
+- If you wrap a `MobSessionService`, forward
+  `runtime_turn_lost_its_host_runtime` to the service you wrap, as you forward
+  `live_session_actor_registered`. The provided default answers `false`, and a
+  member of a stopped host runtime served through a wrapper that keeps it
+  would have an input that reaches it after the stop recorded as a failed run.
+
 - Build an RPC `SessionRuntime` inside the Tokio runtime its sessions should
   run on, and keep that runtime running while you serve them: the session
   runtime records the runtime it is built on. Built outside a Tokio runtime
@@ -615,11 +637,12 @@ them.
 - `meerkat-runtime`, `meerkat-session`: the registration a stopped host
   runtime's session leaves degraded stays in its machine until that machine
   reloads it, at the session's next registration there, or the process exits.
-  With realm persistence, whose hosting claims are file locks, another machine
-  instance in the same process is refused the session (`ServedElsewhere`)
-  while that registration holds its claim; a new process, or the same machine,
-  opens it. The stopped host's other in-memory objects (its session service,
-  machine and the degraded registration) stay in the process until it exits.
+  With realm persistence, whose hosting claims are file locks, that
+  registration keeps the session's lock: any other machine, in this process or
+  in another process, is refused the session (`ServedElsewhere`) until this
+  machine reloads it or this process exits. The stopped host's other in-memory
+  objects (its session service and machine) stay in the process until it
+  exits.
 
 - `meerkat-runtime`: a governed input admitted under its own authority
   association (a governed prompt, for example) that a graceful requeue stop

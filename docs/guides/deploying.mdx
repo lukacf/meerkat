@@ -298,7 +298,8 @@ and those of a session the host creates directly on the runtime that creates
 it. Size the workers of that runtime for the tools you compose. A host runtime
 that stops in the middle of a turn ends the turn as a crash would: the
 interrupted input and the queued ones stay non-terminal, nothing more is
-written for them, and the session's next start resumes them. A turn whose task
+written for them, and the session's next start resumes them. An input that
+reaches the session after the stop waits for that start too. A turn whose task
 panicked, or whose session the service retired, fails with its error, as does
 a turn its caller drives directly. When `RKAT_WORKER_STACK_BYTES` is unset the
 two process runtimes' threads take 16 MiB, twice the budget, or

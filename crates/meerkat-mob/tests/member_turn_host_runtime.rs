@@ -250,9 +250,9 @@ async fn run_one_probe_turn(touch_frame: bool) -> Vec<Option<String>> {
     let (service, adapter) = build_service(temp.path(), Arc::clone(&client)).await;
     let storage = MobStorage::persistent(temp.path().join("mob.db")).expect("mob storage");
     let handle = MobBuilder::new(mob_definition(), storage)
-        .with_session_service(service.clone())
-        .with_runtime_adapter(adapter.clone())
-        .with_default_llm_client(client.clone())
+        .with_session_service(service)
+        .with_runtime_adapter(adapter)
+        .with_default_llm_client(client)
         .create()
         .await
         .expect("create mob");

@@ -4267,15 +4267,15 @@ pub trait SessionAgent: Send {
         Ok(meerkat_core::RunStartInstructionOutcome::NotNeeded)
     }
 
-    /// Conclude the turn's run start once the turn ends: `run_started` is
-    /// whether its run started. A run that never started (a refusal or a
-    /// veto before it, an interrupt before it began) takes back the
-    /// operator-instruction entry its run start applied and restores the
-    /// recorded target, so the changes stay pending. Returns whether an entry
-    /// was taken back. An agent that applies nothing has nothing to conclude.
+    /// Conclude the turn's run start once the turn ends. The agent reports
+    /// from its own run whether that run started: a run that never started
+    /// (a refusal or a veto before it, an interrupt before it began) takes
+    /// back the operator-instruction entry its run start applied and
+    /// restores the recorded target, so the changes stay pending. Returns
+    /// whether an entry was taken back. An agent that applies nothing has
+    /// nothing to conclude.
     fn conclude_run_start_operator_instructions(
         &mut self,
-        _run_started: bool,
     ) -> Result<bool, meerkat_core::error::AgentError> {
         Ok(false)
     }
@@ -11690,7 +11690,7 @@ async fn session_task<A: SessionAgent>(
                             // The run never starts: the operator-instruction
                             // entry its run start applied is taken back, so
                             // the changes stay pending for the next one.
-                            let taken_back = agent.conclude_run_start_operator_instructions(false);
+                            let taken_back = agent.conclude_run_start_operator_instructions();
                             let error = match taken_back {
                                 Ok(_) => error,
                                 Err(failure) => error.with_ancillary_failure(
@@ -12050,13 +12050,13 @@ async fn session_task<A: SessionAgent>(
                     control.state_tx.send_replace(projection);
                 }
 
-                // A run that publishes no `RunStarted` and fails never started
-                // (a refusal or a veto before it, an interrupt before it
-                // began): the operator-instruction entry its run start
-                // applied is taken back, so no entry names a run that never
-                // ran and the changes stay pending for the next run start.
-                let run_never_started = result.is_err() && !run_started_observed;
-                let taken_back = agent.conclude_run_start_operator_instructions(!run_never_started);
+                // The agent reports whether its run started: the
+                // operator-instruction entry a run start applied for a run
+                // that never started (a refusal or a veto before it, an
+                // interrupt before it began) is taken back, so no entry names
+                // a run that never ran and the changes stay pending for the
+                // next run start.
+                let taken_back = agent.conclude_run_start_operator_instructions();
                 let (result, entry_taken_back) = match taken_back {
                     Ok(taken_back) => (result, taken_back),
                     Err(failure) => (

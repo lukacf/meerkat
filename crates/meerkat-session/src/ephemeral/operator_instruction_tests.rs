@@ -82,8 +82,10 @@ struct ProbeAgent {
     probe: Arc<RunProbe>,
     transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
     /// What the last run start's entry changed, until the session task
-    /// reports whether its run started.
+    /// concludes the run start.
     run_start_application: Option<meerkat_core::RunStartInstructionApplication>,
+    /// The run of the last run start started: the agent's own fact.
+    run_started: bool,
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -118,6 +120,7 @@ impl SessionAgentBuilder for ProbeBuilder {
             probe: Arc::clone(&self.probe),
             transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
             run_start_application: None,
+            run_started: false,
         })
     }
 }
@@ -153,6 +156,7 @@ impl ProbeAgent {
                 "the run is refused before it starts".to_string(),
             ));
         }
+        self.run_started = true;
         self.session
             .push(Message::User(meerkat_core::types::UserMessage::text(
                 prompt,
@@ -311,17 +315,15 @@ impl SessionAgent for ProbeAgent {
             )
             .map_err(|error| AgentError::InternalError(error.to_string()))?;
         self.run_start_application = application;
+        self.run_started = false;
         Ok(outcome)
     }
 
-    fn conclude_run_start_operator_instructions(
-        &mut self,
-        run_started: bool,
-    ) -> Result<bool, AgentError> {
+    fn conclude_run_start_operator_instructions(&mut self) -> Result<bool, AgentError> {
         let Some(application) = self.run_start_application.take() else {
             return Ok(false);
         };
-        if run_started {
+        if self.run_started {
             return Ok(false);
         }
         self.session

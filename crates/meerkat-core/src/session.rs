@@ -9169,8 +9169,9 @@ impl Session {
             // Only a run start appends an operator-instruction entry row, and
             // only the validated compaction fold takes entry rows out and
             // inserts a snapshot. Entry rows are compared by identity and by
-            // their place among the conversation rows, not by offset: a
-            // keyed prompt update inserts its later version before them.
+            // their place among the conversation rows and the System rows of
+            // their gap, not by offset: a keyed prompt update adopts a row in
+            // place and inserts its later version before them.
             if operator_instructions::operator_instruction_entry_places(self.messages())
                 != operator_instructions::operator_instruction_entry_places(&rewritten)
             {

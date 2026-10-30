@@ -5,17 +5,31 @@
 //! it appends any input of the run. The session-document authority decides
 //! whether the session's pending operator instructions apply now; when they
 //! do, the session appends the one entry that carries all of them, naming the
-//! run the agent then runs. When the turn ends, the session task reports
-//! whether that run started ([`Agent::conclude_run_start_operator_instructions`]):
-//! the entry of a run that never started is taken back, so its changes stay
-//! pending for the next fresh run start.
+//! run the agent then runs. When the turn ends, the session task concludes
+//! the run start ([`Agent::conclude_run_start_operator_instructions`]), and
+//! the agent reports from its own run whether that run started: the entry of
+//! a run that never started is taken back, so its changes stay pending for
+//! the next fresh run start.
 
 use super::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 use crate::error::AgentError;
 use crate::lifecycle::RunId;
+use crate::session::RunStartInstructionApplication;
 use crate::{
     InstructionLowering, InstructionRunStart, ModelProfileWitness, RunStartInstructionOutcome,
 };
+
+/// A fresh run start's operator-instruction entry until the agent concludes
+/// it: what the entry changed, and what the agent saw since.
+#[derive(Debug)]
+pub(crate) struct UnconcludedRunStartInstructions {
+    application: RunStartInstructionApplication,
+    /// The run loop started the run: the one the entry names.
+    run_started: bool,
+    /// A checkpoint of the session landed (a round commit or a save of the
+    /// run, on either store profile): the entry is durable.
+    committed: bool,
+}
 
 impl<C, T, S> Agent<C, T, S>
 where
@@ -47,6 +61,8 @@ where
     /// run's first request does: the run its turn authority already started
     /// (the run a runtime dispatched), else a run id reserved here, the
     /// dispatched one or a new one, which its run loop starts the run under.
+    /// The run loop takes the reservation whenever it picks a run's id, so
+    /// no later run adopts it.
     pub fn apply_run_start_operator_instructions(
         &mut self,
         run_start: InstructionRunStart,
@@ -82,7 +98,13 @@ where
             })?;
         if matches!(outcome, RunStartInstructionOutcome::Applied { .. }) {
             self.tool_application_observations.invalidate();
-            self.unconcluded_run_start_instructions = application.map(Box::new);
+            self.unconcluded_run_start_instructions = application.map(|application| {
+                Box::new(UnconcludedRunStartInstructions {
+                    application,
+                    run_started: false,
+                    committed: false,
+                })
+            });
             if reserve {
                 self.run_start_reserved_run_id = run_id;
             }
@@ -91,25 +113,32 @@ where
     }
 
     /// Conclude the run start that applied operator instructions, once its
-    /// turn ended: `run_started` is whether the run started. A run that
-    /// never started (a refusal or a veto before it, an interrupt before it
-    /// began) takes its entry back and restores the recorded target, so no
-    /// entry names a run that never ran and the changes stay pending for the
-    /// next fresh run start. Returns whether an entry was taken back.
-    pub fn conclude_run_start_operator_instructions(
-        &mut self,
-        run_started: bool,
-    ) -> Result<bool, AgentError> {
-        let application = self.unconcluded_run_start_instructions.take();
-        if run_started {
-            return Ok(false);
-        }
+    /// turn ended. The agent knows from its own run whether the run started:
+    /// its run loop records it when it starts a run. A run that never
+    /// started (a refusal or a veto before it, an interrupt before it began)
+    /// takes its entry back and restores the recorded target, so no entry
+    /// names a run that never ran and the changes stay pending for the next
+    /// fresh run start. An entry a checkpoint of the session holds (a round
+    /// commit or a save of the run, on either store profile) is never taken
+    /// back: that is refused. Returns whether an entry was taken back.
+    pub fn conclude_run_start_operator_instructions(&mut self) -> Result<bool, AgentError> {
+        // A run id a run start reserved never outlives the run start.
         self.run_start_reserved_run_id = None;
-        let Some(application) = application else {
+        let Some(unconcluded) = self.unconcluded_run_start_instructions.take() else {
             return Ok(false);
         };
+        if unconcluded.run_started {
+            return Ok(false);
+        }
+        if unconcluded.committed {
+            return Err(AgentError::InternalError(
+                "the operator-instruction entry of a run that never started is in a checkpoint \
+                 of the session, so it is not taken back"
+                    .to_string(),
+            ));
+        }
         self.session
-            .revert_run_start_instructions(*application)
+            .revert_run_start_instructions(unconcluded.application)
             .map_err(|error| {
                 AgentError::InternalError(format!(
                     "the operator-instruction entry of a run that never started could not be \
@@ -118,5 +147,21 @@ where
             })?;
         self.tool_application_observations.invalidate();
         Ok(true)
+    }
+
+    /// The run loop started a run: the entry a run start applied names a
+    /// run that started, and its conclusion keeps it.
+    pub(super) fn note_operator_instruction_run_started(&mut self) {
+        if let Some(unconcluded) = self.unconcluded_run_start_instructions.as_mut() {
+            unconcluded.run_started = true;
+        }
+    }
+
+    /// A checkpoint of the session landed: the entry a run start applied is
+    /// durable, and its conclusion never takes it back.
+    pub(super) fn note_operator_instruction_checkpoint(&mut self) {
+        if let Some(unconcluded) = self.unconcluded_run_start_instructions.as_mut() {
+            unconcluded.committed = true;
+        }
     }
 }

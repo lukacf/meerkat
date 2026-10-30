@@ -1640,6 +1640,7 @@ where
                 }
                 self.latest_run_checkpoint_receipt = Some(next);
                 self.note_tail_carries_pending_compaction();
+                self.note_operator_instruction_checkpoint();
                 // The checkpoint moved the durable head over every rewrite the
                 // run made, so the live history retires to the retention now
                 // instead of at the next compaction. The boundary commit that
@@ -2155,6 +2156,7 @@ where
         }
         self.latest_run_checkpoint_receipt = Some(receipt);
         self.note_tail_carries_pending_compaction();
+        self.note_operator_instruction_checkpoint();
         self.round_commits.rewritten_since_base = false;
         self.round_commits.rebased = true;
         Ok(())
@@ -6476,6 +6478,10 @@ where
         // left by another run, so a stale request never leaks into this run.
 
         // --- Authority lifecycle: consume the generated primitive start ---
+        // A run id a run start reserved for its operator-instruction entry
+        // belongs to this run, whichever source names it: no later run
+        // adopts it.
+        let reserved_run_id = self.run_start_reserved_run_id.take();
         let run_id = if let Some(run_id) = self.started_primitive_run_from_authority()? {
             run_id
         } else {
@@ -6487,7 +6493,7 @@ where
                     .turn_state_handle
                     .as_deref()
                     .and_then(|handle| handle.snapshot().active_run_id)
-                    .or_else(|| self.run_start_reserved_run_id.take())
+                    .or(reserved_run_id)
                     .unwrap_or_else(|| RunId(uuid::Uuid::new_v4())),
             };
             self.apply_turn_input(TurnExecutionInput::StartConversationRun {
@@ -6500,6 +6506,9 @@ where
             })?;
             run_id
         };
+        // The run started: an operator-instruction entry its run start
+        // applied names a run that ran.
+        self.note_operator_instruction_run_started();
         // A provisional receipt belongs to exactly one run. Clear any
         // zero-checkpoint predecessor synchronously once the fresh run
         // identity is known, before the first suspension point, so service

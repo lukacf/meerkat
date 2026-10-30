@@ -631,12 +631,14 @@ impl BackendProfile {
     /// Whether requests through this backend can carry more than one System
     /// message in the leading system prefix, as the provider matrix declares
     /// it ([`OpenAiBackendKind::admits_additional_leading_system_messages`]).
-    /// A backend of another provider, or a backend kind this version does
-    /// not know, carries them.
+    /// A backend of another provider carries them. An OpenAI backend kind
+    /// this version does not know fails closed, as a binding the config does
+    /// not resolve does: it may be a backend whose wire carries only the
+    /// prompt's row.
     pub fn admits_additional_leading_system_messages(&self) -> bool {
         match self.provider {
             Provider::OpenAI => OpenAiBackendKind::parse(&self.backend_kind)
-                .is_none_or(OpenAiBackendKind::admits_additional_leading_system_messages),
+                .is_some_and(OpenAiBackendKind::admits_additional_leading_system_messages),
             _ => true,
         }
     }

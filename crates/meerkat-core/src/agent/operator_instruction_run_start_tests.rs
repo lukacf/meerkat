@@ -424,16 +424,15 @@ fn request_json(messages: &[Message]) -> String {
 }
 
 /// Conclude the last run start, as the session task does once the turn
-/// ends. This caller observes nothing of the run: it saw no `RunStarted`.
+/// ends. Whether the run started is the agent's own fact.
 fn conclude_turn(agent: &mut TestAgent) -> Result<bool, AgentError> {
-    agent.conclude_run_start_operator_instructions(false)
+    agent.conclude_run_start_operator_instructions()
 }
 
-/// The session task reports a run that never started (a refusal or a veto
-/// before it, an interrupt before it began): the entry its run start
-/// appended is taken back and the recorded target restored, so the next
-/// fresh run start applies the same change again and the entry names the
-/// run that does run.
+/// A run that never started (a refusal or a veto before it, an interrupt
+/// before it began) takes back the entry its run start appended and
+/// restores the recorded target, so the next fresh run start applies the
+/// same change again and the entry names the run that does run.
 #[tokio::test]
 async fn an_entry_whose_run_never_starts_is_taken_back_and_its_change_stays_pending() {
     let client = Arc::new(RecordingClient::default());
@@ -464,9 +463,7 @@ async fn an_entry_whose_run_never_starts_is_taken_back_and_its_change_stays_pend
     assert_eq!(entry_identities(agent.session().messages()).len(), 1);
 
     assert!(
-        agent
-            .conclude_run_start_operator_instructions(false)
-            .unwrap(),
+        agent.conclude_run_start_operator_instructions().unwrap(),
         "the entry of a run that never started is taken back"
     );
     assert_eq!(
@@ -480,9 +477,7 @@ async fn an_entry_whose_run_never_starts_is_taken_back_and_its_change_stays_pend
         "the recorded target is as the write left it"
     );
     assert!(
-        !agent
-            .conclude_run_start_operator_instructions(false)
-            .unwrap(),
+        !agent.conclude_run_start_operator_instructions().unwrap(),
         "nothing is left to take back"
     );
 
@@ -501,9 +496,7 @@ async fn an_entry_whose_run_never_starts_is_taken_back_and_its_change_stays_pend
     );
     agent.run("next".into()).await.unwrap();
     assert!(
-        !agent
-            .conclude_run_start_operator_instructions(true)
-            .unwrap(),
+        !agent.conclude_run_start_operator_instructions().unwrap(),
         "a run that started keeps its entry"
     );
 

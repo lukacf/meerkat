@@ -5477,12 +5477,14 @@ where
     /// The run id a fresh run start named in its operator-instruction entry
     /// when no run was started in the turn authority yet: the run loop
     /// starts the run under it, so the entry names the run the agent runs.
+    /// The run loop takes it whenever it picks a run's id.
     pub(crate) run_start_reserved_run_id: Option<crate::lifecycle::RunId>,
     /// What the last fresh run start's operator-instruction entry changed,
-    /// until the session task reports whether its run started
+    /// and whether its run started and a checkpoint holds it, until the
+    /// session task concludes the run start
     /// (`Agent::conclude_run_start_operator_instructions`).
     pub(crate) unconcluded_run_start_instructions:
-        Option<Box<crate::session::RunStartInstructionApplication>>,
+        Option<Box<instruction_run_start::UnconcludedRunStartInstructions>>,
     /// Machine-terminal failure observed for the exact runtime run above.
     /// Kept separate from the public `AgentError` so direct session surfaces
     /// preserve their original typed errors while the runtime can commit a

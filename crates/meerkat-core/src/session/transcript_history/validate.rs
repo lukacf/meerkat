@@ -172,8 +172,9 @@ fn validate_instruction_activation_revision_transition(
 /// takes every one out and leaves at most one snapshot, the last row of the
 /// rewritten transcript's leading System prefix, whose entry sequence follows
 /// every entry its origin session wrote before it. Any other rewrite keeps
-/// every entry row exactly, at its place among the conversation rows (not at
-/// its offset: a keyed prompt update inserts a System row before it).
+/// every entry row exactly, at its place among the conversation rows and the
+/// System rows of its gap (`operator_instruction_entry_places`), not at its
+/// offset: a keyed prompt update inserts a later version before it.
 fn validate_operator_instruction_entry_transition(
     commit: &TranscriptRewriteCommit,
     parent_body: &TranscriptRevisionBody,

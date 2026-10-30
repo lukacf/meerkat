@@ -464,9 +464,69 @@ pub(super) type ExternalBindingOverlayMap = BTreeMap<
 pub(super) type MemberOperatorRequestMap =
     BTreeMap<(MobId, MobMemberOperatorRequestKey), MobMemberOperatorRequestRecord>;
 
+/// An intents-table row this build cannot decode, kept as stored: it reads
+/// unreadable for its identity alone, and a host store writes it back
+/// untouched on every rewrite of the group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RawIntentRow {
+    /// The row as the backing store holds it.
+    pub(super) stored: Vec<u8>,
+    /// Whether the row is of schema version 2 or later (a created entry's,
+    /// or a later build's): the created identity scan reports it, never the
+    /// intent scan.
+    pub(super) created_domain: bool,
+    /// Why this build cannot read it.
+    pub(super) detail: String,
+}
+
+impl RawIntentRow {
+    fn evidence_digest(&self) -> String {
+        format!("sha256:{:x}", Sha256::digest(&self.stored))
+    }
+
+    /// The row as the intent readers observe it.
+    fn intent_observation<T>(&self) -> IdentityStoredObservation<T> {
+        if self.created_domain {
+            IdentityStoredObservation::Unsupported {
+                evidence_digest: self.evidence_digest(),
+                detail: self.detail.clone(),
+            }
+        } else {
+            IdentityStoredObservation::Malformed {
+                evidence_digest: self.evidence_digest(),
+                detail: self.detail.clone(),
+            }
+        }
+    }
+}
+
+/// How the intent readers observe a created identity entry's row: it is no
+/// host-adopted identity intent.
+fn created_row_intent_observation<T>(
+    record: &crate::identity::CreatedIdentityRecord,
+) -> Result<IdentityStoredObservation<T>, MobStoreError> {
+    Ok(IdentityStoredObservation::Unsupported {
+        evidence_digest: identity_evidence_digest(record)?,
+        detail: format!(
+            "the identity's row is a created identity entry's (schema version {}), not an \
+             identity intent",
+            record.schema_version
+        ),
+    })
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct IdentityAuthorityState {
     pub(super) intents: BTreeMap<(MobId, AgentIdentity), IdentityIntentRecord>,
+    /// Created identity entries' rows (schema version 2): the intents table's
+    /// other rows, which MobMachine recovers at boot and no intent reader
+    /// takes for an identity intent.
+    pub(super) created: BTreeMap<(MobId, AgentIdentity), crate::identity::CreatedIdentityRecord>,
+    /// Intents-table rows this build cannot decode, by identity.
+    pub(super) unreadable_intents: BTreeMap<(MobId, AgentIdentity), RawIntentRow>,
+    /// Intents-table entries of a host store whose key this build cannot
+    /// decode, by entry name: never read, written back untouched.
+    pub(super) unattributed_intent_entries: BTreeMap<String, Vec<u8>>,
     pub(super) leases: BTreeMap<(MobId, AgentIdentity), IdentityLeaseRecord>,
     pub(super) receipts: BTreeMap<(MobId, String, String), IdentityOperationReceipt>,
     pub(super) mutation_receipts:
@@ -628,6 +688,72 @@ impl InMemoryMobIdentityStore {
             clock,
         }
     }
+
+    /// Keep `record`, a created identity entry's row, as its identity's row
+    /// of the intents table, in place of any row the identity had.
+    #[cfg(test)]
+    pub(crate) async fn put_created_identity(
+        &self,
+        record: crate::identity::CreatedIdentityRecord,
+    ) -> Result<(), MobStoreError> {
+        record.validate().map_err(identity_contract_error)?;
+        let key = (record.mob_id.clone(), record.agent_identity.clone());
+        let mut aggregate = self.aggregate.write().await;
+        let state = &mut aggregate.identity;
+        state.intents.remove(&key);
+        state.unreadable_intents.remove(&key);
+        state.created.insert(key, record);
+        Ok(())
+    }
+
+    /// Keep `stored`, an intents-table row in its stored form, as its
+    /// identity's row, as a later build would have written it: a created
+    /// entry's row this build reads is kept as one, a host-adopted intent it
+    /// reads as an intent, and any other row as raw bytes, unreadable.
+    #[cfg(test)]
+    pub(crate) async fn put_raw_identity_row(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+        stored: Vec<u8>,
+    ) {
+        let key = (mob_id.clone(), identity.clone());
+        let mut aggregate = self.aggregate.write().await;
+        let state = &mut aggregate.identity;
+        state.intents.remove(&key);
+        state.created.remove(&key);
+        state.unreadable_intents.remove(&key);
+        match crate::identity::classify_created_identity_row(&stored) {
+            Some(crate::identity::CreatedIdentityObservation::Created(record)) => {
+                state.created.insert(key, record);
+            }
+            Some(crate::identity::CreatedIdentityObservation::Unreadable { detail, .. }) => {
+                state.unreadable_intents.insert(
+                    key,
+                    RawIntentRow {
+                        stored,
+                        created_domain: true,
+                        detail,
+                    },
+                );
+            }
+            None => match serde_json::from_slice::<IdentityIntentRecord>(&stored) {
+                Ok(record) if record.validate().is_ok() => {
+                    state.intents.insert(key, record);
+                }
+                Ok(_) | Err(_) => {
+                    state.unreadable_intents.insert(
+                        key,
+                        RawIntentRow {
+                            stored,
+                            created_domain: false,
+                            detail: "identity intent row this build cannot read".to_string(),
+                        },
+                    );
+                }
+            },
+        }
+    }
 }
 
 impl InMemoryMobRuntimeMetadataStore {
@@ -664,6 +790,65 @@ fn identity_authority_blocked(detail: impl Into<String>) -> MobStoreError {
         evidence_digest: None,
         detail: detail.into(),
     }
+}
+
+/// The rows of one in-memory scan page, and the cursor of its next page.
+type InMemoryScanPage<V> = (
+    BTreeMap<AgentIdentity, V>,
+    Option<super::IdentityIntentScanCursor>,
+);
+
+/// One page of an in-memory keyset scan: at most `limit` of `rows` (already
+/// after the cursor, in identity order), and the cursor of the last one when
+/// more remain.
+fn in_memory_scan_page<V>(
+    rows: BTreeMap<AgentIdentity, V>,
+    limit: usize,
+) -> Result<InMemoryScanPage<V>, MobStoreError> {
+    let has_more = rows.len() > limit;
+    let page: BTreeMap<AgentIdentity, V> = rows.into_iter().take(limit).collect();
+    let next = if has_more {
+        let Some(identity) = page.keys().next_back() else {
+            return Err(MobStoreError::Internal(
+                "identity scan continuation has no returned row".to_string(),
+            ));
+        };
+        Some(super::IdentityIntentScanCursor::new(
+            "text",
+            identity.as_str().as_bytes().to_vec(),
+        ))
+    } else {
+        None
+    };
+    Ok((page, next))
+}
+
+/// An identity-first mutation (an adoption, a member tool declaration, a
+/// convergence resolution) never touches an identity whose row is a created
+/// entry's, which MobMachine drives, or one this build cannot read.
+fn refuse_identity_first_mutation(
+    state: &IdentityAuthorityState,
+    key: &(MobId, AgentIdentity),
+) -> Result<(), MobStoreError> {
+    if let Some(created) = state.created.get(key) {
+        return Err(MobStoreError::IdentityAuthorityBlocked {
+            evidence_digest: identity_evidence_digest(created).ok(),
+            detail: format!(
+                "'{}' is a created identity entry: identity-first mutations do not act on it",
+                key.1
+            ),
+        });
+    }
+    if let Some(raw) = state.unreadable_intents.get(key) {
+        return Err(MobStoreError::IdentityAuthorityBlocked {
+            evidence_digest: Some(raw.evidence_digest()),
+            detail: format!(
+                "'{}' holds an identity row this build cannot read: {}",
+                key.1, raw.detail
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn validate_identity_store_text(field: &'static str, value: &str) -> Result<(), MobStoreError> {
@@ -966,7 +1151,14 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
     ) -> Result<IdentityStoredObservation<IdentityIntentRecord>, MobStoreError> {
         let aggregate = self.aggregate.read().await;
         let state = &aggregate.identity;
-        let Some(record) = state.intents.get(&(mob_id.clone(), identity.clone())) else {
+        let key = (mob_id.clone(), identity.clone());
+        let Some(record) = state.intents.get(&key) else {
+            if let Some(created) = state.created.get(&key) {
+                return created_row_intent_observation(created);
+            }
+            if let Some(raw) = state.unreadable_intents.get(&key) {
+                return Ok(raw.intent_observation());
+            }
             return Ok(IdentityStoredObservation::Missing);
         };
         if record.mob_id != *mob_id || record.intent.identity() != identity {
@@ -1018,6 +1210,7 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
         let receipt_key = (request.mob_id.clone(), request.request_id.clone());
         let intent_key = (request.mob_id.clone(), request.agent_identity.clone());
         let mut aggregate = self.aggregate.write().await;
+        refuse_identity_first_mutation(&aggregate.identity, &intent_key)?;
         if let Some(existing) = aggregate.identity.adoption_receipts.get(&receipt_key) {
             existing.validate().map_err(identity_authority_error)?;
             return if existing.request_digest == request_digest {
@@ -1063,6 +1256,7 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
         let intent_key = (request.mob_id.clone(), request.agent_identity.clone());
         let committed_at_ms = self.clock.now_ms()?;
         let mut aggregate = self.aggregate.write().await;
+        refuse_identity_first_mutation(&aggregate.identity, &intent_key)?;
         if let Some(existing) = aggregate.identity.mutation_receipts.get(&receipt_key) {
             existing.validate().map_err(identity_authority_error)?;
             return if existing.request_digest == request_digest {
@@ -1104,6 +1298,7 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
         let intent_key = (request.mob_id.clone(), request.agent_identity.clone());
         let committed_at_ms = self.clock.now_ms()?;
         let mut aggregate = self.aggregate.write().await;
+        refuse_identity_first_mutation(&aggregate.identity, &intent_key)?;
         if let Some(existing) = aggregate
             .identity
             .convergence_resolution_receipts
@@ -1164,6 +1359,11 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
             };
             observations.insert(identity.clone(), observation);
         }
+        for ((stored_mob_id, identity), raw) in &state.unreadable_intents {
+            if stored_mob_id == mob_id && !raw.created_domain {
+                observations.insert(identity.clone(), raw.intent_observation());
+            }
+        }
         Ok(observations)
     }
 
@@ -1190,39 +1390,18 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
         let aggregate = self.aggregate.read().await;
         let state = &aggregate.identity;
         let after_bytes = after.map(super::IdentityIntentScanCursor::physical_identity);
-        let mut selected = Vec::with_capacity(limit.saturating_add(1));
+        let after_cursor = |identity: &AgentIdentity| {
+            after_bytes.is_none_or(|after| identity.as_str().as_bytes() > after)
+        };
+        // The host-adopted intents' rows, and the unreadable rows of their
+        // schema; a created entry's row is the created identity scan's.
+        let mut rows: BTreeMap<AgentIdentity, IdentityStoredObservation<IdentityIntentRecord>> =
+            BTreeMap::new();
         for ((stored_mob_id, identity), record) in &state.intents {
-            if stored_mob_id != mob_id
-                || after_bytes.is_some_and(|after| identity.as_str().as_bytes() <= after)
-            {
+            if stored_mob_id != mob_id || !after_cursor(identity) {
                 continue;
             }
-            selected.push((identity.clone(), record));
-            if selected.len() > limit {
-                break;
-            }
-        }
-
-        let has_more = selected.len() > limit;
-        if has_more {
-            selected.pop();
-        }
-        let next = if has_more {
-            let Some((identity, _)) = selected.last() else {
-                return Err(MobStoreError::Internal(
-                    "identity intent scan continuation has no returned row".to_string(),
-                ));
-            };
-            Some(super::IdentityIntentScanCursor::new(
-                "text",
-                identity.as_str().as_bytes().to_vec(),
-            ))
-        } else {
-            None
-        };
-        let mut observations = BTreeMap::new();
-        for (identity, record) in selected {
-            let observation = if record.mob_id != *mob_id || record.intent.identity() != &identity {
+            let observation = if record.mob_id != *mob_id || record.intent.identity() != identity {
                 malformed_identity_record(
                     record,
                     "identity intent record does not match its physical mob/identity key",
@@ -1230,9 +1409,78 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
             } else {
                 classify_identity_record(record, IdentityIntentRecord::validate)?
             };
-            observations.insert(identity, observation);
+            rows.insert(identity.clone(), observation);
         }
+        for ((stored_mob_id, identity), raw) in &state.unreadable_intents {
+            if stored_mob_id == mob_id && !raw.created_domain && after_cursor(identity) {
+                rows.insert(identity.clone(), raw.intent_observation());
+            }
+        }
+        let (observations, next) = in_memory_scan_page(rows, limit)?;
         Ok(super::IdentityIntentScanPage { observations, next })
+    }
+
+    async fn scan_created_identities_page(
+        &self,
+        mob_id: &MobId,
+        after: Option<&super::IdentityIntentScanCursor>,
+        limit: usize,
+    ) -> Result<super::CreatedIdentityScanPage, MobStoreError> {
+        if limit == 0 || limit > super::IDENTITY_INTENT_SCAN_PAGE_MAX {
+            return Err(MobStoreError::Internal(format!(
+                "created identity scan limit must be in 1..={}, got {limit}",
+                super::IDENTITY_INTENT_SCAN_PAGE_MAX
+            )));
+        }
+        if let Some(after) = after
+            && after.storage_class() != "text"
+        {
+            return Err(MobStoreError::Internal(
+                "in-memory created identity scan received a non-text cursor".to_string(),
+            ));
+        }
+        let aggregate = self.aggregate.read().await;
+        let state = &aggregate.identity;
+        let after_bytes = after.map(super::IdentityIntentScanCursor::physical_identity);
+        let after_cursor = |identity: &AgentIdentity| {
+            after_bytes.is_none_or(|after| identity.as_str().as_bytes() > after)
+        };
+        let mut rows: BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation> =
+            BTreeMap::new();
+        for ((stored_mob_id, identity), record) in &state.created {
+            if stored_mob_id != mob_id || !after_cursor(identity) {
+                continue;
+            }
+            let observation = if record.mob_id != *mob_id || record.agent_identity != *identity {
+                crate::identity::CreatedIdentityObservation::Unreadable {
+                    evidence_digest: identity_evidence_digest(record)?,
+                    detail: "created identity record does not match its physical mob/identity key"
+                        .to_string(),
+                }
+            } else {
+                match record.validate() {
+                    Ok(()) => crate::identity::CreatedIdentityObservation::Created(record.clone()),
+                    Err(error) => crate::identity::CreatedIdentityObservation::Unreadable {
+                        evidence_digest: identity_evidence_digest(record)?,
+                        detail: error.to_string(),
+                    },
+                }
+            };
+            rows.insert(identity.clone(), observation);
+        }
+        for ((stored_mob_id, identity), raw) in &state.unreadable_intents {
+            if stored_mob_id == mob_id && raw.created_domain && after_cursor(identity) {
+                rows.insert(
+                    identity.clone(),
+                    crate::identity::CreatedIdentityObservation::Unreadable {
+                        evidence_digest: raw.evidence_digest(),
+                        detail: raw.detail.clone(),
+                    },
+                );
+            }
+        }
+        let (observations, next) = in_memory_scan_page(rows, limit)?;
+        Ok(super::CreatedIdentityScanPage { observations, next })
     }
 
     async fn observe_identity_lease(
@@ -1573,6 +1821,24 @@ impl MobIdentityMemberStore for InMemoryMobIdentityStore {
             };
             if let Some(management) = super::intent_row_management(&observation) {
                 intent_rows.insert(identity.clone(), management);
+            }
+        }
+        // A created entry's row is MobMachine's to drive; a row this build
+        // cannot read is unreadable.
+        for (intent_mob_id, identity) in aggregate.identity.created.keys() {
+            if intent_mob_id == mob_id {
+                intent_rows.insert(
+                    identity.clone(),
+                    crate::runtime::MemberIdentityManagement::CreatedEntry,
+                );
+            }
+        }
+        for (intent_mob_id, identity) in aggregate.identity.unreadable_intents.keys() {
+            if intent_mob_id == mob_id {
+                intent_rows.insert(
+                    identity.clone(),
+                    crate::runtime::MemberIdentityManagement::IntentUnreadable,
+                );
             }
         }
         // The log is in cursor order, so the tail starts at a binary search.

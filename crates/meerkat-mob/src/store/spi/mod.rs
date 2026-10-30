@@ -418,6 +418,93 @@ where
     Ok(out)
 }
 
+/// The identity intents group's entries as this build holds them: the
+/// host-adopted intents, the created entries' rows, and every entry this
+/// build cannot decode, as stored (so a rewrite of the group writes it back
+/// untouched).
+fn intent_group_entries(
+    identity: &super::in_memory::IdentityAuthorityState,
+) -> Result<Vec<(String, EntryBytes)>, MobStoreError> {
+    let mut entries = keyed_entries(G_INTENT, identity.intents.iter())?;
+    entries.extend(keyed_entries(G_INTENT, identity.created.iter())?);
+    for (key, raw) in &identity.unreadable_intents {
+        entries.push((hashed_name(G_INTENT, key)?, Arc::new(raw.stored.clone())));
+    }
+    for (name, stored) in &identity.unattributed_intent_entries {
+        entries.push((name.clone(), Arc::new(stored.clone())));
+    }
+    Ok(entries)
+}
+
+/// Decode the identity intents group one entry at a time, so one entry this
+/// build cannot read fails closed for its identity alone and never the whole
+/// mob: a host-adopted intent and a created entry's row are kept as such; an
+/// entry whose key reads but whose row does not (a later build's format, an
+/// unknown field, a broken seal) is kept as stored for its identity, which
+/// reads unreadable; an entry whose key does not read, or does not name its
+/// entry, is kept as stored by name and never read.
+fn import_intent_entries(
+    body: &BTreeMap<String, EntryBytes>,
+    identity: &mut super::in_memory::IdentityAuthorityState,
+) -> Result<(), MobStoreError> {
+    identity.intents.clear();
+    identity.created.clear();
+    identity.unreadable_intents.clear();
+    identity.unattributed_intent_entries.clear();
+    let prefix = format!("{G_INTENT}/");
+    for (name, bytes) in entries_with_prefix(body, &prefix) {
+        let keyed = check_version(bytes).and_then(|()| {
+            serde_json::from_slice::<
+                KeyedOwned<(MobId, AgentIdentity), Box<serde_json::value::RawValue>>,
+            >(bytes)
+            .map_err(serialization)
+        });
+        let keyed = match keyed {
+            Ok(keyed) if hashed_name(G_INTENT, &keyed.k)? == *name => keyed,
+            Ok(_) | Err(_) => {
+                identity
+                    .unattributed_intent_entries
+                    .insert(name.clone(), bytes.to_vec());
+                continue;
+            }
+        };
+        let row = keyed.d.get().as_bytes();
+        match crate::identity::classify_created_identity_row(row) {
+            Some(crate::identity::CreatedIdentityObservation::Created(record)) => {
+                identity.created.insert(keyed.k, record);
+            }
+            Some(crate::identity::CreatedIdentityObservation::Unreadable { detail, .. }) => {
+                identity.unreadable_intents.insert(
+                    keyed.k,
+                    super::in_memory::RawIntentRow {
+                        stored: bytes.to_vec(),
+                        created_domain: true,
+                        detail,
+                    },
+                );
+            }
+            None => match serde_json::from_slice::<IdentityIntentRecord>(row) {
+                Ok(record) => {
+                    identity.intents.insert(keyed.k, record);
+                }
+                Err(error) => {
+                    identity.unreadable_intents.insert(
+                        keyed.k,
+                        super::in_memory::RawIntentRow {
+                            stored: bytes.to_vec(),
+                            created_domain: false,
+                            detail: format!(
+                                "identity intent entry this build cannot decode: {error}"
+                            ),
+                        },
+                    );
+                }
+            },
+        }
+    }
+    Ok(())
+}
+
 /// Replace a whole group: set every current entry and remove every
 /// committed entry of the group that is gone. The journal writes only the
 /// entries whose bytes changed.
@@ -1252,7 +1339,7 @@ impl Bundle {
         let aggregate = self.events.aggregate.read().await;
         let identity = &aggregate.identity;
         let mut image: BTreeMap<String, EntryBytes> = BTreeMap::new();
-        image.extend(keyed_entries(G_INTENT, identity.intents.iter())?);
+        image.extend(intent_group_entries(identity)?);
         image.extend(keyed_entries(G_LEASE, identity.leases.iter())?);
         image.extend(keyed_entries(G_RECEIPT, identity.receipts.iter())?);
         image.extend(keyed_entries(
@@ -1282,7 +1369,7 @@ impl Bundle {
             changes.extend(group_changes(
                 &state.entry_keys_in_group(G_INTENT),
                 &format!("{G_INTENT}/"),
-                keyed_entries(G_INTENT, identity.intents.iter())?,
+                intent_group_entries(identity)?,
             ));
         }
         if touch.leases {
@@ -1623,7 +1710,7 @@ impl Bundle {
     ) -> Result<(), MobStoreError> {
         let mut aggregate = self.events.aggregate.write().await;
         let identity = &mut aggregate.identity;
-        identity.intents = decode_group(body, G_INTENT)?.into_iter().collect();
+        import_intent_entries(body, identity)?;
         identity.leases = decode_group(body, G_LEASE)?.into_iter().collect();
         identity.receipts = decode_group(body, G_RECEIPT)?.into_iter().collect();
         identity.mutation_receipts = decode_group(body, G_MUTATION_RECEIPT)?

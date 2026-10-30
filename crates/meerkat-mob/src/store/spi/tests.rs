@@ -1128,3 +1128,265 @@ fn a_pre_release_event_entry_is_refused_as_such() {
         "{message}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Created identity entries' rows in the identity intents group
+// ---------------------------------------------------------------------------
+
+/// A sealed created entry's row of `name` in the mob `mob`.
+fn created_record(
+    name: &str,
+    presence: crate::identity::CreatedIdentityPresence,
+) -> crate::identity::CreatedIdentityRecord {
+    crate::identity::CreatedIdentityRecord::sealed(
+        MobId::from("mob"),
+        AgentIdentity::from(name),
+        1,
+        presence,
+        crate::identity::CreatedIdentityProvenance::new(format!("create-{name}"), 1),
+    )
+    .expect("a sealed created row")
+}
+
+/// Write the identity intents group with `edit` applied to the in-memory
+/// identity state, as a write that touches every intent does.
+async fn write_intents(
+    process: &Process,
+    edit: impl FnOnce(&mut crate::store::in_memory::IdentityAuthorityState) + Send + 'static,
+) {
+    let bundle = Arc::clone(&process.stores.bundle);
+    let target = Arc::clone(&bundle);
+    bundle
+        .write(
+            Touch {
+                intents: true,
+                ..Touch::default()
+            },
+            async move {
+                let mut aggregate = target.events.aggregate.write().await;
+                edit(&mut aggregate.identity);
+                Ok(())
+            },
+        )
+        .await
+        .expect("the intents group is written");
+}
+
+/// Every created entry's row of the mob, as its created identity scan reads
+/// it.
+async fn created_rows(
+    store: &dyn MobIdentityStore,
+) -> BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation> {
+    let mut rows = BTreeMap::new();
+    let mut after = None;
+    loop {
+        let page = store
+            .scan_created_identities_page(&MobId::from("mob"), after.as_ref(), 2)
+            .await
+            .expect("the created scan answers");
+        rows.extend(page.observations);
+        match page.next {
+            Some(next) => after = Some(next),
+            None => return rows,
+        }
+    }
+}
+
+/// The created entries' rows round-trip on every built-in store: a present
+/// entry, one pending its host's preparation and a removed entry's
+/// tombstone read back as written, from the in-memory store, from a SQLite
+/// store reopened over its file, and from a host store reopened over its
+/// host.
+#[tokio::test]
+async fn created_rows_round_trip_on_sqlite_memory_and_host_store() {
+    use crate::identity::{CreatedIdentityObservation, CreatedIdentityPresence};
+
+    let written = [
+        created_record("present", CreatedIdentityPresence::Present),
+        created_record(
+            "pending",
+            CreatedIdentityPresence::PendingPreparation { attempt: 2 },
+        ),
+        created_record("removed", CreatedIdentityPresence::Removed),
+    ];
+    let expected: BTreeMap<AgentIdentity, CreatedIdentityObservation> = written
+        .iter()
+        .map(|record| {
+            (
+                record.agent_identity.clone(),
+                CreatedIdentityObservation::Created(record.clone()),
+            )
+        })
+        .collect();
+
+    let memory = crate::store::InMemoryMobIdentityStore::new();
+    for record in written.clone() {
+        memory
+            .put_created_identity(record)
+            .await
+            .expect("the in-memory store keeps the row");
+    }
+    assert_eq!(created_rows(&memory).await, expected, "in memory");
+
+    let dir = tempfile::tempdir().expect("a store directory");
+    let path = dir.path().join("mob.db");
+    {
+        let stores = crate::store::SqliteMobStores::open(&path).expect("open the store");
+        let store = stores.identity_store();
+        for record in &written {
+            store
+                .put_identity_row_for_test(
+                    &record.mob_id,
+                    &record.agent_identity,
+                    serde_json::to_vec(record).expect("encode the row"),
+                )
+                .await
+                .expect("the SQLite store keeps the row");
+        }
+    }
+    let reopened = crate::store::SqliteMobStores::open(&path).expect("reopen the store");
+    assert_eq!(
+        created_rows(&reopened.identity_store()).await,
+        expected,
+        "on SQLite, after a reopen"
+    );
+
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let rows = written.clone();
+    write_intents(&process, move |identity| {
+        for record in rows {
+            identity.created.insert(
+                (record.mob_id.clone(), record.agent_identity.clone()),
+                record,
+            );
+        }
+    })
+    .await;
+    let process = restart_and_compare(&host, "mob", process).await;
+    assert_eq!(
+        created_rows(process.stores.storage().identity.as_ref()).await,
+        expected,
+        "on a host store, after a reopen"
+    );
+}
+
+/// A row a later build wrote into a host store's identity intents group, in
+/// a schema this build cannot decode, fails closed for its identity alone:
+/// the mob still opens, a created entry's row and the other identities read
+/// as before, that identity reads unreadable to the intent reader and to
+/// the created identity scan, and no identity-first mutation acts on it.
+#[tokio::test]
+async fn a_later_build_row_on_a_host_store_reads_unreadable_for_that_identity_alone() {
+    use crate::identity::{CreatedIdentityObservation, CreatedIdentityPresence};
+
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let created = created_record("created", CreatedIdentityPresence::Present);
+    let later_key = (MobId::from("mob"), AgentIdentity::from("later"));
+    let later_entry = encode_keyed(
+        &later_key,
+        &serde_json::json!({"schema_version": 3, "a_later_field": true}),
+    )
+    .expect("a later build's entry");
+    let stored = later_entry.to_vec();
+    let created_row = created.clone();
+    write_intents(&process, move |identity| {
+        identity.created.insert(
+            (
+                created_row.mob_id.clone(),
+                created_row.agent_identity.clone(),
+            ),
+            created_row,
+        );
+        identity.unreadable_intents.insert(
+            later_key,
+            crate::store::in_memory::RawIntentRow {
+                stored,
+                created_domain: true,
+                detail: "written by a later build".to_string(),
+            },
+        );
+    })
+    .await;
+    drop(process);
+
+    let reopened = start(&host, "mob").await;
+    let store = reopened.stores.storage().identity;
+    let rows = created_rows(store.as_ref()).await;
+    assert_eq!(
+        rows.get(&AgentIdentity::from("created")),
+        Some(&CreatedIdentityObservation::Created(created))
+    );
+    assert!(matches!(
+        rows.get(&AgentIdentity::from("later")),
+        Some(CreatedIdentityObservation::Unreadable { .. })
+    ));
+    assert!(matches!(
+        store
+            .observe_identity_intent(&MobId::from("mob"), &AgentIdentity::from("later"))
+            .await
+            .expect("the intent reader answers"),
+        IdentityStoredObservation::Unsupported { .. }
+    ));
+    assert!(matches!(
+        store
+            .observe_identity_intent(&MobId::from("mob"), &AgentIdentity::from("absent"))
+            .await
+            .expect("the intent reader answers"),
+        IdentityStoredObservation::Missing
+    ));
+}
+
+/// Every rewrite of a host store's identity intents group writes an entry
+/// this build cannot decode back untouched: after another identity's row
+/// changes and the store reopens, the entry's bytes are the ones the later
+/// build wrote.
+#[tokio::test]
+async fn a_group_rewrite_keeps_an_undecodable_row_byte_identical() {
+    use crate::identity::CreatedIdentityPresence;
+
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let later_key = (MobId::from("mob"), AgentIdentity::from("later"));
+    let later_entry = encode_keyed(
+        &later_key,
+        &serde_json::json!({"schema_version": 3, "a_later_field": true}),
+    )
+    .expect("a later build's entry");
+    let name = hashed_name(G_INTENT, &later_key).expect("the entry's name");
+    let stored = later_entry.to_vec();
+    write_intents(&process, move |identity| {
+        identity.unreadable_intents.insert(
+            later_key,
+            crate::store::in_memory::RawIntentRow {
+                stored,
+                created_domain: true,
+                detail: "written by a later build".to_string(),
+            },
+        );
+    })
+    .await;
+    let process = restart_and_compare(&host, "mob", process).await;
+    let entry = |export: &BTreeMap<String, Vec<u8>>| export.get(&format!("mbi:{name}")).cloned();
+    assert_eq!(
+        entry(&full_export(&process.stores).await),
+        Some(later_entry.to_vec()),
+        "the reopen keeps the entry as stored"
+    );
+
+    // Another identity's row changes: the whole group is rewritten.
+    let other = created_record("other", CreatedIdentityPresence::Present);
+    write_intents(&process, move |identity| {
+        identity
+            .created
+            .insert((other.mob_id.clone(), other.agent_identity.clone()), other);
+    })
+    .await;
+    let process = restart_and_compare(&host, "mob", process).await;
+    assert_eq!(
+        entry(&full_export(&process.stores).await),
+        Some(later_entry.to_vec()),
+        "the rewrite writes the entry back untouched"
+    );
+}

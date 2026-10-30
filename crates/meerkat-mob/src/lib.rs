@@ -136,11 +136,12 @@ pub use event::{
 pub use forked_participant::ForkedParticipantSourceRuntime;
 pub use identity::{
     AdoptMemberIdentityDeclaration, AdoptMemberIdentityDeclarationResult,
-    ApplyMemberToolDeclaration, ApplyMemberToolDeclarationResult, CallbackToolSetDeclaration,
-    DesiredExecution, DesiredExternalAddress, DesiredIdentityEdge, DesiredInitialDelivery,
-    DesiredLocalCallbackTool, DesiredMemberMaterial, DesiredMemberOverlay, DesiredMemberSpec,
-    DesiredSessionAuthorityPolicy, DesiredSessionTarget, IdentityActuationPermit,
-    IdentityActuatorTarget, IdentityAdoptionId, IdentityAdoptionOutcome,
+    ApplyMemberToolDeclaration, ApplyMemberToolDeclarationResult, CREATED_IDENTITY_SCHEMA_VERSION,
+    CallbackToolSetDeclaration, CreatedIdentityObservation, CreatedIdentityPresence,
+    CreatedIdentityProvenance, CreatedIdentityRecord, DesiredExecution, DesiredExternalAddress,
+    DesiredIdentityEdge, DesiredInitialDelivery, DesiredLocalCallbackTool, DesiredMemberMaterial,
+    DesiredMemberOverlay, DesiredMemberSpec, DesiredSessionAuthorityPolicy, DesiredSessionTarget,
+    IdentityActuationPermit, IdentityActuatorTarget, IdentityAdoptionId, IdentityAdoptionOutcome,
     IdentityAdoptionPrecondition, IdentityAdoptionReceipt, IdentityAuthorityCondition,
     IdentityConvergenceCondition, IdentityConvergenceDirective, IdentityConvergenceMode,
     IdentityConvergenceResolutionId, IdentityConvergenceResolutionOutcome,
@@ -157,7 +158,8 @@ pub use identity::{
     IdentitySessionStoreAuthority, IdentityStoredObservation, IdentityTargetObservationVersion,
     MemberToolAccessConstraint, MemberToolAccessDeclaration, MemberToolCommitOutcome,
     MemberToolDeclaration, MemberToolMutationId, ResolveIdentityConvergenceBlock,
-    ResolveIdentityConvergenceBlockResult, classify_identity_reconciliation,
+    ResolveIdentityConvergenceBlockResult, classify_created_identity_row,
+    classify_identity_reconciliation,
 };
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,

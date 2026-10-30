@@ -654,6 +654,10 @@ pub enum MemberIdentityManagement {
     /// command-driven nor known to be host-adopted: a caller must not drive
     /// it, and its history is unavailable until the row is readable.
     IntentUnreadable,
+    /// The identity is a created identity entry: Core holds its created
+    /// entry's row (schema version 2), and MobMachine drives it. Neither the
+    /// identity reconciler nor a host's identity-first verbs act on it.
+    CreatedEntry,
 }
 
 /// Why [`crate::MobStorage::read_member_binding_history`] refused or failed

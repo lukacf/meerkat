@@ -8,6 +8,10 @@
 //! history. The full store construction converges with the 0.8 binary merge;
 //! v1 shares the identity substrate, whose divergence caused the field
 //! failures.
+//!
+//! The identity session bridge ([`identity_session_bridge`]) is shared by
+//! both binaries and by `UnifiedRuntimeBuilder`: three compositions, one
+//! construction.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -56,4 +60,42 @@ pub async fn open_identity_substrate(
 #[must_use]
 pub fn identity_mob_handle(runtime: &crate::UnifiedRuntime) -> meerkat_mob::MobHandle {
     runtime.mob_handle().observer()
+}
+
+/// The identity-first session bridge a composition installs: Meta's bridge
+/// over `handle`, with every seam `mob_runtime` recorded at its bootstrap.
+/// `UnifiedRuntimeBuilder` and both gateway binaries build their identity
+/// bridge here, so none of them can leave a seam out. The builder once built
+/// its bridge without the controller pin source, and every governed send on
+/// its runtime was refused after Meta had woken and built the member.
+#[must_use]
+pub fn identity_session_bridge(
+    mob_runtime: &crate::mob_handle_runtime::MobRuntime,
+    handle: meerkat_mob::MobHandle,
+) -> crate::identity_first::MobSessionBridge {
+    let mut bridge = match mob_runtime.session_service().cloned() {
+        Some(service) => {
+            crate::identity_first::MobSessionBridge::with_session_service(handle, service)
+        }
+        None => crate::identity_first::MobSessionBridge::new(handle),
+    };
+    // Heal seam (2026-07-29 incident): the continuity repair supervisor asks
+    // this recoverer to commit the durable head before declaring an identity
+    // healed; without it, heal is a cosmetic entry reset that the next
+    // materialization re-Breaks.
+    if let Some(recoverer) = mob_runtime.committed_boundary_recoverer() {
+        bridge = bridge.with_committed_boundary_recoverer(recoverer);
+    }
+    // Image deliveries are judged with the member builder's host config, so a
+    // self-hosted model's `vision` flag counts.
+    if let Some(config) = mob_runtime.member_model_config() {
+        bridge = bridge.with_member_model_config(config);
+    }
+    // Governed binding pins the member session actor's actual controller
+    // through the concrete session owner, and a live MCP attachment reaches
+    // the current member through it.
+    if let Some(source) = mob_runtime.controller_pin_source() {
+        bridge = bridge.with_controller_pin_source(source);
+    }
+    bridge
 }

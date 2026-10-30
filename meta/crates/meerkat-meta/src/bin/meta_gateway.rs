@@ -3348,7 +3348,7 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
     > = if identity_first {
         use meerkat_meta::identity_first::{
             AgentRuntimeServices, DurabilityPolicy, IdentityFirstRuntimeContext, IdentityRuntime,
-            IdentityRuntimeConfig, MobSessionBridge, MutableRosterProvider,
+            IdentityRuntimeConfig, MutableRosterProvider,
         };
 
         let store_dir = layout.state_dir();
@@ -3360,29 +3360,13 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             .map_err(|e| anyhow!("{e}"))?;
 
         let mob_handle = meerkat_meta::gateway_wiring::identity_mob_handle(runtime);
-        let mut bridge =
-            if let Some(session_service) = runtime.mob_runtime().session_service().cloned() {
-                MobSessionBridge::with_session_service(mob_handle.clone(), session_service)
-            } else {
-                MobSessionBridge::new(mob_handle.clone())
-            };
-        // Heal seam (2026-07-29 incident): the continuity repair supervisor
-        // asks this recoverer to commit the durable head before declaring an
-        // identity healed; without it, heal is a cosmetic entry reset that
-        // the next materialization re-Breaks.
-        if let Some(recoverer) = runtime.mob_runtime().committed_boundary_recoverer() {
-            bridge = bridge.with_committed_boundary_recoverer(recoverer);
-        }
-        // Image deliveries are judged with the member builder's host config,
-        // so a self-hosted model's `vision` flag counts.
-        if let Some(config) = runtime.mob_runtime().member_model_config() {
-            bridge = bridge.with_member_model_config(config);
-        }
-        // Governed binding pins the member session actor's actual controller
-        // through the concrete session owner.
-        if let Some(source) = runtime.mob_runtime().controller_pin_source() {
-            bridge = bridge.with_controller_pin_source(source);
-        }
+        // The seams every composition gives its identity bridge: the session
+        // service, the committed-boundary recoverer, the member model config
+        // and the controller pin source.
+        let mut bridge = meerkat_meta::gateway_wiring::identity_session_bridge(
+            runtime.mob_runtime(),
+            mob_handle.clone(),
+        );
         if let Some((identity, first, second)) =
             meerkat_meta::identity_first::conflicting_role_migration_declaration(
                 &role_migration_declarations,

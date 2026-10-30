@@ -2186,29 +2186,13 @@ impl UnifiedRuntimeBuilder {
             // The composition's own bridge (kept in its state and inside its
             // identity runtime) is a back-edge, so it is non-owning; exports
             // carry the public owner separately (`PublicIdentityRuntime`,
-            // `PublicSessionBridge`).
-            let handle = runtime.mob_runtime.handle();
-            let session_service = runtime.mob_runtime.session_service().cloned();
-            let mut bridge: crate::identity_first::bridge::MobSessionBridge =
-                if let Some(service) = session_service {
-                    crate::identity_first::bridge::MobSessionBridge::with_session_service(
-                        handle, service,
-                    )
-                } else {
-                    crate::identity_first::bridge::MobSessionBridge::new(handle)
-                };
-            // Heal seam (2026-07-29 incident): without the recoverer, the
-            // continuity repair supervisor can only reset entries — a
-            // cosmetic heal that materialization re-Breaks when the durable
-            // head is an intra-turn projection.
-            if let Some(recoverer) = runtime.mob_runtime.committed_boundary_recoverer() {
-                bridge = bridge.with_committed_boundary_recoverer(recoverer);
-            }
-            // Image deliveries are judged with the member builder's host
-            // config, so a self-hosted model's `vision` flag counts.
-            if let Some(config) = runtime.mob_runtime.member_model_config() {
-                bridge = bridge.with_member_model_config(config);
-            }
+            // `PublicSessionBridge`). It is built as both gateways build
+            // theirs, with every seam the mob runtime recorded: the controller
+            // pin source among them, so governed input reaches the host's bind.
+            let bridge = crate::gateway_wiring::identity_session_bridge(
+                &runtime.mob_runtime,
+                runtime.mob_runtime.handle(),
+            );
             Some(Arc::new(bridge) as Arc<dyn crate::identity_first::bridge::SessionBridge>)
         };
 

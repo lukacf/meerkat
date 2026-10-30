@@ -19155,34 +19155,15 @@ external_addressable = true
 
         // Construct the session bridge from the mob handle. The gateway
         // uses the raw bootstrap path (not UnifiedRuntimeBuilder), so
-        // session_bridge() won't be set — build it directly.
+        // session_bridge() won't be set: build it directly, with the seams
+        // every composition gives its identity bridge (the session service,
+        // the committed-boundary recoverer, the member model config and the
+        // controller pin source).
         let mob_handle = crate::gateway_wiring::identity_mob_handle(runtime);
-        let mut identity_bridge =
-            if let Some(session_service) = runtime.mob_runtime().session_service().cloned() {
-                crate::identity_first::MobSessionBridge::with_session_service(
-                    mob_handle.clone(),
-                    session_service,
-                )
-            } else {
-                crate::identity_first::MobSessionBridge::new(mob_handle.clone())
-            };
-        // Heal seam (2026-07-29 incident): the continuity repair supervisor
-        // asks this recoverer to commit the durable head before declaring an
-        // identity healed; without it, heal is a cosmetic entry reset that
-        // the next materialization re-Breaks.
-        if let Some(recoverer) = runtime.mob_runtime().committed_boundary_recoverer() {
-            identity_bridge = identity_bridge.with_committed_boundary_recoverer(recoverer);
-        }
-        // Image deliveries are judged with the member builder's host config,
-        // so a self-hosted model's `vision` flag counts.
-        if let Some(config) = runtime.mob_runtime().member_model_config() {
-            identity_bridge = identity_bridge.with_member_model_config(config);
-        }
-        // Governed binding pins the member session actor's actual controller
-        // through the concrete session owner.
-        if let Some(source) = runtime.mob_runtime().controller_pin_source() {
-            identity_bridge = identity_bridge.with_controller_pin_source(source);
-        }
+        let mut identity_bridge = crate::gateway_wiring::identity_session_bridge(
+            runtime.mob_runtime(),
+            mob_handle.clone(),
+        );
         // A declared migration restamps a member's durable role, comms name
         // and binding, so the boot record must name every one the host armed.
         for declaration in &role_migration_declarations {

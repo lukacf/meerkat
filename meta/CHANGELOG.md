@@ -115,6 +115,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   restart: no `customize_build` before the input, exactly one at its wake
   with the context of the member's last build, no `after_create`, and the
   member's next tool call served by the handler that build registered.
+- A runtime `UnifiedRuntimeBuilder` composes gives its identity bridge the
+  controller pin source of its mob runtime, as both gateways do. Before, its
+  bridge had none: every governed send, governed dispatch and governed
+  Console send to a member was refused `Unsupported` ("no controller pin
+  source is installed for this bridge") after Meta had woken and built the
+  member, before the host's binder was asked, and attaching a live MCP
+  server to a member answered `Unsupported` too. The builder and both
+  gateways now build their identity bridge with one helper,
+  `gateway_wiring::identity_session_bridge`, so the three compositions
+  cannot drift apart again.
 
 ### Known limitations
 

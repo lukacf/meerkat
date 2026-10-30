@@ -21,8 +21,10 @@
 //!   retryable with the host's reason; the next delivery tries again.
 //! - A governed input after a clean restart wakes its member the same way:
 //!   one `customize_build`, with the inputs of the member's last build before
-//!   the restart, and no `after_create`; the member's next turn calls the
-//!   tool through the handler that build registered.
+//!   the restart, answered before the host's bind, and no `after_create`; the
+//!   member's next turn calls the tool through the handler that build
+//!   registered. A runtime the builder composes pins the member's controller,
+//!   so governed input reaches the host's bind through both doors.
 //! - A member Core builds before the composition (a start that restores
 //!   every member, or one whose run a kill left open) is held
 //!   (`HostRunStartHoldReason::ToolsNotPublished`) until the roster pass
@@ -3035,24 +3037,38 @@ impl meerkat_client::LlmClient for ToolTurnModel {
     }
 }
 
-/// The trusted host's binder of the governed-input row. It binds nothing: at
-/// each bind it records how many builds the host's customizer has prepared
-/// in this process, and refuses, so nothing is submitted.
+/// What one bind of [`RefusingBinder`] was handed: the member's session and
+/// the controller its session owner pinned, and how many builds the host's
+/// customizer had prepared in this process by then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HandedBind {
+    session_id: meerkat_core::types::SessionId,
+    controller: meerkat_core::ControllerModelSelection,
+    builds: usize,
+}
+
+/// The trusted host's binder of the governed-input rows. It binds nothing: it
+/// records what each bind is handed, and refuses, so nothing is submitted.
 struct RefusingBinder {
     customizer: Arc<RecordingCustomizer>,
-    builds_at_bind: std::sync::Mutex<Vec<usize>>,
+    binds: std::sync::Mutex<Vec<HandedBind>>,
 }
 
 impl RefusingBinder {
     fn new(customizer: Arc<RecordingCustomizer>) -> Self {
         Self {
             customizer,
-            builds_at_bind: std::sync::Mutex::new(Vec::new()),
+            binds: std::sync::Mutex::new(Vec::new()),
         }
     }
 
+    fn binds(&self) -> Vec<HandedBind> {
+        self.binds.lock().unwrap().clone()
+    }
+
+    /// How many builds the host's customizer had prepared at each bind.
     fn builds_at_bind(&self) -> Vec<usize> {
-        self.builds_at_bind.lock().unwrap().clone()
+        self.binds().iter().map(|bind| bind.builds).collect()
     }
 }
 
@@ -3060,11 +3076,15 @@ impl RefusingBinder {
 impl GovernedInputBinder for RefusingBinder {
     async fn bind(
         &self,
-        _context: &GovernedBindContext,
+        context: &GovernedBindContext,
         _input: meerkat_runtime::Input,
     ) -> Result<BoundGovernedInput, String> {
-        let builds = self.customizer.builds().len();
-        self.builds_at_bind.lock().unwrap().push(builds);
+        let handed = HandedBind {
+            session_id: context.session_id.clone(),
+            controller: context.controller.selection().clone(),
+            builds: self.customizer.builds().len(),
+        };
+        self.binds.lock().unwrap().push(handed);
         Err(BIND_REFUSED.to_string())
     }
 
@@ -3132,23 +3152,22 @@ async fn wait_until(what: &str, ready: impl Fn() -> bool) {
 ///   `active_peers`, the managed edges compared as a set, the runtime's
 ///   services, the roster row and the base draft. An in-process customizer
 ///   is handed no scope id: the publication of its build is the scope;
+/// - that `customize_build` is answered before the host's bind: the bind is
+///   handed the member's session and its pinned controller, after exactly
+///   one build;
 /// - the member is built once, on the session and generation it had, and
 ///   the restored process calls no `after_create`;
 /// - `resolved_tools` then answers `live`, and the member's next turn calls
 ///   the tool through the handler that one `customize_build` registered,
 ///   never through one an earlier build registered.
 ///
-/// The governed input itself is refused before anything is submitted, so
-/// the tool call is the next ordinary turn's. Native admission takes only a
-/// bound input (an authority association and an ingress context) on a
-/// member whose runtime machine carries the host's native grant work
-/// configuration, and the one fixture that admits one
-/// (`support/governed_mob.rs`) is an in-memory mob spawned live, with no
-/// roster, customizer, build preparer or restart. The library builder gives
-/// its identity bridge no controller pin source either (the stock gateways
-/// give theirs one), so the send is refused typed after Core's wake and
-/// before the host's bind. With a pinned controller the bind is reached,
-/// after the wake's one build, and this row's binder refuses it.
+/// The host's binder refuses the governed input, so nothing is submitted and
+/// the tool call is the next ordinary turn's: native admission takes only a
+/// bound input (an authority association and an ingress context) on a member
+/// whose runtime machine carries the host's native grant work configuration,
+/// and the one fixture that admits one (`support/governed_mob.rs`) is an
+/// in-memory mob spawned live, with no roster, customizer, build preparer or
+/// restart.
 ///
 /// RED on Meta 0.9.5 behaviour (by reasoning; not run there): no
 /// `customize_build` and no materialized member before the input (the
@@ -3157,7 +3176,9 @@ async fn wait_until(what: &str, ready: impl Fn() -> bool) {
 /// one `customize_build` for the governed input (its member was already
 /// built, so the wake made none), and no `after_create` in the restored
 /// process. The status, the session and generation, and the tool routing
-/// would hold on both.
+/// would hold on both. RED on a builder whose identity bridge has no
+/// controller pin source: the send is refused `Unsupported` after the wake,
+/// and no bind is reached.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_governed_input_after_a_clean_restart_makes_one_customize_build_and_no_after_create() {
     const MOB_ID: &str = "customizer-tools-restart-q";
@@ -3239,7 +3260,7 @@ async fn a_governed_input_after_a_clean_restart_makes_one_customize_build_and_no
     assert_eq!(model.count(), 0, "nothing ran");
 
     // The first governed input: Core wakes the member for it before its
-    // bind, and nothing is submitted.
+    // bind, and the host's bind refuses it, so nothing is submitted.
     let binder = Arc::new(RefusingBinder::new(Arc::clone(&customizer)));
     let sent = runtime
         .identity_runtime()
@@ -3251,35 +3272,45 @@ async fn a_governed_input_after_a_clean_restart_makes_one_customize_build_and_no
             binder.clone(),
         )
         .await;
-    match &sent {
-        // The library builder's identity bridge has no controller pin source:
-        // the send is refused typed after Core's wake, before the host's bind.
-        Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Unsupported(reason)))
-            if reason.contains("controller pin source") =>
-        {
-            assert!(binder.builds_at_bind().is_empty(), "{sent:?}");
-        }
-        // A composition that pins the controller reaches the bind, which
-        // this binder refuses: the wake's one build came before it.
-        Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(reason)))
-            if reason.as_str() == BIND_REFUSED =>
-        {
-            assert_eq!(binder.builds_at_bind(), [1], "{sent:?}");
-        }
-        other => panic!("the governed input is refused before anything is submitted: {other:?}"),
-    }
-    assert_eq!(model.count(), 0, "nothing was submitted, so nothing ran");
 
     // Exactly one customize_build, made by the governed input's wake, with
     // the inputs of the member's last build before the restart.
     let builds = customizer.builds();
     let [woken] = builds.as_slice() else {
-        panic!("the wake prepares the member's build exactly once, inline: {builds:?}");
+        panic!(
+            "the governed input's wake prepares the member's build exactly once, inline: \
+             {builds:?} ({sent:?})"
+        );
     };
     assert_eq!(
         woken.inputs, first_build,
         "the wake's customize_build has the member's context, roster row and base draft"
     );
+
+    // The bind comes after that one build, handed the member's session and
+    // its pinned controller; it refuses, so nothing ran.
+    assert!(
+        matches!(
+            &sent,
+            Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(reason)))
+                if reason.as_str() == BIND_REFUSED
+        ),
+        "the governed input reaches the host's bind: {sent:?}"
+    );
+    assert_eq!(binder.builds_at_bind(), [1], "{:?}", binder.binds());
+    assert_eq!(
+        binder.binds(),
+        [HandedBind {
+            session_id: first_status
+                .session_id
+                .clone()
+                .expect("the first boot's member has a session"),
+            controller: tool_turn_controller(),
+            builds: 1,
+        }],
+        "the bind is handed the member's session and its pinned controller"
+    );
+    assert_eq!(model.count(), 0, "nothing was submitted, so nothing ran");
 
     // The member was built once, on the session and generation it had.
     assert_eq!(
@@ -3319,5 +3350,77 @@ async fn a_governed_input_after_a_clean_restart_makes_one_customize_build_and_no
         0,
         "the restored process calls no after_create: a wake's build never calls it"
     );
+    runtime.shutdown().await;
+}
+
+/// A runtime the library builder composes gives its identity bridge the
+/// controller pin source its mob runtime recorded, as both gateways do, so a
+/// governed input reaches the host's bind through both doors: each bind is
+/// handed the member's session and the controller its session owner pinned.
+/// RED on a builder whose identity bridge has no controller pin source: the
+/// governed send and dispatch are refused `Unsupported` ("no controller pin
+/// source is installed for this bridge") after Meta has woken and built the
+/// member, and no bind is reached.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_builder_runtime_pins_the_member_controller_so_governed_input_reaches_the_hosts_bind() {
+    const MOB_ID: &str = "customizer-tools-restart-r";
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let served = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let model = ToolTurnModel::default();
+    let customizer = Arc::new(RecordingCustomizer::new("builder", &served));
+    let runtime = boot_governed(MOB_ID, &state, model.clone(), customizer.clone()).await;
+    let binder = Arc::new(RefusingBinder::new(Arc::clone(&customizer)));
+
+    // The external door wakes the seated member for its bind; the trusted
+    // host's internal door then reaches the woken member's bind too.
+    let sent = runtime
+        .identity_runtime()
+        .expect("identity runtime")
+        .send_governed_with_turn_ticket(
+            &id(MEMBER),
+            None,
+            meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(GOVERNED_INPUT, None)),
+            binder.clone(),
+        )
+        .await;
+    let dispatched = runtime
+        .identity_runtime()
+        .expect("identity runtime")
+        .dispatch_governed_with_turn_ticket(
+            &id(MEMBER),
+            None,
+            meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(GOVERNED_INPUT, None)),
+            binder.clone(),
+        )
+        .await;
+    for (door, outcome) in [("send", &sent), ("dispatch", &dispatched)] {
+        assert!(
+            matches!(
+                outcome,
+                Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(reason)))
+                    if reason.as_str() == BIND_REFUSED
+            ),
+            "the governed {door} reaches the host's bind: {outcome:?}"
+        );
+    }
+    let session_id = member_status(&runtime)
+        .await
+        .session_id
+        .expect("the member has a session");
+    let handed = binder
+        .binds()
+        .into_iter()
+        .map(|bind| (bind.session_id, bind.controller))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        handed,
+        [
+            (session_id.clone(), tool_turn_controller()),
+            (session_id, tool_turn_controller()),
+        ],
+        "each bind is handed the member's session and the controller its session owner pinned"
+    );
+    assert_eq!(model.count(), 0, "both binds refused, so nothing ran");
     runtime.shutdown().await;
 }

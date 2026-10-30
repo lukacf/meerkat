@@ -11,7 +11,8 @@
 //! owner is read. The host selects its posture first; every selection other
 //! than the realm's stock composition is refused typed. The bundle the host
 //! then constructs keeps the host's own stores and its one approval issuer,
-//! durable for a persistent host.
+//! durable for a persistent host, with its durable decisions under the
+//! host's store path.
 #![cfg(all(feature = "session-store", feature = "local-authorization", unix))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -35,13 +36,20 @@ use meerkat::governed_realm::{
 };
 use meerkat::storage_provider::RealmStoreSet;
 use meerkat::{ApprovalIssuerSelection, ApprovalIssuerSelectionError, DiskStorageProvider};
+use meerkat_core::approval::decision::{
+    ApproverId, DecisionHoldRequest, DecisionKind, DecisionOperationId, DecisionPrincipalKey,
+    DecisionRenderer, DecisionRendering, DecisionRequestBody, DecisionSubjectKey, Sha256Digest,
+};
 use meerkat_core::connection::RealmId;
 use meerkat_core::{
     ApprovalListFilter, DurabilityDeclaration, DurabilityResolution, OperationAuthorizationError,
 };
+use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
 use meerkat_runtime::MeerkatMachine;
+use meerkat_runtime::decision::{DecisionError, DecisionWriteMode};
 use meerkat_runtime::store::RuntimeStoreExecutionCustodyError;
 use meerkat_store::RealmBackend;
+use meerkat_store::approval_decision_store::APPROVAL_DECISIONS_FILE;
 
 const REALM: &str = "stock-host";
 const OTHER_REALM: &str = "stock-host-ordinary";
@@ -604,4 +612,106 @@ async fn a_persistent_host_needs_a_durable_approval_selection() {
         .construct(selection)
         .expect("an explicitly ephemeral host keeps process-local approvals");
     assert!(!bundle.approval_issuer().is_persistent());
+}
+
+/// One durable decision of the host.
+fn hold_request() -> DecisionHoldRequest {
+    let requester = PrincipalRef::in_domain(
+        PrincipalKind::PersonalAgent,
+        "builder",
+        TrustDomainId::new("example.org").expect("trust domain"),
+    )
+    .expect("principal");
+    DecisionHoldRequest {
+        kind: DecisionKind::new("release").expect("kind"),
+        subject_key: DecisionSubjectKey::new("artifact:build-7").expect("subject key"),
+        operation_id: DecisionOperationId::new("operation-7").expect("operation id"),
+        request_digest: Sha256Digest::of(br#"{"build":7}"#),
+        requester: DecisionPrincipalKey::of(&requester).expect("principal key"),
+        approver_id: ApproverId::new("team:owners").expect("approver id"),
+        reviewer: None,
+        deadline_at_ms: u64::MAX / 2,
+        request: DecisionRequestBody::from_value(&serde_json::json!({"build": 7}))
+            .expect("request body"),
+        rendering: DecisionRendering::new("Release build 7.").expect("rendering"),
+        renderer: DecisionRenderer::new("render.v1").expect("renderer"),
+        expected_subject_digest: None,
+    }
+}
+
+/// Whether a file named `name` exists anywhere under `dir`.
+fn tree_holds(dir: &Path, name: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        let path = entry.path();
+        if path.is_dir() {
+            tree_holds(&path, name)
+        } else {
+            entry.file_name() == name
+        }
+    })
+}
+
+/// A persistent host's durable decisions live under its own store path,
+/// beside its approvals, never under the realm's root; the bundle's owner
+/// narrows to a candidate launch one way.
+#[tokio::test]
+async fn host_supplied_stores_keep_decisions_under_the_store_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("realms");
+    provision(&root).await;
+    let host = temp.path().join("host");
+    let prepared = prepare_stock_host_composition(
+        custody(&root),
+        RealmGovernance::Stock(stock_for(REALM)),
+        host_stores(&host),
+    )
+    .await
+    .expect("the host's composition is prepared");
+    let (_pin, bundle) = prepared
+        .construct(ApprovalIssuerSelection::Persistent {
+            store_path: host.clone(),
+        })
+        .expect("the host's bundle");
+
+    let decisions = bundle.decision_owner();
+    assert!(decisions.is_persistent());
+    assert_eq!(decisions.write_mode(), DecisionWriteMode::Admitted);
+    let file = host.join(APPROVAL_DECISIONS_FILE);
+    assert!(!file.exists(), "nothing is created before the first hold");
+    let held = decisions.hold(hold_request(), true).expect("hold");
+    assert!(
+        file.is_file(),
+        "the decision lives under the host's store path"
+    );
+    assert!(
+        !tree_holds(&root, APPROVAL_DECISIONS_FILE),
+        "nothing under the realm's root"
+    );
+    assert_eq!(
+        bundle
+            .decision_owner()
+            .get(&held.decision_id)
+            .expect("one owner across clones"),
+        held
+    );
+
+    let candidate = bundle.with_candidate_launch_decisions();
+    assert_eq!(
+        candidate.decision_owner().write_mode(),
+        DecisionWriteMode::CandidateLaunch
+    );
+    assert!(matches!(
+        candidate.decision_owner().hold(hold_request(), true),
+        Err(DecisionError::CandidateLaunch)
+    ));
+    assert_eq!(
+        candidate
+            .decision_owner()
+            .get(&held.decision_id)
+            .expect("a candidate reads"),
+        held
+    );
 }

@@ -3101,6 +3101,8 @@ pub struct SessionRuntime {
     /// Runtime-owned approval records. Surfaces only project decisions into
     /// this service; approval status is generated-authority-owned.
     approval_service: meerkat_core::ApprovalService,
+    /// The persistence's durable decision owner, beside its approval issuer.
+    decision_service: meerkat_runtime::decision::DurableDecisionService,
     /// P1#5: live adapter host, attached when the surface wires
     /// `with_live_ws`. Held as an interior-mutable slot so it can be set
     /// after the runtime is wrapped in `Arc` (matches the
@@ -4049,8 +4051,9 @@ impl SessionRuntime {
             workgraph_default_realm_id(&persistence),
         );
         // The persistence's one approval issuer, never a second owner over
-        // its approvals file.
+        // its approvals file, and its one durable decision owner.
         let approval_service = persistence.approval_issuer();
+        let decision_service = persistence.decision_owner();
         let (service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service_with_capacities(
                 builder,
@@ -4181,6 +4184,7 @@ impl SessionRuntime {
             builder_schedule_tools_slot,
             builder_agent_llm_client_decorator_slot,
             approval_service,
+            decision_service,
             live_adapter_host,
             inner,
         })
@@ -4225,8 +4229,9 @@ impl SessionRuntime {
             workgraph_default_realm_id(&persistence),
         );
         // The persistence's one approval issuer, never a second owner over
-        // its approvals file.
+        // its approvals file, and its one durable decision owner.
         let approval_service = persistence.approval_issuer();
+        let decision_service = persistence.decision_owner();
         let (service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service_with_capacities(
                 builder,
@@ -4357,6 +4362,7 @@ impl SessionRuntime {
             builder_schedule_tools_slot,
             builder_agent_llm_client_decorator_slot,
             approval_service,
+            decision_service,
             live_adapter_host,
             inner,
         })
@@ -5797,6 +5803,12 @@ impl SessionRuntime {
 
     pub fn approval_service(&self) -> meerkat_core::ApprovalService {
         self.approval_service.clone()
+    }
+
+    /// The persistence's durable decision owner: a clone of the one owner
+    /// the persistence opened beside its approval issuer.
+    pub fn decision_service(&self) -> meerkat_runtime::decision::DurableDecisionService {
+        self.decision_service.clone()
     }
 
     /// Phase 4 R1: thin RPC shim — delegates to

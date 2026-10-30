@@ -3302,7 +3302,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
 
   /// Filtered/paged panel/records query for the Records filter bar, the
   /// keyset load-more, and the lattice page-walk. Resolves null STRICTLY on
-  /// -32030 (denied — consumers render "no access", never an empty store);
+  /// -32030 (denied: consumers render "no access", never an empty store);
   /// other failures surface via the panel error banner and rethrow so the
   /// pager keeps the prior page instead of clobbering it.
   const queryMemoryRecords = React.useCallback(

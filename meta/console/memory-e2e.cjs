@@ -744,7 +744,7 @@ const grantFlows = [
 
   {
     // Gate finding: a partial-grant principal (unscoped agent+mob reads,
-    // NO operator.memory.read) must see "no access" — never the empty-store
+    // NO operator.memory.read) must see "no access", never the empty-store
     // copy, never leaked operator rows.
     name: "partial grants render operator scope as no-grant",
     run: async ({ page, partialBaseUrl }) => {

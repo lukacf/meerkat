@@ -48,6 +48,8 @@ import type {
   ForkSessionReplaceParams,
   GoalStatusRequest,
   GoalStatusResult,
+  GrantToolParams,
+  GrantToolResult,
   HelpRequest,
   HelpResponse,
   InjectSystemContextParams,
@@ -79,6 +81,8 @@ import type {
   ListSessionTranscriptRevisionsParams,
   ListSessionsParams,
   ListSessionsResult,
+  ListToolGrantsParams,
+  ListToolGrantsResult,
   LiveChannelParams,
   LiveCloseResult,
   LiveCommitInputParams,
@@ -230,6 +234,8 @@ import type {
   ReadyWorkFilter,
   RealmIdParams,
   RestoreSessionTranscriptRevisionParams,
+  RevokeToolGrantParams,
+  RevokeToolGrantResult,
   RewriteSessionTranscriptParams,
   RuntimeAcceptResult,
   RuntimeHostCapabilities,
@@ -257,6 +263,8 @@ import type {
   StopRunParams,
   StopRunResult,
   SystemPromptUpdateResult,
+  ToolGrantAuditParams,
+  ToolGrantAuditResult,
   ToolsRegisterParams,
   ToolsRegisterResult,
   UpdateScheduleParams,
@@ -546,6 +554,22 @@ export interface RpcMethodContracts {
   "help/ask": {
     params: HelpRequest;
     result: (HelpResponse) & Record<string, unknown>;
+  };
+  "tool_grants/grant": {
+    params: GrantToolParams;
+    result: (GrantToolResult) & Record<string, unknown>;
+  };
+  "tool_grants/revoke": {
+    params: RevokeToolGrantParams;
+    result: (RevokeToolGrantResult) & Record<string, unknown>;
+  };
+  "tool_grants/list": {
+    params: ListToolGrantsParams;
+    result: (ListToolGrantsResult) & Record<string, unknown>;
+  };
+  "tool_grants/audit": {
+    params: ToolGrantAuditParams;
+    result: (ToolGrantAuditResult) & Record<string, unknown>;
   };
   "blob/get": {
     params: BlobGetParams;

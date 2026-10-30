@@ -109559,6 +109559,283 @@
     ],
     "title": "GrantScope"
   },
+  "GrantToolResult": {
+    "$defs": {
+      "WireToolGrant": {
+        "description": "One scoped tool grant.",
+        "properties": {
+          "ended_at_ms": {
+            "description": "The host clock reading the grant was observed to end at, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expires_at_ms": {
+            "description": "The grant's fixed deadline, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "grant_id": {
+            "type": "string"
+          },
+          "issued_at_ms": {
+            "description": "The host clock reading the grant was issued at, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "issuer": {
+            "$ref": "#/$defs/WireToolGrantIssuer"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/$defs/WireToolGrantStatus"
+          },
+          "subject": {
+            "$ref": "#/$defs/WireToolGrantSubject"
+          },
+          "target": {
+            "$ref": "#/$defs/WireToolGrantTarget"
+          }
+        },
+        "required": [
+          "grant_id",
+          "subject",
+          "target",
+          "issuer",
+          "status",
+          "issued_at_ms",
+          "expires_at_ms"
+        ],
+        "type": "object"
+      },
+      "WireToolGrantIssuer": {
+        "description": "Who issued a grant.",
+        "oneOf": [
+          {
+            "description": "An operator, through a host surface.",
+            "properties": {
+              "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "operator",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An approval decision.",
+            "properties": {
+              "approval_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approval_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an issuer kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolGrantStatus": {
+        "description": "A grant's status.",
+        "oneOf": [
+          {
+            "const": "active",
+            "description": "Issued, and not yet observed at or after its deadline.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Observed at or after its deadline. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "revoked",
+            "description": "Revoked before its deadline. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "requested",
+            "description": "Requested through an approval, not yet decided.",
+            "type": "string"
+          },
+          {
+            "const": "declined",
+            "description": "Requested through an approval and declined. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a status this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireToolGrantSubject": {
+        "description": "Whose grant a record names: a session, or (in a later version) a mob\nmember's identity.",
+        "oneOf": [
+          {
+            "description": "One session's grants.",
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One mob member identity's grants.",
+            "properties": {
+              "identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "identity",
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mob_id",
+              "identity"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a subject kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolGrantTarget": {
+        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "oneOf": [
+          {
+            "description": "One tool name.",
+            "properties": {
+              "kind": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A built-in tool family, and the names it opened.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family",
+                "type": "string"
+              },
+              "names": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a target kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`tool_grants/grant` result.",
+    "properties": {
+      "grant": {
+        "$ref": "#/$defs/WireToolGrant"
+      }
+    },
+    "required": [
+      "grant"
+    ],
+    "title": "GrantToolResult",
+    "type": "object"
+  },
   "HelpExecutionMode": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Execution posture requested by a help caller.\n\nToday all help surfaces are advisory. `plan_execution` is a forward-compatible\nhook for callers that want an executable plan without permitting Meerkat to\nperform the execution yet.",
@@ -112889,6 +113166,309 @@
       "sessions"
     ],
     "title": "ListSessionsResult",
+    "type": "object"
+  },
+  "ListToolGrantsResult": {
+    "$defs": {
+      "WireToolGrant": {
+        "description": "One scoped tool grant.",
+        "properties": {
+          "ended_at_ms": {
+            "description": "The host clock reading the grant was observed to end at, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expires_at_ms": {
+            "description": "The grant's fixed deadline, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "grant_id": {
+            "type": "string"
+          },
+          "issued_at_ms": {
+            "description": "The host clock reading the grant was issued at, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "issuer": {
+            "$ref": "#/$defs/WireToolGrantIssuer"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/$defs/WireToolGrantStatus"
+          },
+          "subject": {
+            "$ref": "#/$defs/WireToolGrantSubject"
+          },
+          "target": {
+            "$ref": "#/$defs/WireToolGrantTarget"
+          }
+        },
+        "required": [
+          "grant_id",
+          "subject",
+          "target",
+          "issuer",
+          "status",
+          "issued_at_ms",
+          "expires_at_ms"
+        ],
+        "type": "object"
+      },
+      "WireToolGrantIssuer": {
+        "description": "Who issued a grant.",
+        "oneOf": [
+          {
+            "description": "An operator, through a host surface.",
+            "properties": {
+              "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "operator",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An approval decision.",
+            "properties": {
+              "approval_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approval_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an issuer kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolGrantStatus": {
+        "description": "A grant's status.",
+        "oneOf": [
+          {
+            "const": "active",
+            "description": "Issued, and not yet observed at or after its deadline.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Observed at or after its deadline. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "revoked",
+            "description": "Revoked before its deadline. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "requested",
+            "description": "Requested through an approval, not yet decided.",
+            "type": "string"
+          },
+          {
+            "const": "declined",
+            "description": "Requested through an approval and declined. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a status this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireToolGrantSubject": {
+        "description": "Whose grant a record names: a session, or (in a later version) a mob\nmember's identity.",
+        "oneOf": [
+          {
+            "description": "One session's grants.",
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One mob member identity's grants.",
+            "properties": {
+              "identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "identity",
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mob_id",
+              "identity"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a subject kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolGrantTarget": {
+        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "oneOf": [
+          {
+            "description": "One tool name.",
+            "properties": {
+              "kind": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A built-in tool family, and the names it opened.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family",
+                "type": "string"
+              },
+              "names": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a target kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireUnreadableToolGrant": {
+        "description": "A stored grant row the server cannot read (written by a newer version,\nor damaged). It opens nothing.",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "grant_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "grant_id",
+          "detail"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`tool_grants/list` result. Due grants are settled as expired first.",
+    "properties": {
+      "grants": {
+        "items": {
+          "$ref": "#/$defs/WireToolGrant"
+        },
+        "type": "array"
+      },
+      "unreadable": {
+        "description": "Rows of the subject the server cannot read.",
+        "items": {
+          "$ref": "#/$defs/WireUnreadableToolGrant"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "grants"
+    ],
+    "title": "ListToolGrantsResult",
     "type": "object"
   },
   "LiveAssistantOutputAvailableParams": {
@@ -143745,6 +144325,287 @@
     "title": "RealtimeVideoChunk",
     "type": "object"
   },
+  "RevokeToolGrantResult": {
+    "$defs": {
+      "WireToolGrant": {
+        "description": "One scoped tool grant.",
+        "properties": {
+          "ended_at_ms": {
+            "description": "The host clock reading the grant was observed to end at, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expires_at_ms": {
+            "description": "The grant's fixed deadline, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "grant_id": {
+            "type": "string"
+          },
+          "issued_at_ms": {
+            "description": "The host clock reading the grant was issued at, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "issuer": {
+            "$ref": "#/$defs/WireToolGrantIssuer"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/$defs/WireToolGrantStatus"
+          },
+          "subject": {
+            "$ref": "#/$defs/WireToolGrantSubject"
+          },
+          "target": {
+            "$ref": "#/$defs/WireToolGrantTarget"
+          }
+        },
+        "required": [
+          "grant_id",
+          "subject",
+          "target",
+          "issuer",
+          "status",
+          "issued_at_ms",
+          "expires_at_ms"
+        ],
+        "type": "object"
+      },
+      "WireToolGrantIssuer": {
+        "description": "Who issued a grant.",
+        "oneOf": [
+          {
+            "description": "An operator, through a host surface.",
+            "properties": {
+              "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "operator",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An approval decision.",
+            "properties": {
+              "approval_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approval_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an issuer kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolGrantStatus": {
+        "description": "A grant's status.",
+        "oneOf": [
+          {
+            "const": "active",
+            "description": "Issued, and not yet observed at or after its deadline.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Observed at or after its deadline. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "revoked",
+            "description": "Revoked before its deadline. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "requested",
+            "description": "Requested through an approval, not yet decided.",
+            "type": "string"
+          },
+          {
+            "const": "declined",
+            "description": "Requested through an approval and declined. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a status this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireToolGrantSubject": {
+        "description": "Whose grant a record names: a session, or (in a later version) a mob\nmember's identity.",
+        "oneOf": [
+          {
+            "description": "One session's grants.",
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One mob member identity's grants.",
+            "properties": {
+              "identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "identity",
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mob_id",
+              "identity"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a subject kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolGrantTarget": {
+        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "oneOf": [
+          {
+            "description": "One tool name.",
+            "properties": {
+              "kind": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A built-in tool family, and the names it opened.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family",
+                "type": "string"
+              },
+              "names": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a target kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`tool_grants/revoke` result. A revoke is idempotent: `changed` says\nwhether this revoke ended the grant.",
+    "properties": {
+      "changed": {
+        "type": "boolean"
+      },
+      "grant": {
+        "$ref": "#/$defs/WireToolGrant"
+      }
+    },
+    "required": [
+      "grant",
+      "changed"
+    ],
+    "title": "RevokeToolGrantResult",
+    "type": "object"
+  },
   "RuntimeAcceptOutcomeType": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Discriminator for runtime-backed input submission responses.",
@@ -154046,6 +154907,391 @@
       "public_peer_id"
     ],
     "title": "SupervisorRotationReportWire",
+    "type": "object"
+  },
+  "ToolGrantAuditResult": {
+    "$defs": {
+      "WireToolGrantAuditEvent": {
+        "description": "One audit event of a subject's grants.",
+        "oneOf": [
+          {
+            "properties": {
+              "expires_at_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "grant_id": {
+                "type": "string"
+              },
+              "issuer": {
+                "$ref": "#/$defs/WireToolGrantIssuer"
+              },
+              "kind": {
+                "const": "granted",
+                "type": "string"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "target": {
+                "$ref": "#/$defs/WireToolGrantTarget"
+              }
+            },
+            "required": [
+              "kind",
+              "grant_id",
+              "target",
+              "issuer",
+              "expires_at_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "driver": {
+                "$ref": "#/$defs/WireToolGrantExpiryDriver"
+              },
+              "expires_at_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "grant_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "expired",
+                "type": "string"
+              },
+              "observed_at_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "grant_id",
+              "expires_at_ms",
+              "observed_at_ms",
+              "driver"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "actor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "grant_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "revoked",
+                "type": "string"
+              },
+              "observed_at_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "grant_id",
+              "observed_at_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
+              "grant_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "refused",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/WireToolGrantRefusalKind"
+              },
+              "run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tool": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool",
+              "reason",
+              "call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an event kind this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolGrantAuditRow": {
+        "description": "One audit row: its place in the subject's log, when it was recorded, and\nits event.",
+        "properties": {
+          "at_ms": {
+            "description": "The host clock reading the row was recorded at, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "event": {
+            "$ref": "#/$defs/WireToolGrantAuditEvent"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sequence",
+          "at_ms",
+          "event"
+        ],
+        "type": "object"
+      },
+      "WireToolGrantExpiryDriver": {
+        "description": "Which driver observed a grant's expiry.",
+        "oneOf": [
+          {
+            "enum": [
+              "timer",
+              "boundary",
+              "dispatch",
+              "read",
+              "revoke"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a driver this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireToolGrantIssuer": {
+        "description": "Who issued a grant.",
+        "oneOf": [
+          {
+            "description": "An operator, through a host surface.",
+            "properties": {
+              "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "operator",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An approval decision.",
+            "properties": {
+              "approval_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approval_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an issuer kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolGrantRefusalKind": {
+        "description": "Why a gated call was refused.",
+        "oneOf": [
+          {
+            "enum": [
+              "required",
+              "expired",
+              "revoked",
+              "unavailable"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a refusal kind this version does not know.\nThe server never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireToolGrantTarget": {
+        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "oneOf": [
+          {
+            "description": "One tool name.",
+            "properties": {
+              "kind": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A built-in tool family, and the names it opened.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family",
+                "type": "string"
+              },
+              "names": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a target kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireUnreadableToolGrantAuditRow": {
+        "description": "An audit row of the page the server cannot read (written by a newer\nversion, or damaged): its place in the subject's log.",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sequence",
+          "detail"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`tool_grants/audit` result. `next_sequence` is the `after_sequence` of\nthe next page while more rows may follow.",
+    "properties": {
+      "next_sequence": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "rows": {
+        "items": {
+          "$ref": "#/$defs/WireToolGrantAuditRow"
+        },
+        "type": "array"
+      },
+      "unreadable": {
+        "description": "Rows of the page the server cannot read; the rest of the page is\nserved.",
+        "items": {
+          "$ref": "#/$defs/WireUnreadableToolGrantAuditRow"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "rows"
+    ],
+    "title": "ToolGrantAuditResult",
     "type": "object"
   },
   "ToolsRegisterResult": {
@@ -170668,6 +171914,29 @@
       "count"
     ],
     "title": "GenerateImageRequest",
+    "type": "object"
+  },
+  "WireGrantGatedTools": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "A session build's scoped tool grant gate (`session/create`\n`grant_gated_tools`): the built-in tool families and the tool names the\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA field this version does not know is refused, never ignored.",
+    "properties": {
+      "families": {
+        "description": "Built-in tool families, such as `shell`.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "tools": {
+        "description": "Tool names.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "title": "WireGrantGatedTools",
     "type": "object"
   },
   "WireGrantRecord": {
@@ -200482,6 +201751,1175 @@
     ],
     "title": "WireToolFilter"
   },
+  "WireToolGrant": {
+    "$defs": {
+      "WireToolGrantIssuer": {
+        "description": "Who issued a grant.",
+        "oneOf": [
+          {
+            "description": "An operator, through a host surface.",
+            "properties": {
+              "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "operator",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An approval decision.",
+            "properties": {
+              "approval_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approval_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an issuer kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolGrantStatus": {
+        "description": "A grant's status.",
+        "oneOf": [
+          {
+            "const": "active",
+            "description": "Issued, and not yet observed at or after its deadline.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Observed at or after its deadline. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "revoked",
+            "description": "Revoked before its deadline. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "requested",
+            "description": "Requested through an approval, not yet decided.",
+            "type": "string"
+          },
+          {
+            "const": "declined",
+            "description": "Requested through an approval and declined. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a status this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireToolGrantSubject": {
+        "description": "Whose grant a record names: a session, or (in a later version) a mob\nmember's identity.",
+        "oneOf": [
+          {
+            "description": "One session's grants.",
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One mob member identity's grants.",
+            "properties": {
+              "identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "identity",
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mob_id",
+              "identity"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a subject kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolGrantTarget": {
+        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "oneOf": [
+          {
+            "description": "One tool name.",
+            "properties": {
+              "kind": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A built-in tool family, and the names it opened.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family",
+                "type": "string"
+              },
+              "names": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a target kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One scoped tool grant.",
+    "properties": {
+      "ended_at_ms": {
+        "description": "The host clock reading the grant was observed to end at, in UNIX ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "expires_at_ms": {
+        "description": "The grant's fixed deadline, in UNIX ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "grant_id": {
+        "type": "string"
+      },
+      "issued_at_ms": {
+        "description": "The host clock reading the grant was issued at, in UNIX ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "issuer": {
+        "$ref": "#/$defs/WireToolGrantIssuer"
+      },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "status": {
+        "$ref": "#/$defs/WireToolGrantStatus"
+      },
+      "subject": {
+        "$ref": "#/$defs/WireToolGrantSubject"
+      },
+      "target": {
+        "$ref": "#/$defs/WireToolGrantTarget"
+      }
+    },
+    "required": [
+      "grant_id",
+      "subject",
+      "target",
+      "issuer",
+      "status",
+      "issued_at_ms",
+      "expires_at_ms"
+    ],
+    "title": "WireToolGrant",
+    "type": "object"
+  },
+  "WireToolGrantAuditEvent": {
+    "$defs": {
+      "WireToolGrantExpiryDriver": {
+        "description": "Which driver observed a grant's expiry.",
+        "oneOf": [
+          {
+            "enum": [
+              "timer",
+              "boundary",
+              "dispatch",
+              "read",
+              "revoke"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a driver this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireToolGrantIssuer": {
+        "description": "Who issued a grant.",
+        "oneOf": [
+          {
+            "description": "An operator, through a host surface.",
+            "properties": {
+              "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "operator",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An approval decision.",
+            "properties": {
+              "approval_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approval_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an issuer kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolGrantRefusalKind": {
+        "description": "Why a gated call was refused.",
+        "oneOf": [
+          {
+            "enum": [
+              "required",
+              "expired",
+              "revoked",
+              "unavailable"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a refusal kind this version does not know.\nThe server never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireToolGrantTarget": {
+        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "oneOf": [
+          {
+            "description": "One tool name.",
+            "properties": {
+              "kind": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A built-in tool family, and the names it opened.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family",
+                "type": "string"
+              },
+              "names": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a target kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One audit event of a subject's grants.",
+    "oneOf": [
+      {
+        "properties": {
+          "expires_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "grant_id": {
+            "type": "string"
+          },
+          "issuer": {
+            "$ref": "#/$defs/WireToolGrantIssuer"
+          },
+          "kind": {
+            "const": "granted",
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "$ref": "#/$defs/WireToolGrantTarget"
+          }
+        },
+        "required": [
+          "kind",
+          "grant_id",
+          "target",
+          "issuer",
+          "expires_at_ms"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "driver": {
+            "$ref": "#/$defs/WireToolGrantExpiryDriver"
+          },
+          "expires_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "grant_id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "expired",
+            "type": "string"
+          },
+          "observed_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "grant_id",
+          "expires_at_ms",
+          "observed_at_ms",
+          "driver"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "actor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grant_id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "revoked",
+            "type": "string"
+          },
+          "observed_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "grant_id",
+          "observed_at_ms"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "grant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "const": "refused",
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WireToolGrantRefusalKind"
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "tool",
+          "reason",
+          "call_id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Forward compatibility: an event kind this version does not know. The\nserver never sends it.",
+        "properties": {
+          "kind": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireToolGrantAuditEvent"
+  },
+  "WireToolGrantAuditRow": {
+    "$defs": {
+      "WireToolGrantAuditEvent": {
+        "description": "One audit event of a subject's grants.",
+        "oneOf": [
+          {
+            "properties": {
+              "expires_at_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "grant_id": {
+                "type": "string"
+              },
+              "issuer": {
+                "$ref": "#/$defs/WireToolGrantIssuer"
+              },
+              "kind": {
+                "const": "granted",
+                "type": "string"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "target": {
+                "$ref": "#/$defs/WireToolGrantTarget"
+              }
+            },
+            "required": [
+              "kind",
+              "grant_id",
+              "target",
+              "issuer",
+              "expires_at_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "driver": {
+                "$ref": "#/$defs/WireToolGrantExpiryDriver"
+              },
+              "expires_at_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "grant_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "expired",
+                "type": "string"
+              },
+              "observed_at_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "grant_id",
+              "expires_at_ms",
+              "observed_at_ms",
+              "driver"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "actor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "grant_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "revoked",
+                "type": "string"
+              },
+              "observed_at_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "grant_id",
+              "observed_at_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
+              "grant_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "refused",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/WireToolGrantRefusalKind"
+              },
+              "run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tool": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool",
+              "reason",
+              "call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an event kind this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolGrantExpiryDriver": {
+        "description": "Which driver observed a grant's expiry.",
+        "oneOf": [
+          {
+            "enum": [
+              "timer",
+              "boundary",
+              "dispatch",
+              "read",
+              "revoke"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a driver this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireToolGrantIssuer": {
+        "description": "Who issued a grant.",
+        "oneOf": [
+          {
+            "description": "An operator, through a host surface.",
+            "properties": {
+              "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "operator",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An approval decision.",
+            "properties": {
+              "approval_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approval_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an issuer kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolGrantRefusalKind": {
+        "description": "Why a gated call was refused.",
+        "oneOf": [
+          {
+            "enum": [
+              "required",
+              "expired",
+              "revoked",
+              "unavailable"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a refusal kind this version does not know.\nThe server never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireToolGrantTarget": {
+        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "oneOf": [
+          {
+            "description": "One tool name.",
+            "properties": {
+              "kind": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A built-in tool family, and the names it opened.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family",
+                "type": "string"
+              },
+              "names": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: a target kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One audit row: its place in the subject's log, when it was recorded, and\nits event.",
+    "properties": {
+      "at_ms": {
+        "description": "The host clock reading the row was recorded at, in UNIX ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "event": {
+        "$ref": "#/$defs/WireToolGrantAuditEvent"
+      },
+      "sequence": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "sequence",
+      "at_ms",
+      "event"
+    ],
+    "title": "WireToolGrantAuditRow",
+    "type": "object"
+  },
+  "WireToolGrantExpiryDriver": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Which driver observed a grant's expiry.",
+    "oneOf": [
+      {
+        "enum": [
+          "timer",
+          "boundary",
+          "dispatch",
+          "read",
+          "revoke"
+        ],
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: a driver this version does not know. The\nserver never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireToolGrantExpiryDriver"
+  },
+  "WireToolGrantIssuer": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Who issued a grant.",
+    "oneOf": [
+      {
+        "description": "An operator, through a host surface.",
+        "properties": {
+          "caller": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "const": "operator",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "An approval decision.",
+        "properties": {
+          "approval_id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "approval",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "approval_id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Forward compatibility: an issuer kind this version does not know.\nThe server never sends it.",
+        "properties": {
+          "kind": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireToolGrantIssuer"
+  },
+  "WireToolGrantRefusalKind": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Why a gated call was refused.",
+    "oneOf": [
+      {
+        "enum": [
+          "required",
+          "expired",
+          "revoked",
+          "unavailable"
+        ],
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: a refusal kind this version does not know.\nThe server never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireToolGrantRefusalKind"
+  },
+  "WireToolGrantStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A grant's status.",
+    "oneOf": [
+      {
+        "const": "active",
+        "description": "Issued, and not yet observed at or after its deadline.",
+        "type": "string"
+      },
+      {
+        "const": "expired",
+        "description": "Observed at or after its deadline. Terminal.",
+        "type": "string"
+      },
+      {
+        "const": "revoked",
+        "description": "Revoked before its deadline. Terminal.",
+        "type": "string"
+      },
+      {
+        "const": "requested",
+        "description": "Requested through an approval, not yet decided.",
+        "type": "string"
+      },
+      {
+        "const": "declined",
+        "description": "Requested through an approval and declined. Terminal.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: a status this version does not know. The\nserver never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireToolGrantStatus"
+  },
+  "WireToolGrantSubject": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Whose grant a record names: a session, or (in a later version) a mob\nmember's identity.",
+    "oneOf": [
+      {
+        "description": "One session's grants.",
+        "properties": {
+          "kind": {
+            "const": "session",
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "session_id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "One mob member identity's grants.",
+        "properties": {
+          "identity": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "identity",
+            "type": "string"
+          },
+          "mob_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "mob_id",
+          "identity"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Forward compatibility: a subject kind this version does not know.\nThe server never sends it.",
+        "properties": {
+          "kind": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireToolGrantSubject"
+  },
+  "WireToolGrantTarget": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+    "oneOf": [
+      {
+        "description": "One tool name.",
+        "properties": {
+          "kind": {
+            "const": "tool",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "name"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A built-in tool family, and the names it opened.",
+        "properties": {
+          "family": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "family",
+            "type": "string"
+          },
+          "names": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "family"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Forward compatibility: a target kind this version does not know.\nThe server never sends it.",
+        "properties": {
+          "kind": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireToolGrantTarget"
+  },
   "WireToolResult": {
     "$defs": {
       "LiveBridgeEffectKind": {
@@ -201076,6 +203514,44 @@
       "peer"
     ],
     "title": "WireUnreachablePeer",
+    "type": "object"
+  },
+  "WireUnreadableToolGrant": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A stored grant row the server cannot read (written by a newer version,\nor damaged). It opens nothing.",
+    "properties": {
+      "detail": {
+        "type": "string"
+      },
+      "grant_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "grant_id",
+      "detail"
+    ],
+    "title": "WireUnreadableToolGrant",
+    "type": "object"
+  },
+  "WireUnreadableToolGrantAuditRow": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "An audit row of the page the server cannot read (written by a newer\nversion, or damaged): its place in the subject's log.",
+    "properties": {
+      "detail": {
+        "type": "string"
+      },
+      "sequence": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "sequence",
+      "detail"
+    ],
+    "title": "WireUnreadableToolGrantAuditRow",
     "type": "object"
   },
   "WireUsage": {

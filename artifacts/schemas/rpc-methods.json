@@ -376,6 +376,30 @@
       "result_type": "HelpResponse"
     },
     {
+      "description": "Grant a session's grant-gated tool name or built-in tool family for a bounded window",
+      "name": "tool_grants/grant",
+      "params_type": "GrantToolParams",
+      "result_type": "GrantToolResult"
+    },
+    {
+      "description": "Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it",
+      "name": "tool_grants/revoke",
+      "params_type": "RevokeToolGrantParams",
+      "result_type": "RevokeToolGrantResult"
+    },
+    {
+      "description": "List a session's scoped tool grants, each due grant settled as expired first",
+      "name": "tool_grants/list",
+      "params_type": "ListToolGrantsParams",
+      "result_type": "ListToolGrantsResult"
+    },
+    {
+      "description": "Read a page of the audit log of a session's scoped tool grants",
+      "name": "tool_grants/audit",
+      "params_type": "ToolGrantAuditParams",
+      "result_type": "ToolGrantAuditResult"
+    },
+    {
       "description": "Fetch raw blob payload metadata and bytes by blob id",
       "name": "blob/get",
       "params_type": "BlobGetParams",

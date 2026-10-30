@@ -852,6 +852,127 @@ export interface WireLoginCancelledConnectorSlotTarget {
 
 export type WireLoginCancelled = WireLoginCancelledMcpLoginTarget | WireLoginCancelledConnectorSlotTarget;
 
+export interface ToolGrantSubjectSession {
+  kind: "session";
+  session_id: string;
+}
+
+export interface ToolGrantSubjectIdentity {
+  identity: string;
+  kind: "identity";
+  mob_id: string;
+}
+
+export type ToolGrantSubjectRequest = ToolGrantSubjectSession | ToolGrantSubjectIdentity;
+
+export interface ToolGrantTargetTool {
+  kind: "tool";
+  name: string;
+}
+
+export interface ToolGrantTargetFamily {
+  family: string;
+  kind: "family";
+}
+
+export type ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily;
+
+export interface WireToolGrantSubjectSession {
+  kind: "session";
+  session_id: string;
+}
+
+export interface WireToolGrantSubjectIdentity {
+  identity: string;
+  kind: "identity";
+  mob_id: string;
+}
+
+export interface WireToolGrantSubjectUnknown {
+  kind: "unknown";
+}
+
+export type WireToolGrantSubject = WireToolGrantSubjectSession | WireToolGrantSubjectIdentity | WireToolGrantSubjectUnknown;
+
+export interface WireToolGrantTargetTool {
+  kind: "tool";
+  name: string;
+}
+
+export interface WireToolGrantTargetFamily {
+  family: string;
+  kind: "family";
+  names?: string[];
+}
+
+export interface WireToolGrantTargetUnknown {
+  kind: "unknown";
+}
+
+export type WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetUnknown;
+
+export interface WireToolGrantIssuerOperator {
+  caller?: string | null;
+  kind: "operator";
+}
+
+export interface WireToolGrantIssuerApproval {
+  approval_id: string;
+  kind: "approval";
+}
+
+export interface WireToolGrantIssuerUnknown {
+  kind: "unknown";
+}
+
+export type WireToolGrantIssuer = WireToolGrantIssuerOperator | WireToolGrantIssuerApproval | WireToolGrantIssuerUnknown;
+
+export type WireToolGrantStatus = "active" | "expired" | "revoked" | "requested" | "declined" | "unknown";
+
+export type WireToolGrantExpiryDriver = "timer" | "boundary" | "dispatch" | "read" | "revoke" | "unknown";
+
+export type WireToolGrantRefusalKind = "required" | "expired" | "revoked" | "unavailable" | "unknown";
+
+export interface WireToolGrantAuditEventGranted {
+  expires_at_ms: number;
+  grant_id: string;
+  issuer: WireToolGrantIssuer;
+  kind: "granted";
+  reason?: string | null;
+  target: WireToolGrantTarget;
+}
+
+export interface WireToolGrantAuditEventExpired {
+  driver: WireToolGrantExpiryDriver;
+  expires_at_ms: number;
+  grant_id: string;
+  kind: "expired";
+  observed_at_ms: number;
+}
+
+export interface WireToolGrantAuditEventRevoked {
+  actor?: string | null;
+  grant_id: string;
+  kind: "revoked";
+  observed_at_ms: number;
+  reason?: string | null;
+}
+
+export interface WireToolGrantAuditEventRefused {
+  call_id: string;
+  grant_id?: string | null;
+  kind: "refused";
+  reason: WireToolGrantRefusalKind;
+  run_id?: string | null;
+  tool: string;
+}
+
+export interface WireToolGrantAuditEventUnknown {
+  kind: "unknown";
+}
+
+export type WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown;
+
 export interface ActivateInstructionParams {
   activation: Record<string, unknown>;
   session_id: string;
@@ -1414,6 +1535,78 @@ export interface WireSessionTranscriptRevision {
 export interface WireSessionTranscriptRevisionList {
   entries: Record<string, unknown>[];
   head_revision: string;
+}
+
+export interface WireToolGrant {
+  ended_at_ms?: number | null;
+  expires_at_ms: number;
+  grant_id: string;
+  issued_at_ms: number;
+  issuer: WireToolGrantIssuer;
+  reason?: string | null;
+  status: WireToolGrantStatus;
+  subject: WireToolGrantSubject;
+  target: WireToolGrantTarget;
+}
+
+export interface WireUnreadableToolGrant {
+  detail: string;
+  grant_id: string;
+}
+
+export interface WireToolGrantAuditRow {
+  at_ms: number;
+  event: WireToolGrantAuditEvent;
+  sequence: number;
+}
+
+export interface WireUnreadableToolGrantAuditRow {
+  detail: string;
+  sequence: number;
+}
+
+export interface GrantToolParams {
+  duration_ms?: number | null;
+  expires_at_ms?: number | null;
+  reason?: string | null;
+  subject: ToolGrantSubjectRequest;
+  target: ToolGrantTargetRequest;
+}
+
+export interface GrantToolResult {
+  grant: WireToolGrant;
+}
+
+export interface RevokeToolGrantParams {
+  grant_id: string;
+  reason?: string | null;
+}
+
+export interface RevokeToolGrantResult {
+  changed: boolean;
+  grant: WireToolGrant;
+}
+
+export interface ListToolGrantsParams {
+  include_ended?: boolean;
+  subject: ToolGrantSubjectRequest;
+}
+
+export interface ListToolGrantsResult {
+  grants: WireToolGrant[];
+  unreadable?: WireUnreadableToolGrant[];
+}
+
+export interface ToolGrantAuditParams {
+  after_sequence?: number | null;
+  limit?: number | null;
+  subject: ToolGrantSubjectRequest;
+}
+
+export interface ToolGrantAuditResult {
+  next_sequence?: number | null;
+  rows: WireToolGrantAuditRow[];
+  unreadable?: WireUnreadableToolGrantAuditRow[];
 }
 
 export interface CallbackToolExecutionFast {

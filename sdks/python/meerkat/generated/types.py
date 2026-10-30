@@ -1080,6 +1080,124 @@ class WireLoginCancelledConnectorSlotTarget(TypedDict, total=False):
 
 WireLoginCancelled = WireLoginCancelledMcpLoginTarget | WireLoginCancelledConnectorSlotTarget
 
+# The subject a request names: whose grants it writes or reads. Closed: a
+# kind or a field this version does not know is refused, never ignored.
+class ToolGrantSubjectSession(TypedDict, total=False):
+    kind: Required[Literal['session']]
+    session_id: Required[str]
+
+class ToolGrantSubjectIdentity(TypedDict, total=False):
+    identity: Required[str]
+    kind: Required[Literal['identity']]
+    mob_id: Required[str]
+
+ToolGrantSubjectRequest = ToolGrantSubjectSession | ToolGrantSubjectIdentity
+
+# The target a grant request names: one tool name, or a built-in tool
+# family, whose names the server takes at grant time. Closed: a kind or a
+# field this version does not know is refused, never ignored, so a request
+# is never read as wider than it asked.
+class ToolGrantTargetTool(TypedDict, total=False):
+    kind: Required[Literal['tool']]
+    name: Required[str]
+
+class ToolGrantTargetFamily(TypedDict, total=False):
+    family: Required[str]
+    kind: Required[Literal['family']]
+
+ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily
+
+# Whose grant a record names: a session, or (in a later version) a mob
+# member's identity.
+class WireToolGrantSubjectSession(TypedDict, total=False):
+    kind: Required[Literal['session']]
+    session_id: Required[str]
+
+class WireToolGrantSubjectIdentity(TypedDict, total=False):
+    identity: Required[str]
+    kind: Required[Literal['identity']]
+    mob_id: Required[str]
+
+class WireToolGrantSubjectUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WireToolGrantSubject = WireToolGrantSubjectSession | WireToolGrantSubjectIdentity | WireToolGrantSubjectUnknown
+
+# What a grant record opens: one tool name, or a built-in tool family with
+# the names the server took for it at grant time.
+class WireToolGrantTargetTool(TypedDict, total=False):
+    kind: Required[Literal['tool']]
+    name: Required[str]
+
+class WireToolGrantTargetFamily(TypedDict, total=False):
+    family: Required[str]
+    kind: Required[Literal['family']]
+    names: NotRequired[list[str]]
+
+class WireToolGrantTargetUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetUnknown
+
+# Who issued a grant.
+class WireToolGrantIssuerOperator(TypedDict, total=False):
+    caller: NotRequired[Optional[str]]
+    kind: Required[Literal['operator']]
+
+class WireToolGrantIssuerApproval(TypedDict, total=False):
+    approval_id: Required[str]
+    kind: Required[Literal['approval']]
+
+class WireToolGrantIssuerUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WireToolGrantIssuer = WireToolGrantIssuerOperator | WireToolGrantIssuerApproval | WireToolGrantIssuerUnknown
+
+# A grant's status.
+WireToolGrantStatus = Literal['active', 'expired', 'revoked', 'requested', 'declined', 'unknown']
+
+# Which driver observed a grant's expiry.
+WireToolGrantExpiryDriver = Literal['timer', 'boundary', 'dispatch', 'read', 'revoke'] | Literal['unknown']
+
+# Why a gated call was refused.
+WireToolGrantRefusalKind = Literal['required', 'expired', 'revoked', 'unavailable'] | Literal['unknown']
+
+# One audit event of a subject's grants.
+class WireToolGrantAuditEventGranted(TypedDict, total=False):
+    expires_at_ms: Required[int]
+    grant_id: Required[str]
+    issuer: Required[WireToolGrantIssuer]
+    kind: Required[Literal['granted']]
+    reason: NotRequired[Optional[str]]
+    target: Required[WireToolGrantTarget]
+
+class WireToolGrantAuditEventExpired(TypedDict, total=False):
+    driver: Required[WireToolGrantExpiryDriver]
+    expires_at_ms: Required[int]
+    grant_id: Required[str]
+    kind: Required[Literal['expired']]
+    observed_at_ms: Required[int]
+
+class WireToolGrantAuditEventRevoked(TypedDict, total=False):
+    actor: NotRequired[Optional[str]]
+    grant_id: Required[str]
+    kind: Required[Literal['revoked']]
+    observed_at_ms: Required[int]
+    reason: NotRequired[Optional[str]]
+
+class WireToolGrantAuditEventRefused(TypedDict, total=False):
+    call_id: Required[str]
+    grant_id: NotRequired[Optional[str]]
+    kind: Required[Literal['refused']]
+    reason: Required[WireToolGrantRefusalKind]
+    run_id: NotRequired[Optional[str]]
+    tool: Required[str]
+
+class WireToolGrantAuditEventUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown
+
 @dataclass
 class ActivateInstructionParams:
     """Request payload for `session/activate_instruction`."""
@@ -1846,6 +1964,108 @@ class WireSessionTranscriptRevisionList:
 format."""
     entries: list[dict[str, Any]]
     head_revision: str
+
+
+@dataclass
+class WireToolGrant:
+    """One scoped tool grant."""
+    expires_at_ms: int
+    grant_id: str
+    issued_at_ms: int
+    issuer: WireToolGrantIssuer
+    status: WireToolGrantStatus
+    subject: WireToolGrantSubject
+    target: WireToolGrantTarget
+    ended_at_ms: Optional[int] = None
+    reason: Optional[str] = None
+
+
+@dataclass
+class WireUnreadableToolGrant:
+    """A stored grant row the server cannot read (written by a newer version,
+or damaged). It opens nothing."""
+    detail: str
+    grant_id: str
+
+
+@dataclass
+class WireToolGrantAuditRow:
+    """One audit row: its place in the subject's log, when it was recorded, and
+its event."""
+    at_ms: int
+    event: WireToolGrantAuditEvent
+    sequence: int
+
+
+@dataclass
+class WireUnreadableToolGrantAuditRow:
+    """An audit row of the page the server cannot read (written by a newer
+version, or damaged): its place in the subject's log."""
+    detail: str
+    sequence: int
+
+
+@dataclass
+class GrantToolParams:
+    """`tool_grants/grant` parameters. Exactly one of `expires_at_ms` and
+`duration_ms` bounds the grant, at most the host's maximum lifetime."""
+    subject: ToolGrantSubjectRequest
+    target: ToolGrantTargetRequest
+    duration_ms: Optional[int] = None
+    expires_at_ms: Optional[int] = None
+    reason: Optional[str] = None
+
+
+@dataclass
+class GrantToolResult:
+    """`tool_grants/grant` result."""
+    grant: WireToolGrant
+
+
+@dataclass
+class RevokeToolGrantParams:
+    """`tool_grants/revoke` parameters."""
+    grant_id: str
+    reason: Optional[str] = None
+
+
+@dataclass
+class RevokeToolGrantResult:
+    """`tool_grants/revoke` result. A revoke is idempotent: `changed` says
+whether this revoke ended the grant."""
+    changed: bool
+    grant: WireToolGrant
+
+
+@dataclass
+class ListToolGrantsParams:
+    """`tool_grants/list` parameters."""
+    subject: ToolGrantSubjectRequest
+    include_ended: Optional[bool] = None
+
+
+@dataclass
+class ListToolGrantsResult:
+    """`tool_grants/list` result. Due grants are settled as expired first."""
+    grants: list[WireToolGrant]
+    unreadable: Optional[list[WireUnreadableToolGrant]] = None
+
+
+@dataclass
+class ToolGrantAuditParams:
+    """`tool_grants/audit` parameters: a page of the subject's audit log."""
+    subject: ToolGrantSubjectRequest
+    after_sequence: Optional[int] = None
+    limit: Optional[int] = None
+
+
+@dataclass
+class ToolGrantAuditResult:
+    """`tool_grants/audit` result. `next_sequence` is the `after_sequence` of
+the next page while more rows may follow."""
+    rows: list[WireToolGrantAuditRow]
+    next_sequence: Optional[int] = None
+    unreadable: Optional[list[WireUnreadableToolGrantAuditRow]] = None
 
 
 # Private host/gateway execution declaration for a callback tool.

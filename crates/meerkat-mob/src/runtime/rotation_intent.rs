@@ -23,7 +23,8 @@
 //! itself, with no host record. A host that keeps its own record of a
 //! FreshSession rotation marks the identity host-pending, and the restarted
 //! mob leaves that rotation to the host's re-issue; a same-session rotation
-//! is always finished by the mob.
+//! is always finished by the mob, and keeps a host-pending member's mark, so
+//! its successor waits for the host's seat step before it wakes.
 
 use std::collections::BTreeMap;
 
@@ -77,6 +78,11 @@ impl RotationTarget {
 /// row and the public event payload never carries it; a reader that predates
 /// it ignores it, and replays the retirement as a plain one. Only this crate
 /// builds one; the retirement start event exposes it read-only.
+///
+/// A record the codec cannot read fails the journal read, typed, so the
+/// whole mob does not resume. While a rollback to 0.9.8 is supported, a later
+/// release must not write a record 0.9.8 cannot decode: a new target or a
+/// changed field goes under a new key, with a rollback fixture.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct MemberRotationRecord {

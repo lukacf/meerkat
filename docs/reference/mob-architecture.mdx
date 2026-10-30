@@ -275,10 +275,13 @@ forked participant attachment (the lineage belongs to the incarnation that
 holds it), and one whose session's creation record, spawn continuity or (for
 a role migration) last role cannot be read. A member whose retirement is in
 flight is refused retryable (`LifecycleOperationPending`), unless that
-retirement is this rotation, which the call re-drives. `MobHandle::respawn`
+retirement is this rotation, which the call re-drives. MobMachine decides the
+route of an identity entry's member: its fresh-life respawn (`Respawn`) admits
+no entry and answers `RespawnRefused` for one. So `MobHandle::respawn`
 respawns an identity entry's member this way, and
-`MobHandle::respawn_with_successor_spec` refuses an entry's member before
-anything starts; a worker's respawn keeps its fresh-session successor.
+`MobHandle::respawn_with_successor_spec` refuses an entry's member
+(`UnsupportedForMode`) before anything starts; a worker's respawn keeps its
+fresh-session successor.
 
 A rotation is durable from its start. Its retirement's start row records it:
 its target (`RotationTarget::FreshSession` for `rotate_member`, `SameSession`
@@ -290,23 +293,38 @@ keeps its own record of a `rotate_member` passes the identity host-pending
 with the same spec after the restart: the restarted mob does not re-drive
 that FreshSession rotation, logs that it holds it, and records its retirement
 stuck at admission with a cause that names the wait
-(`MobHandle::retirement_settlement`), and the call finishes it once
-(`redrive_retirement` re-drives it too). A same-session rotation is the
-mob's own: the restart finishes it whatever the host-pending set says.
+(`MobHandle::retirement_settlement`; `MobHandle::rotation_held_for_host`
+reads the hold), and the call finishes it once (`redrive_retirement`
+re-drives it too). A retire by any other caller, a session archive through
+`meerkat-mob-mcp` included, leaves the rotation held and answers
+`MemberRetirementStuck` with that cause. A same-session rotation is the mob's
+own: the restart finishes it whatever the host-pending set says, and a
+host-pending member keeps its mark through it. Its successor is seated
+Dormant, and its wakes are refused `HostPreparationPending` until the host's
+seat step for it (a `seat_dormant_members` of the identity on its kept
+session, which answers `AlreadySeated`) ends the mark: the host wakes first.
 Re-issued while its rotation stands, `rotate_member` re-drives that rotation;
-re-issued after it finished, it rotates the member again, so a host that does
-not mark the member host-pending must not re-issue an unanswered call after a
-restart. While a rotation of the member stands, `redrive_retirement`
-re-drives the rotation and any other retirement of the member is refused
-retryable. A recorded rotation whose next incarnation cannot be planned again
-(its profile left the definition) stays recorded and stuck until a call plans
-the same next session. A rotation never takes over a retirement of the member
-that started without it, whose start row records no rotation: `rotate_member`
-is refused retryable while that retirement stands, unless the member is
-host-pending, and a retry alone does not succeed until that retirement
-finishes or is re-driven. The record is internal to the stored event codec: an
-older Meerkat release replays the start row as a plain retirement's, and a
-record this release cannot read fails the resume typed.
+re-issued after it finished, it rotates the member again. So a host that does
+not mark the member host-pending reads the member once after a restart (the
+replay is done before the handle is returned) before it re-issues an
+unanswered call: a higher generation means the rotation finished; a Retiring
+member (`list_members_including_retiring`) means it stands, and the mob
+finishes it; the generation the call saw, not Retiring, means it never
+started, and the call is made again. While a rotation of the member stands,
+`redrive_retirement` re-drives the rotation and any other retirement of the
+member is refused retryable. A recorded rotation whose next incarnation cannot
+be planned again (its profile left the definition) stays recorded and stuck
+until a call plans the same next session: `rotate_member` with a spec the
+definition plans, for a FreshSession rotation, and `respawn_member` naming a
+profile the definition has, for a same-session one, which `rotate_member`
+cannot end (it plans a fresh session, refused while that rotation stands).
+The mob's destroy ends either. A rotation never takes over a retirement of
+the member that started without it, whose start row records no rotation:
+`rotate_member` is refused retryable while that retirement stands, unless the
+member is host-pending, and a retry alone does not succeed until that
+retirement finishes or is re-driven. The record is internal to the stored
+event codec: an older Meerkat release replays the start row as a plain
+retirement's, and a record this release cannot read fails the resume typed.
 
 `MobHandle::release_member_at_scope(scope)` releases a member's
 materialization only when its `MemberDeliveryScope` (from

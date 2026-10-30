@@ -751,6 +751,85 @@ async fn a_peer_message_wakes_a_released_member_once_and_is_delivered_once() {
     fixture.finish().await;
 }
 
+/// A same-session successor (`respawn_member` with no wake) is seated
+/// Dormant on the member's own session with the member's edges kept: a peer
+/// message over the kept edge wakes it once and is delivered into its
+/// session once, and the woken successor's reply over the same edge is
+/// delivered into the peer's session once.
+///
+/// RED: let the same-session terminal drop the member's edges (or publish
+/// no wake route for its successor): the peer's message to the Dormant
+/// successor is refused, or never reaches its session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_message_wakes_a_same_session_successor_over_its_kept_edge() {
+    let fixture = WakeFixture::new("wake-same-session-successor").await;
+    let peer = fixture.spawn("successor-peer").await;
+    let member = fixture.spawn("successor-member").await;
+    fixture.wire(&peer, &member).await;
+    let session = fixture.session(&member).await;
+    let generation = fixture.entry(&member).await.generation;
+    let receipt = tokio::time::timeout(
+        WAIT,
+        fixture
+            .handle
+            .respawn_member(member.clone(), crate::runtime::MemberRespawn::new()),
+    )
+    .await
+    .expect("the respawn answers")
+    .expect("the member is respawned on its own session");
+    assert_eq!(receipt.identity, member);
+    fixture
+        .wait_residency(&member, Some(mob_dsl::MemberMaterializationPhase::Dormant))
+        .await;
+    assert_eq!(
+        fixture.session(&member).await,
+        session,
+        "the successor keeps the member's session"
+    );
+    assert_ne!(
+        fixture.entry(&member).await.generation,
+        generation,
+        "the successor is the member's next incarnation"
+    );
+    let prepared_before = fixture.preparer.prepared_count();
+
+    let body = token("to-successor");
+    tokio::time::timeout(
+        WAIT,
+        fixture.handle.send_peer_message(
+            peer.clone(),
+            member.clone(),
+            body.as_str(),
+            HandlingMode::Queue,
+        ),
+    )
+    .await
+    .expect("the send answers")
+    .expect("the kept edge carries the message to the Dormant successor");
+    assert_eq!(fixture.delivered_count(&member, &body).await, 1);
+    fixture
+        .wait_residency(&member, Some(mob_dsl::MemberMaterializationPhase::Live))
+        .await;
+    assert_eq!(
+        fixture.preparer.prepared_count(),
+        prepared_before + 1,
+        "one wake builds the successor once"
+    );
+
+    let reply = token("from-successor");
+    tokio::time::timeout(
+        WAIT,
+        fixture
+            .handle
+            .send_peer_message(member, peer.clone(), reply.as_str(), HandlingMode::Queue),
+    )
+    .await
+    .expect("the send answers")
+    .expect("the kept edge carries the successor's reply");
+    assert_eq!(fixture.delivered_count(&peer, &reply).await, 1);
+    fixture.finish().await;
+}
+
 /// Two peers messaging one released member share one wake.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_peers_messaging_one_released_member_share_one_wake() {

@@ -71,6 +71,13 @@ impl RotationMob {
     /// Crash the mob, restart its session service and resume its storage,
     /// with no host record of anything in flight.
     async fn crash_and_restart(&mut self) {
+        self.crash_and_restart_host_pending(&[]).await;
+    }
+
+    /// [`Self::crash_and_restart`] under a host that passes `host_pending`
+    /// host-pending ([`MobBuilder::with_host_pending_members`]): it keeps its
+    /// own record of their preparation.
+    async fn crash_and_restart_host_pending(&mut self, host_pending: &[&str]) {
         let restarted = Arc::new(self.service.cold_restart_preserving_durable_state().await);
         let _ = restarted.enable_runtime_adapter();
         crash_stop_and_release_routes(self.handle.clone()).await;
@@ -81,6 +88,7 @@ impl RotationMob {
                 MobBuilder::for_resume(self.storage.clone())
                     .with_session_service(self.service.clone())
                     .with_member_comms_identity_root(self.keys.path())
+                    .with_host_pending_members(host_pending.iter().copied().map(id))
                     .notify_orchestrator_on_resume(false)
                     .resume(),
             ),
@@ -377,6 +385,127 @@ async fn respawn_is_one_machine_step_and_never_leaves_the_identity_unseated() {
     );
 }
 
+/// A host's preparation mark outlasts the mob's own same-session terminal:
+/// the host wakes first. A crash interrupts the respawn of a member, and the
+/// host passes the member host-pending at the restart (a host that cannot
+/// read its own records holds every identity this way). The restarted mob
+/// finishes the respawn itself (a same-session rotation is the mob's own)
+/// and seats the successor Dormant at the next generation on the member's
+/// own session, with the mark kept. Every wake of the successor is refused
+/// `HostPreparationPending` until the host's own seat step for it: a
+/// `seat_dormant_members` of the identity on its kept session answers
+/// `AlreadySeated` and ends the mark, after which the successor wakes Live.
+///
+/// RED: let the same-session terminal end the mark (remove the identity
+/// from `member_host_preparation_pending` in
+/// `CommitMemberRotationSameSession`): the mark is gone after the restart,
+/// and the successor wakes before the host's seat step.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_pending_successor_waits_for_the_host_seat_step() {
+    let mut mob = RotationMob::new("host-mark-kept").await;
+    mob.handle
+        .spawn_spec(worker_spec("host-held"))
+        .await
+        .expect("spawn the member");
+    let session = mob.session("host-held").await;
+    let dsl_identity = dsl::AgentIdentity::from_domain(&id("host-held"));
+    let hold = crate::runtime::actor::retirement_stage_hold::install(
+        &id("host-held"),
+        "retire-session-release",
+    );
+    let respawning = {
+        let handle = mob.handle.clone();
+        tokio::spawn(async move {
+            handle
+                .respawn_member(id("host-held"), MemberRespawn::new())
+                .await
+        })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the respawn's retirement reaches the session release");
+    mob.crash_and_restart_host_pending(&["host-held"]).await;
+    hold.release();
+    let _ = tokio::time::timeout(STEP, respawning).await;
+
+    // The restarted mob finished the respawn on the member's own session
+    // and kept the host's mark.
+    mob.seated_at("host-held", Generation::new(1)).await;
+    assert_eq!(mob.session("host-held").await, session);
+    assert!(
+        mob.handle
+            .machine_state_watch_rx
+            .borrow()
+            .member_host_preparation_pending
+            .contains(&dsl_identity),
+        "the mob's own same-session terminal keeps the host's mark"
+    );
+    assert_eq!(
+        mob.handle.member_materialization_for_test(&id("host-held")),
+        Some(dsl::MemberMaterializationPhase::Dormant),
+        "the successor is seated Dormant"
+    );
+    let refused = tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("host-held")))
+        .await
+        .expect("the wake answers");
+    assert!(
+        matches!(
+            refused,
+            Err(MobError::MemberWakeRefused {
+                refusal: crate::MemberWakeRefusal::HostPreparationPending,
+                ..
+            })
+        ),
+        "the successor's wake waits for the host's seat step: {refused:?}"
+    );
+    assert_eq!(
+        mob.handle.member_materialization_for_test(&id("host-held")),
+        Some(dsl::MemberMaterializationPhase::Dormant),
+        "a refused wake leaves the successor Dormant"
+    );
+
+    // The host's seat step: the identity on its kept session is already
+    // seated, and the seat ends the mark.
+    let mut seat = worker_spec("host-held");
+    seat.launch_mode = crate::launch::MemberLaunchMode::Resume {
+        bridge_session_id: session.clone(),
+        resume_from_role: None,
+    };
+    let outcomes = tokio::time::timeout(STEP, mob.handle.seat_dormant_members(vec![seat]))
+        .await
+        .expect("the seat answers")
+        .expect("the host's seat step commits");
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [crate::runtime::DormantSeatOutcome::AlreadySeated { session_id, .. }]
+                if session_id == &session
+        ),
+        "{outcomes:?}"
+    );
+    assert!(
+        !mob.handle
+            .machine_state_watch_rx
+            .borrow()
+            .member_host_preparation_pending
+            .contains(&dsl_identity),
+        "the host's seat step ends the mark"
+    );
+    tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("host-held")))
+        .await
+        .expect("the wake answers")
+        .expect("the successor wakes once the host's seat step ended the mark");
+    assert_eq!(
+        mob.handle.member_materialization_for_test(&id("host-held")),
+        Some(dsl::MemberMaterializationPhase::Live)
+    );
+    assert_eq!(
+        mob.generation("host-held").await,
+        Some(Generation::new(1)),
+        "the seat step seats nothing new"
+    );
+}
+
 /// A release scoped to a member incarnation that is no longer current is
 /// refused by Core: after a same-session successor replaced the incarnation
 /// a scope was captured at (same session, newer runtime id and fence),
@@ -399,7 +528,7 @@ async fn scoped_release_of_a_stale_scope_is_refused_by_core() {
         .capture_member_delivery_scope(&id("scoped"))
         .await
         .expect("capture the member's scope");
-    tokio::time::timeout(
+    let receipt = tokio::time::timeout(
         STEP,
         mob.handle
             .respawn_member(id("scoped"), MemberRespawn::new().with_wake(true)),
@@ -407,6 +536,11 @@ async fn scoped_release_of_a_stale_scope_is_refused_by_core() {
     .await
     .expect("the respawn answers")
     .expect("the member is respawned and woken");
+    assert!(
+        receipt.wake_error().is_none(),
+        "the respawn's wake succeeded: {:?}",
+        receipt.wake_error()
+    );
     assert_eq!(
         mob.handle.member_materialization_for_test(&id("scoped")),
         Some(dsl::MemberMaterializationPhase::Live)
@@ -466,7 +600,7 @@ async fn declared_migration_restamps_on_the_same_session_in_one_step() {
         .await
         .expect("spawn the member");
     let session = mob.session("migrating").await;
-    tokio::time::timeout(
+    let receipt = tokio::time::timeout(
         STEP,
         mob.handle.respawn_member(
             id("migrating"),
@@ -476,6 +610,11 @@ async fn declared_migration_restamps_on_the_same_session_in_one_step() {
     .await
     .expect("the migration answers")
     .expect("the member migrates");
+    assert!(
+        receipt.wake_error().is_none(),
+        "the migration's wake succeeded: {:?}",
+        receipt.wake_error()
+    );
     let entry = mob
         .handle
         .get_member(&id("migrating"))
@@ -504,17 +643,100 @@ async fn declared_migration_restamps_on_the_same_session_in_one_step() {
     );
 }
 
-/// A same-session successor keeps its edges across a restart: the terminal
-/// batch records the member's wiring edges and external peer edges again
-/// after its successor's row, so the replay, which ends the retired
-/// incarnation's edges with its `MemberRetired` row, restores exactly the
-/// topology the terminal kept. After the restart MobMachine holds both
-/// edges, the roster holds the external peer's descriptor, and once both
-/// members wake each one messages the other.
+/// The kept topology of `kept-respawned` and `kept-peer`: MobMachine holds
+/// the member edge and the external edge, and the roster holds the member
+/// edge both ways and the external peer's recorded descriptor.
+async fn assert_kept_topology(mob: &RotationMob, external: &TrustedPeerDescriptor, when: &str) {
+    let respawned = dsl::AgentIdentity::from_domain(&id("kept-respawned"));
+    let edge = dsl::WiringEdge::new(
+        respawned.clone(),
+        dsl::AgentIdentity::from_domain(&id("kept-peer")),
+    );
+    {
+        let state = mob.handle.machine_state_watch_rx.borrow();
+        assert!(
+            state.wiring_edges.contains(&edge),
+            "MobMachine holds the member edge {when}"
+        );
+        assert!(
+            state
+                .external_peer_edges
+                .iter()
+                .any(|kept| kept.local == respawned
+                    && kept.endpoint == dsl::ExternalPeerEndpoint::from(external)),
+            "MobMachine holds the external edge {when}"
+        );
+    }
+    for (member, other) in [
+        ("kept-respawned", "kept-peer"),
+        ("kept-peer", "kept-respawned"),
+    ] {
+        let entry = mob
+            .handle
+            .get_member(&id(member))
+            .await
+            .expect("roster read")
+            .expect("the member is seated");
+        assert!(
+            entry.wired_to.contains(&id(other)),
+            "the roster wires {member} to {other} {when}: {:?}",
+            entry.wired_to
+        );
+    }
+    let entry = mob
+        .handle
+        .get_member(&id("kept-respawned"))
+        .await
+        .expect("roster read")
+        .expect("the successor is seated");
+    assert_eq!(
+        entry
+            .external_peer_specs
+            .get(&AgentIdentity::from(external.name.as_str()))
+            .cloned(),
+        Some(external.clone()),
+        "the roster keeps the external peer's recorded descriptor {when}"
+    );
+}
+
+/// A message from `from` to `to` over their kept edge is carried.
+async fn send_over_kept_edge(mob: &RotationMob, from: &str, to: &str) {
+    let body = format!("a message from {from} to {to}");
+    let receipt = tokio::time::timeout(
+        STEP,
+        mob.handle.send_peer_message(
+            id(from),
+            id(to),
+            body.as_str(),
+            meerkat_core::types::HandlingMode::Queue,
+        ),
+    )
+    .await
+    .expect("the send answers")
+    .expect("the kept edge carries the message");
+    assert_eq!(receipt.to, id(to));
+}
+
+/// A same-session successor keeps its edges across restarts. The terminal
+/// batch records the member's wiring edges and external peer edges again,
+/// right after its successor's row: one batch, at consecutive cursors,
+/// `MemberRetired`, `MemberSpawned` on the same session, one
+/// `MembersWiredBatch` with the member edge and one `ExternalPeerWired`. So
+/// the replay, which ends the retired incarnation's edges with its
+/// `MemberRetired` row, restores exactly the topology the terminal kept.
+/// Before the restart and after it, MobMachine holds both edges and the
+/// roster holds the member edge both ways and the external peer's
+/// descriptor. After the restart the peer, woken alone, messages the
+/// Dormant successor at its durable endpoint, and the successor, once
+/// woken, messages the peer back. A second restart, which replays rows that
+/// were themselves replayed, keeps the same topology. (A peer message over
+/// the kept edge waking the Dormant successor and reaching its session is a
+/// row of the wake fixture, whose comms deliver: this mock's do not.)
 ///
 /// RED: drop the kept-topology rows from the same-session terminal's batch
-/// (`kept_topology_rows` in `commit_member_rotation`): after the restart
-/// neither edge is held, and a message between the two members is refused.
+/// (`kept_topology_rows` in `commit_member_rotation`): the batch ends with
+/// the successor's row, after the restart neither edge is held, and a
+/// message between the two members is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_same_session_successor_keeps_its_edges_across_a_restart() {
     let mut mob = RotationMob::new("kept-edges").await;
@@ -546,27 +768,69 @@ async fn a_same_session_successor_keeps_its_edges_across_a_restart() {
     .expect("the respawn answers")
     .expect("the member is respawned on its own session");
 
-    mob.crash_and_restart().await;
-    let respawned = dsl::AgentIdentity::from_domain(&id("kept-respawned"));
-    let edge = dsl::WiringEdge::new(
-        respawned.clone(),
-        dsl::AgentIdentity::from_domain(&id("kept-peer")),
+    // The terminal batch, at consecutive cursors.
+    let journal = mob.journal().await;
+    let retired = journal
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::MemberRetired {
+                    agent_identity,
+                    generation,
+                    ..
+                } if agent_identity.as_str() == "kept-respawned"
+                    && *generation == Generation::new(0)
+            )
+        })
+        .expect("the retirement's row");
+    let batch = journal
+        .get(retired..retired + 4)
+        .expect("the terminal batch holds four rows");
+    assert!(
+        batch
+            .windows(2)
+            .all(|pair| pair[1].cursor == pair[0].cursor + 1),
+        "the terminal batch is one append, at consecutive cursors: {batch:?}"
     );
-    {
-        let state = mob.handle.machine_state_watch_rx.borrow();
-        assert!(
-            state.wiring_edges.contains(&edge),
-            "the member edge survives the restart"
-        );
-        assert!(
-            state
-                .external_peer_edges
-                .iter()
-                .any(|kept| kept.local == respawned
-                    && kept.endpoint == dsl::ExternalPeerEndpoint::from(&external)),
-            "the external edge survives the restart"
-        );
-    }
+    assert!(
+        matches!(
+            &batch[1].kind,
+            MobEventKind::MemberSpawned(spawned)
+                if spawned.agent_identity.as_str() == "kept-respawned"
+                    && spawned.generation == Generation::new(1)
+                    && spawned
+                        .bridge_member_ref
+                        .as_ref()
+                        .and_then(MemberRef::bridge_session_id)
+                        == Some(&session)
+        ),
+        "the successor's row follows on the same session: {batch:?}"
+    );
+    assert!(
+        matches!(
+            &batch[2].kind,
+            MobEventKind::MembersWiredBatch { edges }
+                if *edges
+                    == [crate::event::MemberWireEdge {
+                        a: id("kept-peer"),
+                        b: id("kept-respawned"),
+                    }]
+        ),
+        "the member edge is recorded again: {batch:?}"
+    );
+    assert!(
+        matches!(
+            &batch[3].kind,
+            MobEventKind::ExternalPeerWired { local, spec }
+                if local.as_str() == "kept-respawned" && spec == &external
+        ),
+        "the external edge is recorded again: {batch:?}"
+    );
+    assert_kept_topology(&mob, &external, "before the restart").await;
+
+    mob.crash_and_restart().await;
+    assert_kept_topology(&mob, &external, "after the restart").await;
     let entry = mob
         .handle
         .get_member(&id("kept-respawned"))
@@ -575,39 +839,29 @@ async fn a_same_session_successor_keeps_its_edges_across_a_restart() {
         .expect("the successor is seated");
     assert_eq!(entry.generation, Generation::new(1));
     assert_eq!(mob.session("kept-respawned").await, session);
-    assert_eq!(
-        entry
-            .external_peer_specs
-            .get(&AgentIdentity::from(external.name.as_str()))
-            .cloned(),
-        Some(external),
-        "the roster keeps the external peer's recorded descriptor"
-    );
-    for name in ["kept-respawned", "kept-peer"] {
-        tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id(name)))
-            .await
-            .expect("the wake answers")
-            .expect("the member wakes");
-    }
-    for (from, to) in [
-        ("kept-respawned", "kept-peer"),
-        ("kept-peer", "kept-respawned"),
-    ] {
-        let body = format!("a message from {from} to {to}");
-        let receipt = tokio::time::timeout(
-            STEP,
-            mob.handle.send_peer_message(
-                id(from),
-                id(to),
-                body.as_str(),
-                meerkat_core::types::HandlingMode::Queue,
-            ),
-        )
+
+    // The peer, woken alone, messages the Dormant successor; the successor,
+    // once woken, messages it back.
+    tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("kept-peer")))
         .await
-        .expect("the send answers")
-        .expect("the kept edge carries the message");
-        assert_eq!(receipt.to, id(to));
-    }
+        .expect("the wake answers")
+        .expect("the peer wakes");
+    assert_eq!(
+        mob.handle
+            .member_materialization_for_test(&id("kept-respawned")),
+        Some(dsl::MemberMaterializationPhase::Dormant),
+        "the successor is still Dormant"
+    );
+    send_over_kept_edge(&mob, "kept-peer", "kept-respawned").await;
+    tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("kept-respawned")))
+        .await
+        .expect("the wake answers")
+        .expect("the successor wakes");
+    send_over_kept_edge(&mob, "kept-respawned", "kept-peer").await;
+
+    // A second restart replays the rows the first replay kept.
+    mob.crash_and_restart().await;
+    assert_kept_topology(&mob, &external, "after a second restart").await;
 }
 
 /// A declared role migration whose successor no build created yet survives a
@@ -730,18 +984,28 @@ async fn runtime_mode_restamp_is_one_same_session_step() {
 
 /// The queued-input handoff's other branch: a member whose session does not
 /// commit each round (its runtime keeps no persistence store, as this
-/// mock's does) ends every input queued behind its running turn when a
-/// same-session successor releases its runtime. The queued Queue-mode
-/// input's waiter is answered with its end, never told the input was kept
-/// for the next incarnation, and the successor is seated on the same
-/// session.
+/// mock's does, which the row checks first) ends every input queued behind
+/// its running turn when a same-session successor releases its runtime. The
+/// queued Queue-mode input's waiter is answered that its runtime terminated
+/// on the member's session, never that the input was kept for the next
+/// incarnation. The terminal batch seats the successor on the same session,
+/// Dormant (the handover owed it no wake), and once woken the successor
+/// never runs the ended input.
 ///
 /// RED: release the kept session with `UnregisterQueuedInputs::Requeue`
 /// whatever the session's commit mode (`retirement_release_kept_session`):
-/// the waiter is told the input was requeued across the stop.
+/// the waiter is told the input was requeued across the stop, and the
+/// successor runs it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn same_session_successor_ends_queued_inputs_when_its_session_does_not_commit_each_round() {
+    const QUEUED: &str = "queued behind the running turn";
     let mob = RotationMob::new("same-session-stop-branch").await;
+    assert!(
+        !mob.service
+            .enable_runtime_adapter()
+            .has_runtime_persistence(),
+        "the branch's precondition: the runtime keeps no persistence store"
+    );
     let identity = id("stop-branch");
     let mut spec = worker_spec("stop-branch");
     spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
@@ -766,7 +1030,7 @@ async fn same_session_successor_ends_queued_inputs_when_its_session_does_not_com
             entry.agent_runtime_id.clone(),
             entry.fence_token,
             WorkRef::new(),
-            WorkSpec::new("queued behind the running turn", WorkOrigin::Internal),
+            WorkSpec::new(QUEUED, WorkOrigin::Internal),
             HandlingMode::Queue,
         )
         .await
@@ -788,11 +1052,11 @@ async fn same_session_successor_ends_queued_inputs_when_its_session_does_not_com
     match answer {
         Ok(_) => panic!("the queued input ran on the released runtime"),
         Err(error) => assert!(
-            !matches!(
+            matches!(
                 error.failure(),
-                BoundedTurnFailure::RequeuedAcrossStop { .. }
+                BoundedTurnFailure::RuntimeTerminated { session_id, .. } if session_id == &session
             ),
-            "a session that does not commit each round keeps no queued input: {error:?}"
+            "a session that does not commit each round ends its queued input with its runtime: {error:?}"
         ),
     }
     assert_eq!(receipt.identity, identity);
@@ -801,6 +1065,32 @@ async fn same_session_successor_ends_queued_inputs_when_its_session_does_not_com
         Some(Generation::new(1))
     );
     assert_eq!(mob.session("stop-branch").await, session);
+    assert_eq!(
+        successor_in_the_terminal_batch(&mob.journal().await, "stop-branch", Generation::new(0)),
+        Some((
+            Generation::new(1),
+            ProfileName::from("worker"),
+            Some(session.clone())
+        )),
+        "the terminal batch seats the successor on the same session"
+    );
+    assert_eq!(
+        mob.handle.member_materialization_for_test(&identity),
+        Some(dsl::MemberMaterializationPhase::Dormant),
+        "the handover owed the successor no wake"
+    );
+    tokio::time::timeout(STEP, mob.handle.ensure_member_live(&identity))
+        .await
+        .expect("the wake answers")
+        .expect("the successor wakes");
+    assert!(
+        !mob.service
+            .recorded_start_turn_prompts()
+            .await
+            .iter()
+            .any(|(turn_session, prompt)| turn_session == &session && prompt.contains(QUEUED)),
+        "the successor never runs the ended input"
+    );
 }
 
 /// The rows a refused respawn leaves: the member keeps its generation and
@@ -830,8 +1120,72 @@ async fn assert_nothing_started(handle: &MobHandle, storage: &MobStorage, name: 
     );
 }
 
+/// `name`'s roster anchor: its generation, fence and session.
+async fn roster_anchor(
+    handle: &MobHandle,
+    name: &str,
+) -> (Generation, crate::ids::FenceToken, Option<SessionId>) {
+    let entry = handle
+        .get_member(&id(name))
+        .await
+        .expect("roster read")
+        .expect("the member is seated");
+    (
+        entry.generation,
+        entry.fence_token,
+        entry.bridge_session_id().cloned(),
+    )
+}
+
+/// A refused respawn of each named member left nothing behind: the journal
+/// holds no new row, MobMachine holds no rotation of the member, no
+/// retirement of it was published, and its roster anchor is unchanged.
+async fn assert_nothing_happened(
+    handle: &MobHandle,
+    storage: &MobStorage,
+    journal_before: usize,
+    anchors_before: &[(
+        &str,
+        (Generation, crate::ids::FenceToken, Option<SessionId>),
+    )],
+) {
+    let journal = storage
+        .events
+        .poll(0, usize::MAX)
+        .await
+        .expect("read the journal");
+    assert_eq!(journal.len(), journal_before, "no row was written");
+    for (name, before) in anchors_before {
+        let dsl_identity = dsl::AgentIdentity::from_domain(&id(name));
+        {
+            let state = handle.machine_state_watch_rx.borrow();
+            assert!(
+                !state.member_rotation_targets.contains_key(&dsl_identity)
+                    && !state
+                        .member_rotation_session_ids
+                        .contains_key(&dsl_identity),
+                "MobMachine holds no rotation of {name}"
+            );
+        }
+        assert!(
+            handle.retirement_settlement(&id(name)).is_none(),
+            "no retirement of {name} was published"
+        );
+        assert_eq!(
+            &roster_anchor(handle, name).await,
+            before,
+            "{name}'s roster anchor is unchanged"
+        );
+    }
+}
+
 /// `respawn_member` of a member that is not runtime-backed (its mob has no
-/// runtime) is refused typed before anything starts.
+/// runtime) is refused typed before anything starts, and so is `respawn` of
+/// an identity entry's member in the same mob: MobMachine refuses a
+/// fresh-life respawn of an entry, so it is routed to the same-session path,
+/// which refuses it the same way. Nothing happens: the journal holds no new
+/// row, MobMachine holds no rotation of either member, no retirement of
+/// either is published, and both roster anchors are unchanged.
 ///
 /// RED: drop the runtime-backed check from `plan_member_respawn`: the
 /// respawn starts the member's retirement.
@@ -851,9 +1205,29 @@ async fn respawn_member_of_a_member_that_is_not_runtime_backed_is_refused_typed(
         .spawn_spec(worker_spec("no-runtime"))
         .await
         .expect("spawn the member");
-    let refused = handle
-        .respawn_member(id("no-runtime"), MemberRespawn::new())
-        .await;
+    handle
+        .spawn_spec(entry_spec("no-runtime-entry"))
+        .await
+        .expect("the host declares a spawned entry");
+    let journal_before = storage
+        .events
+        .poll(0, usize::MAX)
+        .await
+        .expect("read the journal")
+        .len();
+    let anchors_before = [
+        ("no-runtime", roster_anchor(&handle, "no-runtime").await),
+        (
+            "no-runtime-entry",
+            roster_anchor(&handle, "no-runtime-entry").await,
+        ),
+    ];
+    let refused = tokio::time::timeout(
+        STEP,
+        handle.respawn_member(id("no-runtime"), MemberRespawn::new()),
+    )
+    .await
+    .expect("the respawn answers");
     assert!(
         matches!(
             &refused,
@@ -861,7 +1235,19 @@ async fn respawn_member_of_a_member_that_is_not_runtime_backed_is_refused_typed(
         ),
         "{refused:?}"
     );
-    assert_nothing_started(&handle, &storage, "no-runtime").await;
+    let refused_entry = tokio::time::timeout(STEP, handle.respawn(id("no-runtime-entry"), None))
+        .await
+        .expect("the respawn answers");
+    assert!(
+        matches!(
+            &refused_entry,
+            Err(crate::runtime::handle::MobRespawnError::Mob(
+                MobError::UnsupportedForMode { reason, .. }
+            )) if reason.contains("runtime-backed")
+        ),
+        "the entry is routed to the same-session path: {refused_entry:?}"
+    );
+    assert_nothing_happened(&handle, &storage, journal_before, &anchors_before).await;
 }
 
 /// `respawn_member` on a service that keeps no durable sessions is refused
@@ -889,9 +1275,12 @@ async fn respawn_member_on_a_service_without_durable_sessions_is_refused_typed()
         .spawn_spec(worker_spec("non-durable"))
         .await
         .expect("spawn the member");
-    let refused = handle
-        .respawn_member(id("non-durable"), MemberRespawn::new())
-        .await;
+    let refused = tokio::time::timeout(
+        STEP,
+        handle.respawn_member(id("non-durable"), MemberRespawn::new()),
+    )
+    .await
+    .expect("the respawn answers");
     assert!(
         matches!(
             &refused,
@@ -920,10 +1309,13 @@ async fn respawn_member_of_a_member_whose_session_is_lost_is_refused_by_the_mach
     let session = mob.session("lost-session").await;
     mob.crash_and_restart().await;
     mob.service.delete_persisted_session(&session).await;
-    let refused = mob
-        .handle
-        .respawn_member(id("lost-session"), MemberRespawn::new())
-        .await;
+    let refused = tokio::time::timeout(
+        STEP,
+        mob.handle
+            .respawn_member(id("lost-session"), MemberRespawn::new()),
+    )
+    .await
+    .expect("the respawn answers");
     assert!(
         matches!(
             &refused,
@@ -936,12 +1328,14 @@ async fn respawn_member_of_a_member_whose_session_is_lost_is_refused_by_the_mach
 
 /// `respawn_with_successor_spec` of an identity entry's member is refused
 /// typed before anything starts: an entry's successor keeps its session,
-/// which a successor spec (a fresh life) cannot. The member stays the
-/// entry's.
+/// which a successor spec (a fresh life) cannot. MobMachine owns the
+/// refusal: its fresh-life respawn arm (`RespawnRunning`) admits no entry
+/// (`not_an_identity_entry`), and its refusal twin answers `RespawnRefused`,
+/// which the shell answers typed. The member stays the entry's.
 ///
-/// RED: route an entry with a successor spec through the retire-then-spawn
-/// helper (drop the entry refusal in `handle_respawn`): the member is
-/// retired and respawned on a new session.
+/// RED: drop `RespawnRunning`'s `not_an_identity_entry` guard and its
+/// refusal twin: MobMachine admits the fresh-life respawn, and the member
+/// is retired and respawned on a new session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn respawn_with_successor_spec_of_an_identity_entry_is_refused_typed() {
     let mob = RotationMob::new("entry-successor-spec").await;
@@ -949,16 +1343,19 @@ async fn respawn_with_successor_spec_of_an_identity_entry_is_refused_typed() {
         .spawn_spec(entry_spec("entry-spec"))
         .await
         .expect("the host declares a spawned entry");
-    let refused = mob
-        .handle
-        .respawn_with_successor_spec(worker_spec("entry-spec"))
-        .await;
+    let refused = tokio::time::timeout(
+        STEP,
+        mob.handle
+            .respawn_with_successor_spec(worker_spec("entry-spec")),
+    )
+    .await
+    .expect("the respawn answers");
     assert!(
         matches!(
             &refused,
             Err(crate::runtime::handle::MobRespawnError::Mob(
-                MobError::UnsupportedForMode { .. }
-            ))
+                MobError::UnsupportedForMode { reason, .. }
+            )) if reason.contains("identity entry")
         ),
         "{refused:?}"
     );

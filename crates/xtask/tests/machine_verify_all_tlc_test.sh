@@ -715,6 +715,31 @@ if run_part audits-h; then
   TLC_WORKERS="${tlc_workers}" "${identity_entry_audit}" --mutants
 fi
 
+# The SessionDocumentMachine operator-instruction region: a hand-written
+# audit composes the generated arms with a model of the shell that observes
+# its typed target and effective sets (one session, two slots, revisions
+# 1..2, every run start, all lowerings, folds at and after a run's first
+# request, mob records, session writes and owner rebinds) within the ci.cfg
+# step bound. It checks that the effective set changes only at a FreshRun
+# start or a run-start fold, that an application reaches the target with one
+# entry per run start, that an applied revoke holds, that a mid-run fold
+# keeps the effective set, that a session write never lowers a revision,
+# that a leading-prefix-only model applies only on a leading System prefix,
+# and that the machine's counts mirror the shell; it first checks that the
+# generated model defines every arm it drives, and requires its three
+# witnesses reached. --mutants refuses five seeded defects, each by the
+# invariant it targets. Not yet measured on a hosted runner; it joins this
+# shard as the lightest one measured locally.
+instruction_boundary_audit="${workspace_root}/specs/machines/session_document/instruction_boundary_audit.sh"
+if [[ ! -x "${instruction_boundary_audit}" ]]; then
+  echo "error: instruction boundary audit runner is missing from workspace runfiles: ${instruction_boundary_audit}" >&2
+  exit 1
+fi
+if run_part audits-h; then
+  echo "running bounded instruction boundary TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${instruction_boundary_audit}" --mutants
+fi
+
 # The MobMachine arm-coverage gate: every arm of the generated model's Next
 # relation is either in a hand-written audit runner's covered_actions array
 # (each runner checks with TLC coverage that every listed arm fires) or named
@@ -895,7 +920,9 @@ run_machine_verify() {
 # locally with 4 TLC workers. Locally, with 4 TLC workers and the eight
 # shards in parallel, audits-h took 298 s and audits-c 273 s, where audits-c
 # took 455 s with the identity entry audit; neither shard is measured on a
-# hosted runner yet.
+# hosted runner yet. The SessionDocumentMachine instruction boundary audit
+# with --mutants joined audits-h after these measurements (seven runs over a
+# model that does not extend meerkat_machine; not yet measured).
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
 # inside the 1080 s execution budget even on a runner 1.6x slower than the
 # faster ones here. As three shards these audits ran 13-18 minutes (audits-a),

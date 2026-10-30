@@ -2062,6 +2062,48 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "SessionBuildStateRestoreAuthorized",
                         ]),
                 ),
+                scenario(
+                    "session_operator_instruction_region",
+                    "RecoverSessionInstructionState seeds the per-session owner, target generation, target slot count, effective active count and entry sequence from the shell's durable projection and refuses a torn one; RecordInstructionTargetAdvance, RecordInstructionTargetAlreadyRecorded and RecordInstructionTargetOwnedBySession record a mob snapshot by generation alone; SetSessionInstructionNew, SetSessionInstructionAdvance, SetSessionInstructionDuplicate, SetSessionInstructionStale, SetSessionInstructionConflict, SetSessionInstructionOwnedByMob, SetSessionInstructionSlotLimitExceeded and SetSessionInstructionUnknownSlot decide a session-owned write per slot; RebindInstructionOwner starts the new owner from the effective set; ResolveRunStartInstructionsApply, ResolveRunStartInstructionsNoChange, ResolveRunStartInstructionsDeferredLeadingPrefix and ResolveRunStartInstructionsDeferredUnavailable decide at a run start whether one coalesced entry applies the pending changes; AuthorizeInstructionFoldAtRunStart and AuthorizeInstructionFoldEffective decide the set a compaction fold renders. The shell observes its typed target and effective sets mechanically and mirrors each verdict",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "RecoverSessionInstructionState",
+                            "RecordInstructionTargetAdvance",
+                            "RecordInstructionTargetAlreadyRecorded",
+                            "RecordInstructionTargetOwnedBySession",
+                            "SetSessionInstructionNew",
+                            "SetSessionInstructionAdvance",
+                            "SetSessionInstructionDuplicate",
+                            "SetSessionInstructionStale",
+                            "SetSessionInstructionConflict",
+                            "SetSessionInstructionOwnedByMob",
+                            "SetSessionInstructionSlotLimitExceeded",
+                            "SetSessionInstructionUnknownSlot",
+                            "RebindInstructionOwner",
+                            "ResolveRunStartInstructionsApply",
+                            "ResolveRunStartInstructionsNoChange",
+                            "ResolveRunStartInstructionsDeferredLeadingPrefix",
+                            "ResolveRunStartInstructionsDeferredUnavailable",
+                            "AuthorizeInstructionFoldAtRunStart",
+                            "AuthorizeInstructionFoldEffective",
+                        ])
+                        .effects(&[
+                            "SessionInstructionStateRecovered",
+                            "InstructionTargetRecorded",
+                            "InstructionTargetRefused",
+                            "InstructionOwnerRebound",
+                            "InstructionEntryAuthorized",
+                            "InstructionEntryNotNeeded",
+                            "InstructionApplicationDeferred",
+                            "InstructionFoldAuthorized",
+                        ])
+                        .invariants(&[
+                            "instruction_state_maps_lockstep",
+                            "instruction_owner_present_with_target",
+                            "instruction_slot_count_bounded",
+                            "instruction_entry_sequence_covers_effective",
+                        ]),
+                ),
             ],
         ),
         machine_manifest_from_schema(

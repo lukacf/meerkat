@@ -1079,6 +1079,37 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 "SessionArchiveRuntimeObservation",
                 &["Absent", "RetirementRequired", "QuiescentTerminal"],
             ),
+            // Operator-instruction region typed vocabulary: the owner of a
+            // session's recorded target, a slot's effect, the run start and
+            // lowering a turn start observes, and the verdicts the shell
+            // mirrors.
+            NamedTypeBinding::string_enum("InstructionTargetOwner", &["Unowned", "Session", "Mob"]),
+            NamedTypeBinding::string_enum("InstructionEffect", &["Absent", "Active"]),
+            NamedTypeBinding::string_enum(
+                "InstructionRunStart",
+                &["FreshRun", "ResumeRun", "NoRun"],
+            ),
+            NamedTypeBinding::string_enum(
+                "InstructionLowering",
+                &["MidConversation", "LeadingPrefixOnly", "Unavailable"],
+            ),
+            NamedTypeBinding::string_enum("InstructionWriteOutcome", &["Recorded", "Duplicate"]),
+            NamedTypeBinding::string_enum(
+                "InstructionWriteRefusal",
+                &[
+                    "StaleRevision",
+                    "RevisionConflict",
+                    "OwnedByMob",
+                    "OwnedBySession",
+                    "SlotLimitExceeded",
+                    "UnknownSlot",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "InstructionDeferReason",
+                &["LeadingPrefixOnly", "LoweringUnavailable"],
+            ),
+            NamedTypeBinding::string_enum("InstructionFoldSource", &["Effective", "Target"]),
         ],
         Vec::new(),
     )

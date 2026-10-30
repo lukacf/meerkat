@@ -1035,6 +1035,22 @@ impl Session {
                 max_bytes: MAX_INSTRUCTION_BODY_BYTES,
             });
         }
+        // One session never mixes activations and operator instructions on
+        // one slot: a key the operator-instruction target or effective set
+        // names takes no activation (the existing invalid_request code).
+        let operator_slot = super::InstructionSlot {
+            namespace: request.revision.namespace.clone(),
+            key: request.revision.key.clone(),
+        };
+        if self
+            .names_operator_instruction_slot(&operator_slot)
+            .map_err(|error| InstructionActivationError::MalformedHistory(error.to_string()))?
+        {
+            return Err(InstructionActivationError::Unsupported(format!(
+                "instruction key {operator_slot} is managed by operator instructions in this \
+                 session"
+            )));
+        }
         let retained_body_bytes = self.messages().iter().try_fold(0usize, |total, message| {
             let Message::System(system) = message else {
                 return Ok(total);

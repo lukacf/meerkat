@@ -127,6 +127,7 @@ mod inline_image_externalization_tests;
 mod instruction_activation;
 #[cfg(test)]
 mod instruction_envelope_tests;
+mod instruction_target;
 #[cfg(test)]
 mod instruction_target_tests;
 pub mod model_routing_control;
@@ -160,6 +161,14 @@ pub use instruction_activation::{
     InstructionActivationRequest, MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES,
     MAX_INSTRUCTION_BODY_BYTES, inherited_instruction_keys_requiring_activation,
     materialize_instruction_activation_messages, validate_instruction_activation_messages,
+};
+pub use instruction_target::{
+    InstructionDeferReason, InstructionLowering, InstructionRecordDisposition,
+    InstructionRecordReceipt, InstructionRunStart, InstructionSetErrorCode, InstructionStateError,
+    InstructionTargetOwner, InstructionTargetRecord, InstructionTargetRecordSlot,
+    InstructionTargetSlot, InstructionWriteDisposition, InstructionWriteError,
+    RunStartInstructionOutcome, SessionInstructionChange, SessionInstructionReceipt,
+    SessionInstructionState, SessionInstructionWrite,
 };
 pub use operator_instructions::{
     EffectiveInstructionSlot, EffectiveOperatorInstructions, INSTRUCTION_ENTRY_RENDER_VERSION_V1,

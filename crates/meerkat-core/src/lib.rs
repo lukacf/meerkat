@@ -579,12 +579,17 @@ pub use session::{
 };
 pub use session::{
     EffectiveInstructionSlot, EffectiveOperatorInstructions, INSTRUCTION_ENTRY_RENDER_VERSION_V1,
-    InstructionActiveRef, InstructionChange, InstructionEffect, InstructionEntryIdentity,
-    InstructionEntryKind, InstructionRevision, InstructionSlot, InvalidInstructionRevision,
-    MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES, MAX_OPERATOR_INSTRUCTION_SLOTS,
-    SESSION_ENVELOPE_BASELINE_VERSION, SESSION_INSTRUCTION_STATE_KEY,
-    effective_operator_instructions, materialize_operator_instruction_messages,
-    validate_operator_instruction_messages,
+    InstructionActiveRef, InstructionChange, InstructionDeferReason, InstructionEffect,
+    InstructionEntryIdentity, InstructionEntryKind, InstructionLowering,
+    InstructionRecordDisposition, InstructionRecordReceipt, InstructionRevision,
+    InstructionRunStart, InstructionSetErrorCode, InstructionSlot, InstructionStateError,
+    InstructionTargetOwner, InstructionTargetRecord, InstructionTargetRecordSlot,
+    InstructionTargetSlot, InstructionWriteDisposition, InstructionWriteError,
+    InvalidInstructionRevision, MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES,
+    MAX_OPERATOR_INSTRUCTION_SLOTS, RunStartInstructionOutcome, SESSION_ENVELOPE_BASELINE_VERSION,
+    SESSION_INSTRUCTION_STATE_KEY, SessionInstructionChange, SessionInstructionReceipt,
+    SessionInstructionState, SessionInstructionWrite, effective_operator_instructions,
+    materialize_operator_instruction_messages, validate_operator_instruction_messages,
 };
 pub use session_component_sidecar::{
     ComponentEventDigest, ComponentEventPrefixAuthority, ComponentEventPrefixDigest,

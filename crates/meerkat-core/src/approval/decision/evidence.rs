@@ -87,6 +87,15 @@ impl AttestedDecision {
     /// `observed_at_ms` (UNIX milliseconds, the ingress's own reading of the
     /// event, such as a chat provider's message time).
     ///
+    /// The decision's machine compares that reading with each presentation's
+    /// `at_ms`, a reading of the host clock, and refuses a decision observed
+    /// before the first presentation. An ingress clock that is coarser than
+    /// the host's or behind it can only make a decision look earlier: the
+    /// worst case is a retryable `decided_before_presentation` (the decision
+    /// stays open), never the acceptance of a decision made before it was
+    /// shown. That guarantee assumes the ingress clock does not run ahead of
+    /// the host's. A presentation at 0 is no reading and never counts.
+    ///
     /// # Errors
     /// [`DecisionContractError::UnqualifiedPrincipal`] when the approver's
     /// principal has no key.

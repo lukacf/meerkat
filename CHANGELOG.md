@@ -263,7 +263,12 @@ them.
   (`DecisionRefusal::DecidedBeforePresentation`, token
   `decided_before_presentation`). A decision observed in the same
   millisecond is decided, and one with no presentation stays
-  `presentation_incomplete`.
+  `presentation_incomplete`. A presentation time of 0 is no reading: a
+  presentation to the approver at 0, recorded or carried by the decision
+  event, is refused as `presentation_incomplete` and never becomes the first
+  presentation. The observed time is the ingress's reading and a
+  presentation's time the host clock's, so a coarse or lagging ingress clock
+  can only cause a retryable refusal.
 
 - `meerkat-runtime`: `PromptInput::detached_job_completed_with_handling`
   admits a completion notice under the handling its producer declares,

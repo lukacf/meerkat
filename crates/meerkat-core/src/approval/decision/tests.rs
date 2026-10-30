@@ -822,8 +822,12 @@ const HUMAN_OBSERVED_EVIDENCE_DIGEST: &str =
 /// A human decision's evidence records when its ingress observed the
 /// decision event, under the same evidence domain: its pinned bytes decode
 /// and encode back unchanged. Evidence recorded before it carried that time
-/// decodes without it and keeps its bytes and its digest, so a decided row
-/// written then stays readable; being decided, it needs no ordering check.
+/// decodes without it and keeps its bytes and its digest, so the machine's
+/// evidence digest still binds it; being decided, it needs no ordering
+/// check. A whole row written before the machine state recorded
+/// `first_presented_to_approver_at_ms` is still unreadable, by design: its
+/// state names `presented_to_approver`, an unknown field to the stored
+/// state.
 #[test]
 fn the_evidence_records_the_observed_time_and_older_evidence_keeps_its_digest() {
     for (json, digest) in [

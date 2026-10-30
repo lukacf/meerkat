@@ -931,7 +931,7 @@ describe("rows and controls", () => {
           ]}
         />
         <SearchField label="Search agents" value="" onChange={() => {}} />
-        <SelectField label="Mob" ariaLabel="Memory mob" value="a" onChange={() => {}} options={[{ value: "a", label: "Operations" }]} />
+        <SelectField label="Team" ariaLabel="Memory team" value="a" onChange={() => {}} options={[{ value: "a", label: "Operations" }]} />
       </div>,
     );
     expect(view.getByTestId("view:tree").getAttribute("aria-pressed")).toBe("true");
@@ -939,7 +939,7 @@ describe("rows and controls", () => {
     fireEvent.click(view.getByTestId("view:graph"));
     expect(onChange.mock.calls[0]?.[0]).toBe("graph");
     expect(view.getByRole("searchbox", { name: "Search agents" }).tagName).toBe("INPUT");
-    expect(view.getByRole("combobox", { name: "Memory mob" }).tagName).toBe("SELECT");
+    expect(view.getByRole("combobox", { name: "Memory team" }).tagName).toBe("SELECT");
   });
 
   it("pairs tone attributes with words and keeps dots decorative", () => {

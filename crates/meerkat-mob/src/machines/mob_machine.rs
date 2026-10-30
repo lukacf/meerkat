@@ -14521,6 +14521,49 @@ mod tests {
         );
     }
 
+    /// While the mob is still Stopped (the explicit resume selects and
+    /// prepares its members before the durable Resume), the member
+    /// authorization answers a member whose host preparation is owed held,
+    /// with its cause, and changes nothing; it answers no other member
+    /// there, so the rebuild's arms answer those once the mob runs.
+    #[test]
+    fn the_explicit_resume_answers_a_held_member_held_while_the_mob_is_stopped() {
+        let (authority, attempt, identity, binding) = explicit_resume_fixture();
+        let authorize = || MobMachineInput::AuthorizeExplicitResumeMember {
+            attempt: attempt.clone(),
+            agent_identity: identity.clone(),
+            binding: binding.clone(),
+        };
+        let mut probe = authority.fork();
+        assert!(
+            MobMachineMutator::apply(&mut probe, authorize()).is_err(),
+            "no arm authorizes a member that owes nothing while the mob is Stopped"
+        );
+
+        let mut state = authority.state().clone();
+        state
+            .member_host_preparation_causes
+            .insert(identity.clone(), HostPreparationCause::FirstBootRow);
+        let mut authority = MobMachineAuthority::recover_from_state(state)
+            .expect("a member owing its host preparation recovers");
+        assert_eq!(authority.state().lifecycle_phase, MobPhase::Stopped);
+        let before = authority.state().clone();
+        let held = MobMachineMutator::apply(&mut authority, authorize())
+            .expect("the authorization answers a held member while Stopped");
+        assert!(held.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::ExplicitResumeMemberHeld {
+                agent_identity,
+                cause: HostPreparationCause::FirstBootRow,
+            } if agent_identity == &identity
+        )));
+        assert_eq!(
+            authority.state(),
+            &before,
+            "nothing changes, and the mob stays Stopped"
+        );
+    }
+
     /// One declared apply of a mob is open at a time: a second opening while
     /// one is open is answered Busy and changes nothing, a close (in any
     /// lifecycle phase, total) lets the next apply open, and a mob that is

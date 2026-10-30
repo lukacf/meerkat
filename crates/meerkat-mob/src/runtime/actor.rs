@@ -22498,14 +22498,25 @@ impl MobActor {
                 .collect::<Result<Vec<_>, MobError>>()?
         };
         let mut candidates = Vec::with_capacity(listed.len());
+        // MobMachine answers a member whose host preparation is owed held
+        // while the mob is still Stopped, so the preparation never acts on a
+        // held Live member: no session read, no customizer call, no actor
+        // retired for a changed binding. It keeps its live actor, session and
+        // runtime as they are. One fork serves the loop.
+        let mut held_probe = self.dsl_authority.fork();
         for (entry, member_ref, session_id, dormant) in listed {
             // A Dormant member is a candidate only while its session still
             // has a materialization of this process, which the seam retires
             // (an earlier handle of this mob left it; a fresh provisioner
             // never adopts it). One with nothing of this process stays lazy:
             // the lift's member plan decides, after the durable Resume, which
-            // Dormant members it materializes (see `boot_lift`).
+            // Dormant members it materializes (see `boot_lift`). A held
+            // Dormant member's retained materialization is retired as any
+            // member's is: an earlier handle left it.
             let preparation = if !dormant {
+                if Self::explicit_resume_answers_held(&mut held_probe, &entry, &session_id) {
+                    continue;
+                }
                 ExplicitResumePreparation::Live
             } else if self.session_has_retained_materialization(&session_id).await {
                 ExplicitResumePreparation::RetireRetained
@@ -22519,16 +22530,24 @@ impl MobActor {
 
     /// Whether MobMachine's member authorization of the explicit resume
     /// answers `entry` held (`ExplicitResumeMemberHeld`: its host preparation
-    /// is owed), on `session_id`. A pure probe on a fork of the authority,
-    /// never committed: the member's own authorization runs on its rebuild.
-    fn explicit_resume_answers_held(&self, entry: &RosterEntry, session_id: &SessionId) -> bool {
-        let state = self.dsl_authority.state();
+    /// is owed), on `session_id`: while the mob is still Stopped at the
+    /// candidate selection, and once it runs at the rebuild. A pure probe on
+    /// `probe`, a fork of the authority that is never committed. One fork
+    /// serves a whole loop: the Held arms change nothing, and no member's
+    /// authorization touches another member's Held guards. The member's own
+    /// authorization runs on its rebuild.
+    fn explicit_resume_answers_held(
+        probe: &mut mob_dsl::MobMachineAuthority,
+        entry: &RosterEntry,
+        session_id: &SessionId,
+    ) -> bool {
+        let state = probe.state();
         let Some(attempt) = state.explicit_resume_attempt.clone() else {
             return false;
         };
-        let mut probe = self.dsl_authority.fork();
+        let definition_epoch = state.definition_epoch;
         mob_dsl::MobMachineMutator::apply(
-            &mut probe,
+            probe,
             mob_dsl::MobMachineInput::AuthorizeExplicitResumeMember {
                 attempt,
                 agent_identity: mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
@@ -22536,7 +22555,7 @@ impl MobActor {
                     agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
                     fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
                     session_id: mob_dsl::SessionId::from_domain(session_id),
-                    definition_epoch: state.definition_epoch,
+                    definition_epoch,
                 },
             },
         )
@@ -22598,6 +22617,7 @@ impl MobActor {
             self.member_residency.verify_concurrency.max(1),
         ));
         let mut failed = Vec::new();
+        let mut held_probe = self.dsl_authority.fork();
         for rebuild in rebuild {
             let ExplicitResumeMemberRebuild {
                 mut entry,
@@ -22624,7 +22644,9 @@ impl MobActor {
             // A member MobMachine's member authorization answers held (its
             // host preparation is owed: `ExplicitResumeMemberHeld`) is left as
             // the preparation left it: not repointed, recustomized or rebuilt.
-            if self.explicit_resume_answers_held(&entry, &bridge_session_id) {
+            // The candidate selection already left a held Live member out;
+            // this answers a member held since.
+            if Self::explicit_resume_answers_held(&mut held_probe, &entry, &bridge_session_id) {
                 continue;
             }
             if let Some(superseded_session_id) = superseded_session_id.as_ref() {
@@ -31662,16 +31684,12 @@ impl MobActor {
                     let result = self.seal_declared_roster(desired);
                     let _ = reply_tx.send(result);
                 }
-                MobCommand::OpenDeclaredApply {
-                    close_authority,
-                    reply_tx,
-                } => {
+                MobCommand::OpenDeclaredApply { reply_tx } => {
                     let result = self.open_declared_apply().map(|verdict| {
                         if verdict == mob_dsl::DeclaredApplyOpenVerdict::Opened {
                             super::declared_apply::DeclaredApplyOpening::Opened(
                                 super::declared_apply::DeclaredApplyLease::new(
                                     self.command_tx.clone(),
-                                    close_authority,
                                 ),
                             )
                         } else {

@@ -222,8 +222,9 @@ them.
   `OpenDeclaredApplyMobNotRunningCompleted`,
   `OpenDeclaredApplyMobNotRunningDestroyed`, `CloseDeclaredApplyRunning`,
   `CloseDeclaredApplyStopped`, `CloseDeclaredApplyCompleted`,
-  `CloseDeclaredApplyDestroyed`, `AdmitResetRunning`, `AdmitResetStopped` and
-  `AdmitResetCompleted`, so no existing variant's discriminant moves.
+  `CloseDeclaredApplyDestroyed`, `AdmitResetRunning`, `AdmitResetStopped`,
+  `AdmitResetCompleted` and `AuthorizeExplicitResumeMemberHeldStopped`, so no
+  existing variant's discriminant moves.
   Exhaustive matches must add the new variants.
   `meerkat_mob::MobEventKind::MemberRetirementStarted` gains the public field
   `cause` (why the retirement started) and `MemberRetired` the public field

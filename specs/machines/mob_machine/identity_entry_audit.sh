@@ -78,7 +78,8 @@
 #   migration, its same-session and fresh-session rotations under another
 #   role or its own, and a first-boot Resume request. resume: a member,
 #   Dormant or Live, whose host preparation (a first-boot preparation or a
-#   role hold) is owed or not, through an explicit resume. held: held
+#   role hold) is owed or not, through an explicit resume (probed while
+#   the mob is still stopped and again once it runs). held: held
 #   creation and the held spawn, entries hosted on their first use, the
 #   dormant seat's refusal of both, and Stop, Resume and Complete, where the
 #   declaration and the seal refuse; the declared apply's open fact. placed:
@@ -107,7 +108,8 @@
 #   on an empty roster and its preflight changing nothing and admitting, on
 #   an empty roster, exactly the resets the mob commits, the explicit resume
 #   never rebuilding a member whose host preparation is owed and answering
-#   it held with no change, the remote commit seating its custody's entry,
+#   it held with no change, stopped or running, and only when it is owed,
+#   the remote commit seating its custody's entry,
 #   the placed end keeping it hosted on its first use, the dormant seat
 #   taking only an entry owed its seat, and a ladder opened for an entry's
 #   name holding its custody.
@@ -504,6 +506,7 @@ resume_covered_actions=(
   PlanBootMaterializationStayDormant
   AuthorizeExplicitResumeMemberJoinRunning
   AuthorizeExplicitResumeMemberHeldRunning
+  AuthorizeExplicitResumeMemberHeldStopped
   RecoverIdentityEntrySeatedRunning
   WakeMemberAuthorizedRunning
   ResolveMemberRevivalSucceededRunningLocal
@@ -706,7 +709,8 @@ write_cfg() {
           spec="ResumeSpec"
           run_properties="
   AuditResumeNeverRebuildsHeldMember
-  AuditResumeHeldChangesNothing"
+  AuditResumeHeldChangesNothing
+  AuditResumeHeldOnlyWhenOwed"
           run_invariants=""
           ;;
       esac
@@ -895,7 +899,8 @@ for witness in \
   "hold:Action property:MigrateKeepsHold" "hold:Action property:HoldEndsAtSameSessionCommit" \
   "hold:Action property:HoldEndsAtFreshCommit" "hold:Action property:HoldKeptOnSameRole" \
   "hold:Action property:SeatedResumeRevealsHold" \
-  "resume:Action property:ResumeAnswersHeld" "resume:Action property:ResumeAuthorizesSettled"; do
+  "resume:Action property:ResumeAnswersHeld" "resume:Action property:ResumeAuthorizesSettled" \
+  "resume:Action property:ResumeAnswersHeldStopped"; do
   run="${witness%%:*}"
   if ! in_part "${run}"; then
     continue
@@ -1404,6 +1409,19 @@ PY
   # The resume's held answer reserves the member's work.
   mutate resume held_resume_reserves_member "Action property AuditResumeHeldChangesNothing" <<'PY'
 update_var("AuthorizeExplicitResumeMemberHeldRunning", "explicit_resume_member_work",
+           "MapSet(explicit_resume_member_work, agent_identity, binding)")
+PY
+
+  # The held answer while the mob is still stopped, for a member that owes
+  # nothing (its host_preparation_owed guard dropped).
+  mutate resume stopped_held_without_owed_preparation "Action property AuditResumeHeldOnlyWhenOwed" <<'PY'
+drop_guard("AuthorizeExplicitResumeMemberHeldStopped", "member_host_preparation_causes) = TRUE)")
+PY
+
+  # The held answer while the mob is still stopped reserves the member's
+  # work.
+  mutate resume stopped_held_reserves_member "Action property AuditResumeHeldChangesNothing" <<'PY'
+update_var("AuthorizeExplicitResumeMemberHeldStopped", "explicit_resume_member_work",
            "MapSet(explicit_resume_member_work, agent_identity, binding)")
 PY
 

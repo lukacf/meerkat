@@ -649,6 +649,9 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "AdmitResetRunning",
             "AdmitResetStopped",
             "AdmitResetCompleted",
+            // The explicit resume's held answer while the mob is still
+            // Stopped, before its preparation (0.9.9).
+            "AuthorizeExplicitResumeMemberHeldStopped",
             // Created identity entries (0.9.9): the admission probe of a
             // custody of another origin and of a reserved name, the declared
             // apply's refusals of a created, removed or unreadable name, the

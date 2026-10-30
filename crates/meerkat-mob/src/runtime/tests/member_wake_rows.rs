@@ -3671,6 +3671,208 @@ async fn a_relisted_identity_under_a_new_role_wakes_under_it_with_its_declared_m
     fixture.finish().await;
 }
 
+/// A member whose role move the declared apply holds, still Live at a Stop
+/// (its release once idle was refused: an input waits for a run its hold
+/// does not start), keeps its live actor through the explicit resume, even
+/// when the host's customizer now names another auth binding. MobMachine
+/// answers it held while the mob is still Stopped, before the resume's
+/// preparation would read its session, ask the customizer and retire its
+/// actor for the changed binding; after the resume it is Live and held.
+///
+/// RED: drop the Held arm's Stopped twin
+/// (`AuthorizeExplicitResumeMemberHeldStopped`) or its probe at the
+/// candidate selection: the preparation retires the member's live actor for
+/// the changed binding, the rebuild leaves the member alone as held, and
+/// MobMachine records it Live with no live actor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_live_member_keeps_its_actor_through_an_explicit_resume() {
+    use crate::HostRunStartHoldReason;
+    use crate::runtime::{
+        DeclaredEntry, DeclaredEntryOutcome, DeclaredRoster, HostPreparationCause,
+        IdentityEntryRead,
+    };
+
+    let fixture = WakeFixture::build(
+        "wake-role-hold-resume",
+        |config| {
+            config.realm.insert(
+                "global".to_string(),
+                meerkat_core::RealmConfigSection::from_inline_api_keys(&[("openai", "test-key")]),
+            );
+        },
+        |definition| {
+            let lead = definition
+                .profiles
+                .get_mut(&ProfileName::from("lead"))
+                .and_then(ProfileBinding::as_inline_mut)
+                .expect("inline lead");
+            lead.model = "gpt-5.5".to_string();
+            lead.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+            lead.tools = ToolConfig {
+                comms: true,
+                ..ToolConfig::default()
+            };
+        },
+        true,
+    )
+    .await;
+    let identity = AgentIdentity::from(format!("role-hold-resume-{}", Uuid::new_v4().simple()));
+    let roster = |role: &str| {
+        DeclaredRoster::complete([DeclaredEntry::new(SpawnMemberSpec::new(
+            role,
+            identity.clone(),
+        ))])
+    };
+    let handle = &fixture.handle;
+    let apply = |roster: DeclaredRoster| async move {
+        tokio::time::timeout(WAIT, handle.apply_declared_roster(roster))
+            .await
+            .expect("the apply answers")
+            .expect("the apply runs")
+    };
+    let holding = || {
+        fixture
+            .handle
+            .members_holding_run_starts(HostRunStartHoldReason::HostPreparation)
+            .expect("the hold read")
+            .contains(&identity)
+    };
+    let live_actor = |session: SessionId| {
+        let service = fixture.service.clone();
+        async move {
+            MobSessionService::live_session_actor_registered(&*service, &session)
+                .await
+                .unwrap_or(false)
+        }
+    };
+
+    let seated = apply(roster("worker")).await;
+    assert!(
+        matches!(
+            seated.entries.get(&identity),
+            Some(DeclaredEntryOutcome::Seated { .. })
+        ),
+        "{seated:?}"
+    );
+    fixture
+        .ensure_live(&identity)
+        .await
+        .expect("the first wake builds the member");
+    let session = fixture.session(&identity).await;
+
+    // A run in flight, then the role move held: the member's run starts are
+    // held, and the run goes on.
+    fixture.client.block();
+    let entry = fixture.entry(&identity).await;
+    let in_flight = token("role-hold-resume-in-flight");
+    let turn = tokio::time::timeout(
+        WAIT,
+        fixture.handle.start_work_with_mode(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new(in_flight.as_str(), WorkOrigin::Internal),
+            HandlingMode::Queue,
+        ),
+    )
+    .await
+    .expect("the delivery is admitted in time")
+    .expect("the delivery is admitted");
+    fixture.client.wait_started(1).await;
+    let held = apply(roster("lead")).await;
+    assert!(
+        matches!(
+            held.entries.get(&identity),
+            Some(DeclaredEntryOutcome::RoleMigrationHeld { .. })
+        ),
+        "{held:?}"
+    );
+    let deadline = std::time::Instant::now() + WAIT;
+    while !holding() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the held member's run starts are held"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // An input that waits for a run the hold does not start: once the run in
+    // flight settles, the release of the idle member is refused, and it
+    // stays Live.
+    let waiting = token("role-hold-resume-waiting");
+    let _waiting = tokio::time::timeout(
+        WAIT,
+        fixture.handle.start_work_with_mode(
+            entry.agent_runtime_id,
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new(waiting.as_str(), WorkOrigin::Internal),
+            HandlingMode::Queue,
+        ),
+    )
+    .await
+    .expect("the waiting input is admitted in time")
+    .expect("the waiting input is admitted");
+    fixture.client.release();
+    tokio::time::timeout(WAIT, turn.wait())
+        .await
+        .expect("the run in flight finishes")
+        .expect("the run in flight succeeds");
+
+    tokio::time::timeout(WAIT, fixture.handle.stop())
+        .await
+        .expect("the stop answers")
+        .expect("stop the mob");
+    assert_eq!(
+        fixture.residency(&identity),
+        Some(mob_dsl::MemberMaterializationPhase::Live),
+        "precondition: the held member is Live at the Stop"
+    );
+    assert!(
+        live_actor(session.clone()).await,
+        "precondition: the Stop kept the member's live actor"
+    );
+
+    // The host's customizer now names another auth binding.
+    fixture
+        .customizer
+        .set_auth_binding(meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::global(),
+            binding: meerkat_core::BindingId::parse("default_openai").expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        });
+    tokio::time::timeout(WAIT, fixture.handle.resume())
+        .await
+        .expect("the resume answers")
+        .expect("resume the mob");
+
+    assert!(
+        live_actor(session.clone()).await,
+        "the held member keeps its live actor through the explicit resume"
+    );
+    assert_eq!(
+        fixture.residency(&identity),
+        Some(mob_dsl::MemberMaterializationPhase::Live),
+        "MobMachine records it Live, as it is"
+    );
+    assert_eq!(fixture.session(&identity).await, session);
+    assert!(holding(), "its run starts stay held");
+    match fixture
+        .handle
+        .identity_entry(&identity)
+        .expect("entry read")
+    {
+        IdentityEntryRead::Entry(view) => assert_eq!(
+            view.host_preparation,
+            Some(HostPreparationCause::RoleMigrationUndeclared),
+            "the member stays held"
+        ),
+        other => panic!("the identity is an entry: {other:?}"),
+    }
+    fixture.finish().await;
+}
+
 /// A Live member whose role move the declared apply holds finishes the run it
 /// has in flight, never preempted, while its run starts are held for its host
 /// preparation (`HostPreparation`), and the mob releases it once that run

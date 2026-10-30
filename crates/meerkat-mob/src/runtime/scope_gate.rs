@@ -172,8 +172,7 @@ impl MobCommand {
             // seal retires the members of unlisted ones.
             | Self::DeclareIdentityEntries { .. }
             | Self::SealDeclaredRoster { .. }
-            | Self::OpenDeclaredApply { .. }
-            | Self::CloseDeclaredApply { .. } => Some(ControlScope::Retire),
+            | Self::OpenDeclaredApply { .. } => Some(ControlScope::Retire),
 
             // ── WireTopology: trust/topology configuration ──
             Self::Wire { .. }
@@ -312,6 +311,11 @@ impl MobCommand {
             // Builder/test config seam; no principal caller today —
             // reclassify the moment a surface exposes it.
             | Self::SetSpawnPolicy { .. }
+            // The close of a declared apply's open fact: the hygiene of the
+            // lease the actor made in the step that opened it, which alone
+            // sends it. No grant refuses it, so a caller whose grant ends
+            // mid-apply never leaves the mob's applies refused.
+            | Self::CloseDeclaredApply { .. }
             | Self::Shutdown { .. } => None,
 
             #[cfg(feature = "runtime-adapter")]
@@ -465,8 +469,7 @@ impl MobCommand {
             Self::AdoptLegacyIdentityEntry { .. }
             | Self::DeclareIdentityEntries { .. }
             | Self::SealDeclaredRoster { .. }
-            | Self::OpenDeclaredApply { .. }
-            | Self::CloseDeclaredApply { .. } => AgentLaneAdmission::HostOnly,
+            | Self::OpenDeclaredApply { .. } => AgentLaneAdmission::HostOnly,
 
             // Spawns, seats, work, flows, objectives and forked participants.
             Self::Spawn { .. }
@@ -522,6 +525,7 @@ impl MobCommand {
             | Self::RevokeScopes { .. }
             | Self::Grants { .. }
             // Internal and machine-authority plumbing.
+            | Self::CloseDeclaredApply { .. }
             | Self::SpawnProvisioned { .. }
             | Self::SpawnPreparationSettled { .. }
             | Self::MemberTurnAdmissionSettled { .. }
@@ -749,7 +753,7 @@ impl MobCommand {
             Self::SealDeclaredRoster { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
-            Self::OpenDeclaredApply { reply_tx, .. } => {
+            Self::OpenDeclaredApply { reply_tx } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::CloseDeclaredApply { reply_tx } => {

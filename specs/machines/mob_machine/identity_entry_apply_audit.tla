@@ -63,7 +63,8 @@
 \*     its row, its first-boot preparation owed or not, woken to Live by one
 \*     operator wake or not, and declared under another role with no
 \*     migration (its role hold) or not, in a stopped mob the explicit resume
-\*     brings back.
+\*     brings back (its member probed while the mob is still stopped, at
+\*     its candidate selection, and again once it runs).
 \*   held (HeldSpec): member 2 never created, declared local, placed or
 \*     externally bound, held or not; the held spawn (the spawn ladder with
 \*     entry custody and its membership commit) and its abort; the dormant
@@ -135,8 +136,9 @@
 \*     masked); all action properties but the first.
 \*   resume: AuditResumeNeverRebuildsHeldMember (the explicit resume never
 \*     authorizes a member whose host preparation is owed);
-\*     AuditResumeHeldChangesNothing (its held answer changes nothing); both
-\*     action properties.
+\*     AuditResumeHeldChangesNothing (its held answer, stopped or running,
+\*     changes nothing); AuditResumeHeldOnlyWhenOwed (it answers held only a
+\*     member whose host preparation is owed); all action properties.
 \*   held: AuditHeldDeclareExactlyOne and AuditSealExactlyOne (in the
 \*     Stopped and Completed phases too); AuditApplyOpenExactlyOne
 \*     (invariant, ENABLED form: exactly one arm answers an apply's opening);
@@ -1105,12 +1107,15 @@ NotAuditWitnessSeatedResumeRevealsHold == [][~AuditWitnessSeatedResumeRevealsHol
 \* declared under another role with no migration (its role hold) or not, in
 \* a stopped mob the explicit resume brings back: the resume rebuilds no
 \* member whose host preparation is owed, Dormant or Live, and answers it
-\* held.
+\* held, while the mob is still stopped (its candidate selection, before
+\* anything prepares the member) as once it runs.
 ResumeAuthorize ==
     \/ AuthorizeExplicitResumeMemberRunning(AuditResumeAttempt, Id1, AuditResumeBinding)
     \/ AuthorizeExplicitResumeMemberLiveRunning(AuditResumeAttempt, Id1, AuditResumeBinding)
     \/ AuthorizeExplicitResumeMemberJoinRunning(AuditResumeAttempt, Id1, AuditResumeBinding)
 ResumeHeld == AuthorizeExplicitResumeMemberHeldRunning(AuditResumeAttempt, Id1, AuditResumeBinding)
+ResumeHeldStopped == AuthorizeExplicitResumeMemberHeldStopped(AuditResumeAttempt, Id1, AuditResumeBinding)
+ResumeHeldAny == ResumeHeld \/ ResumeHeldStopped
 
 ResumeNext ==
     \/ WRecover
@@ -1128,6 +1133,7 @@ ResumeNext ==
     \/ ResumeStopped
     \/ RResumeArms
     \/ ResumeHeld
+    \/ ResumeHeldStopped
 
 ResumeSpec == Init /\ [][ResumeNext]_vars
 
@@ -1136,13 +1142,19 @@ ResumeSpec == Init /\ [][ResumeNext]_vars
 AuditResumeNeverRebuildsHeldMember ==
     [][Cause(Id1) # None => ~ResumeAuthorize]_vars
 
-\* The resume's held answer changes nothing.
-AuditResumeHeldChangesNothing == [][ResumeHeld => StateView' = StateView]_vars
+\* The resume's held answer, stopped or running, changes nothing.
+AuditResumeHeldChangesNothing == [][ResumeHeldAny => StateView' = StateView]_vars
+
+\* The resume answers held only a member whose host preparation is owed.
+AuditResumeHeldOnlyWhenOwed == [][ResumeHeldAny => Cause(Id1) # None]_vars
 
 \* Witnesses of the resume run.
 AuditWitnessResumeAnswersHeld == ResumeHeld
+\* A held member probed while the mob is still stopped, in an open attempt.
+AuditWitnessResumeAnswersHeldStopped == ResumeHeldStopped
 AuditWitnessResumeAuthorizesSettled == Cause(Id1) = None /\ ResumeAuthorize
 
 NotAuditWitnessResumeAnswersHeld == [][~AuditWitnessResumeAnswersHeld]_vars
+NotAuditWitnessResumeAnswersHeldStopped == [][~AuditWitnessResumeAnswersHeldStopped]_vars
 NotAuditWitnessResumeAuthorizesSettled == [][~AuditWitnessResumeAuthorizesSettled]_vars
 ====

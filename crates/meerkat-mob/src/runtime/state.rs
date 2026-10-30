@@ -1556,15 +1556,17 @@ pub(super) enum MobCommand {
     },
     /// Open a declared apply (`MobHandle::apply_declared_roster`): one apply
     /// of the mob at a time, MobMachine's verdict. An opened apply is
-    /// answered with the lease of its open fact, whose close is sent under
-    /// `close_authority`, the opening call's own.
+    /// answered with the lease of its open fact, whose close is the lease's
+    /// own command on the internal lane.
     OpenDeclaredApply {
-        close_authority: crate::control_policy::CommandAuthority,
         reply_tx: oneshot::Sender<
             Result<super::declared_apply::DeclaredApplyOpening, crate::MobError>,
         >,
     },
-    /// Close the open declared apply, whatever its outcome.
+    /// Close the open declared apply, whatever its outcome: sent only by the
+    /// apply's lease, on the internal lane, and never refused (not by a
+    /// grant, not in a Shutdown step), so nothing leaves the mob's applies
+    /// refused.
     CloseDeclaredApply {
         reply_tx: oneshot::Sender<Result<(), crate::MobError>>,
     },
@@ -2335,9 +2337,11 @@ impl MobCommand {
             Self::CommitDormantSeats { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdoptLegacyIdentityEntry { .. } => ShutdownAnswerClass::CallerRequest,
             Self::DeclareIdentityEntries { .. } => ShutdownAnswerClass::CallerRequest,
-            Self::OpenDeclaredApply { .. } | Self::CloseDeclaredApply { .. } => {
-                ShutdownAnswerClass::CallerRequest
-            }
+            Self::OpenDeclaredApply { .. } => ShutdownAnswerClass::CallerRequest,
+            // The lease's close is retained through a Shutdown step: a
+            // Shutdown that then fails leaves the actor serving, and the
+            // close closes the fact, so the mob's next apply opens.
+            Self::CloseDeclaredApply { .. } => ShutdownAnswerClass::ActorCompletion,
             Self::SealDeclaredRoster { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityIntent { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityConvergenceStatus { .. } => ShutdownAnswerClass::CallerRequest,

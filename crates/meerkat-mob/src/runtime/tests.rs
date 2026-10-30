@@ -2285,6 +2285,9 @@ struct MockSessionService {
     /// #1250 seam: per-read delay for the metadata-only durable read, and
     /// per-session metadata read counts (proves a single realm scan).
     load_persisted_session_metadata_delay_ms: AtomicU64,
+    /// Whether every metadata-only read waits, once counted, until the
+    /// hold is released.
+    persisted_session_metadata_reads_held: tokio::sync::watch::Sender<bool>,
     metadata_reads_for: std::sync::Mutex<HashMap<SessionId, u64>>,
     /// Per-session durable reads (`load_persisted_session`,
     /// `observe_session_resume_authority`,
@@ -2537,6 +2540,7 @@ impl MockSessionService {
             load_persisted_session_calls: AtomicU64::new(0),
             load_persisted_session_metadata_calls: AtomicU64::new(0),
             load_persisted_session_metadata_delay_ms: AtomicU64::new(0),
+            persisted_session_metadata_reads_held: tokio::sync::watch::Sender::new(false),
             metadata_reads_for: Default::default(),
             durable_reads_for: Default::default(),
             durable_head_status_views: AtomicBool::new(false),
@@ -3643,6 +3647,19 @@ impl MockSessionService {
     fn set_persisted_session_metadata_delay_ms(&self, delay_ms: u64) {
         self.load_persisted_session_metadata_delay_ms
             .store(delay_ms, Ordering::Relaxed);
+    }
+
+    /// Hold every metadata-only read, once counted, until
+    /// [`Self::release_persisted_session_metadata_reads`].
+    fn hold_persisted_session_metadata_reads(&self) {
+        self.persisted_session_metadata_reads_held
+            .send_modify(|held| *held = true);
+    }
+
+    /// Let every held metadata-only read go on.
+    fn release_persisted_session_metadata_reads(&self) {
+        self.persisted_session_metadata_reads_held
+            .send_modify(|held| *held = false);
     }
 
     fn fail_persisted_session_metadata_reads_for(&self, session_id: SessionId) {
@@ -5446,6 +5463,8 @@ impl MockSessionService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(session_id.clone())
             .or_default() += 1;
+        let mut held = self.persisted_session_metadata_reads_held.subscribe();
+        let _ = held.wait_for(|held| !*held).await;
         let delay_ms = self
             .load_persisted_session_metadata_delay_ms
             .load(Ordering::Relaxed);

@@ -476,7 +476,13 @@ textarea.cc-input {
   text-overflow: ellipsis;
   flex: none;
 }
-.cc-chip--outline { background: transparent; }
+/* Toned chips sit on an opaque mix with the card, so their text keeps its
+   contrast on sunken and selected backgrounds too. */
+.cc-chip:not([data-tone="neutral"]):not([data-tone="locked"]) {
+  background: color-mix(in oklch, var(--_cc-tone) 12%, var(--_cc-surface-card));
+}
+.cc-chip--outline,
+.cc-chip.cc-chip--outline:not([data-tone="neutral"]):not([data-tone="locked"]) { background: transparent; }
 .cc-chip--mono {
   font-family: var(--_cc-font-mono);
   font-size: 10.5px;
@@ -844,7 +850,8 @@ textarea.cc-input {
   height: 18px;
   border-radius: var(--_cc-radius-round);
   background: var(--_cc-member-accent-soft);
-  color: var(--_cc-member-accent);
+  /* Mixed toward the foreground so the small initial stays readable. */
+  color: color-mix(in oklch, var(--_cc-member-accent) 70%, var(--_cc-foreground));
   font-family: var(--_cc-font-display);
   font-size: 9.5px;
   font-weight: 600;

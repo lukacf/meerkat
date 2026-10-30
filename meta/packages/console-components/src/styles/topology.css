@@ -9,7 +9,8 @@
   --ink: var(--_cc-foreground);
   --ink-muted: var(--_cc-foreground-muted);
   --ink-dim: var(--_cc-foreground-subtle);
-  --ink-faint: var(--_cc-foreground-subtle);
+  /* Text-safe: the faint ink labels small text here (the Edges tag). */
+  --ink-faint: var(--_cc-foreground-meta);
   --focus: var(--_cc-link);
   --accent: var(--_cc-member-accent);
   --ok: var(--_cc-positive);

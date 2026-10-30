@@ -976,8 +976,9 @@ adopted instead of respawned, a respawn. `customize_build` runs:
   `resolved_tools`, which reports the tools a build actually resolved,
   answers `no_build_recorded` until the member's first build. Your
   `after_create(identity,
-  session_id, context)`, when you define one, is then called once with the
-  session the identity is bound to;
+  session_id, context)`, when you define one, is then called with the
+  session the identity is bound to, at least once: a gateway stopped
+  before the call makes it at its next start;
 - once per build of a member, right before it: when work reaches a member
   that is not materialized (a send, a dispatch, a peer message, a kickoff),
   and at start for the members that must be live then. No `after_create`

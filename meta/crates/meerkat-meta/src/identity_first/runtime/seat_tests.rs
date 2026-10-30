@@ -2464,12 +2464,10 @@ async fn a_reprofiled_identity_without_a_declared_migration_stays_seated_and_hel
         .await
         .expect("registered live");
 
-    let mut retired = Vec::new();
     runtime
-        .reconcile_roster_members(&[spec(&alice)], 1, &mut retired)
+        .reconcile_roster_members(&[spec(&alice)], 1)
         .await
         .expect("the pass reconciles the roster");
-    assert!(retired.is_empty(), "the pass retires nobody");
     assert_eq!(
         lock(&core.releases).as_slice(),
         std::slice::from_ref(&alice),
@@ -2540,11 +2538,15 @@ async fn a_reprofiled_identity_with_a_declared_migration_moves_onto_its_own_sess
         .await
         .expect("registered live");
 
-    let mut retired = Vec::new();
     runtime
-        .reconcile_roster_members(&[spec(&alice)], 1, &mut retired)
+        .reconcile_roster_members(&[spec(&alice)], 1)
         .await
         .expect("the pass reconciles the roster");
+    assert_eq!(
+        core.generation_of(&alice),
+        Some(0),
+        "the pass retires nobody: the binding keeps its generation"
+    );
     let outcome = runtime
         .seat_identities(&[spec(&alice)], None)
         .await
@@ -2552,7 +2554,6 @@ async fn a_reprofiled_identity_with_a_declared_migration_moves_onto_its_own_sess
         .expect("the step answers alice");
 
     assert!(outcome.is_ok(), "{:?}", outcome.as_ref().err());
-    assert!(retired.is_empty(), "the pass retires nobody");
     assert_eq!(
         core.session_of(&alice),
         Some(session),

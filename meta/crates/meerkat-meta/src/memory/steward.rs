@@ -1224,6 +1224,24 @@ impl StewardEngine {
         self.signals.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// [`Self::note_identity_retired`] for a retirement whose step was asked
+    /// at `retired_at_ms`, the key of its harvest: a repeat of the same
+    /// retirement records nothing more. Answers the store's error, so a
+    /// caller that owes the harvest at least once runs it again.
+    pub async fn record_identity_retired_at(
+        &self,
+        identity: &str,
+        session_key: Option<&str>,
+        cause: &str,
+        retired_at_ms: u64,
+    ) -> Result<(), AgentMemoryError> {
+        self.store
+            .record_pending_harvest_at(&self.realm, identity, session_key, cause, retired_at_ms)
+            .await?;
+        self.signals.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn mint_run_id(&self) -> String {
         let seq = self.run_counter.fetch_add(1, Ordering::Relaxed);
         format!("dream-{}-{seq}", now_ms())

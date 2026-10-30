@@ -1851,8 +1851,9 @@ const IDENTITY_RESET_USAGE: &str = "usage: meta_gateway identity-reset \
      identity carries it out. A live member is replaced by its successor on a \
      fresh session and stays live; a retired one gets a fresh session and \
      stays dormant. The old session stays in Core's store, bound to nothing. \
-     Unlike the online reset, this offline reset distills nothing of the old \
-     session into agent memory.\n\
+     As for the online reset, a live member's old session is distilled into \
+     agent memory once the row is carried out (with agent memory \
+     configured); nothing of a retired one's is.\n\
      Stop every process that uses the directory first: a process hosting a \
      runtime is refused, and the directory is held as storage-migrate-native \
      holds it. The directory must be in the native layout (run \

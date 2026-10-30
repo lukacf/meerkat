@@ -232,10 +232,17 @@ impl ContinuityStore for CountingContinuityStore {
 /// The members Core holds behind the test bridge (an identity's status,
 /// runtime id and session are Core's member history). The bridge's seats,
 /// creates, resumes, rotations and retires commit here; Core's member reads
-/// answer from here.
+/// answer from here. Once [`CoreMembers::keep_journal`] was called, its
+/// member lifecycle journal reads answer too: each bind journals a seat,
+/// each retire a retirement.
 #[derive(Default)]
 struct CoreMembers {
     members: Mutex<BTreeMap<AgentIdentity, CoreMember>>,
+    /// The member lifecycle facts the binds and retires journaled, in
+    /// order; a fact's cursor is its position from one.
+    facts: Mutex<Vec<meerkat_meta::identity_first::MemberLifecycleFact>>,
+    /// Set by [`CoreMembers::keep_journal`]: the journal reads answer.
+    journal: AtomicBool,
     /// Identities Core holds an identity intent row for: a host adopted
     /// them.
     adopted: Mutex<std::collections::BTreeSet<AgentIdentity>>,
@@ -286,6 +293,7 @@ impl CoreMembers {
             .unwrap_or(0);
         let mut members = self.members.lock().unwrap();
         let fence = members.get(identity).map_or(1, |member| member.fence + 1);
+        self.journal_seat(identity, generation);
         members.insert(
             identity.clone(),
             CoreMember {
@@ -298,6 +306,67 @@ impl CoreMembers {
                 marked: true,
             },
         );
+    }
+
+    /// From now on the member lifecycle journal reads answer, with every
+    /// fact journaled so far; until then they answer `Unsupported`, as a
+    /// bridge without the journal does.
+    fn keep_journal(&self) {
+        self.journal.store(true, Ordering::SeqCst);
+    }
+
+    fn journal_seat(&self, identity: &AgentIdentity, generation: u64) {
+        self.facts.lock().unwrap().push(
+            meerkat_meta::identity_first::MemberLifecycleFact::Seated {
+                member: meerkat_meta::member_comms_id::roster_member_id_for_identity(
+                    identity.as_str(),
+                ),
+                generation,
+            },
+        );
+    }
+
+    fn journal_head(
+        &self,
+    ) -> Result<meerkat_meta::identity_first::MemberLifecycleJournalHead, BridgeError> {
+        if !self.journal.load(Ordering::SeqCst) {
+            return Err(BridgeError::Unsupported {
+                operation: "member_lifecycle_journal_head",
+            });
+        }
+        Ok(meerkat_meta::identity_first::MemberLifecycleJournalHead {
+            incarnation: "counting-bridge".to_string(),
+            cursor: self.facts.lock().unwrap().len() as u64,
+        })
+    }
+
+    fn journal_page(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<meerkat_meta::identity_first::MemberLifecycleJournalPage, BridgeError> {
+        if !self.journal.load(Ordering::SeqCst) {
+            return Err(BridgeError::Unsupported {
+                operation: "member_lifecycle_journal_page",
+            });
+        }
+        let records = self
+            .facts
+            .lock()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(
+                |(index, fact)| meerkat_meta::identity_first::MemberLifecycleFactRecord {
+                    cursor: index as u64 + 1,
+                    fact: fact.clone(),
+                },
+            )
+            .filter(|record| record.cursor > after)
+            .take(limit.max(1))
+            .collect::<Vec<_>>();
+        let next = records.last().map_or(after, |record| record.cursor);
+        Ok(meerkat_meta::identity_first::MemberLifecycleJournalPage { records, next })
     }
 
     /// Core holds `identity`'s member live at `generation` on `session`
@@ -313,6 +382,7 @@ impl CoreMembers {
         let runtime_id = AgentRuntimeId::parse(&format!("rt:{identity}:{generation}")).unwrap();
         let mut members = self.members.lock().unwrap();
         let fence = members.get(identity).map_or(1, |member| member.fence + 1);
+        self.journal_seat(identity, generation);
         members.insert(
             identity.clone(),
             CoreMember {
@@ -394,9 +464,18 @@ impl CoreMembers {
 
     /// Core retired the member `runtime_id` names; its binding stays.
     fn retire(&self, runtime_id: &AgentRuntimeId) {
-        for member in self.members.lock().unwrap().values_mut() {
-            if member.runtime_id == *runtime_id {
+        for (identity, member) in self.members.lock().unwrap().iter_mut() {
+            if member.runtime_id == *runtime_id && member.live {
                 member.live = false;
+                self.facts.lock().unwrap().push(
+                    meerkat_meta::identity_first::MemberLifecycleFact::Retired {
+                        member: meerkat_meta::member_comms_id::roster_member_id_for_identity(
+                            identity.as_str(),
+                        ),
+                        generation: member.generation,
+                        role: member.profile.clone(),
+                    },
+                );
             }
         }
     }
@@ -1163,6 +1242,20 @@ impl SessionBridge for CountingBridge {
         Ok(members
             .get(identity)
             .map(|member| self.core.binding(identity, member)))
+    }
+
+    async fn member_lifecycle_journal_head(
+        &self,
+    ) -> Result<meerkat_meta::identity_first::MemberLifecycleJournalHead, BridgeError> {
+        self.core.journal_head()
+    }
+
+    async fn member_lifecycle_journal_page(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<meerkat_meta::identity_first::MemberLifecycleJournalPage, BridgeError> {
+        self.core.journal_page(after, limit)
     }
 
     async fn durable_identity_members(
@@ -5757,13 +5850,14 @@ async fn identity_first_runtime_retire_is_a_release_that_distills_nothing() {
 }
 
 /// A roster pass that no longer lists an identity retires it in Core, and
-/// only once Core retired it does the retirement distill the retired
-/// session's evidence.
+/// only once Core journaled the retirement does the lifecycle projection
+/// distill the retired session's evidence.
 #[tokio::test]
 async fn identity_first_runtime_unlisting_distills_once_core_retired_the_member() {
     let store = Arc::new(CountingContinuityStore::new());
     let lease = Arc::new(LocalLeaseProvider::new());
     let bridge = Arc::new(CountingBridge::default());
+    bridge.core.keep_journal();
     let runtime = make_runtime_with_bridge(store, lease, bridge.clone());
     lazy_register_flow(&runtime, &[make_spec("agent:distill-unlisted")], None)
         .await
@@ -5805,6 +5899,12 @@ async fn identity_first_runtime_unlisting_distills_once_core_retired_the_member(
         1,
         "the roster pass retires the unlisted identity in Core"
     );
+    // The projection distills after the pass answered.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while retires_at_read.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
         retires_at_read.lock().unwrap().clone(),
         vec![1],
@@ -5942,7 +6042,20 @@ impl meerkat_meta::memory::distiller::TranscriptSource for GatedTranscripts {
 /// store's write gate).
 async fn reset_distillation_quarantine_case() {
     let bridge = Arc::new(CountingBridge::default());
+    // The distillation of the session the reset retires is the lifecycle
+    // projection's, from Core's journal, for the runtime an identity context
+    // serves.
+    bridge.core.keep_journal();
     let runtime = make_runtime_with_bridge_no_store(bridge.clone());
+    let _context = meerkat_meta::identity_first::IdentityFirstRuntimeContext::new(
+        runtime.clone(),
+        Arc::new(StaticRosterProvider::new(vec![make_spec(
+            "agent:reset-distill",
+        )])),
+        None,
+        None,
+        None,
+    );
     let id = make_identity("agent:reset-distill");
     let old_session = register_live(&runtime, &bridge, make_spec("agent:reset-distill"), 0).await;
     // Production wiring shape (rpc_gateway): ONE tracker shared by the
@@ -5995,9 +6108,9 @@ async fn reset_distillation_quarantine_case() {
         .to_string();
     assert_ne!(new_session_key, old_session_key);
 
-    // The RUNTIME marked the outgoing session's boundary before spawning
-    // the distillation (the engine's defensive re-mark is still gated), and
-    // targeted the OLD key, not the new one.
+    // The RUNTIME marked the outgoing session's boundary before the
+    // distillation reads it (the engine's defensive re-mark is still gated),
+    // and targeted the OLD key, not the new one.
     let reason = tracker
         .evidence_quarantine_reason(&old_session_key)
         .expect("reset() must mark the outgoing session's §8.4 boundary before distilling");

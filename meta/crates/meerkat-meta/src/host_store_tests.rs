@@ -2776,6 +2776,92 @@ async fn identity_tool_records_and_rotations_round_trip_through_the_realm_docume
     );
 }
 
+/// The lifecycle projection's cursor and a lifecycle effect intent, as Meta
+/// keeps them in a host store realm's documents, round trip: another host
+/// reads both from the realm, intents are per generation, and a cleared
+/// intent is gone there.
+#[tokio::test(flavor = "multi_thread")]
+async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
+    use crate::runtime::{LifecycleEffectIntent, LifecycleEffectVerb, LifecycleProjectionCursor};
+    let fixture = Fixture::new();
+    let mob_id = unique_mob_id("lifecycle-records");
+    let cursor = LifecycleProjectionCursor {
+        mob_id: mob_id.clone(),
+        incarnation: "incarnation-1".to_string(),
+        cursor: 41,
+        recorded_at_ms: 1_700_000_000_000,
+    };
+    let intent = LifecycleEffectIntent {
+        mob_id: mob_id.clone(),
+        incarnation: "incarnation-1".to_string(),
+        identity: ALICE.to_string(),
+        generation: 3,
+        verb: LifecycleEffectVerb::Delete,
+        session_id: Some(SessionId::new()),
+        recorded_at_ms: 1_700_000_000_000,
+    };
+    {
+        let provider = fixture.open(&fixture.process()).await.expect("open");
+        let store = SpiMetadataStore::new(provider.realm.documents().clone());
+        assert_eq!(
+            store
+                .lifecycle_projection_cursor(&mob_id)
+                .await
+                .expect("read the cursor"),
+            None
+        );
+        store
+            .set_lifecycle_projection_cursor(&cursor)
+            .await
+            .expect("write the cursor");
+        store
+            .set_lifecycle_effect_intent(&intent)
+            .await
+            .expect("record the intent");
+    }
+
+    fixture.lapse();
+    let provider = fixture
+        .open(&fixture.process())
+        .await
+        .expect("another host opens the realm");
+    let store = SpiMetadataStore::new(provider.realm.documents().clone());
+    assert_eq!(
+        store
+            .lifecycle_projection_cursor(&mob_id)
+            .await
+            .expect("read the cursor"),
+        Some(cursor)
+    );
+    assert_eq!(
+        store
+            .lifecycle_effect_intent(&mob_id, ALICE, 3)
+            .await
+            .expect("read the intent"),
+        Some(intent)
+    );
+    assert_eq!(
+        store
+            .lifecycle_effect_intent(&mob_id, ALICE, 4)
+            .await
+            .expect("read another generation's intent"),
+        None,
+        "intents are per generation"
+    );
+    store
+        .clear_lifecycle_effect_intent(&mob_id, ALICE, 3)
+        .await
+        .expect("clear the intent");
+    assert_eq!(
+        store
+            .lifecycle_effect_intent(&mob_id, ALICE, 3)
+            .await
+            .expect("read the intent"),
+        None,
+        "a cleared intent is gone"
+    );
+}
+
 /// A build on another host's empty cache reads the held-completion marks
 /// the realm keeps: an identity a held pass left owing its host a fresh held
 /// completion is refused a wake outside a held pass, typed, while an

@@ -3,7 +3,8 @@
 //! Two records, each keyed by identity, kept where an earlier Meta never
 //! looks (rows of the existing `meta_metadata` table under their own key
 //! prefixes; documents of Meta's record family on a host store realm), so a
-//! rollback ignores them:
+//! rollback ignores them (the lifecycle projection keeps its cursor and its
+//! effect intents in the same places: see `lifecycle_projection`):
 //! - the last-published tool record: the visible tools of the identity's
 //!   member as of its last build, written from Core's report of each build
 //!   and read by `meta/identity/resolved_tools` for a member Core holds
@@ -111,7 +112,7 @@ pub(crate) async fn host_pending_members_before_build(
 /// The mob id the process-only records are keyed by.
 const PROCESS_RECORDS_MOB: &str = "";
 
-fn unix_ms_now() -> u64 {
+pub(super) fn unix_ms_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
@@ -135,7 +136,7 @@ impl IdentityRuntime {
 
     /// The store the identity records go to and the mob id they are keyed
     /// by: the durable store, or this process's own.
-    fn identity_record_store(&self) -> (Arc<dyn PersistentMetadataStore>, String) {
+    pub(super) fn identity_record_store(&self) -> (Arc<dyn PersistentMetadataStore>, String) {
         match &*self
             .identity_records
             .read()

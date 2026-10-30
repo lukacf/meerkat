@@ -806,6 +806,8 @@ async fn a_scoped_retire_reaches_the_hook_while_its_scope_names_the_current_inca
 #[tokio::test]
 async fn a_retirement_before_a_failed_step_still_reaches_the_hook() {
     let bridge = Arc::new(CoreReadsBridge::default());
+    // The retirement reaches the hook from Core's journal.
+    bridge.core.keep_journal();
     let identities = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
         continuity_store: Arc::new(LocalContinuityStore::in_memory().expect("continuity store")),
         lease_provider: Arc::new(LocalLeaseProvider::new()),

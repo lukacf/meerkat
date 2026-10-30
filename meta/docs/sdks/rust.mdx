@@ -357,18 +357,25 @@ calls them at these points:
   also runs at every build of the member (each wake Core makes), right
   before the build. A start over identities Core already holds calls it for
   none of them until they are built.
-- `after_create` is called once after each seat, fresh life or migration that
+- `after_create` is called after each seat, fresh life or migration that
   ran `customize_build`, with the session the identity is bound to, as at an
   identity's creation. A wake's build never calls it.
 
 `after_create` is best-effort: an error is logged and the seat or build
-stands. The gateway calls it with no lock of the identity held, so once the
-init has settled an `after_create` can call back into the gateway for the
-same identity; during the roster bootstrap the gateway still answers
-`init_in_progress`. The call can come after the operation that seated the
-identity has answered. The context's `model` is the build's model, else the
-model of the profile when the mob definition declares it inline; it is empty
-for a realm-bound profile the build sets no model for.
+stands. The gateway calls it once Core's journal records the seat, with no
+lock of the identity held, so once the init has settled an `after_create`
+can call back into the gateway for the same identity; during the roster
+bootstrap the gateway still answers `init_in_progress`. The call can come
+after the operation that seated the identity has answered; the roster
+bootstrap's own seats are told before the init settles. It comes at least
+once: a gateway stopped between the seat and the call (killed, or a shutdown
+whose drain window closed first) makes it at its next start, and one stopped
+during the call may make it again, so key what it does by the session. The
+context's `model` is the build's model, else the model of the profile when
+the mob definition declares it inline; it is empty for a realm-bound profile
+the build sets no model for. A call made at a later start reports the
+identity's roster labels and no `system_prompt`: the build that made the seat
+ended with the stopped process.
 `AgentCustomizer::after_create` has a no-op default, so a wrapper that
 overrides only `customize_build` silently drops the SDK's `after_create`
 callback.

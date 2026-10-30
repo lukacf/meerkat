@@ -682,6 +682,33 @@ impl AgentMemoryRuntimeInjector {
         }
     }
 
+    /// §8.5 exit interviews, for a retirement whose step was asked at
+    /// `retired_at_ms`: the pending harvest is keyed by it, so a repeat of
+    /// the same retirement (its side effects run again after a restart)
+    /// queues nothing more. Answers the store's error, for a caller that
+    /// owes the harvest at least once. No-op without a wired Steward.
+    pub async fn record_identity_retired_at(
+        &self,
+        identity: &AgentIdentity,
+        session_key: Option<&str>,
+        cause: &str,
+        retired_at_ms: u64,
+    ) -> Result<(), AgentMemoryError> {
+        match self.steward.as_ref() {
+            Some(steward) => {
+                steward
+                    .record_identity_retired_at(
+                        identity.as_str(),
+                        session_key,
+                        cause,
+                        retired_at_ms,
+                    )
+                    .await
+            }
+            None => Ok(()),
+        }
+    }
+
     /// Detached distillation for the paths that must never wait on it
     /// (reset, resume fallback). The session store outlives the session, so
     /// the read stays valid after teardown.

@@ -2,14 +2,20 @@
 //! [`SessionBridge`](super::bridge::SessionBridge) whose Core reads
 //! (`live_member`, `live_member_scope`, `last_member_binding`,
 //! `member_binding_history`, `durable_identity_members`) answer from what
-//! the double's create, resume, reset and retire calls committed.
+//! the double's create, resume, reset and retire calls committed. Once
+//! [`CoreTestMembers::keep_journal`] was called, the member lifecycle journal
+//! reads answer too: each bind journals a seat, each retire a retirement.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use meerkat_core::types::SessionId;
 
-use super::bridge::{BridgeError, MemberRuntimeBinding};
+use super::bridge::{
+    BridgeError, MemberLifecycleFact, MemberLifecycleFactRecord, MemberLifecycleJournalHead,
+    MemberLifecycleJournalPage, MemberRuntimeBinding,
+};
 use super::types::{AgentIdentity, AgentRuntimeId};
 
 #[derive(Clone)]
@@ -28,6 +34,11 @@ pub(crate) struct CoreTestMembers {
     /// Bindings a rebind ended: Core's history still names the sessions an
     /// identity's member was bound to before (who owned a session).
     ended: Mutex<Vec<(AgentIdentity, TestMember)>>,
+    /// The member lifecycle facts the binds and retires journaled, in order;
+    /// a fact's cursor is its position from one.
+    facts: Mutex<Vec<MemberLifecycleFact>>,
+    /// Set by [`Self::keep_journal`]: the journal reads answer.
+    journal: AtomicBool,
 }
 
 impl CoreTestMembers {
@@ -57,6 +68,10 @@ impl CoreTestMembers {
                 ));
         }
         let fence = members.get(identity).map_or(1, |member| member.fence + 1);
+        self.journal_fact(MemberLifecycleFact::Seated {
+            member: crate::member_comms_id::roster_member_id_for_identity(identity.as_str()),
+            generation,
+        });
         members.insert(
             identity.clone(),
             TestMember {
@@ -74,11 +89,70 @@ impl CoreTestMembers {
     /// binding stays in the history as retired.
     pub(crate) fn retire(&self, runtime_id: &AgentRuntimeId) {
         let mut members = self.members.lock().unwrap_or_else(PoisonError::into_inner);
-        for member in members.values_mut() {
-            if member.runtime_id == *runtime_id {
+        for (identity, member) in members.iter_mut() {
+            if member.runtime_id == *runtime_id && member.live {
                 member.live = false;
+                self.journal_fact(MemberLifecycleFact::Retired {
+                    member: crate::member_comms_id::roster_member_id_for_identity(
+                        identity.as_str(),
+                    ),
+                    generation: member.generation,
+                    role: member.profile.clone(),
+                });
             }
         }
+    }
+
+    /// From now on the member lifecycle journal reads answer, with every
+    /// fact journaled so far; until then they answer `Unsupported`, as a
+    /// bridge without the journal does.
+    pub(crate) fn keep_journal(&self) {
+        self.journal.store(true, Ordering::SeqCst);
+    }
+
+    fn journal_fact(&self, fact: MemberLifecycleFact) {
+        self.facts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(fact);
+    }
+
+    pub(crate) fn journal_head(&self) -> Result<MemberLifecycleJournalHead, BridgeError> {
+        if !self.journal.load(Ordering::SeqCst) {
+            return Err(BridgeError::Unsupported {
+                operation: "member_lifecycle_journal_head",
+            });
+        }
+        let facts = self.facts.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(MemberLifecycleJournalHead {
+            incarnation: "core-test-members".to_string(),
+            cursor: facts.len() as u64,
+        })
+    }
+
+    pub(crate) fn journal_page(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<MemberLifecycleJournalPage, BridgeError> {
+        if !self.journal.load(Ordering::SeqCst) {
+            return Err(BridgeError::Unsupported {
+                operation: "member_lifecycle_journal_page",
+            });
+        }
+        let facts = self.facts.lock().unwrap_or_else(PoisonError::into_inner);
+        let records = facts
+            .iter()
+            .enumerate()
+            .map(|(index, fact)| MemberLifecycleFactRecord {
+                cursor: index as u64 + 1,
+                fact: fact.clone(),
+            })
+            .filter(|record| record.cursor > after)
+            .take(limit.max(1))
+            .collect::<Vec<_>>();
+        let next = records.last().map_or(after, |record| record.cursor);
+        Ok(MemberLifecycleJournalPage { records, next })
     }
 
     pub(crate) fn live_member(

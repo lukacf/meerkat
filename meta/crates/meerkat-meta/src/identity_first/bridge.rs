@@ -4010,6 +4010,58 @@ pub enum DormantSeatResult {
     Refused(BridgeError),
 }
 
+/// Where Core's member lifecycle journal of the bridge's mob stands
+/// ([`SessionBridge::member_lifecycle_journal_head`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberLifecycleJournalHead {
+    /// The incarnation of the mob the journal belongs to
+    /// (`MobHandle::incarnation`): a mob destroyed and created again under
+    /// the same id starts a new journal, whose cursors start again.
+    pub incarnation: String,
+    /// The cursor of the journal's latest event.
+    pub cursor: u64,
+}
+
+/// One member lifecycle fact of Core's journal, as Meta's lifecycle
+/// projection reads it ([`SessionBridge::member_lifecycle_journal_page`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemberLifecycleFact {
+    /// Core seated an incarnation of `member`: a spawn, a dormant seat, a
+    /// rotation's next incarnation, or a resume onto a session.
+    Seated {
+        member: meerkat_mob::AgentIdentity,
+        generation: u64,
+    },
+    /// Core retired the incarnation `generation` of `member`, which ran under
+    /// `role`.
+    Retired {
+        member: meerkat_mob::AgentIdentity,
+        generation: u64,
+        role: meerkat_mob::ProfileName,
+    },
+    /// The mob was reset: no member before it is a member after it.
+    MobReset,
+}
+
+/// A [`MemberLifecycleFact`] at its journal cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberLifecycleFactRecord {
+    pub cursor: u64,
+    pub fact: MemberLifecycleFact,
+}
+
+/// One page of Core's member lifecycle journal
+/// ([`SessionBridge::member_lifecycle_journal_page`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemberLifecycleJournalPage {
+    /// The page's facts, in journal order.
+    pub records: Vec<MemberLifecycleFactRecord>,
+    /// The cursor of the last journal event the page read, a lifecycle fact
+    /// or not; the cursor it was asked for when it read nothing.
+    pub next: u64,
+}
+
 /// Bridge between the identity-first control plane and the Meerkat session
 /// pipeline. Each method maps an identity-layer operation to its concrete
 /// mob-level counterpart.
@@ -4347,6 +4399,35 @@ pub trait SessionBridge: Send + Sync {
     ) -> Result<Option<meerkat_mob::MemberBinding>, BridgeError> {
         Err(BridgeError::Unsupported {
             operation: "last_member_binding",
+        })
+    }
+
+    /// Where Core's member lifecycle journal of this bridge's mob stands: the
+    /// mob's incarnation and the cursor of the journal's latest event. A
+    /// store read; it never wakes a member. The identity runtime's lifecycle
+    /// projection starts here when it has no cursor of its own. A bridge
+    /// without the journal answers [`BridgeError::Unsupported`], and the
+    /// identity runtime then projects no lifecycle side effect.
+    async fn member_lifecycle_journal_head(
+        &self,
+    ) -> Result<MemberLifecycleJournalHead, BridgeError> {
+        Err(BridgeError::Unsupported {
+            operation: "member_lifecycle_journal_head",
+        })
+    }
+
+    /// One page of Core's member lifecycle journal of this bridge's mob
+    /// (`MobHandle::member_lifecycle_events`): the facts of the journal
+    /// events after `after`, reading at most `limit` events. A store read; it
+    /// never wakes a member.
+    async fn member_lifecycle_journal_page(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<MemberLifecycleJournalPage, BridgeError> {
+        let _ = (after, limit);
+        Err(BridgeError::Unsupported {
+            operation: "member_lifecycle_journal_page",
         })
     }
 
@@ -8247,6 +8328,78 @@ impl SessionBridge for MobSessionBridge {
             })
     }
 
+    async fn member_lifecycle_journal_head(
+        &self,
+    ) -> Result<MemberLifecycleJournalHead, BridgeError> {
+        let cursor = self
+            .handle
+            .events()
+            .latest_cursor()
+            .await
+            .map_err(|error| {
+                BridgeError::Mob(format!("reading the head of Core's journal: {error}"))
+            })?;
+        Ok(MemberLifecycleJournalHead {
+            incarnation: self.handle.incarnation().to_string(),
+            cursor,
+        })
+    }
+
+    async fn member_lifecycle_journal_page(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<MemberLifecycleJournalPage, BridgeError> {
+        let page = self
+            .handle
+            .member_lifecycle_events(meerkat_mob::MobJournalCursor::new(after), limit)
+            .await
+            .map_err(|error| {
+                BridgeError::Mob(format!(
+                    "reading Core's member lifecycle journal after {after}: {error}"
+                ))
+            })?;
+        let records = page
+            .records
+            .into_iter()
+            .filter_map(|record| {
+                // Adoptions, retirement starts and legacy member resets owe
+                // no side effect: the projection reads seats, retirements
+                // and mob resets only.
+                let fact = match record.event {
+                    meerkat_mob::MemberLifecycleEvent::Spawned {
+                        agent_identity,
+                        generation,
+                        ..
+                    } => MemberLifecycleFact::Seated {
+                        member: agent_identity,
+                        generation: generation.get(),
+                    },
+                    meerkat_mob::MemberLifecycleEvent::Retired {
+                        agent_identity,
+                        generation,
+                        role,
+                        ..
+                    } => MemberLifecycleFact::Retired {
+                        member: agent_identity,
+                        generation: generation.get(),
+                        role,
+                    },
+                    meerkat_mob::MemberLifecycleEvent::MobReset => MemberLifecycleFact::MobReset,
+                    _ => return None,
+                };
+                Some(MemberLifecycleFactRecord {
+                    cursor: record.cursor.get(),
+                    fact,
+                })
+            })
+            .collect();
+        Ok(MemberLifecycleJournalPage {
+            records,
+            next: page.next.get(),
+        })
+    }
+
     async fn identity_management(
         &self,
         identity: &AgentIdentity,
@@ -9317,6 +9470,22 @@ impl SessionBridge for super::PublicSessionBridge {
         identity: &AgentIdentity,
     ) -> Result<Option<meerkat_mob::MemberBinding>, BridgeError> {
         self.bridge.last_member_binding(identity).await
+    }
+
+    async fn member_lifecycle_journal_head(
+        &self,
+    ) -> Result<MemberLifecycleJournalHead, BridgeError> {
+        self.bridge.member_lifecycle_journal_head().await
+    }
+
+    async fn member_lifecycle_journal_page(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<MemberLifecycleJournalPage, BridgeError> {
+        self.bridge
+            .member_lifecycle_journal_page(after, limit)
+            .await
     }
 
     async fn identity_management(

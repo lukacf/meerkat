@@ -30,7 +30,8 @@
 //! with the runtime's real context: Core builds the member from it at its
 //! first materialization, as a create of the identity would build it. That
 //! run also publishes the identity's customizer tools, and the customizer is
-//! told the bound session (`after_create`).
+//! told the bound session (`after_create`) by the lifecycle projection once
+//! it reaches the seat in Core's journal.
 //!
 //! A seat holds no lifecycle lock while the customizer runs, so a customizer
 //! that calls into another identity never waits on this one. The Core step
@@ -52,11 +53,11 @@ use super::super::types::{
     IdentityLifecycleState,
 };
 use super::{
-    AfterCreateNotice, CANDIDATE_CREATE_MEMBER, CANDIDATE_FIRST_BOOT_FRESH,
-    CANDIDATE_FRESH_SESSION, CANDIDATE_MOVE_ROLE, CANDIDATE_RESUME_MEMBER, FirstBootRows,
-    IdentityRuntime, IdentityRuntimeError, WakeHold, binding_spawned_for_identity,
-    classify_wake_failure, deterministic_build_rejection_reason,
-    durable_spec_uses_external_binding, refuse_runtime_plane_creation, release_error,
+    CANDIDATE_CREATE_MEMBER, CANDIDATE_FIRST_BOOT_FRESH, CANDIDATE_FRESH_SESSION,
+    CANDIDATE_MOVE_ROLE, CANDIDATE_RESUME_MEMBER, FirstBootRows, IdentityRuntime,
+    IdentityRuntimeError, WakeHold, binding_spawned_for_identity, classify_wake_failure,
+    deterministic_build_rejection_reason, durable_spec_uses_external_binding,
+    refuse_runtime_plane_creation, release_error,
 };
 
 /// How one listed identity becomes, or stays, a member of Core's mob.
@@ -144,11 +145,6 @@ pub(crate) struct SeatOutcome {
     /// The draft the step recorded: the host's build of the spec, or the
     /// spec's base draft when nothing was built.
     pub(crate) draft: AgentBuildDraft,
-    /// The `after_create` owed to the customizer the caller passed, for a
-    /// caller that holds the identity's lifecycle lock: it tells it once it
-    /// has released the lock, so the customizer may call back into the
-    /// identity.
-    pub(super) override_after_create: Option<AfterCreateNotice>,
     /// Core ended the identity's host preparation in this step: a seat
     /// Core answered (seated, already seated, embodied), or a rotation's
     /// terminal step. Every other step leaves a mark Meta asked for at
@@ -243,13 +239,21 @@ impl IdentityRuntime {
                         session_id: None,
                         minted: false,
                         draft: Self::base_build_draft(spec),
-                        override_after_create: None,
                         host_preparation_ended: false,
                     }),
                 );
             }
             return outcomes;
         };
+        // The lifecycle projection's cursor is read before the step asks
+        // Core for anything, so each seat and rotation it journals is
+        // projected. A failed read is tried again before the next step.
+        if let Err(error) = self.prepare_lifecycle_projection().await {
+            tracing::warn!(
+                %error,
+                "the lifecycle projection could not be prepared before the seat step"
+            );
+        }
         // The manifest is read first: an unreadable one refuses every
         // identity of the step, since which of them it covers is unknown.
         if let Err(error) = self.load_first_boot_manifest().await {
@@ -353,7 +357,6 @@ impl IdentityRuntime {
                                 session_id: None,
                                 minted: false,
                                 draft: Self::base_build_draft(spec),
-                                override_after_create: None,
                                 host_preparation_ended: false,
                             }),
                         );
@@ -390,13 +393,14 @@ impl IdentityRuntime {
         }
 
         let committed = self.commit_seats(&bridge, ready, locks).await;
-        let installed = self.customizer.read().await.clone();
-        let mut told = Vec::new();
+        // The seats Core journaled tell their customizer `after_create` from
+        // the lifecycle projection, with no lifecycle lock held.
+        self.kick_lifecycle_projection();
         let mut seeded_settled = Vec::new();
-        for (planned, draft, result) in committed {
+        for (planned, _draft, result) in committed {
             let identity = planned.spec.identity.clone();
             match result {
-                Ok(mut outcome) => {
+                Ok(outcome) => {
                     if self.host_pending_seeded_contains(&identity) {
                         if outcome.host_preparation_ended {
                             self.forget_seeded_host_preparation(&identity);
@@ -410,46 +414,18 @@ impl IdentityRuntime {
                     if planned.rotation {
                         self.clear_rotation_intent(&identity).await;
                     }
-                    if !outcome.already_seated {
+                    if outcome.already_seated {
+                        // No seat: nothing to tell of the build.
+                        self.forget_lifecycle_build(&identity);
+                    } else if locks == SeatLocks::Take {
                         // A caller that holds the identity's lifecycle lock
                         // settles the views itself, once, with its own step.
-                        if locks == SeatLocks::Take {
-                            self.settle_successful_wake(&identity).await;
-                        }
-                        // The customizer that built the draft is told the
-                        // session the identity is bound to, with no
-                        // lifecycle lock held: the installed one in a
-                        // runtime-owned task, the caller's own by the caller
-                        // once it holds none.
-                        if planned.plan.customizes()
-                            && let Some(session_id) = outcome.session_id.clone()
-                        {
-                            let notice = AfterCreateNotice {
-                                session_id,
-                                context: self.session_created_context(&planned.spec, &draft),
-                            };
-                            match (customizer, installed.as_ref(), locks) {
-                                (Some(_), _, SeatLocks::Held) => {
-                                    outcome.override_after_create = Some(notice);
-                                }
-                                (Some(_), _, SeatLocks::Take) => {
-                                    told.push((identity.clone(), notice));
-                                }
-                                (None, Some(installed), _) => {
-                                    self.spawn_after_create(
-                                        Arc::clone(installed),
-                                        identity.clone(),
-                                        notice,
-                                    )
-                                    .await;
-                                }
-                                (None, None, _) => {}
-                            }
-                        }
+                        self.settle_successful_wake(&identity).await;
                     }
                     outcomes.insert(identity, Ok(outcome));
                 }
                 Err(error) => {
+                    self.forget_lifecycle_build(&identity);
                     self.record_wake_refusal(&identity, &error).await;
                     outcomes.insert(identity, Err(error));
                 }
@@ -474,11 +450,6 @@ impl IdentityRuntime {
         // failed before.
         self.rewrite_first_boot_manifest().await;
         self.publish_first_boot_pending().await;
-        if let Some(customizer) = customizer {
-            for (identity, notice) in told {
-                Self::tell_after_create(customizer, &identity, &notice).await;
-            }
-        }
         outcomes
     }
 
@@ -986,6 +957,12 @@ impl IdentityRuntime {
                     match result {
                         Ok(()) => {
                             self.publish_customizer_tools(identity, &mut draft).await;
+                            // Told to `after_create` once the lifecycle
+                            // projection reaches the step's seat.
+                            self.note_lifecycle_build(
+                                identity,
+                                self.session_created_context(&planned.spec, &draft),
+                            );
                             Ok(draft)
                         }
                         Err(super::super::types::CustomizerError::ToolArtifactRefused(refusal)) => {
@@ -1040,7 +1017,6 @@ impl IdentityRuntime {
                         session_id: None,
                         minted: false,
                         draft: draft.clone(),
-                        override_after_create: None,
                         host_preparation_ended: false,
                     };
                     answered.push((planned, draft, Ok(outcome)));
@@ -1132,7 +1108,6 @@ impl IdentityRuntime {
                 session_id: Some(session_id),
                 minted: requested_fresh,
                 draft: draft.clone(),
-                override_after_create: None,
                 host_preparation_ended: true,
             }),
             // A fresh spec that owes a kickoff: Core spawned it live, and its
@@ -1142,7 +1117,6 @@ impl IdentityRuntime {
                 session_id: Some(session_id),
                 minted: requested_fresh,
                 draft: draft.clone(),
-                override_after_create: None,
                 host_preparation_ended: true,
             }),
             DormantSeatResult::AlreadySeated { session_id } => Ok(SeatOutcome {
@@ -1150,7 +1124,6 @@ impl IdentityRuntime {
                 session_id: Some(session_id),
                 minted: false,
                 draft: draft.clone(),
-                override_after_create: None,
                 host_preparation_ended: true,
             }),
             DormantSeatResult::SessionArchived { session_id } => {
@@ -1239,7 +1212,6 @@ impl IdentityRuntime {
             session_id: Some(resumed.session_id().clone()),
             minted: false,
             draft: draft.clone(),
-            override_after_create: None,
             host_preparation_ended: false,
         })
     }
@@ -1301,7 +1273,6 @@ impl IdentityRuntime {
                             session_id: None,
                             minted: false,
                             draft: draft.clone(),
-                            override_after_create: None,
                             host_preparation_ended: false,
                         });
                     }
@@ -1344,30 +1315,50 @@ impl IdentityRuntime {
                         .await
                         .map_err(|error| release_error(identity, Some(session), error))?;
                 }
-                let session_id = bridge
-                    .rotate_member(identity, &planned.spec, draft)
-                    .await
-                    .map_err(|error| match deterministic_build_rejection_reason(&error) {
-                        // A fresh life refused for good (its member build off
-                        // the launch's member auth binding, say) is answered
-                        // typed and final, as a seat's is: asking again
-                        // changes nothing.
-                        Some(reason) => IdentityRuntimeError::HostRejectedBuild {
-                            identity: identity.clone(),
-                            reason,
-                        },
-                        None => IdentityRuntimeError::IdentityWakeRetryable {
-                            identity: identity.clone(),
-                            session_id: None,
-                            detail: format!("Core's rotation of the identity failed: {error}"),
-                        },
-                    })?;
+                // The rotation retires the identity's live incarnation and
+                // seats the next one on a fresh session: a reset's side
+                // effects, recorded before Core is asked. A rotation a crash
+                // interrupted is the verb's that recorded its own.
+                let retiring = match &planned.plan {
+                    SeatPlan::Rotate { from_row: false } => None,
+                    _ => {
+                        self.prepare_lifecycle_retirement(
+                            identity,
+                            crate::runtime::LifecycleEffectVerb::Reset,
+                            Some(super::super::types::RetiredIdentityCause::Reset),
+                        )
+                        .await?
+                    }
+                };
+                let session_id = match bridge.rotate_member(identity, &planned.spec, draft).await {
+                    Ok(session_id) => session_id,
+                    Err(error) => {
+                        if super::nothing_of_the_rotation_started(&error) {
+                            self.abandon_lifecycle_retirement(retiring).await;
+                        }
+                        return Err(match deterministic_build_rejection_reason(&error) {
+                            // A fresh life refused for good (its member build
+                            // off the launch's member auth binding, say) is
+                            // answered typed and final, as a seat's is:
+                            // asking again changes nothing.
+                            Some(reason) => IdentityRuntimeError::HostRejectedBuild {
+                                identity: identity.clone(),
+                                reason,
+                            },
+                            None => IdentityRuntimeError::IdentityWakeRetryable {
+                                identity: identity.clone(),
+                                session_id: None,
+                                detail: format!("Core's rotation of the identity failed: {error}"),
+                            },
+                        });
+                    }
+                };
+                self.settle_lifecycle_retirement(retiring).await;
                 Ok(SeatOutcome {
                     already_seated: false,
                     session_id: Some(session_id),
                     minted: true,
                     draft: draft.clone(),
-                    override_after_create: None,
                     host_preparation_ended: true,
                 })
             }
@@ -1400,7 +1391,6 @@ impl IdentityRuntime {
                     session_id: Some(resumed.session_id().clone()),
                     minted: false,
                     draft: draft.clone(),
-                    override_after_create: None,
                     host_preparation_ended: false,
                 })
             }
@@ -1422,7 +1412,6 @@ impl IdentityRuntime {
                     session_id: binding.session_id,
                     minted: true,
                     draft: draft.clone(),
-                    override_after_create: None,
                     host_preparation_ended: false,
                 })
             }

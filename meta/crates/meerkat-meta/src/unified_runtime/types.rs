@@ -927,7 +927,7 @@ pub enum ErrorEvent {
     /// The retirement itself stands: Core retired the incarnation, and the
     /// retire's caller saw its own outcome. Only the host's release of what
     /// it keeps for that incarnation failed, and Meta does not retry it.
-    /// `cause` is `unlisted`, `retire` or `scoped`.
+    /// `cause` is `unlisted`, `retire`, `scoped`, `reset` or `delete`.
     RetiredMemberReleaseFailed {
         identity: String,
         agent_runtime_id: String,

@@ -39,7 +39,8 @@ pub use bridge::{
     ControllerPinSource, GovernedAdmission, GovernedAdmissionRecord, GovernedBindContext,
     GovernedDelivery, GovernedDeliveryCustody, GovernedEntryFence, GovernedEntryOutcome,
     GovernedEntryPermit, GovernedEntryRefusal, GovernedInputBinder, GovernedInputError,
-    GovernedSettlement, MemberInspection, MemberRuntimeBinding, MobSessionBridge,
+    GovernedSettlement, MemberInspection, MemberLifecycleFact, MemberLifecycleFactRecord,
+    MemberLifecycleJournalHead, MemberLifecycleJournalPage, MemberRuntimeBinding, MobSessionBridge,
     NativeInputAdmissionSettlement, QueuedMemberInputs, ResumeRejectionKind, ResumeSessionOutcome,
     SessionBridge,
 };

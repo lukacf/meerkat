@@ -15679,27 +15679,35 @@ pub trait GatewayHostComposition: Send + Sync + 'static {
     /// What ended depends on [`crate::identity_first::RetiredIdentityCause`].
     /// `Unlisted` ends the incarnation and the identity's place in the
     /// roster, so state the host keeps for the identity itself may go.
-    /// `Retire` and `Scoped` release the member: they end its registration,
-    /// not the incarnation. The identity stays registered and active on the
-    /// same session at the same generation, and its next delivery
-    /// materializes it again under a new registration, which the host's
-    /// registration hook is given as for any build. State the host bound to
-    /// the ended registration may go; state it keeps for the incarnation or
-    /// the identity stays.
+    /// `Reset` and `Delete` end the incarnation (a reset's or a delete's
+    /// rotation onto a fresh session, a first-boot `Fresh` row's): the
+    /// identity stays in the roster on its fresh session, so state the host
+    /// keeps for the incarnation may go and state it keeps for the identity
+    /// stays. `Retire` and `Scoped` release the member: they end its
+    /// registration, not the incarnation. The identity stays registered and
+    /// active on the same session at the same generation, and its next
+    /// delivery materializes it again under a new registration, which the
+    /// host's registration hook is given as for any build. State the host
+    /// bound to the ended registration may go; state it keeps for the
+    /// incarnation or the identity stays.
     ///
     /// A `Retire` or `Scoped` call for a member that is already released (or
     /// was never built in this process) still calls this, with
     /// `registration` `None`: no registration ended.
     ///
-    /// Called once per retire or release, after it, with no Meta
-    /// lock held (no identity lifecycle lock, no bootstrap controller), so it
-    /// may call back into the runtime. The gateway installs it right after
-    /// [`Self::bind_identity_runtime`], so the identity bootstrap's own
-    /// retirements of members the roster no longer lists reach it too (from
-    /// the init task); later ones run in the retiring operation's tracked
-    /// task, which a shutdown joins. Never called for a reload, a reprofile,
-    /// a compaction rebuild, a respawn, a reset or delete successor, a held
-    /// or refused spawn, or a shutdown or restart. The retirement stands
+    /// Called with no Meta lock held (no identity lifecycle lock, no
+    /// bootstrap controller), so it may call back into the runtime. A release
+    /// calls it once, after Core's release answered, before the verb
+    /// answers. An incarnation Core ends (`Unlisted`, `Reset`, `Delete`)
+    /// reaches it from Core's journal, after the step that ended it, at least
+    /// once: a gateway stopped before the call makes it at its next start,
+    /// naming no registration, and one stopped during the call may make it
+    /// again, so key what it does by the incarnation (`agent_runtime_id`).
+    /// The gateway installs it right after [`Self::bind_identity_runtime`],
+    /// so the identity bootstrap's own retirements of members the roster no
+    /// longer lists reach it too, before the init settles. Never called for a
+    /// reload, a reprofile, a compaction rebuild, a respawn, a held or
+    /// refused spawn, or a shutdown or restart. The retirement stands
     /// whatever this returns: an `Err` is reported to the error hook as
     /// `retired_member_release_failed` and is not retried. The default does
     /// nothing.
@@ -15708,7 +15716,7 @@ pub trait GatewayHostComposition: Send + Sync + 'static {
     /// retire this can announce first reads the retiring incarnation from
     /// Core's member history, under the identity's lifecycle lock and before
     /// Core is asked. If that read fails, that retire is refused rather than
-    /// retiring an incarnation the host would not hear of.
+    /// retiring an incarnation without the registration the host is owed.
     async fn identity_member_retired(
         &self,
         retired: &crate::identity_first::RetiredIdentityMember,

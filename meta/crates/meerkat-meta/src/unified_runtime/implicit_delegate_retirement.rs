@@ -1150,6 +1150,40 @@ comms = true
             ) -> Result<(), MetadataStoreError> {
                 Ok(())
             }
+            async fn lifecycle_projection_cursor(
+                &self,
+                _mob_id: &str,
+            ) -> Result<Option<crate::LifecycleProjectionCursor>, MetadataStoreError> {
+                Ok(None)
+            }
+            async fn set_lifecycle_projection_cursor(
+                &self,
+                _cursor: &crate::LifecycleProjectionCursor,
+            ) -> Result<(), MetadataStoreError> {
+                Ok(())
+            }
+            async fn lifecycle_effect_intent(
+                &self,
+                _mob_id: &str,
+                _identity: &str,
+                _generation: u64,
+            ) -> Result<Option<crate::LifecycleEffectIntent>, MetadataStoreError> {
+                Ok(None)
+            }
+            async fn set_lifecycle_effect_intent(
+                &self,
+                _intent: &crate::LifecycleEffectIntent,
+            ) -> Result<(), MetadataStoreError> {
+                Ok(())
+            }
+            async fn clear_lifecycle_effect_intent(
+                &self,
+                _mob_id: &str,
+                _identity: &str,
+                _generation: u64,
+            ) -> Result<(), MetadataStoreError> {
+                Ok(())
+            }
         }
 
         let early = SessionId::new();

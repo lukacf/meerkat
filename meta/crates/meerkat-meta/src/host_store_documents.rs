@@ -19,6 +19,8 @@
 //! | `idle/<mob id length>:<mob id><member id>` | one member's idle-retirement opt-in |
 //! | `tools/<mob id length>:<mob id><identity>` | one identity's last-published tool record |
 //! | `rotation/<mob id length>:<mob id><identity>` | one identity's pending rotation intent |
+//! | `lifecycle/<mob id>` | the identity runtime's lifecycle projection cursor |
+//! | `effect/<mob id length>:<mob id><generation>/<identity>` | one pending lifecycle effect intent |
 //!
 //! Every document goes through the realm's one [`SpiRealm`] under its fence:
 //! a write is one single-scope batch, settled before it answers. A batch
@@ -41,8 +43,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::mob_handle_runtime::DelegateIdleRetireOverride;
 use crate::runtime::{
-    IdentityRotationIntent, IdentityToolRecord, MemberIdleRetireOverrideRecord, MetadataStoreError,
-    PersistentMetadataStore, decode_identity_record, encode_identity_record,
+    IdentityRotationIntent, IdentityToolRecord, LifecycleEffectIntent, LifecycleProjectionCursor,
+    MemberIdleRetireOverrideRecord, MetadataStoreError, PersistentMetadataStore,
+    decode_identity_record, encode_identity_record,
 };
 
 /// Meta's record family on a host store realm: one record scope per
@@ -69,6 +72,8 @@ const CURSOR_PREFIX: &str = "cursor/";
 const IDLE_PREFIX: &str = "idle/";
 const TOOLS_PREFIX: &str = "tools/";
 const ROTATION_PREFIX: &str = "rotation/";
+const LIFECYCLE_PREFIX: &str = "lifecycle/";
+const EFFECT_PREFIX: &str = "effect/";
 
 /// The format version of the cursor and idle opt-in documents.
 const ENTRY_VERSION: u32 = 1;
@@ -103,6 +108,21 @@ fn identity_tools_key(mob_id: &str, identity: &str) -> String {
 /// every rotation intent of the mob.
 fn identity_rotation_key(mob_id: &str, identity: &str) -> String {
     format!("{ROTATION_PREFIX}{}:{mob_id}{identity}", mob_id.len())
+}
+
+/// A mob's lifecycle projection cursor.
+fn lifecycle_cursor_key(mob_id: &str) -> String {
+    format!("{LIFECYCLE_PREFIX}{mob_id}")
+}
+
+/// The lifecycle effect intent of `identity`'s `generation`, injective over
+/// (mob id, generation, identity): the mob id's length comes first, and the
+/// generation, a number, ends at its `/`.
+fn lifecycle_effect_key(mob_id: &str, identity: &str, generation: u64) -> String {
+    format!(
+        "{EFFECT_PREFIX}{}:{mob_id}{generation}/{identity}",
+        mob_id.len()
+    )
 }
 
 fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -835,6 +855,67 @@ impl PersistentMetadataStore for SpiMetadataStore {
     ) -> Result<(), MetadataStoreError> {
         self.documents
             .write(&identity_rotation_key(mob_id, identity), None)
+            .await
+            .map_err(io_error)
+    }
+
+    /// Written through, never coalesced: the cursor says which lifecycle
+    /// side effects ran, so it lands before this answers.
+    async fn lifecycle_projection_cursor(
+        &self,
+        mob_id: &str,
+    ) -> Result<Option<LifecycleProjectionCursor>, MetadataStoreError> {
+        let key = lifecycle_cursor_key(mob_id);
+        let Some(bytes) = self.documents.read(&key).await.map_err(io_error)? else {
+            return Ok(None);
+        };
+        decode_identity_record(&bytes).map(Some)
+    }
+
+    async fn set_lifecycle_projection_cursor(
+        &self,
+        cursor: &LifecycleProjectionCursor,
+    ) -> Result<(), MetadataStoreError> {
+        let document = encode_identity_record(cursor)?.into_bytes();
+        self.documents
+            .write(&lifecycle_cursor_key(&cursor.mob_id), Some(document))
+            .await
+            .map_err(io_error)
+    }
+
+    async fn lifecycle_effect_intent(
+        &self,
+        mob_id: &str,
+        identity: &str,
+        generation: u64,
+    ) -> Result<Option<LifecycleEffectIntent>, MetadataStoreError> {
+        let key = lifecycle_effect_key(mob_id, identity, generation);
+        let Some(bytes) = self.documents.read(&key).await.map_err(io_error)? else {
+            return Ok(None);
+        };
+        decode_identity_record(&bytes).map(Some)
+    }
+
+    async fn set_lifecycle_effect_intent(
+        &self,
+        intent: &LifecycleEffectIntent,
+    ) -> Result<(), MetadataStoreError> {
+        let key = lifecycle_effect_key(&intent.mob_id, &intent.identity, intent.generation);
+        let document = encode_identity_record(intent)?.into_bytes();
+        self.documents
+            .write(&key, Some(document))
+            .await
+            .map_err(io_error)
+    }
+
+    async fn clear_lifecycle_effect_intent(
+        &self,
+        mob_id: &str,
+        identity: &str,
+        generation: u64,
+    ) -> Result<(), MetadataStoreError> {
+        self.documents
+            .write(&lifecycle_effect_key(mob_id, identity, generation), None)
             .await
             .map_err(io_error)
     }

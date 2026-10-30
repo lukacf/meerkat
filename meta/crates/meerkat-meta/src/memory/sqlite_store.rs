@@ -2022,6 +2022,20 @@ impl StewardStore for SqliteAgentMemoryStore {
         session_key: Option<&str>,
         cause: &str,
     ) -> Result<(), AgentMemoryError> {
+        self.record_pending_harvest_at(realm, identity, session_key, cause, now_ms())
+            .await
+    }
+
+    /// The row's key is (identity, `retired_at_ms`): a repeat of the same
+    /// retirement, harvested since or not, writes nothing.
+    async fn record_pending_harvest_at(
+        &self,
+        realm: &str,
+        identity: &str,
+        session_key: Option<&str>,
+        cause: &str,
+        retired_at_ms: u64,
+    ) -> Result<(), AgentMemoryError> {
         let store = self.clone();
         let realm = realm.to_string();
         let identity = identity.to_string();
@@ -2033,7 +2047,7 @@ impl StewardStore for SqliteAgentMemoryStore {
                     "INSERT OR IGNORE INTO pending_harvests \
                      (identity, session_key, cause, retired_at_ms, status) \
                      VALUES (?1, ?2, ?3, ?4, 'pending')",
-                    params![identity, session_key, cause, now_ms() as i64],
+                    params![identity, session_key, cause, retired_at_ms as i64],
                 )
                 .map_err(sql_err)?;
                 Ok(())

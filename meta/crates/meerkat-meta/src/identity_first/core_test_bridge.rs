@@ -17,7 +17,9 @@
 //! [`CoreReadsBridge::fail_history_reads`] places a fault on chosen reads of
 //! Core's member history, and [`CoreReadsBridge::refuse_release_of`] has
 //! Core refuse a member's release, retryably, as Core does while the member
-//! is being woken or has work in flight.
+//! is being woken or has work in flight. Its member lifecycle journal reads
+//! answer once its members keep the journal
+//! ([`CoreTestMembers::keep_journal`]).
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,7 +29,8 @@ use meerkat_core::types::SessionId;
 
 use super::IdentityRuntime;
 use super::bridge::{
-    BridgeDelivery, BridgeError, BridgeMemberReload, HostHumanInputError, MemberRuntimeBinding,
+    BridgeDelivery, BridgeError, BridgeMemberReload, HostHumanInputError,
+    MemberLifecycleJournalHead, MemberLifecycleJournalPage, MemberRuntimeBinding,
     ResumeSessionOutcome, SessionBridge,
 };
 use super::core_test_members::CoreTestMembers;
@@ -281,6 +284,20 @@ impl SessionBridge for CoreReadsBridge {
         identity: &AgentIdentity,
     ) -> Result<Option<meerkat_mob::MemberBinding>, BridgeError> {
         self.core.last_member_binding(identity)
+    }
+
+    async fn member_lifecycle_journal_head(
+        &self,
+    ) -> Result<MemberLifecycleJournalHead, BridgeError> {
+        self.core.journal_head()
+    }
+
+    async fn member_lifecycle_journal_page(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<MemberLifecycleJournalPage, BridgeError> {
+        self.core.journal_page(after, limit)
     }
 
     async fn identity_management(

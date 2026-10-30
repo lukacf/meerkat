@@ -280,6 +280,24 @@ pub trait StewardStore: StagedMemoryStore + TombstoneSource {
         cause: &str,
     ) -> Result<(), AgentMemoryError>;
 
+    /// [`Self::record_pending_harvest`] keyed by `retired_at_ms`, the time
+    /// the retirement's step was asked: a step whose side effects run again
+    /// (after a restart) records its harvest once. The default records it at
+    /// the store's own clock, as [`Self::record_pending_harvest`] does, so a
+    /// repeat records it again.
+    async fn record_pending_harvest_at(
+        &self,
+        realm: &str,
+        identity: &str,
+        session_key: Option<&str>,
+        cause: &str,
+        retired_at_ms: u64,
+    ) -> Result<(), AgentMemoryError> {
+        let _ = retired_at_ms;
+        self.record_pending_harvest(realm, identity, session_key, cause)
+            .await
+    }
+
     /// Pending exit-interview harvests, oldest first.
     async fn pending_harvests(
         &self,

@@ -1799,8 +1799,10 @@ impl IdentityLifecycleState {
 /// host's retirement hook reads it
 /// (`GatewayHostComposition::identity_member_retired`).
 ///
-/// Every cause ends the member's registration. Only [`Self::Unlisted`] ends
-/// the incarnation and the identity's place in the roster: [`Self::Retire`]
+/// Every cause ends the member's registration. [`Self::Unlisted`] ends the
+/// incarnation and the identity's place in the roster. [`Self::Reset`] and
+/// [`Self::Delete`] end the incarnation, and the identity stays in the
+/// roster, its next incarnation seated on a fresh session. [`Self::Retire`]
 /// and [`Self::Scoped`] release the member, and the identity stays
 /// registered and active on the same session at the same generation, so its
 /// next delivery materializes it again.
@@ -1816,23 +1818,36 @@ pub enum RetiredIdentityCause {
     /// A retire at a captured delivery scope that named the live member:
     /// the member is released.
     Scoped,
+    /// Core rotated the identity onto a fresh session and its incarnation
+    /// ended: a reset (online, or an offline `identity-reset` whose
+    /// first-boot row the next start carried out), a role move whose session
+    /// had nothing to carry over, or a rotation a host asked Core for.
+    Reset,
+    /// A `delete_identity` rotated the identity onto a fresh session and its
+    /// incarnation ended, with the identity's memory continuity.
+    Delete,
 }
 
 impl RetiredIdentityCause {
-    /// The cause's wire name: `unlisted`, `retire` or `scoped`.
+    /// The cause's wire name: `unlisted`, `retire`, `scoped`, `reset` or
+    /// `delete`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Unlisted => "unlisted",
             Self::Retire => "retire",
             Self::Scoped => "scoped",
+            Self::Reset => "reset",
+            Self::Delete => "delete",
         }
     }
 }
 
-/// A durable identity's member that was retired or released, read from Core
-/// before the retire: the binding its incarnation ran under. Handed to a
-/// gateway host's retirement hook once, after Core's retire or release
-/// returned.
+/// A durable identity's member that was retired or released: the binding
+/// its incarnation ran under. A release is handed to a gateway host's
+/// retirement hook once, after Core's release returned; an incarnation Core
+/// ended (`Unlisted`, `Reset`, `Delete`) at least once, after Core journaled
+/// its end, from the lifecycle projection, which a restart before its
+/// cursor moved past the end repeats.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RetiredIdentityMember {
@@ -1857,8 +1872,10 @@ pub struct RetiredIdentityMember {
     /// local registration, as for a peer-only or placed member, or a bridge
     /// without a runtime machine), the member was not materialized (a seat
     /// no delivery has woken yet, or a member already released), so the
-    /// retire ended none, or the registration was still current after
-    /// Core's retire answered, so the retire did not end it. Compare
+    /// retire ended none, the registration was still current after Core's
+    /// retire answered, so the retire did not end it, or the process that
+    /// read it stopped before the hook ran, and the next start, which never
+    /// saw it, hands the incarnation over. Compare
     /// registrations with `==` only: a successor that resumes the same
     /// session can carry the same session id and epoch (all its `Debug`
     /// output shows), and only `==` tells the two apart.

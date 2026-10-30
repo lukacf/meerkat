@@ -842,7 +842,7 @@ A host's pure check in a tool body, with the wait after a stale read:
 ```rust
 let mut churn = context.owner_change_churn();
 let answer = loop {
-    let answer = check_binding(); // observe, and rebuild once on a stale read
+    let answer = pure_check(); // observe, and rebuild once on a stale read
     let Some(work) = context.work_authorization() else { break answer };
     if !matches!(answer, Err(CheckError::Stale))
         || !churn

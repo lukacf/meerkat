@@ -585,3 +585,133 @@ fn generic_rewrite_cannot_mint_move_or_erase_entry_rows() {
     .expect("a non-empty set renders a snapshot");
     assert_refused(&mut session, 4, 4, vec![Message::System(snapshot)]);
 }
+
+fn prompt_update(
+    expected_version: Option<u64>,
+    target_message_index: Option<usize>,
+    content: &str,
+) -> super::SystemPromptUpdateRequest {
+    super::SystemPromptUpdateRequest {
+        key: SystemPromptKey::new("primary").unwrap(),
+        expected_version: expected_version
+            .map(|version| SystemPromptVersion::new(version).unwrap()),
+        target_message_index,
+        content: content.to_string(),
+        actor: Some("host-test".to_string()),
+        expected_parent_revision: None,
+    }
+}
+
+/// A keyed system-prompt update inserts each later version right after the
+/// current one, so before the entry rows that follow the head prompt. Entry
+/// rows are told apart by their identity and their place among the
+/// conversation rows, not by their offset: two later versions both commit,
+/// the entry row is unchanged and still reaches the model after the newest
+/// prompt, and every rewrite record of the reloaded graph validates.
+#[test]
+fn update_system_prompt_inserts_a_later_version_before_entry_rows() {
+    use super::SystemPromptUpdateStatus;
+
+    let mut session = Session::new();
+    session.append_system_message("You are a careful assistant.");
+    let adopted = session
+        .update_system_prompt(prompt_update(None, Some(0), "Prompt version one."))
+        .expect("the head prompt is adopted in place");
+    assert_eq!(adopted.version, SystemPromptVersion::INITIAL);
+    let entry = mint_operator_instruction_delta(
+        header(session.id(), 1),
+        vec![active("app.example", "tone", 1, "Answer in a formal tone.")],
+        vec![activate(
+            "app.example",
+            "tone",
+            1,
+            None,
+            "Answer in a formal tone.",
+        )],
+        at(),
+    )
+    .unwrap();
+    session.append_operator_instruction_entry(entry).unwrap();
+    session.push(Message::User(UserMessage::text(
+        "What is the boiling point?",
+    )));
+    let entry_row = session.messages()[1].clone();
+    assert_eq!(entry_rows(std::slice::from_ref(&entry_row)).len(), 1);
+
+    for (expected, content) in [(1, "Prompt version two."), (2, "Prompt version three.")] {
+        let result = session
+            .update_system_prompt(prompt_update(Some(expected), None, content))
+            .unwrap_or_else(|error| {
+                panic!("a later prompt version commits before the entry row: {error}")
+            });
+        assert_eq!(result.status, SystemPromptUpdateStatus::Applied);
+        assert_eq!(result.version.get(), expected + 1);
+    }
+    let rows = session.messages().to_vec();
+    assert_eq!(
+        rows.len(),
+        5,
+        "three prompt versions, the entry row and the user turn"
+    );
+    assert_eq!(rows[3], entry_row, "the entry row is unchanged");
+    assert_eq!(entry_rows(&rows).len(), 1);
+
+    let projected = session.messages_for_model_boundary().unwrap();
+    assert!(
+        matches!(
+            &projected[0],
+            Message::System(system) if system.content == "Prompt version three."
+        ),
+        "the model reads the newest prompt: {projected:?}"
+    );
+    assert_eq!(projected[1], entry_row, "and the entry row after it");
+
+    let reloaded = Session::from_persisted_bytes(&session.to_persisted_bytes().unwrap())
+        .expect("the reloaded rewrite graph validates");
+    assert_eq!(reloaded.messages(), session.messages());
+    let history = reloaded
+        .validated_transcript_history_state()
+        .unwrap()
+        .expect("the session holds a rewrite graph");
+    assert_eq!(
+        history.commit_count(),
+        3,
+        "the adoption and the two later versions"
+    );
+    for commit in history.commits() {
+        let parent = history.materialize_rewrite_parent(commit).unwrap();
+        let child = history.materialize_rewrite_child(commit).unwrap();
+        crate::TranscriptRewriteRecord::new(commit.clone(), parent, child)
+            .expect("the rewrite record validates with both of its bodies");
+    }
+}
+
+/// A keyed system-prompt update cannot adopt an operator-instruction entry
+/// row as its prompt: only a run start or a compaction fold writes one. The
+/// refusal says so, instead of claiming that the row is not a System row,
+/// and changes nothing.
+#[test]
+fn update_system_prompt_refuses_an_entry_target_as_an_operator_instruction_entry() {
+    use super::SystemPromptUpdateError;
+    use crate::TranscriptEditError;
+
+    // [head prompt, delta 1, user turn, delta 2]
+    let mut session = session_with_two_deltas();
+    let before = session.messages().to_vec();
+    let error = session
+        .update_system_prompt(prompt_update(None, Some(1), "Replacement prompt."))
+        .expect_err("an entry row cannot be adopted as a prompt");
+    assert!(
+        matches!(
+            &error,
+            SystemPromptUpdateError::Transcript(TranscriptEditError::InvalidTranscriptShape(detail))
+                if detail.contains("operator instruction entry")
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        session.messages(),
+        before.as_slice(),
+        "a refusal changes nothing"
+    );
+}

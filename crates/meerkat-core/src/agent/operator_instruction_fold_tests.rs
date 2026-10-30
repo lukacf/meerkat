@@ -17,9 +17,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use meerkat_core::compact::{
-    COMPACTION_SUMMARY_PREFIX, CompactionContext, CompactionDiscard, CompactionResult,
-    CompactionRetained, CompactionSummary, Compactor, SummarizationSource,
-    SummarizationSourceBudget,
+    COMPACTION_SUMMARY_PREFIX, CompactionContext, CompactionCurator, CompactionCuratorError,
+    CompactionDiscard, CompactionResult, CompactionRetained, CompactionSummary, CompactionWindow,
+    Compactor, CuratedCompactionSummary, SummarizationSource, SummarizationSourceBudget,
 };
 use meerkat_core::types::{
     InstructionActivationId, InstructionContentDigest, InstructionKey, InstructionNamespace,
@@ -60,10 +60,12 @@ fn text_response(text: &str) -> LlmStreamResult {
 
 /// Answers a compaction summary request with a short summary, and an
 /// ordinary request with one tool call while `tool_calls` lasts, then with
-/// text. Keeps every ordinary request's messages.
+/// text. Keeps every summary request's messages and every ordinary
+/// request's messages, apart.
 #[derive(Default)]
 struct FoldClient {
     requests: Mutex<Vec<Vec<Message>>>,
+    summaries: Mutex<Vec<Vec<Message>>>,
     tool_calls: AtomicUsize,
     calls: AtomicUsize,
 }
@@ -71,6 +73,12 @@ struct FoldClient {
 impl FoldClient {
     fn requests(&self) -> Vec<Vec<Message>> {
         self.requests.lock().unwrap().clone()
+    }
+
+    /// Every compaction summary request: the summary source, then the
+    /// compaction prompt.
+    fn summaries(&self) -> Vec<Vec<Message>> {
+        self.summaries.lock().unwrap().clone()
     }
 
     fn call_tool_once(&self) {
@@ -97,6 +105,7 @@ impl AgentLlmClient for FoldClient {
             })
             .is_some_and(|text| text == COMPACTION_PROMPT);
         if summary_request {
+            self.summaries.lock().unwrap().push(messages.to_vec());
             return Ok(text_response("summary"));
         }
         self.requests.lock().unwrap().push(messages.to_vec());
@@ -177,6 +186,7 @@ impl AgentSessionStore for NoopStore {
 struct ArmedCompactor {
     countdown: AtomicUsize,
     rebuilds: AtomicUsize,
+    discarded: AtomicUsize,
 }
 
 impl ArmedCompactor {
@@ -186,6 +196,11 @@ impl ArmedCompactor {
 
     fn rebuilds(&self) -> usize {
         self.rebuilds.load(Ordering::SeqCst)
+    }
+
+    /// How many source rows the last rebuild folded into its summary.
+    fn last_discarded(&self) -> usize {
+        self.discarded.load(Ordering::SeqCst)
     }
 }
 
@@ -271,12 +286,37 @@ impl Compactor for ArmedCompactor {
                 mapping
             }
         };
+        self.discarded.store(discarded.len(), Ordering::SeqCst);
         CompactionResult {
             messages: rebuilt,
             summary,
             retained,
             discarded,
         }
+    }
+}
+
+/// A host curator that writes every summary itself and keeps the window
+/// each compaction handed it.
+#[derive(Default)]
+struct RecordingCurator {
+    windows: Mutex<Vec<Vec<Message>>>,
+}
+
+impl RecordingCurator {
+    fn windows(&self) -> Vec<Vec<Message>> {
+        self.windows.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl CompactionCurator for RecordingCurator {
+    async fn curate_summary(
+        &self,
+        window: CompactionWindow<'_>,
+    ) -> Result<CuratedCompactionSummary, CompactionCuratorError> {
+        self.windows.lock().unwrap().push(window.messages.to_vec());
+        CuratedCompactionSummary::new("curated summary")
     }
 }
 
@@ -296,6 +336,32 @@ async fn build_agent(
         ))
         .with_operator_instruction_lowering(lowering)
         .compactor(compactor)
+        .build_standalone(
+            Arc::clone(client),
+            Arc::new(ProbeTool::new()),
+            Arc::new(NoopStore),
+        )
+        .await
+}
+
+/// [`build_agent`] with a host curator that writes the summaries.
+async fn build_curated_agent(
+    session: Session,
+    client: &Arc<FoldClient>,
+    compactor: &Arc<ArmedCompactor>,
+    curator: &Arc<RecordingCurator>,
+    lowering: InstructionLowering,
+) -> TestAgent {
+    let compactor: Arc<dyn Compactor> = compactor.clone();
+    let curator: Arc<dyn CompactionCurator> = curator.clone();
+    AgentBuilder::new()
+        .resume_session(session)
+        .with_turn_state_handle(Arc::new(
+            crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+        ))
+        .with_operator_instruction_lowering(lowering)
+        .compactor(compactor)
+        .compaction_curator(curator)
         .build_standalone(
             Arc::clone(client),
             Arc::new(ProbeTool::new()),
@@ -932,6 +998,389 @@ async fn a_fork_child_fold_takes_out_inherited_rows_and_keeps_envelope_5() {
         state.slots().is_empty(),
         "the child has no target of its own"
     );
-    assert!(state.entry_sequence() >= 1);
+    assert_eq!(
+        state.entry_sequence(),
+        1,
+        "the child's first fold takes the first sequence of its own origin"
+    );
     assert_eq!(envelope_version(child.session()), 5);
+}
+
+/// The body of every instruction the summarizer rows below write: the one
+/// in effect, a superseded one and a revoked one.
+const INSTRUCTION_BODIES: [&str; 3] =
+    ["Answer formally.", "Use short sentences.", "Answer warmly."];
+
+/// Two slots apply at one run start; the next run start supersedes one and
+/// revokes the other. The first delta then holds a superseded body and a
+/// revoked body, and the second the body in effect.
+async fn apply_superseded_and_revoked_bodies(agent: &mut TestAgent) {
+    for write in [
+        activate("tone", 1, "Answer formally."),
+        activate("style", 1, "Use short sentences."),
+    ] {
+        agent.session_mut().set_session_instruction(write).unwrap();
+    }
+    assert!(matches!(
+        apply_and_run(agent, "first").await,
+        RunStartInstructionOutcome::Applied {
+            entry_sequence: 1,
+            ..
+        }
+    ));
+    for write in [activate("tone", 2, "Answer warmly."), revoke("style", 2)] {
+        agent.session_mut().set_session_instruction(write).unwrap();
+    }
+    assert!(matches!(
+        apply_and_run(agent, "second").await,
+        RunStartInstructionOutcome::Applied {
+            entry_sequence: 2,
+            ..
+        }
+    ));
+}
+
+fn assert_carries_no_instruction_body(what: &str, messages: &[Message]) {
+    let text = transcript_text(messages);
+    for body in INSTRUCTION_BODIES {
+        assert!(
+            !text.contains(body),
+            "{what} carries the instruction body {body:?}: {text}"
+        );
+    }
+    assert!(
+        entry_identities(messages).is_empty(),
+        "{what} carries an operator-instruction entry row"
+    );
+}
+
+fn is_user_request(message: &Message, text: &str) -> bool {
+    matches!(message, Message::User(user) if user.text_content() == text)
+}
+
+/// The session reloads from its persisted bytes, which validates its
+/// rewrite graph, and every rewrite the reloaded graph retains validates as
+/// a record with both of its bodies. Returns how many records validated.
+fn assert_reload_validates(session: &Session) -> usize {
+    let reloaded = Session::from_persisted_bytes(&session.to_persisted_bytes().unwrap())
+        .expect("the reloaded rewrite graph validates");
+    assert_eq!(reloaded.messages(), session.messages());
+    let history = reloaded
+        .validated_transcript_history_state()
+        .unwrap()
+        .expect("the session holds a rewrite graph");
+    let retained = history
+        .commits()
+        .skip(history.retired_count())
+        .cloned()
+        .collect::<Vec<_>>();
+    for commit in &retained {
+        let parent = history.materialize_rewrite_parent(commit).unwrap();
+        let child = history.materialize_rewrite_child(commit).unwrap();
+        meerkat_core::TranscriptRewriteRecord::new(commit.clone(), parent, child)
+            .expect("the rewrite record validates with both of its bodies");
+    }
+    retained.len()
+}
+
+/// No compaction summary request carries an operator-instruction body: not
+/// the body in effect, not a superseded one, not a revoked one. A summary
+/// is a user row, so a body it paraphrased would outlive the entry that
+/// revoked it. The first compaction runs inside a run and folds the rows
+/// before the run, its summary written from them; the second runs at a
+/// run's first request, with the first fold's snapshot in the transcript it
+/// summarizes. The instruction in effect stays in the transcript, in the
+/// snapshot.
+#[tokio::test]
+async fn no_summary_request_carries_an_instruction_body() {
+    let client = Arc::new(FoldClient::default());
+    let compactor = Arc::new(ArmedCompactor::default());
+    let mut agent = build_agent(
+        fresh_session(),
+        &client,
+        &compactor,
+        InstructionLowering::MidConversation,
+    )
+    .await;
+    apply_superseded_and_revoked_bodies(&mut agent).await;
+
+    // The third run's first request answers with a tool call; the
+    // compaction at its second request folds the rows before the run.
+    client.call_tool_once();
+    compactor.arm(2);
+    apply_and_run(&mut agent, "third").await;
+    assert_eq!(compactor.rebuilds(), 1);
+    assert_eq!(
+        entry_identities(agent.session().messages()).len(),
+        1,
+        "the first fold leaves its snapshot"
+    );
+    // The fourth run compacts at its first request.
+    compactor.arm(1);
+    apply_and_run(&mut agent, "fourth").await;
+    assert_eq!(compactor.rebuilds(), 2);
+
+    let summaries = client.summaries();
+    assert_eq!(summaries.len(), 2, "each compaction asks for one summary");
+    assert!(
+        transcript_text(&summaries[0]).contains("second"),
+        "the first summary is written from the rows before the run: {:?}",
+        summaries[0]
+    );
+    assert!(
+        transcript_text(&summaries[1]).contains("fourth"),
+        "the second summary is written from the whole transcript: {:?}",
+        summaries[1]
+    );
+    for (index, summary) in summaries.iter().enumerate() {
+        assert_carries_no_instruction_body(&format!("summary request {index}"), summary);
+    }
+
+    let messages = agent.session().messages().to_vec();
+    let entries = entry_identities(&messages);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind(), InstructionEntryKind::Snapshot);
+    assert!(
+        entry_row(&messages).content.contains("Answer warmly."),
+        "the instruction in effect stays in the snapshot"
+    );
+}
+
+/// A host curator writes the summary from a window that holds no
+/// operator-instruction row: no body in effect, superseded or revoked
+/// reaches it.
+#[tokio::test]
+async fn no_curator_window_carries_an_instruction_body() {
+    let client = Arc::new(FoldClient::default());
+    let compactor = Arc::new(ArmedCompactor::default());
+    let curator = Arc::new(RecordingCurator::default());
+    let mut agent = build_curated_agent(
+        fresh_session(),
+        &client,
+        &compactor,
+        &curator,
+        InstructionLowering::MidConversation,
+    )
+    .await;
+    apply_superseded_and_revoked_bodies(&mut agent).await;
+
+    compactor.arm(1);
+    apply_and_run(&mut agent, "third").await;
+    assert_eq!(compactor.rebuilds(), 1);
+    assert!(
+        client.summaries().is_empty(),
+        "the curator writes the summary"
+    );
+
+    let windows = curator.windows();
+    assert_eq!(windows.len(), 1);
+    assert!(
+        transcript_text(&windows[0]).contains("second"),
+        "the window holds the history: {:?}",
+        windows[0]
+    );
+    assert_carries_no_instruction_body("the curator window", &windows[0]);
+}
+
+/// The fold's snapshot is neutral in the shrink rule, which counts the rows
+/// other than operator-instruction entries. On a leading-prefix-only model
+/// the first run-start fold inserts a snapshot and takes no entry row out,
+/// so a compactor that takes out exactly two rows (its summary takes one
+/// back) leaves as many rows as there were. Its own rebuild still shrank
+/// the transcript, so the rewrite commits and the reloaded graph validates.
+#[tokio::test]
+async fn the_first_run_start_fold_commits_when_its_compaction_removes_two_rows() {
+    let client = Arc::new(FoldClient::default());
+    let compactor = Arc::new(ArmedCompactor::default());
+    let mut session = fresh_session();
+    exchange(&mut session, "hello", "hi");
+    let mut agent = build_agent(
+        session,
+        &client,
+        &compactor,
+        InstructionLowering::LeadingPrefixOnly,
+    )
+    .await;
+    agent
+        .session_mut()
+        .set_session_instruction(activate("tone", 1, "Answer formally."))
+        .unwrap();
+    compactor.arm(1);
+    assert_eq!(
+        apply_and_run(&mut agent, "next").await,
+        RunStartInstructionOutcome::Deferred(InstructionDeferReason::LeadingPrefixOnly)
+    );
+    assert_eq!(compactor.rebuilds(), 1, "the run's first request compacts");
+    assert_eq!(
+        compactor.last_discarded(),
+        2,
+        "the compactor takes out the earlier exchange"
+    );
+
+    let requests = client.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(
+        entry_index(request),
+        Some(1),
+        "the rewrite committed: the snapshot is in the request's leading System prefix: {request:?}"
+    );
+    assert!(is_summary(&request[2]), "the summary follows the snapshot");
+    assert!(is_user_request(&request[3], "next"));
+    assert_eq!(
+        request.len(),
+        4,
+        "the prompt, the snapshot, the summary and the run's request: as many rows as before"
+    );
+    assert!(entry_row(request).content.contains("Answer formally."));
+
+    let state = agent.session().instruction_target_state().unwrap().unwrap();
+    assert!(
+        state.slots()[0].pending_body.is_none(),
+        "the fold applied the target"
+    );
+    assert_eq!(state.entry_sequence(), 1);
+    assert_eq!(
+        assert_reload_validates(agent.session()),
+        1,
+        "the compaction's record validates"
+    );
+}
+
+/// A run that answers a pending tail starts with that tail, and the entry
+/// its run start applied follows the tail. An entry row belongs to the
+/// run's request rows, so a compaction inside the run (after its first
+/// response) folds only the rows before the tail: the request the run
+/// answers is kept verbatim, and the summary is not written from it.
+#[tokio::test]
+async fn a_mid_run_compaction_keeps_the_pending_tail_request_an_entry_follows() {
+    let client = Arc::new(FoldClient::default());
+    let compactor = Arc::new(ArmedCompactor::default());
+    let mut session = conversed_session();
+    session.push(Message::User(UserMessage::text("pending question")));
+    let mut agent = build_agent(
+        session,
+        &client,
+        &compactor,
+        InstructionLowering::MidConversation,
+    )
+    .await;
+    agent
+        .session_mut()
+        .set_session_instruction(activate("tone", 1, "Answer formally."))
+        .unwrap();
+    assert!(matches!(
+        agent
+            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+            .unwrap(),
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    let rows = agent.session().messages().to_vec();
+    assert!(is_user_request(&rows[rows.len() - 2], "pending question"));
+    assert_eq!(
+        entry_index(&rows),
+        Some(rows.len() - 1),
+        "the entry follows the pending tail"
+    );
+
+    // The run's first request answers with a tool call; the compaction
+    // runs at its second request.
+    client.call_tool_once();
+    compactor.arm(2);
+    agent.set_runtime_execution_kind(Some(
+        meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+    ));
+    agent
+        .run_pending()
+        .await
+        .expect("the pending tail runs with the entry after it");
+    assert_eq!(
+        compactor.rebuilds(),
+        1,
+        "the run compacts at its second request"
+    );
+
+    let after_fold = client.requests().last().cloned().unwrap();
+    let summary_index = after_fold
+        .iter()
+        .position(is_summary)
+        .expect("the request after the compaction carries its summary");
+    let tail_index = after_fold
+        .iter()
+        .position(|message| is_user_request(message, "pending question"))
+        .unwrap_or_else(|| panic!("the request the run answers is kept verbatim: {after_fold:?}"));
+    assert!(summary_index < tail_index);
+    assert!(
+        agent
+            .session()
+            .messages()
+            .iter()
+            .any(|message| is_user_request(message, "pending question")),
+        "the transcript keeps the run's request"
+    );
+    let summaries = client.summaries();
+    assert_eq!(summaries.len(), 1);
+    assert!(
+        !transcript_text(&summaries[0]).contains("pending question"),
+        "the summary is not written from the request the run answers"
+    );
+}
+
+/// A run-start fold applies the recorded target, and an empty folded set
+/// leaves no entry row. A leading-prefix-only model takes a pending revoke
+/// of its only slot this way, although the entry row the fold takes out
+/// still had that slot in effect: the rewrite's record validates, so a
+/// compaction that leaves no snapshot cannot be refused merely because the
+/// rows it takes out had an instruction in effect.
+#[tokio::test]
+async fn a_run_start_fold_of_a_fully_revoked_target_leaves_no_entry_row() {
+    let client = Arc::new(FoldClient::default());
+    let compactor = Arc::new(ArmedCompactor::default());
+    let mut agent = build_agent(
+        fresh_session(),
+        &client,
+        &compactor,
+        InstructionLowering::LeadingPrefixOnly,
+    )
+    .await;
+    agent
+        .session_mut()
+        .set_session_instruction(activate("tone", 1, "Answer formally."))
+        .unwrap();
+    assert!(matches!(
+        apply_and_run(&mut agent, "first").await,
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    agent
+        .session_mut()
+        .set_session_instruction(revoke("tone", 2))
+        .unwrap();
+    compactor.arm(1);
+    assert_eq!(
+        apply_and_run(&mut agent, "second").await,
+        RunStartInstructionOutcome::Deferred(InstructionDeferReason::LeadingPrefixOnly)
+    );
+    assert_eq!(compactor.rebuilds(), 1, "the run's first request compacts");
+
+    let messages = agent.session().messages().to_vec();
+    assert!(
+        entry_identities(&messages).is_empty(),
+        "an empty folded set leaves no row"
+    );
+    assert!(!transcript_text(&messages).contains("Answer formally."));
+    assert!(entry_identities(client.requests().last().unwrap()).is_empty());
+    let state = agent.session().instruction_target_state().unwrap().unwrap();
+    assert_eq!(state.entry_sequence(), 2, "the fold took sequence 2");
+    assert_eq!(
+        agent
+            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+            .unwrap(),
+        RunStartInstructionOutcome::NotNeeded,
+        "the fold applied the revoke"
+    );
+    assert_eq!(
+        assert_reload_validates(agent.session()),
+        1,
+        "the compaction's record validates"
+    );
 }

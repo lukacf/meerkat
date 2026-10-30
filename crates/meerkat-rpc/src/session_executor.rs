@@ -1002,6 +1002,25 @@ impl CoreExecutor for SessionRuntimeExecutor {
             ));
         }
 
+        // A session whose task ended with the host's runtime is checked
+        // before anything is forwarded: a live channel's adapter would
+        // otherwise take a resumed run (which skips the pre-dequeue check)
+        // for a session the stop left without an actor. The session service
+        // degrades the registration, so the runtime loop leaves the run to
+        // the session's next registration.
+        if self
+            .runtime
+            .persistent_service()
+            .runtime_turn_lost_its_host_runtime(&self.session_id, Some(&run_id))
+            .await
+        {
+            return Err(CoreExecutorError::apply_failed_runtime_turn(format!(
+                "session {} lost its session task to the runtime it ran on; run {run_id} is \
+                 left to the session's next registration",
+                self.session_id
+            )));
+        }
+
         if let Some(output) = self
             .runtime
             .try_forward_runtime_primitive_to_live_adapter(

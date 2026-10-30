@@ -232,6 +232,8 @@ pub enum MobMachineCatalogInput {
     BeginMemberRotation,
     CommitMemberRotation,
     ClassifyMemberRelease,
+    AdoptLegacyIdentityEntry,
+    ResolveAgentLaneMemberAdmission,
 }
 
 impl MobMachineCatalogInput {
@@ -464,6 +466,8 @@ impl MobMachineCatalogInput {
         Self::BeginMemberRotation,
         Self::CommitMemberRotation,
         Self::ClassifyMemberRelease,
+        Self::AdoptLegacyIdentityEntry,
+        Self::ResolveAgentLaneMemberAdmission,
     ];
 
     #[must_use]
@@ -699,6 +703,8 @@ impl MobMachineCatalogInput {
             Self::BeginMemberRotation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::BeginMemberRotation,
             Self::CommitMemberRotation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::CommitMemberRotation,
             Self::ClassifyMemberRelease => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ClassifyMemberRelease,
+            Self::AdoptLegacyIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdoptLegacyIdentityEntry,
+            Self::ResolveAgentLaneMemberAdmission => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveAgentLaneMemberAdmission,
         }
     }
 
@@ -959,6 +965,8 @@ impl MobMachineCatalogInput {
             Self::BeginMemberRotation => "BeginMemberRotation",
             Self::CommitMemberRotation => "CommitMemberRotation",
             Self::ClassifyMemberRelease => "ClassifyMemberRelease",
+            Self::AdoptLegacyIdentityEntry => "AdoptLegacyIdentityEntry",
+            Self::ResolveAgentLaneMemberAdmission => "ResolveAgentLaneMemberAdmission",
         }
     }
 }

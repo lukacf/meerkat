@@ -6,7 +6,10 @@
 //! Each effect follows a lifecycle step Core journals (a rotation, a seat, a
 //! retirement). A process killed between the step and its effect still owes
 //! the effect: the next start over the same state delivers it, once, and
-//! repeats none that the killed process completed.
+//! repeats none that the killed process completed, nor one for an
+//! incarnation that ended since. An effect that never answers, or whose
+//! write always fails, is reported and holds back none of the effects after
+//! it.
 //!
 //! A kill is a child process of this test binary: the test's own body,
 //! selected by [`CHILD_STATE_ENV`], boots over a state directory, takes the
@@ -41,6 +44,8 @@ use crate::memory::steward::{
     StewardClientHandle, StewardConfig, StewardEngine, StewardError, StewardProfile,
 };
 use crate::mob_handle_runtime::SessionCreatedContext;
+use crate::unified_runtime::ErrorHook;
+use crate::unified_runtime::types::ErrorEvent;
 use crate::{
     ChildMobStorage, DiscoverySpec, MetaConfig, MobBootstrapOptions, MobBootstrapSpec,
     PersistentMetadataStore, RuntimeOptions, SqliteAgentMemoryStore, SqliteMetadataStore,
@@ -68,6 +73,14 @@ const REALM: &str = "default";
 
 const ALPHA: &str = "alpha-1";
 const BETA: &str = "beta-1";
+const GAMMA: &str = "gamma-1";
+
+/// The bounds of each lifecycle side effect in the rows that wait for one:
+/// an attempt that has not answered within this deadline failed.
+const SHORT_DEADLINE: Duration = Duration::from_millis(200);
+
+/// How many attempts of one side effect those rows allow.
+const SHORT_ATTEMPTS: u32 = 2;
 
 fn mob_toml(mob_id: &str) -> String {
     format!(
@@ -143,6 +156,10 @@ struct Wiring {
     memory: Option<AgentMemoryRuntimeInjector>,
     /// Read the first-boot manifest from the boot's state root.
     first_boot_rows: bool,
+    error_hook: Option<ErrorHook>,
+    /// Bound each lifecycle side effect: a deadline per attempt, and the
+    /// attempts allowed.
+    effect_limits: Option<(Duration, u32)>,
 }
 
 /// One boot over a state directory: a persistent mob, sessions and metadata,
@@ -265,6 +282,12 @@ async fn boot(state: &Path, mob_id: &str, roster: Vec<DurableAgentSpec>, wiring:
     }
     if wiring.first_boot_rows {
         identities.set_first_boot_state_dir(Some(state_root));
+    }
+    if let Some(hook) = wiring.error_hook {
+        identities.set_error_hook(Some(hook));
+    }
+    if let Some((deadline, attempts)) = wiring.effect_limits {
+        identities.set_lifecycle_effect_limits(deadline, attempts);
     }
     let roster_provider = Arc::new(MutableRosterProvider::new(roster.clone()));
     let context = Arc::new(IdentityFirstRuntimeContext::new(
@@ -494,6 +517,81 @@ fn recording_observer(seen: &Arc<Mutex<Vec<RetiredIdentityMember>>>) -> RetiredM
 /// kill lands inside the hook.
 fn exiting_observer() -> RetiredMemberObserver {
     Arc::new(move |_retired| Box::pin(async { exit_now::<Result<(), String>>() }))
+}
+
+/// The host's retirement hook, recording each incarnation it hears of, that
+/// never answers for an incarnation of `stuck`.
+fn hook_stuck_on(
+    stuck: &AgentIdentity,
+    seen: &Arc<Mutex<Vec<RetiredIdentityMember>>>,
+) -> RetiredMemberObserver {
+    let stuck = stuck.clone();
+    let seen = Arc::clone(seen);
+    Arc::new(move |retired| {
+        let never = retired.identity == stuck;
+        seen.lock().unwrap().push(retired);
+        Box::pin(async move {
+            if never {
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        })
+    })
+}
+
+/// The incarnations of `identity` the hook heard of, each with its cause.
+fn hook_calls_of(
+    seen: &Mutex<Vec<RetiredIdentityMember>>,
+    identity: &AgentIdentity,
+) -> Vec<String> {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .filter(|retired| retired.identity == *identity)
+        .map(|retired| retired.cause.as_str().to_string())
+        .collect()
+}
+
+/// An error hook that keeps every event it is handed.
+fn keeping_error_hook(events: &Arc<Mutex<Vec<ErrorEvent>>>) -> ErrorHook {
+    let events = Arc::clone(events);
+    Arc::new(move |event| {
+        events.lock().unwrap().push(event);
+        Box::pin(async {})
+    })
+}
+
+/// The failed lifecycle side effects of `identity` the error hook was
+/// handed, each in its wire form.
+fn failed_effects_of(
+    events: &Mutex<Vec<ErrorEvent>>,
+    identity: &AgentIdentity,
+) -> Vec<serde_json::Value> {
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|event| serde_json::to_value(event).expect("an error event serializes"))
+        .filter(|event| {
+            event["category"] == "lifecycle_effect_failed" && event["identity"] == identity.as_str()
+        })
+        .collect()
+}
+
+/// From now on, every write to the exit-interview queue in `store` fails.
+async fn refuse_exit_interviews(store: &SqliteAgentMemoryStore) {
+    // A read opens the realm's database, and its tables, first.
+    store
+        .pending_harvests(REALM, 1)
+        .await
+        .expect("read the exit-interview queue");
+    let conn =
+        rusqlite::Connection::open(store.path_for_realm(REALM)).expect("open the memory database");
+    conn.execute_batch(
+        "CREATE TRIGGER refuse_exit_interviews BEFORE INSERT ON pending_harvests \
+         BEGIN SELECT RAISE(ABORT, 'the exit-interview queue refuses every write'); END;",
+    )
+    .expect("make the exit-interview queue refuse every write");
 }
 
 /// Wait until `ready` answers, polling: the parent's start owes the effect.
@@ -871,6 +969,222 @@ async fn a_kill_inside_after_create_tells_it_after_the_restart() {
         customizer.told(),
         vec![(alpha.identity.clone(), session)],
         "the seat is told once, with the identity's session"
+    );
+    let _ = boot.runtime.shutdown().await;
+}
+
+/// A seat commits in Core, and the process is killed inside the customizer's
+/// `after_create` for it. The next start's roster no longer lists the
+/// identity: its boot pass retires the incarnation the seat made, and the
+/// replay of the seat tells nothing for it, since its retirement hook
+/// (`unlisted`) stands for it. The identity the roster still lists is told,
+/// once.
+///
+/// RED before only the incarnation Core still binds was told: the replayed
+/// seat of the retired incarnation was told `after_create`, after its
+/// retirement, with a session no member of the identity runs on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replayed_seat_of_an_incarnation_that_ended_is_not_told() {
+    const NAME: &str = "a_replayed_seat_of_an_incarnation_that_ended_is_not_told";
+    const MOB: &str = "lifecycle-effect-ended-seat";
+    let alpha = member(ALPHA);
+    let beta = member(BETA);
+    if let Some(state) = child_state() {
+        // A seat's after_create ends the process, during the roster pass or
+        // after it.
+        let _boot = boot(
+            &state,
+            MOB,
+            vec![alpha.clone(), beta.clone()],
+            Wiring {
+                customizer: Some(Arc::new(ExitingAfterCreate)),
+                ..Wiring::default()
+            },
+        )
+        .await;
+        std::future::pending::<()>().await;
+    }
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    run_child(NAME, temp.path()).await;
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let customizer = Arc::new(RecordingCustomizer::default());
+    let boot = boot(
+        temp.path(),
+        MOB,
+        vec![alpha.clone()],
+        Wiring {
+            observer: Some(recording_observer(&seen)),
+            customizer: Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>),
+            ..Wiring::default()
+        },
+    )
+    .await;
+    eventually("the ended incarnation's retirement hook", || {
+        (!hook_calls_of(&seen, &beta.identity).is_empty()).then_some(())
+    })
+    .await;
+    eventually("the listed seat's after_create", || {
+        (!customizer.told().is_empty()).then_some(())
+    })
+    .await;
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(
+        hook_calls_of(&seen, &beta.identity),
+        vec!["unlisted".to_string()],
+        "the retirement of the incarnation the seat made is handed over once"
+    );
+    let session = boot.session_of(&alpha.identity).await;
+    assert_eq!(
+        customizer.told(),
+        vec![(alpha.identity.clone(), session)],
+        "only the incarnation Core still binds is told"
+    );
+    let _ = boot.runtime.shutdown().await;
+}
+
+/// The host's retirement hook never answers for one identity the roster
+/// stops listing. Each attempt to call it is bounded: once every attempt
+/// missed its deadline, the failure is reported typed
+/// (`lifecycle_effect_failed`, effect `retirement_hook`), and the retirement
+/// Core journaled after it reaches the hook.
+///
+/// RED before each lifecycle side effect was bounded: the projection waited
+/// for the hook forever, and every side effect journaled after it waited
+/// behind it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retirement_hook_that_never_answers_is_reported_and_later_effects_run() {
+    const MOB: &str = "lifecycle-effect-stuck-hook";
+    let temp = tempfile::tempdir().expect("temp dir");
+    let alpha = member(ALPHA);
+    let beta = member(BETA);
+    let gamma = member(GAMMA);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let boot = boot(
+        temp.path(),
+        MOB,
+        vec![alpha.clone(), beta.clone(), gamma.clone()],
+        Wiring {
+            observer: Some(hook_stuck_on(&beta.identity, &seen)),
+            error_hook: Some(keeping_error_hook(&events)),
+            effect_limits: Some((SHORT_DEADLINE, SHORT_ATTEMPTS)),
+            ..Wiring::default()
+        },
+    )
+    .await;
+    assert!(boot.roster.remove(&beta.identity));
+    boot.context
+        .refresh_desired_topology_tracked()
+        .await
+        .expect("the roster pass retires the unlisted identity");
+    eventually("the first call of the hook that never answers", || {
+        (!hook_calls_of(&seen, &beta.identity).is_empty()).then_some(())
+    })
+    .await;
+    // A step Core journals after the one whose hook never answers.
+    assert!(boot.roster.remove(&gamma.identity));
+    boot.context
+        .refresh_desired_topology_tracked()
+        .await
+        .expect("the roster pass retires the second unlisted identity");
+    eventually("the later retirement's hook", || {
+        (!hook_calls_of(&seen, &gamma.identity).is_empty()).then_some(())
+    })
+    .await;
+    eventually("the reported failure of the hook", || {
+        (!failed_effects_of(&events, &beta.identity).is_empty()).then_some(())
+    })
+    .await;
+    tokio::time::sleep(SETTLE).await;
+    let failed = failed_effects_of(&events, &beta.identity);
+    assert_eq!(failed.len(), 1, "reported once: {failed:?}");
+    assert_eq!(failed[0]["effect"], "retirement_hook", "{failed:?}");
+    assert_eq!(failed[0]["attempts"], SHORT_ATTEMPTS, "{failed:?}");
+    assert_eq!(
+        hook_calls_of(&seen, &beta.identity).len(),
+        SHORT_ATTEMPTS as usize,
+        "each attempt calls the hook once, and no attempt follows the last"
+    );
+    assert_eq!(
+        hook_calls_of(&seen, &gamma.identity),
+        vec!["unlisted".to_string()]
+    );
+    let _ = boot.runtime.shutdown().await;
+}
+
+/// The exit-interview queue refuses every write. Each attempt to queue an
+/// unlisted identity's exit interview is bounded: once every attempt failed,
+/// the failure is reported typed (`lifecycle_effect_failed`, effect
+/// `exit_interview`), the identity still reaches the retirement hook, and the
+/// retirement Core journaled after it runs its side effects too.
+///
+/// RED before each lifecycle side effect was bounded: the failed write failed
+/// the projection's page, which ran again from the same place at every
+/// sweep, so neither the identity's hook nor anything journaled after it
+/// ever ran.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_exit_interview_write_that_always_fails_is_reported_and_later_effects_run() {
+    const MOB: &str = "lifecycle-effect-refused-write";
+    let temp = tempfile::tempdir().expect("temp dir");
+    let alpha = member(ALPHA);
+    let beta = member(BETA);
+    let gamma = member(GAMMA);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let (memory, memory_store) = memory_over(
+        &temp.path().join("memory"),
+        Arc::new(RecordingTranscripts::default()),
+    );
+    let boot = boot(
+        temp.path(),
+        MOB,
+        vec![alpha.clone(), beta.clone(), gamma.clone()],
+        Wiring {
+            observer: Some(recording_observer(&seen)),
+            memory: Some(memory),
+            error_hook: Some(keeping_error_hook(&events)),
+            effect_limits: Some((SHORT_DEADLINE, SHORT_ATTEMPTS)),
+            ..Wiring::default()
+        },
+    )
+    .await;
+    refuse_exit_interviews(&memory_store).await;
+    assert!(boot.roster.remove(&beta.identity));
+    boot.context
+        .refresh_desired_topology_tracked()
+        .await
+        .expect("the roster pass retires the unlisted identity");
+    // A step Core journals after the one whose exit interview is refused.
+    assert!(boot.roster.remove(&gamma.identity));
+    boot.context
+        .refresh_desired_topology_tracked()
+        .await
+        .expect("the roster pass retires the second unlisted identity");
+    eventually("the later retirement's hook", || {
+        (!hook_calls_of(&seen, &gamma.identity).is_empty()).then_some(())
+    })
+    .await;
+    eventually("the reported failure of the exit interview", || {
+        (!failed_effects_of(&events, &beta.identity).is_empty()).then_some(())
+    })
+    .await;
+    tokio::time::sleep(SETTLE).await;
+    let failed = failed_effects_of(&events, &beta.identity);
+    assert_eq!(failed.len(), 1, "reported once: {failed:?}");
+    assert_eq!(failed[0]["effect"], "exit_interview", "{failed:?}");
+    assert_eq!(failed[0]["attempts"], SHORT_ATTEMPTS, "{failed:?}");
+    assert_eq!(
+        hook_calls_of(&seen, &beta.identity),
+        vec!["unlisted".to_string()],
+        "the refused exit interview holds back none of the identity's other side effects"
+    );
+    assert!(
+        pending_harvests_of(&memory_store, &beta.identity)
+            .await
+            .is_empty(),
+        "the refused write queued nothing"
     );
     let _ = boot.runtime.shutdown().await;
 }

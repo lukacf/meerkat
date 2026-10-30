@@ -1227,6 +1227,16 @@ impl IdentityRuntime {
 }
 
 #[cfg(test)]
+impl IdentityRuntime {
+    /// The bounds a row asks for each lifecycle side effect: `deadline` per
+    /// attempt, at most `attempts` attempts. No side effect is bounded yet,
+    /// so they are not kept.
+    pub(crate) fn set_lifecycle_effect_limits(&self, deadline: Duration, attempts: u32) {
+        let _ = (deadline, attempts);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

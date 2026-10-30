@@ -15,16 +15,23 @@ use tokio::sync::oneshot;
 
 use super::*;
 use crate::identity_first::bridge::{
-    BridgeDelivery, BridgeError, DormantSeatRequest, DormantSeatResult, MemberRuntimeBinding,
-    ResumeRejectionKind, ResumeSessionOutcome, SessionBridge,
+    BridgeDelivery, BridgeError, DormantSeatRequest, DormantSeatResult, MemberLifecycleJournalHead,
+    MemberLifecycleJournalPage, MemberRuntimeBinding, ResumeRejectionKind, ResumeSessionOutcome,
+    SessionBridge,
 };
 use crate::identity_first::core_test_bridge::{CoreReadsBridge, bind_live, register_live};
 use crate::identity_first::core_test_members::CoreTestMembers;
 use crate::identity_first::first_boot_manifest::FirstBootManifest;
 use crate::identity_first::local_lease::LocalLeaseProvider;
 use crate::identity_first::local_store::LocalContinuityStore;
+use crate::identity_first::runtime::RetiredMemberObserver;
 use crate::identity_first::{
-    AgentAddressability, AgentRuntimeId, DurabilityPolicy, IdentityRuntimeConfig, SessionSnapshot,
+    AgentAddressability, AgentMemoryConfig, AgentMemoryRuntimeInjector, AgentRuntimeId,
+    DurabilityPolicy, IdentityRuntimeConfig, SessionSnapshot,
+};
+use crate::memory::distiller::{
+    DistillerClientHandle, DistillerConfig, DistillerEngine, DistillerError, DistillerProfile,
+    TranscriptSlice, TranscriptSource,
 };
 
 fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -565,6 +572,20 @@ impl SessionBridge for SeatCore {
     async fn retire_member(&self, runtime_id: &AgentRuntimeId) -> Result<(), BridgeError> {
         self.core.retire(runtime_id);
         Ok(())
+    }
+
+    async fn member_lifecycle_journal_head(
+        &self,
+    ) -> Result<MemberLifecycleJournalHead, BridgeError> {
+        self.core.journal_head()
+    }
+
+    async fn member_lifecycle_journal_page(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<MemberLifecycleJournalPage, BridgeError> {
+        self.core.journal_page(after, limit)
     }
 }
 
@@ -3434,5 +3455,143 @@ async fn shutdown_waits_for_a_seat_step_inside_cores_seat_call() {
     assert!(
         core.session_of(&alice).is_some(),
         "Core's seat committed before the join returned"
+    );
+}
+
+/// A transcript source that records each session the distiller reads and
+/// answers that the store holds no such session, so no model is asked.
+#[derive(Default)]
+struct ReadSessions(StdMutex<Vec<String>>);
+
+impl ReadSessions {
+    fn reads_of(&self, session: &SessionId) -> usize {
+        let session = session.to_string();
+        lock(&self.0)
+            .iter()
+            .filter(|read| **read == session)
+            .count()
+    }
+}
+
+#[async_trait::async_trait]
+impl TranscriptSource for ReadSessions {
+    async fn read(
+        &self,
+        session_key: &str,
+        _from_index: u64,
+    ) -> Result<Option<TranscriptSlice>, DistillerError> {
+        lock(&self.0).push(session_key.to_string());
+        Ok(None)
+    }
+}
+
+/// The distiller's model client: never asked, since no session it reads
+/// holds anything.
+struct UnaskedClient;
+
+#[async_trait::async_trait]
+impl DistillerClientHandle for UnaskedClient {
+    async fn client(&self) -> Result<Arc<dyn meerkat_client::LlmClient>, DistillerError> {
+        Ok(Arc::new(meerkat_client::TestClient::default()))
+    }
+
+    fn invalidate(&self) {}
+}
+
+/// Agent memory over a store in `dir`, whose distiller reads sessions
+/// through `reads`, and the taint tracker that marks its reset boundaries.
+fn memory_reading(
+    dir: &std::path::Path,
+    reads: Arc<ReadSessions>,
+) -> (AgentMemoryRuntimeInjector, crate::SessionTaintTracker) {
+    let store = Arc::new(crate::SqliteAgentMemoryStore::open(dir).expect("open the memory store"));
+    let tracker = crate::SessionTaintTracker::new(crate::ContentTrustConfig::default());
+    let distiller = Arc::new(DistillerEngine::new(
+        DistillerProfile::embedded_default(),
+        DistillerConfig {
+            enabled: true,
+            ..DistillerConfig::default()
+        },
+        Arc::new(UnaskedClient),
+        store.clone(),
+        store.clone(),
+        reads,
+        None,
+        None,
+        "default",
+    ));
+    let injector = AgentMemoryRuntimeInjector::new(store, AgentMemoryConfig::default())
+        .with_taint_tracker(tracker.clone())
+        .with_distiller(distiller);
+    (injector, tracker)
+}
+
+/// A role move on a session that lives in memory only rotates the identity
+/// onto a fresh session under the roster profile. The retirement hook hears
+/// of the incarnation that ended as a role move (`role_move`), never as a
+/// reset. The session the move left is distilled once, as a retirement's
+/// is, and no reset boundary quarantines what it held: nobody asked for a
+/// clean slate.
+///
+/// RED before a role move had a cause of its own: the move recorded a
+/// reset's intent, so the hook heard `reset`, and the session it left was
+/// marked a reset boundary.
+#[tokio::test]
+async fn a_role_move_reaches_the_retirement_hook_as_a_role_move() {
+    let alice = identity("personal:alice");
+    let planned = SessionId::new();
+    let core = Arc::new(SeatCore {
+        sessions_in_memory: true,
+        ..SeatCore::default()
+    });
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, planned.clone())
+        .await
+        .expect("registered live");
+    let seen = Arc::new(StdMutex::new(Vec::new()));
+    let recorded = Arc::clone(&seen);
+    let observer: RetiredMemberObserver = Arc::new(move |retired| {
+        lock(&recorded).push(retired);
+        Box::pin(async { Ok(()) })
+    });
+    runtime.set_retired_member_observer(Some(observer));
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let reads = Arc::new(ReadSessions::default());
+    let (memory, tracker) = memory_reading(memory_dir.path(), Arc::clone(&reads));
+    runtime.set_agent_memory(Some(memory)).await;
+    let mut reviewer = spec(&alice);
+    reviewer.profile = meerkat_mob::ProfileName::from("reviewer");
+
+    let outcomes = runtime
+        .seat_identities(std::slice::from_ref(&reviewer), None)
+        .await;
+    let outcome = outcomes[&alice]
+        .as_ref()
+        .expect("the role move rotates the identity");
+    assert!(!outcome.already_seated, "the move rotated the member");
+    assert_ne!(
+        core.session_of(&alice),
+        Some(planned.clone()),
+        "the identity runs on a fresh session"
+    );
+    runtime.settle_lifecycle_projection().await;
+
+    let calls = lock(&seen).clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].identity, alice);
+    assert_eq!(calls[0].cause.as_str(), "role_move", "{calls:?}");
+    assert_eq!(calls[0].generation, 0);
+    assert_eq!(calls[0].role, meerkat_mob::ProfileName::from("personal"));
+    assert_eq!(calls[0].session_id.as_ref(), Some(&planned));
+    assert_eq!(
+        reads.reads_of(&planned),
+        1,
+        "the session the move left is distilled once"
+    );
+    assert_eq!(
+        tracker.evidence_quarantine_reason(&planned.to_string()),
+        None,
+        "no reset boundary quarantines the session a role move left"
     );
 }

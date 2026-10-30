@@ -1724,7 +1724,8 @@ mod tests {
                 }
             });
             // Native fixture setup is complete. This timeout observes only
-            // the presenter and scripted answer, never a native finalizer.
+            // the presenter and the answer typed on its PTY, never a native
+            // finalizer.
             let (result, ()) = tokio::time::timeout(Duration::from_secs(30), async {
                 tokio::join!(
                     present(

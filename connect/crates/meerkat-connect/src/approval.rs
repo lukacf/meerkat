@@ -817,7 +817,8 @@ impl LocalApprovals {
         context: &ToolDispatchContext,
     ) -> Result<(), ToolError> {
         let refused = || ToolError::access_denied(call.name);
-        // Service access holds this phase while checking approvals/session
+        // Service access observes the installation policy's phase and releases
+        // it before it locks Shared.state to check approvals/session
         // currentness. Never take the phase lock while holding Shared.state.
         if let Some(source) = &self.shared.installation_policy
             && let Some(policy) = source

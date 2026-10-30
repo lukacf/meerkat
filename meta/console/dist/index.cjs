@@ -43486,7 +43486,8 @@ function RoleTree({
   agents,
   activity,
   onSelectAgent,
-  teamName: teamName2
+  teamName: teamName2,
+  teamKey
 }) {
   const graph = import_react31.default.useMemo(() => buildGraph(nodes, agents), [nodes, agents]);
   const roleIndex = import_react31.default.useMemo(() => roleIndexFor(graph.roles), [graph.roles]);
@@ -43526,7 +43527,7 @@ function RoleTree({
             }
           ),
           /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("span", { className: "topo-roletree__dot", style: { background: "var(--ok)" } }),
-          /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("span", { className: "topo-roletree__label", children: teamName2?.trim() || "Team" }),
+          /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("span", { className: "topo-roletree__label", title: teamKey?.trim() || void 0, children: teamName2?.trim() || "Team" }),
           /* @__PURE__ */ (0, import_jsx_runtime50.jsxs)("span", { className: "topo-roletree__count", children: [
             graph.agents.length,
             " agents \xB7 ",
@@ -44795,7 +44796,8 @@ function TopologyPanel({
   bulkActions,
   onRequestBulkAction,
   onSelectAgent,
-  teamName: teamName2
+  teamName: teamName2,
+  teamKey
 }) {
   const hasConnectionView = Boolean(management && management.policy.mode !== "disabled");
   const [uncontrolledView, setUncontrolledView] = import_react33.default.useState(() => {
@@ -44951,7 +44953,8 @@ function TopologyPanel({
               agents,
               activity,
               onSelectAgent,
-              teamName: teamName2
+              teamName: teamName2,
+              teamKey
             }
           ) : null,
           view === "connections" && management ? /* @__PURE__ */ (0, import_jsx_runtime52.jsx)(
@@ -49767,6 +49770,7 @@ function framesAfterIdleWatermark(frames, watermark) {
 var import_react57 = __toESM(require("react"));
 
 // src/lib/panel-runtime.ts
+var SHARED_CONSOLE_RUNTIME_ID = "console-aggregator";
 function selectionStorageKey(scope) {
   return "meta-console-panel-runtime:".concat(encodeURIComponent(scope));
 }
@@ -51400,6 +51404,12 @@ function parseConsoleTopologyEndpointKey(id) {
 function topologyNodeAgent(agents, id) {
   const identity = parseConsoleTopologyEndpointKey(id)?.identity ?? id;
   return agents.find((agent) => agent.identity === identity || agent.member_id === identity || agent.agent_id === identity);
+}
+function topologyTeamKey(experience) {
+  const runtimeId = experience?.runtime_id?.trim();
+  if (runtimeId && runtimeId !== SHARED_CONSOLE_RUNTIME_ID) return runtimeId;
+  const runtimes = experience?.panel_runtimes;
+  return runtimes?.length === 1 ? runtimes[0]?.label?.trim() || void 0 : void 0;
 }
 function agentChatTarget(target) {
   return target && target.kind === "agent-chat" ? target : null;
@@ -70005,7 +70015,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     setRailCollapsed(configured);
   }, [experience?.console_config?.rail?.collapsed]);
-  const hasMobControlSurface = experience?.runtime_id !== "console-aggregator";
+  const hasMobControlSurface = experience?.runtime_id !== SHARED_CONSOLE_RUNTIME_ID;
   const frontendReadOnly = import_react57.default.useMemo(() => resolveConsoleReadOnlyOverride(), []);
   const accessEnforcing = experience?.access?.enabled === true;
   const consoleReadOnly = frontendReadOnly || experience?.console_policy?.read_only === true || !accessEnforcing && experience?.runtime_capabilities?.can_send_messages === false;
@@ -72266,7 +72276,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           readOnly: consoleReadOnly
         }
       );
-    if (target.kind === "topology")
+    if (target.kind === "topology") {
+      const teamKey = topologyTeamKey(experience);
       return /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(
         TopologyPanel,
         {
@@ -72281,9 +72292,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onSelectAgent: (id) => {
             const agent = topologyNodeAgent(agents, id);
             if (agent) openAgentBesideTopology(agent, panel.id);
-          }
+          },
+          teamName: teamKey ? teamName(teamKey) : void 0,
+          teamKey
         }
       );
+    }
     if (target.kind === "health")
       return renderHealthPanel(
         experience?.health_overview?.live_snapshot?.identities || []

@@ -281,9 +281,9 @@ pub use session::{
     RevisionSelector, RewriteSessionTranscriptParams, SessionStreamCloseParams,
     SessionStreamCloseResult, SessionStreamOpenParams, SessionStreamOpenResult,
     TranscriptRewriteMessage, UpdateSystemPromptParams, WireAssistantBlock, WireContentBlock,
-    WireContentInput, WireImageData, WireInterruptOutcome, WirePromptInput, WireProviderMeta,
-    WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
-    WireSessionTranscriptRevision, WireSessionTranscriptRevisionEntry,
+    WireContentInput, WireImageData, WireInstructionEntryIdentity, WireInterruptOutcome,
+    WirePromptInput, WireProviderMeta, WireSessionHistory, WireSessionInfo, WireSessionMessage,
+    WireSessionSummary, WireSessionTranscriptRevision, WireSessionTranscriptRevisionEntry,
     WireSessionTranscriptRevisionList, WireStopReason, WireSystemMessageIdentity, WireToolResult,
     WireToolResultContent, WireTranscriptSource, WireVideoData,
 };

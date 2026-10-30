@@ -379,14 +379,14 @@ async fn write_during_a_turn_leaves_its_requests_unchanged_and_applies_at_the_ne
 #[tokio::test]
 async fn ephemeral_service_refuses_durability_unavailable() {
     let probe = Arc::new(RunProbe::default());
-    let service = EphemeralSessionService::new(ProbeBuilder { probe }, 1);
+    let service = Arc::new(EphemeralSessionService::new(ProbeBuilder { probe }, 1));
     let id = service
         .create_session(create_request())
         .await
         .expect("create a deferred session")
         .session_id;
 
-    let refused = service
+    let refused = Arc::clone(&service)
         .set_session_instruction(&id, write_tone())
         .await
         .expect_err("an ephemeral session keeps no durable target");
@@ -410,7 +410,9 @@ async fn ephemeral_service_refuses_durability_unavailable() {
         }],
     };
     assert!(matches!(
-        service.record_instruction_target(&id, record).await,
+        Arc::clone(&service)
+            .record_instruction_target(&id, record)
+            .await,
         Err(SessionInstructionError::DurabilityUnavailable)
     ));
     assert!(matches!(

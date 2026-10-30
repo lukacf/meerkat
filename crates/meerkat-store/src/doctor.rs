@@ -174,7 +174,11 @@ pub const FINDING_HEAD_METADATA_SIDECAR: &str = "head-metadata-sidecar";
 /// Sessions written at the envelope that carries operator-instruction facts
 /// (an entry row or the recorded target state). A release before operator
 /// instructions refuses them typed until a roll-forward; an operator lists
-/// them before a rollback. Informational.
+/// them before a rollback. Informational. The census covers the realms whose
+/// documents are on disk: SQLite realms (head rows and documents in
+/// `sessions.sqlite3`) and JSONL realms (the WholeBlob documents of their
+/// runtime store, `runtime.sqlite3`). A host-store realm keeps its documents
+/// in the host's store, not on disk, so the disk sweep cannot list them.
 pub const FINDING_OPERATOR_INSTRUCTION_ENVELOPE: &str = "operator-instruction-envelope";
 /// Durable rows or documents the storage census could not measure. The
 /// footprint findings exclude them, so the report says *unknown* instead of
@@ -808,6 +812,7 @@ fn diagnose_realm_dir(
     diagnosis: &mut StorageDiagnosis,
 ) {
     let mut sessions_db_swept = false;
+    let mut runtime_db_swept = false;
     for (relative, expected_domains) in REALM_DATABASE_FILES {
         let db_path = realm_dir.join(relative);
         if !probe_database_file(&db_path, realm, diagnosis) {
@@ -815,6 +820,9 @@ fn diagnose_realm_dir(
         }
         if *relative == "sessions.sqlite3" {
             sessions_db_swept = true;
+        }
+        if *relative == "runtime.sqlite3" {
+            runtime_db_swept = true;
         }
         entry.databases.push(inspect_database(
             &db_path,
@@ -890,6 +898,18 @@ fn diagnose_realm_dir(
                 }
             }
         }
+    }
+
+    // A JSONL realm keeps its session documents in its WholeBlob runtime
+    // store, not beside the JSONL files.
+    if let Some("jsonl") = backend
+        && runtime_db_swept
+    {
+        census_runtime_store_instruction_envelopes(
+            &realm_dir.join("runtime.sqlite3"),
+            realm,
+            diagnosis,
+        );
     }
 
     diagnose_jsonl_session_index_projection(realm_dir, realm, backend, diagnosis);
@@ -1815,15 +1835,26 @@ fn census_storage_footprint(
 /// The most session ids the operator-instruction envelope finding names.
 const OPERATOR_INSTRUCTION_ENVELOPE_REPORT_CAP: usize = 50;
 
-/// Envelope lens of a head-less WholeBlob document: its version only.
+/// Envelope lens of a session document: its version only.
 #[derive(Deserialize)]
 struct EnvelopeVersionLens {
     version: u32,
 }
 
+/// Whether a session document is written at `envelope`. An undecodable
+/// document is not; the blob sweep and the runtime store's own reads report
+/// it.
+fn document_is_at_envelope(document: JsonColumnBytes, envelope: u32) -> bool {
+    serde_json::from_slice::<EnvelopeVersionLens>(&document.into_bytes())
+        .is_ok_and(|lens| lens.version == envelope)
+}
+
 /// The sessions of one database written at the operator-instruction
-/// envelope: head rows by their indexed `version`, and head-less WholeBlob
-/// documents by their envelope.
+/// envelope: head rows by their indexed `version`, head-less documents by
+/// their envelope, and a runtime store's WholeBlob documents (each session's
+/// committed body, and the candidate body of a run's provisional tail) by
+/// their envelope. Snapshot rows from before the WholeBlob authority predate
+/// the envelope and are not read.
 fn operator_instruction_envelope_sessions(
     conn: &Connection,
     envelope: u32,
@@ -1839,27 +1870,74 @@ fn operator_instruction_envelope_sessions(
             sessions.insert(row.get::<_, String>(0)?);
         }
     }
+    let mut documents = Vec::new();
     if table_exists(conn, "sessions")? {
-        let sql = if heads {
+        documents.push(if heads {
             "SELECT session_id, session_json FROM sessions \
              WHERE session_id NOT IN (SELECT session_id FROM session_heads) ORDER BY session_id"
         } else {
             "SELECT session_id, session_json FROM sessions ORDER BY session_id"
-        };
+        });
+    }
+    if table_exists(conn, "runtime_whole_blob_bodies")? {
+        if table_exists(conn, "runtime_whole_blob_authority")? {
+            documents.push(
+                "SELECT authority.session_id, body.session_snapshot \
+                 FROM runtime_whole_blob_authority AS authority \
+                 JOIN runtime_whole_blob_bodies AS body \
+                 ON body.blob_sha256 = authority.blob_sha256",
+            );
+        }
+        if table_exists(conn, "runtime_whole_blob_provisional_tails")? {
+            documents.push(
+                "SELECT tail.session_id, body.session_snapshot \
+                 FROM runtime_whole_blob_provisional_tails AS tail \
+                 JOIN runtime_whole_blob_bodies AS body \
+                 ON body.blob_sha256 = tail.candidate_blob_sha256",
+            );
+        }
+    }
+    for sql in documents {
         let mut statement = conn.prepare(sql)?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
             let session_id: String = row.get(0)?;
-            let document: JsonColumnBytes = row.get(1)?;
-            // An undecodable document is reported by the blob sweep.
-            if serde_json::from_slice::<EnvelopeVersionLens>(&document.into_bytes())
-                .is_ok_and(|lens| lens.version == envelope)
-            {
+            if document_is_at_envelope(row.get(1)?, envelope) {
                 sessions.insert(session_id);
             }
         }
     }
     Ok(sessions)
+}
+
+/// [`census_operator_instruction_envelopes`] over a JSONL realm's runtime
+/// store, in one read snapshot.
+fn census_runtime_store_instruction_envelopes(
+    db_path: &Path,
+    realm: &str,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    // No schema preflight: doctor must open future files to report them
+    // (module safety contract). An unopenable file is already reported by
+    // inspect_database.
+    let profile = meerkat_sqlite::ConnectionProfile::ReadOnly;
+    let Ok(conn) = meerkat_sqlite::open(db_path, profile) else {
+        return;
+    };
+    match conn.unchecked_transaction() {
+        Ok(tx) => census_operator_instruction_envelopes(&tx, db_path, realm, diagnosis),
+        Err(err) => {
+            diagnosis.findings.push(
+                StorageFinding::new(
+                    FindingSeverity::Error,
+                    FINDING_DATABASE_UNREADABLE,
+                    format!("cannot begin read-snapshot transaction: {err}"),
+                )
+                .with_path(db_path.to_path_buf())
+                .with_realm(realm),
+            );
+        }
+    }
 }
 
 /// One Info finding naming the sessions of this database a release without
@@ -1916,7 +1994,9 @@ fn census_operator_instruction_envelopes(
             format!(
                 "{} session(s) carry operator instructions at session envelope {envelope}: \
                  {listed}{overflow_note}; a release before operator instructions refuses them \
-                 typed until a roll-forward",
+                 typed until a roll-forward. The census reads the realms whose documents are \
+                 on disk (SQLite realms, and JSONL realms through runtime.sqlite3); host-store \
+                 realms keep their documents in the host's store and are not listed",
                 sessions.len()
             ),
         )

@@ -16,6 +16,7 @@ use crate::{
     SessionInstructionReceipt, SessionInstructionState, SessionInstructionWrite,
 };
 use async_trait::async_trait;
+use std::sync::Arc;
 
 /// Why an operator-instruction operation on a session was refused.
 #[derive(Debug, thiserror::Error)]
@@ -58,6 +59,11 @@ pub struct SessionInstructionRead {
 }
 
 /// Operator-instruction extension for [`SessionService`].
+///
+/// The two writes take the service by `Arc`, as
+/// [`SessionService::tool_application`] does, so an implementation can hand
+/// a write to a task it owns: a caller that stops waiting must not leave a
+/// write applied to a live session and missing from its session document.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionServiceInstructionExt: SessionService {
@@ -65,7 +71,7 @@ pub trait SessionServiceInstructionExt: SessionService {
     /// returns once the target is in the session document; the write applies
     /// at the session's next fresh run start.
     async fn set_session_instruction(
-        &self,
+        self: Arc<Self>,
         id: &SessionId,
         write: SessionInstructionWrite,
     ) -> Result<SessionInstructionReceipt, SessionInstructionError> {
@@ -78,7 +84,7 @@ pub trait SessionServiceInstructionExt: SessionService {
     /// the session already recorded answers "already recorded" and writes
     /// nothing.
     async fn record_instruction_target(
-        &self,
+        self: Arc<Self>,
         id: &SessionId,
         record: InstructionTargetRecord,
     ) -> Result<InstructionRecordReceipt, SessionInstructionError> {

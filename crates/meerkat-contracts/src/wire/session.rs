@@ -1519,10 +1519,12 @@ pub enum WireSessionMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         instruction_activation: Option<meerkat_core::InstructionActivationIdentity>,
         /// Typed operator-instruction entry identity (a delta appended at a
-        /// run start, or a compaction snapshot). The rendered entry in
-        /// `content` is validated against this fact on ingress.
+        /// run start, or a compaction snapshot). Read-only: the session
+        /// mints it and validates the rendered entry in `content` against
+        /// it; no write accepts it. An identity whose form this reader does
+        /// not know reads raw instead of failing the read.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        instruction_entry: Option<meerkat_core::InstructionEntryIdentity>,
+        instruction_entry: Option<WireInstructionEntryIdentity>,
     },
     SystemNotice {
         kind: SystemNoticeKind,
@@ -1613,6 +1615,29 @@ impl From<SystemMessageIdentity> for WireSystemMessageIdentity {
     }
 }
 
+/// Public wire form of an operator-instruction entry's typed identity.
+///
+/// Reads are tolerant: an identity whose form this version does not know (a
+/// newer entry kind, change kind or field) reads as [`Self::Raw`], the value
+/// as it was sent, and is written back the same. It never fails the history
+/// page or bridge message that carries it. The session document keeps the
+/// closed core type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum WireInstructionEntryIdentity {
+    /// An identity this version knows.
+    Known(meerkat_core::InstructionEntryIdentity),
+    /// An identity this version does not know, as it was sent.
+    Raw(serde_json::Value),
+}
+
+impl From<meerkat_core::InstructionEntryIdentity> for WireInstructionEntryIdentity {
+    fn from(identity: meerkat_core::InstructionEntryIdentity) -> Self {
+        Self::Known(identity)
+    }
+}
+
 impl From<Message> for WireSessionMessage {
     fn from(value: Message) -> Self {
         match value {
@@ -1622,7 +1647,7 @@ impl From<Message> for WireSessionMessage {
                 identity: message.identity.map(Into::into),
                 prompt_version: message.prompt_version,
                 instruction_activation: message.instruction_activation,
-                instruction_entry: message.instruction_entry,
+                instruction_entry: message.instruction_entry.map(Into::into),
             },
             Message::SystemNotice(message) => Self::SystemNotice {
                 kind: message.kind,
@@ -2962,7 +2987,7 @@ mod tests {
         let wire: WireSessionHistory = page.into();
         match &wire.messages[0] {
             WireSessionMessage::System {
-                instruction_entry: Some(identity),
+                instruction_entry: Some(WireInstructionEntryIdentity::Known(identity)),
                 instruction_activation: None,
                 prompt_version: None,
                 identity: None,
@@ -3066,6 +3091,16 @@ mod tests {
         };
 
         for message in [&history.messages[0], &bridge_page.page.messages[0].0] {
+            assert!(
+                matches!(
+                    message,
+                    WireSessionMessage::System {
+                        instruction_entry: Some(WireInstructionEntryIdentity::Raw(_)),
+                        ..
+                    }
+                ),
+                "the identity reads raw: {message:?}"
+            );
             let json = serde_json::to_value(message).expect("the row serializes");
             assert_eq!(
                 json["instruction_entry"], identity,

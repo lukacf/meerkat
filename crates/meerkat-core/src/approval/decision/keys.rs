@@ -215,7 +215,7 @@ validated_string!(
 
 validated_string!(
     /// How an attested decision reached the host (`[a-z0-9._-]{1,64}`, for
-    /// example `console` or a channel name).
+    /// example `web` or a channel name).
     DecisionIngress,
     is_token,
     "ingress"

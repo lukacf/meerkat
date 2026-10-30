@@ -10,7 +10,8 @@
 //! which drives every command class against every phase and asserts the one
 //! intended transition, a byte-identical self-loop with its typed verdict, or
 //! the generated kernel's typed refusal for inputs an unheld record never
-//! receives.
+//! receives: any input but `Hold`, and a `Hold` that names no decision or no
+//! operation.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use meerkat_machine_schema::catalog::dsl::durable_decision::{
@@ -90,6 +91,38 @@ fn conflicting_hold() -> Input {
         deadline_at_ms: DEADLINE,
         subject_digest: digest(OTHER_SUBJECT),
         operation_id: OPERATION.to_owned(),
+        request_digest: digest(REQUEST),
+        requester: party(REQUESTER),
+        approver_id: party(APPROVER),
+        reviewer: None,
+        notice_routable: true,
+    }
+}
+
+/// The test hold naming no decision: the owner service never sends it.
+fn unnamed_hold() -> Input {
+    Input::Hold {
+        decision_id: String::new(),
+        now_ms: HELD_AT,
+        deadline_at_ms: DEADLINE,
+        subject_digest: digest(SUBJECT),
+        operation_id: OPERATION.to_owned(),
+        request_digest: digest(REQUEST),
+        requester: party(REQUESTER),
+        approver_id: party(APPROVER),
+        reviewer: None,
+        notice_routable: true,
+    }
+}
+
+/// The test hold naming no operation: the owner service never sends it.
+fn operationless_hold() -> Input {
+    Input::Hold {
+        decision_id: DECISION.to_owned(),
+        now_ms: HELD_AT,
+        deadline_at_ms: DEADLINE,
+        subject_digest: digest(SUBJECT),
+        operation_id: String::new(),
         request_digest: digest(REQUEST),
         requester: party(REQUESTER),
         approver_id: party(APPROVER),
@@ -300,7 +333,9 @@ enum Expected {
     /// A byte-identical self-loop with exactly these effects.
     SelfLoop(&'static [&'static str]),
     /// The generated kernel's typed refusal (`GuardRejected`): no arm of the
-    /// input admits the pair, and the state is untouched.
+    /// input admits the pair (against an unheld record: any input but
+    /// `Hold`, and a `Hold` that names no decision or no operation), and the
+    /// state is untouched.
     Refused,
 }
 
@@ -310,9 +345,11 @@ enum Expected {
 
 #[test]
 fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended() {
-    let commands: [(&str, fn() -> Input); 15] = [
+    let commands: [(&str, fn() -> Input); 17] = [
         ("Hold", hold),
         ("HoldOther", conflicting_hold),
+        ("HoldUnnamed", unnamed_hold),
+        ("HoldNoOperation", operationless_hold),
         ("Present", || present(APPROVER, SUBJECT, true, HELD_AT + 1)),
         ("Decide", || Decision::valid(true).input()),
         ("Review", || {
@@ -335,10 +372,13 @@ fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended()
         let ended = ENDED_PHASES.contains(&phase);
         match (phase, command) {
             (Phase::Unheld, "Hold" | "HoldOther") => Advance(Phase::Open, &["Held"]),
-            // A row exists only after `Hold`, so the owner never sends these.
+            // A row exists only after a `Hold` that names its decision and
+            // its operation, so the owner never sends these.
             (Phase::Unheld, _) => Refused,
             (_, "Hold") => SelfLoop(&["HoldReplayed"]),
-            (_, "HoldOther") => SelfLoop(&["Refused(HoldConflict)"]),
+            (_, "HoldOther" | "HoldUnnamed" | "HoldNoOperation") => {
+                SelfLoop(&["Refused(HoldConflict)"])
+            }
             (Phase::Open, "Present") => Advance(Phase::Open, &["Presented"]),
             (Phase::Open, "Decide") => Advance(Phase::Approved, &["Approved"]),
             (Phase::Open, "Review") => SelfLoop(&["Refused(HumanStage)"]),

@@ -108,7 +108,7 @@ impl AttestedDecision {
         })
     }
 
-    /// The presentation the decision event carried (the console's one-part
+    /// The presentation the decision event carried (a one-part
     /// presentation, for example).
     #[must_use]
     pub fn with_presentation(mut self, presentation: PresentationRecord) -> Self {

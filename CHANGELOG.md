@@ -237,7 +237,7 @@ them.
   settled; without one an approved decision expires at its deadline and
   never runs after it. Every ended decision of a routable requester owes one
   notice, settled by `settle_notice`. An owner
-  narrowed for a candidate launch reads and writes nothing.
+  narrowed for a candidate launch reads, and writes nothing.
 
 - `meerkat-store`: `SqliteDecisionStore` keeps a persistence's decisions in
   `approval_decisions.sqlite3` beside `approvals.json` (schema domain
@@ -552,8 +552,11 @@ them.
   decisions under it (none expires, executes or settles its notice). Back on
   0.9.8, an open decision past its deadline expires at its first read (a
   deadline driver reads the due ones) and owes its notice; an approved one is
-  listed as owed and runs only before its deadline. Back the file up with the
-  state root, as a WAL-complete copy.
+  listed as owed and runs only before its deadline, and past it expires the
+  same way, unless its execution permit was outstanding at the rollback: that
+  decision waits for its owner to settle the permit (record the commit, or
+  release or refuse the permit). Back the file up with the state root, as a
+  WAL-complete copy.
 
 ### Known limitations
 

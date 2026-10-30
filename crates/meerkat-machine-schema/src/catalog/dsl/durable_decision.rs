@@ -52,9 +52,12 @@
 //!
 //! Every input has an explicit transition in every held phase, and every
 //! refusal is a typed `Refused` effect that leaves the state byte-identical.
-//! Inputs other than `Hold` against an `Unheld` record are refused by the
-//! generated kernel (`GuardRejected`: no arm admits them): the owner service
-//! creates a row only through `Hold`, so it never sends them.
+//! Against an `Unheld` record the generated kernel refuses (`GuardRejected`:
+//! no arm admits them) every input other than `Hold`, and a `Hold` that
+//! names no decision or no operation (unless its window is already closed or
+//! it names its requester as its reviewer: the typed `InvalidWindow` and
+//! `SelfReview` refusals). The owner service creates a row only through a
+//! `Hold` whose ids it validated as non-empty, so it never sends them.
 
 use super::OptionValueExt;
 

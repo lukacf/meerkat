@@ -11,7 +11,7 @@
 # out the two counters no guard, other variable's update or invariant of the
 # generated model reads (model_step_count and topology_epoch). The runner
 # first checks that the model still reads neither counter anywhere else, and
-# fails otherwise. It checks ten small runs over their whole space with TLC
+# fails otherwise. It checks eleven small runs over their whole space with TLC
 # coverage (see member_residency_audit.tla):
 # - seed (AuditSeedSpec): one identity, its seat session unborn or born,
 #   through every build seed, every boot verdict, the seal and the host
@@ -50,7 +50,13 @@
 # - recover-rotation (AuditRecoverRotationSpec): one identity whose
 #   retirement start and rotation (FreshSession or SameSession) are
 #   replayed, re-driven and finished by the rotation's own terminal, owing a
-#   kickoff or not, in Running and in Stopped, and the mob's destroy.
+#   kickoff or not, in Running and in Stopped, and the mob's destroy;
+# - replay-same (AuditReplaySameSpec): two identities, member 1 wired to
+#   member 2 and to an external peer, whose committed same-session rotation's
+#   rows are replayed (its MemberRetired row, then its successor's spawn row
+#   on the same session, and the edge rows its terminal batch records
+#   again), the end-of-replay topology convergence, the seal and the
+#   successor's wake.
 # Every run checks every generated invariant (the residency invariants among
 # them), AuditAttemptEndsClosed and AuditWakingClosable (an open attempt is
 # never replaced and ends only Live, Dormant or without a phase; every Waking
@@ -96,7 +102,11 @@
 # session (AuditScopedReleaseFenced). The recover-rotation run checks that a
 # replayed rotation, once its grant is recorded and its ingress detach
 # closed, can always be finished by its own terminal while the plain archive
-# waits (AuditRecoveredRotationFinishable).
+# waits (AuditRecoveredRotationFinishable). The replay-same run checks that a
+# step that keeps member 1's incarnation and member 2 seated keeps their edge
+# and member 1's external edge (AuditReplayKeepsKeptTopology), and that before
+# the seal the replay of those edges' rows is accepted by exactly one arm
+# each, recorded already or not (AuditKeptRowsReplayable).
 # TLC evaluates the module's wake refusal ASSUME (a present, bound member with
 # a phase is never refused as not a member) and its release ASSUMEs (the
 # verdict helper, and no member wired to a placed member is releasable) at the
@@ -130,6 +140,7 @@ seat_states=46248
 wake2_states=1425
 rotate_same_states=3296
 recover_rotation_states=973
+replay_same_states=1400
 
 # Every arm each run must fire. TLC names an arm after the generated
 # operator, since every audit wrapper here is a plain application.
@@ -353,6 +364,7 @@ rotate_same_covered_actions=(
   CommitMemberRotationSameSessionKickoffRunning
   CommitMemberRotationSameSessionKickoffStopped
   RetireRunningReleasingArchiveOnly
+  RetireStoppedReleasingArchiveOnly
   RetireRunningPreservingBindingArchiveOnly
   RetireStoppedPreservingBindingArchiveOnly
   ObserveMemberRetirementArchivedLive
@@ -381,6 +393,22 @@ recover_rotation_covered_actions=(
   CommitMemberRotationSameSessionStopped
   CommitMemberRotationSameSessionKickoffRunning
   CommitMemberRotationSameSessionKickoffStopped
+)
+
+replay_same_covered_actions=(
+  RecoverRosterMemberRunning
+  RecoverSpawnedMemberPeerEndpointFreshRunning
+  RecoverMemberSessionBindingFreshRunning
+  RecoverRosterWiringRunning
+  RecoverRosterWiringAlreadyRecovered
+  RecoverExternalPeerWiringRunning
+  RecoverExternalPeerWiringAlreadyRecovered
+  RecoverRosterMemberRetiredRunning
+  ConvergeRecoveredRosterTopologyPrune
+  ConvergeRecoveredRosterTopologyRetain
+  SealBootMaterializationPlan
+  WakeMemberAuthorizedRunning
+  ResolveMemberRevivalSucceededRunningLocal
 )
 
 spec_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -448,7 +476,7 @@ epoch_index="${view_positions#* }"
 
 # usage: write_cfg <run> <file> <extra invariant lines> <extra property lines>
 # where <run> is seed, wake, retire, terminal, resume, edge, seat, wake2,
-# rotate-same or recover-rotation.
+# rotate-same, recover-rotation or replay-same.
 write_cfg() {
   local run="$1" cfg="$2" invariants="$3" properties="$4"
   local spec run_properties run_invariants max_attempts section_end
@@ -565,6 +593,16 @@ write_cfg() {
       run_invariants="
   AuditWakingClosable
   AuditRecoveredRotationFinishable"
+      ;;
+    replay-same)
+      spec="AuditReplaySameSpec"
+      max_attempts=1
+      run_properties="
+  AuditAttemptEndsClosed
+  AuditReplayKeepsKeptTopology"
+      run_invariants="
+  AuditWakingClosable
+  AuditKeptRowsReplayable"
       ;;
     *)
       echo "error: unknown audit run '${run}'" >&2
@@ -700,6 +738,7 @@ check_space seat "${seat_states}" "${seat_covered_actions[@]}"
 check_space wake2 "${wake2_states}" "${wake2_covered_actions[@]}"
 check_space rotate-same "${rotate_same_states}" "${rotate_same_covered_actions[@]}"
 check_space recover-rotation "${recover_rotation_states}" "${recover_rotation_covered_actions[@]}"
+check_space replay-same "${replay_same_states}" "${replay_same_covered_actions[@]}"
 
 # Each witness is <run>:<kind>:<name>: a state goal's negation joins the
 # invariants, a step goal's negation ([][~step]_vars) joins the properties.
@@ -727,7 +766,9 @@ for witness in \
   "rotate-same:Invariant:StaleScopeAfterRotation" \
   "rotate-same:Action property:EntryRotatedSameSession" \
   "recover-rotation:Action property:RecoveredFreshRotated" \
-  "recover-rotation:Action property:RecoveredSameRotated"; do
+  "recover-rotation:Action property:RecoveredSameRotated" \
+  "replay-same:Invariant:ReplayedKeptTopology" \
+  "replay-same:Action property:ReplayedSuccessorWokeLive"; do
   run="${witness%%:*}"
   rest="${witness#*:}"
   kind="${rest%%:*}"
@@ -1175,6 +1216,10 @@ add_guard("AuthorizeExplicitResumeMemberLiveRunning", "(explicit_resume_readines
   mutate rotate-same redrive_releases_kept_session \
     "Error: (Invariant same_session_rotation_keeps_its_binding|Action property AuditSameSessionNeverUnseats) is violated" \
     'drop_guard("RetireRunningReleasingArchiveOnly", "\"SameSession\"")' "$@"
+  # The same releasing re-drive in a stopped mob (the guard's Stopped copy).
+  mutate rotate-same stopped_redrive_releases_kept_session \
+    "Error: (Invariant same_session_rotation_keeps_its_binding|Action property AuditSameSessionNeverUnseats) is violated" \
+    'drop_guard("RetireStoppedReleasingArchiveOnly", "\"SameSession\"")' "$@"
   # The scoped release verdict without its fence: a scope whose fence is not
   # its runtime's current one is answered as the current incarnation.
   mutate rotate-same scoped_release_ignores_fence \
@@ -1186,5 +1231,15 @@ add_guard("ClassifyMemberReleaseRunning", "((scope_agent_runtime_id = None) \\/ 
   mutate recover-rotation recovered_intent_not_retiring \
     "Error: Invariant rotation_intent_is_a_retiring_member is violated" \
     'drop_guard("RecoverMemberRotationIntentSameSessionRunning", "member_state_markers")' "$@"
+  # The end-of-replay convergence prunes an edge whose ends are both seated:
+  # the edge a same-session terminal kept, recorded again, is lost.
+  mutate replay-same convergence_prunes_kept_edge \
+    "Error: Action property AuditReplayKeepsKeptTopology is violated" \
+    'rewrite_frame("ConvergeRecoveredRosterTopologyRetain", {"wiring_edges": "(wiring_edges \\ {edge})"})' "$@"
+  # The replay refuses an edge row it recorded already: a row the
+  # same-session terminal records again would fail the replay.
+  mutate replay-same duplicate_kept_row_refused \
+    "Error: Invariant AuditKeptRowsReplayable is violated" \
+    'add_guard("RecoverRosterWiringAlreadyRecovered", "FALSE")' "$@"
 fi
 echo "member residency audit passed over the whole reachable space of its domains"

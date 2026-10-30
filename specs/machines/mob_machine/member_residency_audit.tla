@@ -3,7 +3,7 @@
 \*
 \* The generated ci profile has no identities, so the residency arms and the
 \* residency invariants hold there only vacuously. This audit keeps the
-\* generated model unchanged and drives the residency arms in ten runs,
+\* generated model unchanged and drives the residency arms in eleven runs,
 \* each over a small, fixed domain, so every run fits the canonical lane's
 \* per-run cap:
 \*
@@ -83,6 +83,18 @@
 \*     terminal (owing a kickoff or not, in Running and Stopped), its profile
 \*     grant, the session ingress detach, the plain archives, the next
 \*     incarnation's wake and the mob's destroy.
+\*   replay-same (AuditReplaySameSpec): two identities, member 1 wired to
+\*     member 2 and to an external peer, whose committed same-session
+\*     rotation's rows are replayed: each member's spawn row (the member,
+\*     its endpoint, its binding), the edge's and the external edge's rows,
+\*     member 1's MemberRetired row (its start preserved the binding, not
+\*     the topology, so the replay ends the incarnation's edges), its
+\*     successor's spawn row (generation 1 on the same session with the same
+\*     endpoint, only after that MemberRetired row) and the rows the
+\*     terminal batch records again (the edge and the external edge), every
+\*     row but the successor's in any order, then the end-of-replay roster
+\*     topology convergence, the boot plan and seal, and the successor's
+\*     wake.
 \*
 \* Domains are fixed per run (see the runner). Each run explores its whole
 \* reachable space under a state constraint that caps the machine's wake
@@ -151,7 +163,14 @@
 \*   recover-rotation: AuditRecoveredRotationFinishable (invariant, ENABLED
 \*     form: a replayed rotation whose grant is recorded and whose ingress
 \*     detach closed has an enabled terminal of its own target, and its
-\*     plain archive is not enabled, outside the destroy).
+\*     plain archive is not enabled, outside the destroy);
+\*   replay-same: AuditReplayKeepsKeptTopology (a step that keeps member 1's
+\*     incarnation and member 2 seated keeps their edge and member 1's
+\*     external edge: only an incarnation's end or an unseat ends them) and
+\*     AuditKeptRowsReplayable (invariant, ENABLED form: before the seal,
+\*     the replay of the edge's and the external edge's rows is accepted by
+\*     exactly one arm each, recorded already or not, so a replay never
+\*     fails on the rows a same-session terminal records again).
 \* An ASSUME over the generated wake refusal helper's whole input domain:
 \* a present, session-bound member with a phase is never refused as not a
 \* member. A second ASSUME pins the release verdict helper: Release,
@@ -1077,6 +1096,75 @@ AuditRecoverRotationNext ==
 AuditRecoverRotationSpec == Init /\ [][AuditRecoverRotationNext]_vars
 
 (***************************************************************************)
+(* The replay-same run: the rows of a committed same-session rotation      *)
+(* replayed, the edges its terminal kept among them.                       *)
+(***************************************************************************)
+
+\* Member 1's external peer (its own name and peer id) and its key.
+YExternal ==
+    [local |-> Id1,
+     endpoint |-> [name |-> "peername_4", peer_id |-> "peerid_4", address |-> "inproc://peername_4",
+                   signing_key |-> "peersigningkey_4"]]
+YExternalKey == [local |-> Id1, name |-> "peername_4"]
+
+\* The spawn rows, each replayed as the builder replays one: the member, its
+\* endpoint and its binding. Member 1's first incarnation (Rid1, fence 1,
+\* generation 0) and its same-session successor (Rid3, fence 3,
+\* generation 1) share session 1 and endpoint 1; member 2 is Rid2, fence 2,
+\* session 2, endpoint 2. The successor's spawn row follows the first
+\* incarnation's rows and its MemberRetired row in the journal: the replay
+\* meets it only once generation 0 is retained and member 1 is unseated.
+YRecoverSuccessor ==
+    /\ Id1 \in DOMAIN identity_runtime_generations
+    /\ identity_runtime_generations[Id1] = 0
+    /\ RecoverRosterMemberRunning(Id1, Rid3, 3, 1, AuditProfile, AuditMode, FALSE)
+YRecover ==
+    \/ RecoverRosterMemberRunning(Id1, Rid1, 1, 0, AuditProfile, AuditMode, FALSE)
+    \/ RecoverRosterMemberRunning(Id2, Rid2, 2, 0, AuditProfile, AuditMode, FALSE)
+    \/ YRecoverSuccessor
+YEndpoint ==
+    \/ RecoverSpawnedMemberPeerEndpointFreshRunning(Id1, Rid1, 1, 0, E1Inproc)
+    \/ RecoverSpawnedMemberPeerEndpointFreshRunning(Id2, Rid2, 2, 0, E2Inproc)
+    \/ RecoverSpawnedMemberPeerEndpointFreshRunning(Id1, Rid3, 3, 1, E1Inproc)
+YBind ==
+    \/ RecoverMemberSessionBindingFreshRunning(Id1, Rid1, Sess1, None)
+    \/ RecoverMemberSessionBindingFreshRunning(Id2, Rid2, Sess2, None)
+    \/ RecoverMemberSessionBindingFreshRunning(Id1, Rid3, Sess1, None)
+
+\* The edge's and the external edge's rows: their own, and the ones the
+\* same-session terminal's batch records again after its successor's spawn
+\* row (recorded already or not).
+YWire ==
+    \/ RecoverRosterWiringRunning(AuditEdge)
+    \/ RecoverRosterWiringAlreadyRecovered(AuditEdge)
+    \/ RecoverExternalPeerWiringRunning(YExternalKey, YExternal)
+    \/ RecoverExternalPeerWiringAlreadyRecovered(YExternalKey, YExternal)
+
+\* Member 1's MemberRetired row: its same-session start preserved the
+\* binding, not the topology, so the replay ends the incarnation's edges.
+YRetired == RecoverRosterMemberRetiredRunning(Id1, Rid1, 0, FALSE, FALSE)
+
+\* The end-of-replay roster topology convergence of the edge.
+YConverge ==
+    \/ ConvergeRecoveredRosterTopologyPrune(AuditEdge, Id1, Id2)
+    \/ ConvergeRecoveredRosterTopologyRetain(AuditEdge, Id1, Id2)
+
+AuditReplaySameNext ==
+    \/ YRecover
+    \/ YEndpoint
+    \/ YBind
+    \/ YWire
+    \/ YRetired
+    \/ YConverge
+    \/ AuditPlanDefault(Id1)
+    \/ AuditPlanDefault(Id2)
+    \/ SealBootMaterializationPlan
+    \/ AuditOperatorWake(Id1)
+    \/ AuditWakePath(Id1)
+
+AuditReplaySameSpec == Init /\ [][AuditReplaySameNext]_vars
+
+(***************************************************************************)
 (* Constraint and view.                                                    *)
 (***************************************************************************)
 
@@ -1486,6 +1574,29 @@ ASSUME \A placed, sealed, has_endpoint, epoch_recorded \in BOOLEAN,
           residency \in {None, Some("Dormant"), Some("Waking"), Some("Live")} :
     ~member_registration_releasable(residency, placed, sealed, has_endpoint, epoch_recorded, TRUE)
 
+\* A step that keeps member 1's incarnation and member 2 seated keeps their
+\* edge and member 1's external edge: only an incarnation's end (its
+\* MemberRetired row) or an unseat ends them.
+AuditReplayKeepsKeptTopology ==
+    [][/\ Id1 \in DOMAIN identity_to_runtime
+       /\ Id1 \in DOMAIN identity_to_runtime'
+       /\ identity_to_runtime'[Id1] = identity_to_runtime[Id1]
+       /\ Id2 \in DOMAIN identity_to_runtime'
+       => /\ (AuditEdge \in wiring_edges => AuditEdge \in wiring_edges')
+          /\ (YExternal \in external_peer_edges => YExternal \in external_peer_edges')
+      ]_vars
+
+\* ENABLED form: in Running, before the seal, the replay of the edge's and
+\* the external edge's rows is accepted by exactly one arm each, recorded
+\* already or not: a replay never fails on the rows a same-session
+\* terminal records again.
+AuditKeptRowsReplayable ==
+    (phase = "Running" /\ boot_plan_sealed = FALSE)
+        => /\ (ENABLED RecoverRosterWiringRunning(AuditEdge))
+                # (ENABLED RecoverRosterWiringAlreadyRecovered(AuditEdge))
+           /\ (ENABLED RecoverExternalPeerWiringRunning(YExternalKey, YExternal))
+                # (ENABLED RecoverExternalPeerWiringAlreadyRecovered(YExternalKey, YExternal))
+
 (***************************************************************************)
 (* Reachability goals, each checked as an expected violation of its       *)
 (* negation: a state goal as an invariant, a step goal as an action        *)
@@ -1678,6 +1789,26 @@ AuditWitnessRecoveredFreshRotatedStep ==
 AuditWitnessRecoveredSameRotatedStep ==
     /\ Id1 \in DOMAIN member_rotation_targets
     /\ \E ko \in BOOLEAN : VCommitSame(ko)
+\* Replay-same run: after the seal, member 1's successor is seated on its
+\* own session with its endpoint, its edge to member 2 and its external
+\* edge.
+AuditWitnessReplayedKeptTopology ==
+    /\ boot_plan_sealed
+    /\ Id1 \in DOMAIN identity_to_runtime
+    /\ identity_to_runtime[Id1] = Rid3
+    /\ Id1 \in DOMAIN member_session_bindings
+    /\ member_session_bindings[Id1] = Sess1
+    /\ Id1 \in DOMAIN member_peer_endpoints
+    /\ AuditEdge \in wiring_edges
+    /\ YExternal \in external_peer_edges
+\* Replay-same run: the replayed successor wakes Live with its kept edges.
+AuditWitnessReplayedSuccessorWokeLiveStep ==
+    /\ Id1 \in DOMAIN identity_to_runtime
+    /\ identity_to_runtime[Id1] = Rid3
+    /\ Phase1 = Some("Waking")
+    /\ Phase1Next = Some("Live")
+    /\ AuditEdge \in wiring_edges'
+    /\ YExternal \in external_peer_edges'
 
 NotAuditWitnessSealedDormant == ~AuditWitnessSealedDormant
 NotAuditWitnessSealedEndpointPending == ~AuditWitnessSealedEndpointPending
@@ -1719,4 +1850,6 @@ NotAuditWitnessStaleScopeAfterRotation == ~AuditWitnessStaleScopeAfterRotation
 NotAuditWitnessEntryRotatedSameSession == [][~AuditWitnessEntryRotatedSameSessionStep]_vars
 NotAuditWitnessRecoveredFreshRotated == [][~AuditWitnessRecoveredFreshRotatedStep]_vars
 NotAuditWitnessRecoveredSameRotated == [][~AuditWitnessRecoveredSameRotatedStep]_vars
+NotAuditWitnessReplayedKeptTopology == ~AuditWitnessReplayedKeptTopology
+NotAuditWitnessReplayedSuccessorWokeLive == [][~AuditWitnessReplayedSuccessorWokeLiveStep]_vars
 ====

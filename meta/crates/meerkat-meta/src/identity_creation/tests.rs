@@ -9,6 +9,7 @@ use std::num::NonZeroU32;
 use serde_json::{Value, json};
 
 use super::escape::{escaped_line, is_hidden, is_markup, quoted, unescape_line, unquote};
+use super::template::profile_digest;
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -1236,6 +1237,47 @@ fn profile_facts_detect_changes_inside_option_and_schema_values() {
         digest(json!({"model": "gpt-5.4"})),
         "the model is always digested"
     );
+}
+
+#[test]
+fn a_new_default_valued_tool_config_field_leaves_the_profile_digest_unchanged() {
+    // Every member profile sets tools.comms, so its tool configuration is
+    // never the default as a whole.
+    let profile: meerkat_mob::Profile =
+        serde_json::from_value(json!({"model": "gpt-5.5", "tools": {"comms": true}}))
+            .expect("a profile");
+    let value = serde_json::to_value(&profile).expect("the profile's form");
+    let defaults = serde_json::to_value(
+        serde_json::from_value::<meerkat_mob::Profile>(json!({"model": "gpt-5.5"}))
+            .expect("the defaults"),
+    )
+    .expect("the defaults' form");
+    let today = profile_digest(value.clone(), &defaults);
+    assert_eq!(
+        today,
+        ProfileFacts::of_profile(&profile).expect("facts").digest
+    );
+
+    // A later Core release adds a tool configuration field, or a top-level
+    // field, serialized at its default in the profile and the defaults alike.
+    let mut later = value.clone();
+    let mut later_defaults = defaults.clone();
+    later["tools"]["future_flag"] = json!(false);
+    later_defaults["tools"]["future_flag"] = json!(false);
+    later["future_member"] = json!([]);
+    later_defaults["future_member"] = json!([]);
+    assert_eq!(profile_digest(later, &later_defaults), today);
+
+    // Set away from its default, the new field changes the digest, and so
+    // does a change of a field that exists today.
+    let mut set = value.clone();
+    let mut set_defaults = defaults.clone();
+    set["tools"]["future_flag"] = json!(true);
+    set_defaults["tools"]["future_flag"] = json!(false);
+    assert_ne!(profile_digest(set, &set_defaults), today);
+    let mut shell = value;
+    shell["tools"]["shell"] = json!(true);
+    assert_ne!(profile_digest(shell, &defaults), today);
 }
 
 #[test]
@@ -3546,6 +3588,312 @@ fn the_consequences_callback_contract_round_trips() {
 // ---------------------------------------------------------------------------
 // The refusal vocabulary
 // ---------------------------------------------------------------------------
+
+/// One refusal of every kind, in the order of the design's table. The match
+/// below stops compiling when a kind is added without a sample here.
+fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
+    let kinds = vec![
+        IdentityRefusalKind::TemplateNotAllowed {
+            template: "t".to_owned(),
+        },
+        IdentityRefusalKind::ProfileNotAllowed { profile: None },
+        IdentityRefusalKind::ModelNotAllowed {
+            model: "m".to_owned(),
+        },
+        IdentityRefusalKind::TemplateBindingChanged,
+        IdentityRefusalKind::ExceedsTemplate { tools: Vec::new() },
+        IdentityRefusalKind::ExceedsCreator { tools: Vec::new() },
+        IdentityRefusalKind::ReservedKey {
+            key: "k".to_owned(),
+        },
+        IdentityRefusalKind::AuthorityFieldNeedsApproval {
+            key: "k".to_owned(),
+        },
+        IdentityRefusalKind::AuthorityFieldInvalid {
+            key: "k".to_owned(),
+        },
+        IdentityRefusalKind::TextTooLarge { limit: 1 },
+        IdentityRefusalKind::KickoffRefused {
+            rule: KickoffRule::Forbidden,
+        },
+        IdentityRefusalKind::ConsequencesUnavailable,
+        IdentityRefusalKind::InvalidName,
+        IdentityRefusalKind::ReservedName,
+        IdentityRefusalKind::NameTaken {
+            by: NameTakenBy::Declared,
+        },
+        IdentityRefusalKind::PeerNotAllowed {
+            identity: "p".to_owned(),
+        },
+        IdentityRefusalKind::PeerUnknown,
+        IdentityRefusalKind::LimitReached {
+            limit: LimitKind::Total,
+        },
+        IdentityRefusalKind::BatchTooLarge { max: 256 },
+        IdentityRefusalKind::ValidationRefused {
+            reason: "r".to_owned(),
+        },
+        IdentityRefusalKind::CreationDenied {
+            change: ChangeClass::Create,
+        },
+        IdentityRefusalKind::InvalidRequest {
+            problem: RequestProblem::Empty,
+        },
+        IdentityRefusalKind::Unsupported {
+            feature: "f".to_owned(),
+        },
+        IdentityRefusalKind::IdentityUnknown,
+        IdentityRefusalKind::NotCreatorCustody,
+        IdentityRefusalKind::SelfChangeRefused,
+        IdentityRefusalKind::StaleRevision { current: 1 },
+        IdentityRefusalKind::OperationReused,
+        IdentityRefusalKind::AdmissionUnsettled {
+            correlation: "c".to_owned(),
+        },
+        IdentityRefusalKind::NotTransferring,
+        IdentityRefusalKind::PredecessorMismatch,
+        IdentityRefusalKind::ImportRefused,
+        IdentityRefusalKind::PreparationNotPending,
+        IdentityRefusalKind::PreparationMismatch,
+        IdentityRefusalKind::ConstructionOpen,
+        IdentityRefusalKind::StaleAttempt { current: None },
+        IdentityRefusalKind::NotConstructed,
+        IdentityRefusalKind::IdentityTransferring,
+        IdentityRefusalKind::TransferInFlight,
+        IdentityRefusalKind::ObservationMismatch,
+        IdentityRefusalKind::ConstructionRequired,
+        IdentityRefusalKind::ActivationPending { attempt: 1 },
+        IdentityRefusalKind::ApprovalUnavailable,
+        IdentityRefusalKind::DecisionOpen {
+            decision_id: "d".to_owned(),
+        },
+        IdentityRefusalKind::SubjectWidened,
+        IdentityRefusalKind::DecisionClosed {
+            state: "expired".to_owned(),
+        },
+        IdentityRefusalKind::DecisionNotFound,
+        IdentityRefusalKind::EvidenceRequired,
+        IdentityRefusalKind::SubjectChanged,
+        IdentityRefusalKind::PresentationIncomplete,
+        IdentityRefusalKind::RequesterCannotDecide,
+        IdentityRefusalKind::ApproverNotEligible,
+        IdentityRefusalKind::DecidedBeforePresentation,
+        IdentityRefusalKind::CreationHeld,
+        IdentityRefusalKind::HostPreparationPending,
+        IdentityRefusalKind::CandidateLaunch,
+        IdentityRefusalKind::IdentityMember,
+        IdentityRefusalKind::StorageUnsupported,
+        IdentityRefusalKind::ConstructionRefused {
+            kind: "controller_route_refused".to_owned(),
+        },
+        IdentityRefusalKind::CreatorUnresolved,
+    ];
+    for kind in &kinds {
+        match kind {
+            IdentityRefusalKind::TemplateNotAllowed { .. }
+            | IdentityRefusalKind::ProfileNotAllowed { .. }
+            | IdentityRefusalKind::ModelNotAllowed { .. }
+            | IdentityRefusalKind::TemplateBindingChanged
+            | IdentityRefusalKind::ExceedsTemplate { .. }
+            | IdentityRefusalKind::ExceedsCreator { .. }
+            | IdentityRefusalKind::ReservedKey { .. }
+            | IdentityRefusalKind::AuthorityFieldNeedsApproval { .. }
+            | IdentityRefusalKind::AuthorityFieldInvalid { .. }
+            | IdentityRefusalKind::TextTooLarge { .. }
+            | IdentityRefusalKind::KickoffRefused { .. }
+            | IdentityRefusalKind::ConsequencesUnavailable
+            | IdentityRefusalKind::InvalidName
+            | IdentityRefusalKind::ReservedName
+            | IdentityRefusalKind::NameTaken { .. }
+            | IdentityRefusalKind::PeerNotAllowed { .. }
+            | IdentityRefusalKind::PeerUnknown
+            | IdentityRefusalKind::LimitReached { .. }
+            | IdentityRefusalKind::BatchTooLarge { .. }
+            | IdentityRefusalKind::ValidationRefused { .. }
+            | IdentityRefusalKind::CreationDenied { .. }
+            | IdentityRefusalKind::InvalidRequest { .. }
+            | IdentityRefusalKind::Unsupported { .. }
+            | IdentityRefusalKind::IdentityUnknown
+            | IdentityRefusalKind::NotCreatorCustody
+            | IdentityRefusalKind::SelfChangeRefused
+            | IdentityRefusalKind::StaleRevision { .. }
+            | IdentityRefusalKind::OperationReused
+            | IdentityRefusalKind::AdmissionUnsettled { .. }
+            | IdentityRefusalKind::NotTransferring
+            | IdentityRefusalKind::PredecessorMismatch
+            | IdentityRefusalKind::ImportRefused
+            | IdentityRefusalKind::PreparationNotPending
+            | IdentityRefusalKind::PreparationMismatch
+            | IdentityRefusalKind::ConstructionOpen
+            | IdentityRefusalKind::StaleAttempt { .. }
+            | IdentityRefusalKind::NotConstructed
+            | IdentityRefusalKind::IdentityTransferring
+            | IdentityRefusalKind::TransferInFlight
+            | IdentityRefusalKind::ObservationMismatch
+            | IdentityRefusalKind::ConstructionRequired
+            | IdentityRefusalKind::ActivationPending { .. }
+            | IdentityRefusalKind::ApprovalUnavailable
+            | IdentityRefusalKind::DecisionOpen { .. }
+            | IdentityRefusalKind::SubjectWidened
+            | IdentityRefusalKind::DecisionClosed { .. }
+            | IdentityRefusalKind::DecisionNotFound
+            | IdentityRefusalKind::EvidenceRequired
+            | IdentityRefusalKind::SubjectChanged
+            | IdentityRefusalKind::PresentationIncomplete
+            | IdentityRefusalKind::RequesterCannotDecide
+            | IdentityRefusalKind::ApproverNotEligible
+            | IdentityRefusalKind::DecidedBeforePresentation
+            | IdentityRefusalKind::CreationHeld
+            | IdentityRefusalKind::HostPreparationPending
+            | IdentityRefusalKind::CandidateLaunch
+            | IdentityRefusalKind::IdentityMember
+            | IdentityRefusalKind::StorageUnsupported
+            | IdentityRefusalKind::ConstructionRefused { .. }
+            | IdentityRefusalKind::CreatorUnresolved => {}
+        }
+    }
+    kinds
+}
+
+#[test]
+fn every_refusal_token_is_the_closed_vocabulary() {
+    let kinds = every_refusal_kind();
+    let tokens: Vec<&str> = kinds.iter().map(IdentityRefusalKind::token).collect();
+    assert_eq!(
+        tokens,
+        [
+            // Template.
+            "template_not_allowed",
+            "profile_not_allowed",
+            "model_not_allowed",
+            "template_binding_changed",
+            "exceeds_template",
+            "exceeds_creator",
+            // Request data.
+            "reserved_key",
+            "authority_field_needs_approval",
+            "authority_field_invalid",
+            "text_too_large",
+            "kickoff_refused",
+            "consequences_unavailable",
+            // Name.
+            "invalid_name",
+            "reserved_name",
+            "name_taken",
+            // Peers.
+            "peer_not_allowed",
+            "peer_unknown",
+            // Limits and policy.
+            "limit_reached",
+            "batch_too_large",
+            "validation_refused",
+            "creation_denied",
+            "invalid_request",
+            "unsupported",
+            // Custody and operations.
+            "identity_unknown",
+            "not_creator_custody",
+            "self_change_refused",
+            "stale_revision",
+            "operation_reused",
+            "admission_unsettled",
+            "not_transferring",
+            "predecessor_mismatch",
+            "import_refused",
+            "preparation_not_pending",
+            "preparation_mismatch",
+            "construction_open",
+            "stale_attempt",
+            "not_constructed",
+            "identity_transferring",
+            "transfer_in_flight",
+            "observation_mismatch",
+            "construction_required",
+            "activation_pending",
+            // Decisions.
+            "approval_unavailable",
+            "decision_open",
+            "subject_widened",
+            "decision_closed",
+            "decision_not_found",
+            // Decide side.
+            "evidence_required",
+            "subject_changed",
+            "presentation_incomplete",
+            "requester_cannot_decide",
+            "approver_not_eligible",
+            "decided_before_presentation",
+            // Admission.
+            "creation_held",
+            "host_preparation_pending",
+            "candidate_launch",
+            "identity_member",
+            "storage_unsupported",
+            "construction_refused",
+            // Per call.
+            "creator_unresolved",
+        ]
+    );
+    let distinct: BTreeSet<&str> = tokens.iter().copied().collect();
+    assert_eq!(distinct.len(), 60);
+    let retryable: BTreeSet<&str> = kinds
+        .iter()
+        .filter(|kind| kind.is_retryable())
+        .map(IdentityRefusalKind::token)
+        .collect();
+    assert_eq!(
+        retryable,
+        BTreeSet::from([
+            "consequences_unavailable",
+            "creation_held",
+            "creator_unresolved",
+            "host_preparation_pending",
+        ])
+    );
+    let problems: Vec<&str> = [
+        RequestProblem::Empty,
+        RequestProblem::Conflicting,
+        RequestProblem::Malformed,
+    ]
+    .into_iter()
+    .map(RequestProblem::token)
+    .collect();
+    assert_eq!(problems, ["empty", "conflicting", "malformed"]);
+    let takers: Vec<&str> = [
+        NameTakenBy::Declared,
+        NameTakenBy::Created,
+        NameTakenBy::Removed,
+        NameTakenBy::Worker,
+        NameTakenBy::Unreadable,
+    ]
+    .into_iter()
+    .map(NameTakenBy::token)
+    .collect();
+    assert_eq!(
+        takers,
+        ["declared", "created", "removed", "worker", "unreadable"]
+    );
+    let limits: Vec<&str> = [
+        LimitKind::Total,
+        LimitKind::PerCreator,
+        LimitKind::PeersPerIdentity,
+        LimitKind::Batch,
+        LimitKind::OpenDecisionsPerCreator,
+    ]
+    .into_iter()
+    .map(LimitKind::token)
+    .collect();
+    assert_eq!(
+        limits,
+        [
+            "total",
+            "per_creator",
+            "peers_per_identity",
+            "batch",
+            "open_decisions_per_creator"
+        ]
+    );
+}
 
 #[test]
 fn refusal_data_carries_the_kind_its_field_and_its_payload() {

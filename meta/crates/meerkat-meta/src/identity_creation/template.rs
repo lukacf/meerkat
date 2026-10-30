@@ -36,13 +36,15 @@ impl ProfileFacts {
 
     /// The facts of an inline mob profile. The digest is over the profile's
     /// serialized form without its top-level members that equal that
-    /// member's default (the profile read from its model alone), so a Core
-    /// release that adds a profile field keeps every digest while the field
-    /// is left at its default. Nothing below the top level is pruned: a
-    /// schema, provider params or a tool configuration is digested whole,
-    /// so a change anywhere inside one changes the digest, and the
-    /// identities whose template binds the profile then read Broken until
-    /// the host rebinds them. The model is always digested.
+    /// member's default (the profile read from its model alone), and
+    /// without the members of its tool configuration (`tools`) that equal
+    /// theirs. So a Core release that adds a top-level profile field, or a
+    /// tool configuration field, keeps every digest while the field is left
+    /// at its default. Nothing deeper is pruned: a schema or provider params
+    /// are digested whole, so a change anywhere inside one changes the
+    /// digest, and the identities whose template binds the profile then
+    /// read Broken until the host rebinds them. The model is always
+    /// digested.
     pub fn of_profile(profile: &meerkat_mob::Profile) -> Result<Self, serde_json::Error> {
         let value = serde_json::to_value(profile)?;
         let defaults = serde_json::to_value(serde_json::from_value::<meerkat_mob::Profile>(
@@ -50,25 +52,52 @@ impl ProfileFacts {
         )?)?;
         Ok(Self {
             model: profile.model.clone(),
-            digest: canonical_digest(&json!({
-                "format": FORMAT_PROFILE,
-                "profile": without_default_members(value, &defaults),
-            })),
+            digest: profile_digest(value, &defaults),
         })
     }
 }
 
+/// The digest of a profile's serialized form `value`, against `defaults`,
+/// the serialized form of the profile read from its model alone.
+pub(super) fn profile_digest(value: Value, defaults: &Value) -> Sha256Digest {
+    canonical_digest(&json!({
+        "format": FORMAT_PROFILE,
+        "profile": without_default_members(value, defaults),
+    }))
+}
+
 /// `value`'s top-level members, without those other than `model` that equal
-/// the same member of `defaults`. Nested values are kept whole.
+/// the same member of `defaults`, and with `tools` (a typed struct whose
+/// serde defaults are its meaning's defaults) pruned the same way one level
+/// down. Nothing deeper is pruned.
 fn without_default_members(value: Value, defaults: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let kept: Map<String, Value> = map
                 .into_iter()
                 .filter(|(key, member)| key == "model" || defaults.get(key) != Some(member))
+                .map(|(key, member)| match defaults.get(&key) {
+                    Some(default) if key == "tools" => {
+                        let member = without_equal_members(member, default);
+                        (key, member)
+                    }
+                    _ => (key, member),
+                })
                 .collect();
             Value::Object(kept)
         }
+        other => other,
+    }
+}
+
+/// `value`'s members without those equal to the same member of `defaults`.
+fn without_equal_members(value: Value, defaults: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .filter(|(key, member)| defaults.get(key) != Some(member))
+                .collect(),
+        ),
         other => other,
     }
 }

@@ -88,6 +88,7 @@ them.
   `ResolveAgentLaneMemberAdmissionIdentityMemberCompleted` and
   `ResolveAgentLaneMemberAdmissionIdentityMemberDestroyed`, so no existing
   variant's discriminant moves. Exhaustive matches must add the new variants.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
   machine records the members exempt from the mob definition's wiring rules
   (see Added). `MobMachineState` (meerkat-machine-schema and meerkat-mob) and
@@ -103,6 +104,7 @@ them.
   existing variant's discriminant moves. Exhaustive matches must add the new
   variants. The signal records the exemption only when a restore replays an
   exempt member's row, before the boot plan is sealed.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the
   inputs that seat a member carry its exemption from the mob definition's
   wiring rules, so the transition that seats it records it. The
@@ -114,12 +116,14 @@ them.
   set it (`false` keeps the previous behaviour), and a serialized kernel input
   without the field no longer deserializes. A placed member's membership
   commit refuses `true`.
+
 - `meerkat-core`: the Copilot auth methods gain an operator-supplied GitHub
   token: `OpenAiAuthMethod::GitHubCopilotToken`,
   `AnthropicAuthMethod::GitHubCopilotToken` and
   `GoogleAuthMethod::GitHubCopilotToken` (wire `github_copilot_token`). An
   exhaustive match on these enums needs the new arm. The Web SDK's generated
   `WIRE_AUTH_METHODS` and `WIRE_PROVIDER_AUTH_METHODS` list it too.
+
 - `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`: the
   AuthMachine records which credential value a source-read publication
   carries, so a value that was refused or logged out is not published again
@@ -160,6 +164,7 @@ them.
   `Expired` and accept any value, the recorded one included, so a run-out
   window still renews the lease. Code that builds `Acquire` sets the new
   field.
+
 - Behaviour-only (not measured by the gate): `meerkat-core` human consent
   (R3): a route's `HumanConsentRoute::eligibility` is now also asked after
   the decision, for the same approver and the approval as decided, when
@@ -175,6 +180,7 @@ them.
   does so: `StockConsentSurface::approver_login` states a login past its
   own deadline with that deadline, and returns `None` only for a login
   logged out, replaced, retired or no longer permitted.
+
 - Behaviour-only (not measured by the gate): `meerkat-core` approval reads
   and decisions run host code. `ApprovalService::get` and `list` call the
   host's authorization `prepare` and `review_operation_context` for a live
@@ -185,6 +191,7 @@ them.
   outside the approval owner's locks: a host must not hold a lock its
   owners take while it reads or decides approvals, and each re-preparation
   is audited as a preparation.
+
 - Behaviour-only (not measured by the gate): `meerkat-core`:
   `ApprovalService::decide_consent` can answer a retryable
   `ApprovalError::StoreUnavailable`, with nothing recorded: for an approval
@@ -192,6 +199,7 @@ them.
   progress, unavailable owners, or a publication that keeps changing), and
   for any decision while the eligibility owner cannot say. A decline is
   recorded whatever the retained decision's currentness.
+
 - Behaviour-only (not measured by the gate): `meerkat-core` consent
   withdrawal reasons. Owners that refuse the operation when asked afresh
   (at a read, a decision, an attempt's admission or a spend) withdraw the
@@ -203,6 +211,7 @@ them.
   of its review material is the owners' refusal, at the move as in a run:
   the consent is withdrawn as `AuthorityChanged` (facts they cannot read
   withdraw it as `ContextChanged`).
+
 - Behaviour-only (not measured by the gate): `meerkat-session`: the summary
   request `DefaultCompactor` builds names each image or video in a user row
   or tool result as `[image (<media type>) omitted from this summary request]`
@@ -234,6 +243,7 @@ them.
   exhaustive, so a downstream exhaustive match needs the new arms, or a
   wildcard arm; a `MeerkatMachineState` literal that ends with
   `..Default::default()` keeps compiling.
+
 - Behaviour-only (not measured by the gate): `meerkat-runtime`:
   `NativeWorkAuthorizationHost::authenticate_retained_resume`, and through it
   the scoped composition's `RetainedControllerOwner::reacquire_controller`,
@@ -255,6 +265,7 @@ them.
   now also ends a single queued input that belongs to no run, and a kept
   governed input admitted under its own authority association, which an
   attachment ends before it serves (see Known limitations).
+
 - Behaviour-only (not measured by the gate): `meerkat-authorization`: the
   native work owner's operation-time steps (`LocalWorkAuthorization`'s
   `WorkAuthorization::run_if_current_within`,
@@ -289,6 +300,7 @@ them.
   `Unavailable`. A host that matched the unavailable answer for this
   contention matches the refusal to rebuild instead, or uses the waiting
   forms (see Added).
+
 - `meerkat-core`: `service::SessionBuildOptions` gains `grant_gated_tools`,
   `SessionTooling` gains `grant_gated`, and `SessionToolVisibilityState` gains
   `tool_grant_gated_names` and `tool_grant_open_names` (struct literals need
@@ -296,6 +308,7 @@ them.
   fields default to empty. `AgentBuildPolicyError` gains
   `ToolGrantGateWithoutAdjudication`: an agent with a scoped tool grant gate
   requires a dispatcher whose `adjudicates_tool_grants` answers true.
+
 - `meerkat`: `AgentBuildConfig` gains `grant_gated_tools`, and
   `BuildAgentError` gains `GrantGate(GrantGateBuildError)`, where
   `GrantGateBuildError` is core's `tool_grant::GrantGateRefusal`.
@@ -303,9 +316,11 @@ them.
   arm. A session service surfaces the refusal as the typed
   `AgentError::ToolGrantGateRefused`: an invalid-params error whose data is
   `{"kind": "tool_grant_gate_refused", "tool_grant_gate_refusal": ...}`.
+
 - `meerkat-rpc`: `handlers::session::CreateSessionParams` gains
   `grant_gated_tools` (`Option<meerkat_contracts::WireGrantGatedTools>`); a
   struct literal needs it.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
   MeerkatMachine gains the scoped tool grant gate (see Added).
   `MeerkatMachineState` (meerkat-machine-schema and meerkat-runtime) and the
@@ -329,6 +344,7 @@ them.
   `ApplyToolGrantOpenSetUnchangedRunning`,
   `ApplyToolGrantOpenSetUnchangedRetired` and
   `ApplyToolGrantOpenSetUnchangedStopped`.
+
 - `meerkat-session`, `meerkat-mob`: a session service reports where its agent
   builds keep the members' comms identities, and every wrapper forwards it.
   `SessionAgentBuilder` and `MobSessionService` each gain the required method
@@ -411,6 +427,7 @@ them.
   member host cannot be exempt: its spawn is refused typed
   (`MobError::WiringError`). The option is Rust-only; the wire spawn
   contracts do not carry it.
+
 - `meerkat-core`: `AuthLeaseHandle::publish_source_credential` publishes a
   credential value its caller re-reads from a source (an environment
   variable, a command, an external resolver) only when the AuthMachine says
@@ -425,6 +442,7 @@ them.
   (an opaque SHA-256 fingerprint with a redacted `Debug` and no `Display`) and
   `SourceCredentialPublication` are new. The method's default fails closed,
   so other `AuthLeaseHandle` implementations are unaffected.
+
 - GitHub Copilot with a service-account token: `auth_method =
   "github_copilot_token"` authenticates the `copilot` backends with a GitHub
   token from any credential source and no device sign-in, as GitHub Copilot
@@ -448,6 +466,7 @@ them.
   `meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_URL` are new. The
   OpenAI, Anthropic and Gemini runtimes report the readiness of a
   `github_copilot_token` route from its source, without a network request.
+
 - Zero-config GitHub Copilot: while `[realm.global]` configures no Copilot
   route, a request that names `global:copilot_openai`,
   `global:copilot_anthropic` or `global:copilot_gemini` resolves it in token
@@ -456,9 +475,11 @@ them.
   `rkat auth test` and `rkat auth status`. Default selection never picks
   these routes, and any configured Copilot route turns them off.
   `RealmConnectionSet::copilot_token_default` returns them.
+
 - `meerkat-runtime`: `PromptInput::detached_job_completed_with_handling`
   admits a completion notice under the handling its producer declares,
   with the same notice record as `PromptInput::detached_job_completed`.
+
 - `meerkat-runtime`: a caller reads the disposition the machine recorded
   for an unregister. A call that joins an unregister already in progress
   keeps the disposition that unregister began with, whatever it passed.
@@ -482,6 +503,7 @@ them.
   runtime's lifecycle row while the unregister is in progress
   (`RuntimeStore::observe_machine_lifecycle`, then
   `DecodedMachineLifecycleObservation::unregister_progress`).
+
 - `meerkat-core`: `ConsentEligibilityAnswer` and the provided
   `HumanConsentRoute::eligibility_answer` tell an eligibility owner's
   refusal (`Refused`) apart from an owner that cannot say now
@@ -497,6 +519,7 @@ them.
   and keeps the default `eligibility_answer` answers an owner change in
   progress as a refusal, which withdraws an approved consent at its spend:
   such a route should override `eligibility_answer` with `observe_answer`.
+
 - `meerkat-core`: waiting forms of the governed dispatch steps,
   `GovernedDispatchOperation::run_if_current_within_after_owner_change` and
   `issue_child_if_current_within_after_owner_change`, and the same two on
@@ -521,6 +544,7 @@ them.
   `GovernedHelperChildIssuance::issue_or_recover_after_owner_change` waits
   the same way on the dispatch and entered paths, and answers `Unavailable`
   only past the bounds; its prepared path does not wait.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
   canonical `ToolGrantLifecycleMachine` (catalog
   `catalog::dsl::tool_grant_lifecycle`, kernel
@@ -535,6 +559,7 @@ them.
   deadline timer, the model-request boundary, the gated dispatch, reads,
   revocation, crash and restart, and one host clock rollback against the
   generated model, with reachability witnesses and seeded defects.
+
 - `meerkat-core`, `meerkat-runtime`, `meerkat`: scoped tool grants. A build
   marks built-in tool families and tool names grant-gated
   (`SessionBuildOptions::grant_gated_tools`,
@@ -593,6 +618,7 @@ them.
   doctor knows the new domain. `ToolVisibilityOwner` gains
   `replace_tool_grant_gate` and `apply_tool_grant_open_set`, whose defaults
   accept only an empty gate.
+
 - `meerkat-rpc`, `meerkat-contracts`, `meerkat-runtime`, `meerkat`, Python and
   TypeScript SDKs: scoped tool grants over JSON-RPC. `session/create` takes
   `grant_gated_tools` (`{"families": [...], "tools": [...]}`; a field the gate
@@ -634,6 +660,7 @@ them.
   `revokeToolGrant`, `listToolGrants`, `toolGrantAudit` and
   `SessionOptions.grantGatedTools`) wrap them; both refuse to send a gate to a
   server older than contract 0.9.8, which would build the session ungated.
+
 - `meerkat-core`: `SessionCommsIdentityRoot` says where a session service's
   agent builds keep each session's durable comms identity (its key pair) on
   in-process comms: `Durable(root)` (the key pair in `<root>/<session id>`),
@@ -652,6 +679,7 @@ them.
   reads `Tool call denied (<code>): <message>` from the denial itself, for an
   application consequence policy and a scoped tool grant gate alike, instead
   of naming the application policy over a debug rendering of the denial.
+
 - `meerkat-mob`: a dormant seat (`MobHandle::seat_dormant_members`,
   `MobHandle::rotate_member`) on in-process comms takes the members' comms
   identity root from the mob's session service when the host declares none:
@@ -744,6 +772,7 @@ them.
   outside the approval owner's locks: a host must not hold a lock its
   owners take while it reads or decides approvals, and each re-preparation
   is audited as a preparation.
+
 - `meerkat`: a consent notice keeps the queue handling its delivery
   declares. Before, it was admitted with steer handling, like a detached
   job's completion record, so a graceful requeue stop of its session
@@ -819,6 +848,7 @@ them.
     is bound to waits the same way, marked, and then resumes under the
     destination its inputs were staged for, so its destination-scoped
     operations and its scoped reply run under that destination.
+
 - `meerkat-core`, `meerkat-authorization`, `meerkat`: a governed tool step
   taken through the new waiting forms (see Added) no longer fails on
   transient contention with a concurrent actor on the same authorization
@@ -845,6 +875,7 @@ them.
   they meet after a refusal to rebuild. This is shell synchronization only:
   no machine input, generated authority or owner fact changed, and the
   review spend stays single and machine-owned.
+
 - `meerkat-runtime`: native admission of a scoped original no longer
   reports an owner change it meets as an unavailable policy. The scoped
   original check (`ScopedOriginalIngress`) resolved the admitted
@@ -869,6 +900,7 @@ them.
   `PolicyChanged` with the change, and the next attempt answers
   `PolicyUnavailable` if the failure persists. Nothing waits: the answer is
   returned at once, as before.
+
 - `meerkat-core`: an agent whose provider-native tools are disabled
   (`ProviderNativeToolPolicy::DisableAll`, which a governed build or a grant
   gate covering `web_search` sets) no longer sends a provider-native tool,
@@ -887,6 +919,7 @@ them.
   sessions before relying on a gate, and do not roll a host that served gated
   sessions back to an older binary. Grant rows and their audit log live in the
   `runtime-tool-grants` schema domain, which an older binary leaves alone.
+
 - An `rkat-rpc` older than scoped tool grants ignores `session/create`
   `grant_gated_tools` and builds the session with those tools ungated. A
   JSON-RPC client that is not one of the SDKs (which refuse) must check the
@@ -907,11 +940,13 @@ them.
   failed runs, and while it waited controller grant changes and credential
   publications were refused. Submit such a prompt again, with a fresh
   authentication of its caller.
+
 - `meerkat-runtime`: queued work admitted after a kept resume whose host
   cannot say yet whether it supplies its controller client runs first. When
   that work binds a newer generation of the resume's destination, the resume
   then ends as a refused resume (its destination was superseded) instead of
   running once its host answers.
+
 - `meerkat-runtime`: only a runtime loop asks a kept resume's host again,
   and a registration runs one only once an executor attaches. A registration
   with no executor attached asks only at its recovery: a kept resume held

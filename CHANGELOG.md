@@ -347,8 +347,11 @@ them.
   succeed. The retained-resume check (`ScopedRetainedResume`) answers the
   same two reads the same way, and so does `require_source_original_live`
   when it is called outside an exclusion of owner changes. A poisoned or
-  retired publication, failed durable grant custody and a clock failure
-  still answer `PolicyUnavailable`, and nothing waits: the answer is
+  retired publication still answers `PolicyUnavailable`. So do failed
+  durable grant custody and a clock failure, except, as since 0.9.4, one
+  that a read meets while an owner change is publishing: that read answers
+  `PolicyChanged` with the change, and the next attempt answers
+  `PolicyUnavailable` if the failure persists. Nothing waits: the answer is
   returned at once, as before.
 
 ## [0.9.7] - 2026-10-28

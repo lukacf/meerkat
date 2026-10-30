@@ -66,6 +66,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   token in the gateway's credential store; name the route with
   `member_auth_binding`.
 
+- `MobBootstrapSpec::with_agent_customizer` declares the agent customizer of
+  the identity runtime a host composes with `UnifiedRuntime::bootstrap` (or
+  the `bootstrap_with_*` family). The bootstrap then wires the mob's member
+  builds when it builds the mob, before the mob restores anything, so the
+  members a killed process left owing work, which the start builds before the
+  identity bootstrap, are held until its roster pass publishes their
+  customizer tools (one `customize_build` each), and their runs continue only
+  with them. Without the declaration the customizer is taken at the identity
+  bootstrap, which covers a clean restart but not those builds. The identity
+  runtime and its `IdentityFirstRuntimeContext` carry the declared customizer
+  or none: another one is refused at the identity bootstrap, before anything
+  is installed. `UnifiedRuntimeBuilder::mob_spec` refuses a spec that
+  declares one (`ConflictingConfiguration`): the builder composes its own
+  (`agent_customizer`).
+
 ### Changed
 
 - `meta/fork_helper` on the Console answers a source agent the console's
@@ -141,12 +156,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   From the mob's lift on, `customize_build` runs right before each build of
   an identity's member, the first wake after a restart included, and the
   build carries the tools it published. Without a customizer nothing
-  changes. Builds before the identity bootstrap stay unprepared, as before:
-  after a clean shutdown the mob stays stopped until that bootstrap lifts it,
-  but a mob a killed process left running restores the members that owe
-  work as it starts, and each gets its tools at its next build. The builder,
-  the stdio gateway and the bootstrap now wire their members' builds with
-  one shared construction.
+  changes. After a clean shutdown the mob stays stopped until that bootstrap
+  lifts it, so no build comes before it; a mob a killed process left running
+  restores the members that owe work as it starts, before the identity
+  bootstrap, and those builds are covered only when the spec declares the
+  customizer (`MobBootstrapSpec::with_agent_customizer`, see Added). The
+  builder, the stdio gateway and the bootstrap now wire their members'
+  builds with one shared construction.
 
 ### Known limitations
 

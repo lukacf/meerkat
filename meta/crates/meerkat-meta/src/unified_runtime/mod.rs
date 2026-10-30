@@ -444,8 +444,8 @@ pub struct UnifiedRuntimeCore {
     identity_first_context: Option<Arc<crate::identity_first::IdentityFirstRuntimeContext>>,
     /// The member build wiring [`UnifiedRuntime::bootstrap`] installed on a
     /// mob whose spec brought no build preparer, bound at the identity
-    /// bootstrap (`gateway_wiring::MemberBuildWiring::bind_deferred`).
-    deferred_member_build_wiring: Option<crate::gateway_wiring::MemberBuildWiring>,
+    /// bootstrap (`gateway_wiring::MemberBuildWiring::bind_at_identity_bootstrap`).
+    bootstrap_member_build_wiring: Option<crate::gateway_wiring::MemberBuildWiring>,
 
     // Optional ABAC enforcement shared by the console/SSE surfaces.
     access_controller: Option<crate::access::AccessController>,
@@ -908,7 +908,7 @@ impl UnifiedRuntime {
                 remote_host_reconnect_task: tokio::sync::Mutex::new(None),
                 session_bridge: None,
                 identity_first_context: None,
-                deferred_member_build_wiring: None,
+                bootstrap_member_build_wiring: None,
                 access_controller: None,
                 console_session_fences: crate::auth::session_fence::ConsoleSessionFences::detached(
                 ),
@@ -1092,15 +1092,22 @@ impl UnifiedRuntime {
             .map_err(|error| UnifiedRuntimeBootstrapError::Topology(error.to_string()))?;
         // Every composition wires its mob's member builds the same way
         // (`gateway_wiring::MemberBuildWiring`). A spec that brings no build
-        // preparer gets the deferred wiring: inert until the identity
-        // bootstrap finds an agent customizer, and from then on it publishes
-        // each identity member's customizer tools right before Core builds
-        // the member, as the builder's and the gateways' wiring do.
-        let deferred_member_build_wiring = mob_spec
-            .member_build_preparer
-            .is_none()
-            .then(crate::gateway_wiring::MemberBuildWiring::deferred);
-        let mob_spec = match deferred_member_build_wiring.as_ref() {
+        // preparer gets the bootstrap's wiring. With a declared agent
+        // customizer it is armed now, before the mob restores anything, so a
+        // member the start builds is held until the roster pass publishes its
+        // tools. Without one it is deferred: inert until the identity
+        // bootstrap finds a customizer, and from then on it publishes each
+        // identity member's tools right before Core builds the member, as
+        // the builder's and the gateways' wiring do.
+        let bootstrap_member_build_wiring = if mob_spec.member_build_preparer.is_some() {
+            None
+        } else {
+            Some(match mob_spec.agent_customizer.clone() {
+                Some(customizer) => crate::gateway_wiring::MemberBuildWiring::declared(customizer),
+                None => crate::gateway_wiring::MemberBuildWiring::deferred(),
+            })
+        };
+        let mob_spec = match bootstrap_member_build_wiring.as_ref() {
             Some(wiring) => wiring.install(mob_spec),
             None => mob_spec,
         };
@@ -1124,7 +1131,7 @@ impl UnifiedRuntime {
                 })
                 .await;
                 runtime.topology_controller = topology_controller;
-                runtime.deferred_member_build_wiring = deferred_member_build_wiring;
+                runtime.bootstrap_member_build_wiring = bootstrap_member_build_wiring;
                 // Configuration-only; dispatches nothing into the mob.
                 runtime
                     .configure_implicit_delegate_retirement(&runtime_options)
@@ -1533,13 +1540,18 @@ impl UnifiedRuntime {
     ///
     /// On a runtime from [`Self::bootstrap`] or the `bootstrap_with_*`
     /// family, this is where the member builds are wired as the builder
-    /// wires them, when the identity runtime has an agent customizer or the
-    /// context carries one: the context's customizer becomes the runtime's
-    /// own when none is installed, and from the lift on `customize_build`
-    /// runs right before each build of an identity's member (the first wake
-    /// after a restart included), whose build carries the tools it
-    /// published. Without a customizer nothing changes. The held variants
-    /// do the same.
+    /// wires them, when the spec declared an agent customizer
+    /// (`MobBootstrapSpec::with_agent_customizer`), the identity runtime has
+    /// one installed or the context carries one: the customizer becomes the
+    /// runtime's own when none is installed, and from the lift on
+    /// `customize_build` runs right before each build of an identity's
+    /// member (the first wake after a restart included), whose build carries
+    /// the tools it published. A declared customizer also covers the members
+    /// the mob built before this bootstrap: they are held until the roster
+    /// pass publishes their tools. The runtime and the context carry the
+    /// declared customizer or none; another one is refused here, before
+    /// anything is installed. Without a customizer nothing changes. The held
+    /// variants do the same.
     pub async fn bootstrap_installed_identity_first_context(
         &mut self,
         roster: &[crate::identity_first::DurableAgentSpec],
@@ -1618,7 +1630,11 @@ impl UnifiedRuntime {
                 "no identity-first context is installed to bootstrap".to_string(),
             ));
         };
-        self.bind_deferred_member_build_wiring(&context).await;
+        if let Err(error) = self.bind_bootstrap_member_build_wiring(&context).await {
+            return Ok(HeldBootstrapStart::Unsettled(
+                HeldBootstrapSettlement::resolved(error),
+            ));
+        }
         // The ruled activation order is unchanged (see the unheld path): a
         // held setup runs it first in its tracked operation. The bootstrap
         // edges are reconciled after the roster pass, as on the unheld path.
@@ -1689,7 +1705,11 @@ impl UnifiedRuntime {
                 "no identity-first context is installed to bootstrap".to_string(),
             ));
         };
-        self.bind_deferred_member_build_wiring(&context).await;
+        if let Err(error) = self.bind_bootstrap_member_build_wiring(&context).await {
+            self.report_bootstrap_phase(UnifiedRuntimeBootstrapPhase::FailureCleanup);
+            self.shutdown().await;
+            return Err(error);
+        }
         // The ruled activation order: the lift precedes rostering, because a
         // Stopped mob seats nothing. Nothing is published before the lift:
         // Core asks the mob's member build preparer before each member it
@@ -1730,20 +1750,24 @@ impl UnifiedRuntime {
         }
     }
 
-    /// Bind the deferred member build wiring [`Self::bootstrap`] installed,
-    /// if it installed one, to `context`'s identity runtime. The identity
-    /// bootstrap binds it before it lifts the mob, so with an agent
-    /// customizer every build from the lift on is prepared; without one the
-    /// wiring stays inert.
-    async fn bind_deferred_member_build_wiring(
+    /// Bind the member build wiring [`Self::bootstrap`] installed, if it
+    /// installed one, to `context`'s identity runtime. The identity bootstrap
+    /// binds it before it lifts the mob, so with an agent customizer every
+    /// build from the lift on is prepared, and the builds a declared wiring
+    /// held before are published by the roster pass; without one a deferred
+    /// wiring stays inert. A customizer or registry that conflicts with the
+    /// spec's declaration is refused before anything is installed.
+    async fn bind_bootstrap_member_build_wiring(
         &self,
         context: &crate::identity_first::IdentityFirstRuntimeContext,
-    ) {
-        if let Some(wiring) = self.deferred_member_build_wiring.as_ref() {
-            wiring
-                .bind_deferred(context, self.mob_runtime.session_service().cloned())
-                .await;
-        }
+    ) -> Result<(), crate::identity_first::IdentityRuntimeError> {
+        let Some(wiring) = self.bootstrap_member_build_wiring.as_ref() else {
+            return Ok(());
+        };
+        wiring
+            .bind_at_identity_bootstrap(context, self.mob_runtime.session_service().cloned())
+            .await
+            .map_err(crate::identity_first::IdentityRuntimeError::Internal)
     }
 
     fn install_identity_first_context_authority(

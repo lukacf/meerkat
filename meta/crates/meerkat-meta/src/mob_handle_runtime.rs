@@ -6540,6 +6540,10 @@ pub struct MobBootstrapSpec {
     /// member it builds, on both start paths and at every wake
     /// ([`crate::identity_first::IdentityBuildPreparer`]).
     pub(crate) member_build_preparer: Option<Arc<dyn meerkat_mob::MemberBuildPreparer>>,
+    /// The agent customizer the host declares for the identity runtime this
+    /// mob serves ([`Self::with_agent_customizer`]): `UnifiedRuntime::bootstrap`
+    /// wires the mob's member builds with it when it builds the mob.
+    pub(crate) agent_customizer: Option<Arc<dyn crate::identity_first::AgentCustomizer>>,
     /// How the mob materializes its seated members when it starts
     /// (`runtime_options.member_restore`), forwarded to
     /// `MobBuilder::with_member_restore_policy`.
@@ -6800,6 +6804,7 @@ impl MobBootstrapSpec {
             member_auth_binding_recorded: None,
             member_runtime_registration_hook: None,
             member_build_preparer: None,
+            agent_customizer: None,
             member_restore: crate::identity_first::MemberRestore::default(),
             host_pending_members: Vec::new(),
             session_identity_config_root: None,
@@ -7468,6 +7473,35 @@ impl MobBootstrapSpec {
         preparer: Arc<dyn meerkat_mob::MemberBuildPreparer>,
     ) -> Self {
         self.member_build_preparer = Some(preparer);
+        self
+    }
+
+    /// Declare the agent customizer of the identity runtime a host composes
+    /// over this mob with [`crate::UnifiedRuntime::bootstrap`] (or the
+    /// `bootstrap_with_*` family). The bootstrap then wires the mob's member
+    /// builds before the mob restores anything: a member the start builds
+    /// (one a killed process left with an open run, say) is held until the
+    /// identity bootstrap's roster pass publishes its customizer tools, and
+    /// every later build is prepared with them. Without the declaration the
+    /// wiring is decided at the identity bootstrap
+    /// (`install_and_bootstrap_identity_first_context`), which covers the
+    /// builds from the mob's lift on, as after a clean shutdown, but not the
+    /// builds of a start that does not wait for that lift.
+    ///
+    /// The declaration is the composition's customizer: the identity runtime
+    /// and its `IdentityFirstRuntimeContext` carry this same customizer or
+    /// none, and the identity bootstrap refuses another one. Declare it only
+    /// for a mob whose runtime bootstraps an identity context
+    /// (`install_and_bootstrap_identity_first_context`): until that
+    /// bootstrap, an identity member the mob builds is held. A spec handed to
+    /// `UnifiedRuntimeBuilder::mob_spec` must not declare one: the builder
+    /// composes its own (`UnifiedRuntimeBuilder::agent_customizer`).
+    #[must_use]
+    pub fn with_agent_customizer(
+        mut self,
+        customizer: Arc<dyn crate::identity_first::AgentCustomizer>,
+    ) -> Self {
+        self.agent_customizer = Some(customizer);
         self
     }
 

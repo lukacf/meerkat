@@ -20,9 +20,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::identity_first::{
-    ContinuityStore, CustomizerToolRegistry, CustomizerToolsSpawnCustomizer, IdentityBuildPreparer,
-    IdentityFirstRuntimeContext, IdentityRuntime, LocalContinuityStore, LocalLeaseProvider,
-    contracts::LeaseProvider,
+    AgentCustomizer, ContinuityStore, CustomizerToolRegistry, CustomizerToolsSpawnCustomizer,
+    IdentityBuildPreparer, IdentityFirstRuntimeContext, IdentityRuntime, LocalContinuityStore,
+    LocalLeaseProvider, contracts::LeaseProvider,
 };
 
 /// The durable-identity substrate a gateway builds from its state directory:
@@ -120,6 +120,10 @@ pub(crate) struct MemberBuildWiring {
     registry: Option<Arc<CustomizerToolRegistry>>,
     spawn_customizer: Option<Arc<CustomizerToolsSpawnCustomizer>>,
     preparer: Option<Arc<IdentityBuildPreparer>>,
+    /// The agent customizer the composition's spec declares
+    /// (`MobBootstrapSpec::with_agent_customizer`), which the identity
+    /// bootstrap installs.
+    declared_customizer: Option<Arc<dyn AgentCustomizer>>,
 }
 
 impl MemberBuildWiring {
@@ -134,18 +138,34 @@ impl MemberBuildWiring {
                 .map(|registry| Arc::new(CustomizerToolsSpawnCustomizer::new(registry))),
             preparer: prepares.then(|| IdentityBuildPreparer::new(registry.is_some())),
             registry,
+            declared_customizer: None,
         }
     }
 
-    /// The wiring of a composition that learns only at its identity
-    /// bootstrap whether it composes an agent customizer
-    /// (`UnifiedRuntime::bootstrap`): its spawn customizer attaches nothing
-    /// and its preparer is inert until [`Self::bind_deferred`] finds one.
+    /// The wiring of a `UnifiedRuntime::bootstrap` composition whose spec
+    /// declares its agent customizer: armed when the mob is built, as
+    /// [`Self::new`] arms a composition with a customizer, so a build that
+    /// comes before the identity bootstrap is held until the roster pass
+    /// publishes its tools. The identity bootstrap installs `customizer` and
+    /// binds the preparer ([`Self::bind_at_identity_bootstrap`]).
+    pub(crate) fn declared(customizer: Arc<dyn AgentCustomizer>) -> Self {
+        Self {
+            declared_customizer: Some(customizer),
+            ..Self::new(true, true)
+        }
+    }
+
+    /// The wiring of a `UnifiedRuntime::bootstrap` composition whose spec
+    /// declares no agent customizer: it learns only at its identity
+    /// bootstrap whether it composes one, so its spawn customizer attaches
+    /// nothing and its preparer is inert until
+    /// [`Self::bind_at_identity_bootstrap`] finds one.
     pub(crate) fn deferred() -> Self {
         Self {
             registry: None,
             spawn_customizer: Some(Arc::new(CustomizerToolsSpawnCustomizer::deferred())),
             preparer: Some(IdentityBuildPreparer::deferred()),
+            declared_customizer: None,
         }
     }
 
@@ -184,42 +204,86 @@ impl MemberBuildWiring {
         }
     }
 
-    /// Bind a deferred wiring to the identity runtime of `context`, before
-    /// its identity bootstrap lifts the mob. Without an agent customizer
-    /// (none installed on the runtime and none in the context) nothing
-    /// changes: the wiring stays inert. With one, the runtime is composed as
-    /// `UnifiedRuntimeBuilder` composes it: the context's customizer becomes
-    /// the runtime's own when none is installed, the runtime gets a
-    /// customizer tool registry when it has none, the spawn customizer
-    /// attaches from the runtime's registry, and the preparer publishes
-    /// tools and is bound.
-    pub(crate) async fn bind_deferred(
+    /// Bind a `UnifiedRuntime::bootstrap` wiring to the identity runtime of
+    /// `context`, before its identity bootstrap lifts the mob, composing the
+    /// runtime as `UnifiedRuntimeBuilder` composes it.
+    ///
+    /// The customizer is the one the spec declared; without a declaration,
+    /// the one installed on the runtime, else the one the context carries.
+    /// A declared customizer allows the runtime and the context to carry the
+    /// same customizer or none: any other one is refused, as is a runtime
+    /// whose customizer tool registry is not the one the mob was built with.
+    /// Without any customizer nothing changes: a deferred wiring stays inert.
+    /// With one, it becomes the runtime's own when none is installed, the
+    /// runtime gets the composition's registry when it has none, the spawn
+    /// customizer attaches from the runtime's registry, and the preparer
+    /// publishes tools and is bound. A refusal changes nothing.
+    pub(crate) async fn bind_at_identity_bootstrap(
         &self,
         context: &IdentityFirstRuntimeContext,
         session_service: Option<Arc<dyn meerkat_mob::MobSessionService>>,
-    ) {
+    ) -> Result<(), String> {
         let runtime = &context.runtime;
-        if runtime.installed_agent_customizer().await.is_none() {
-            let Some(customizer) = context.customizer.clone() else {
-                return;
-            };
-            runtime.set_agent_customizer(Some(customizer)).await;
-        }
-        let registry = match runtime.installed_customizer_tool_registry().await {
-            Some(registry) => registry,
-            None => {
-                let registry = CustomizerToolRegistry::new();
+        let installed = runtime.installed_agent_customizer().await;
+        let customizer = match self.declared_customizer.as_ref() {
+            Some(declared) => {
+                let other = |carried: &Arc<dyn AgentCustomizer>| !Arc::ptr_eq(carried, declared);
+                if context.customizer.as_ref().is_some_and(other) {
+                    return Err(
+                        "conflicting agent customizers: the mob's spec declares one \
+                         (MobBootstrapSpec::with_agent_customizer) and the identity context \
+                         carries another; the context carries the declared customizer or none"
+                            .to_string(),
+                    );
+                }
+                if installed.as_ref().is_some_and(other) {
+                    return Err(
+                        "conflicting agent customizers: the mob's spec declares one \
+                         (MobBootstrapSpec::with_agent_customizer) and the identity runtime has \
+                         another installed; the runtime installs the declared customizer or none"
+                            .to_string(),
+                    );
+                }
+                Arc::clone(declared)
+            }
+            None => match installed.clone().or_else(|| context.customizer.clone()) {
+                Some(customizer) => customizer,
+                None => return Ok(()),
+            },
+        };
+        let registry = match (
+            runtime.installed_customizer_tool_registry().await,
+            self.registry.as_ref(),
+        ) {
+            (Some(runtime_registry), Some(composed))
+                if !Arc::ptr_eq(&runtime_registry, composed) =>
+            {
+                return Err(
+                    "conflicting customizer tool registries: the mob was built with its own \
+                     and the identity runtime has another installed; the runtime installs none"
+                        .to_string(),
+                );
+            }
+            (Some(runtime_registry), _) => runtime_registry,
+            (None, composed) => {
+                let registry = composed
+                    .cloned()
+                    .unwrap_or_else(CustomizerToolRegistry::new);
                 runtime
                     .set_customizer_tool_registry(Some(Arc::clone(&registry)))
                     .await;
                 registry
             }
         };
+        if installed.is_none() {
+            runtime.set_agent_customizer(Some(customizer)).await;
+        }
         if let Some(customizer) = self.spawn_customizer.as_ref() {
             customizer.arm(registry);
         }
         if let Some(preparer) = self.preparer.as_ref() {
             preparer.bind_publishing(runtime, session_service).await;
         }
+        Ok(())
     }
 }

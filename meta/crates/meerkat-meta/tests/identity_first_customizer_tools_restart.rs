@@ -31,6 +31,10 @@
 //!   publishes its tools and releases the hold: no run starts without them.
 //!   A publication that fails keeps the member held, and work Core admits
 //!   for it waits until a delivery publishes them.
+//! - A host that composes with `UnifiedRuntime::bootstrap` gets the same
+//!   hold across a kill when its spec declares the agent customizer
+//!   (`MobBootstrapSpec::with_agent_customizer`); an identity context that
+//!   carries another customizer is refused.
 //! - A restored member whose identity the roster no longer lists starts no
 //!   run before the roster pass retires it. A host-adopted identity's member,
 //!   which the roster pass never retires and no roster publication covers,
@@ -3423,4 +3427,222 @@ async fn a_builder_runtime_pins_the_member_controller_so_governed_input_reaches_
     );
     assert_eq!(model.count(), 0, "both binds refused, so nothing ran");
     runtime.shutdown().await;
+}
+
+/// Set in the child process of
+/// [`a_bootstrap_spec_declaring_its_customizer_continues_a_killed_run_only_with_its_tools`]:
+/// the state directory its first boot runs in.
+const DECLARED_CHILD_STATE: &str = "META_CUSTOMIZER_TOOLS_DECLARED_CHILD_STATE";
+
+/// A mob over `state` composed the way a host composes one with
+/// `UnifiedRuntime::bootstrap`: a persistent spec whose members are built on
+/// `model` and which declares `customizer`
+/// (`MobBootstrapSpec::with_agent_customizer`), bootstrapped and not yet
+/// given an identity context.
+async fn bootstrap_declaring(
+    mob_id: &str,
+    state: &Path,
+    model: WorkerModel,
+    customizer: Arc<dyn AgentCustomizer>,
+) -> meerkat_meta::UnifiedRuntime {
+    std::fs::create_dir_all(state).expect("state root");
+    let (storage, provenance) =
+        meerkat_meta::mob_composition_manifest::persistent_mob_storage(state.join("mob.sqlite3"))
+            .expect("open persistent mob storage");
+    let spec = meerkat_meta::MobBootstrapSpec::persistent(
+        MobDefinition::from_toml(&MOB_TOML.replace("{MOB_ID}", mob_id)).expect("definition"),
+        storage,
+        provenance,
+        state.to_path_buf(),
+        16,
+    )
+    .await
+    .expect("compose persistent Meta stores")
+    .with_child_mob_storage(meerkat_meta::ChildMobStorage::ProcessBound)
+    .with_options(meerkat_meta::MobBootstrapOptions {
+        allow_ephemeral_sessions: true,
+        notify_orchestrator_on_resume: true,
+        default_llm_client: Some(Arc::new(model)),
+    })
+    .with_agent_customizer(customizer);
+    meerkat_meta::UnifiedRuntime::bootstrap(
+        spec,
+        meerkat_meta::MetaConfig {
+            modules: Vec::new(),
+            discovery: meerkat_meta::DiscoverySpec {
+                namespace: mob_id.to_string(),
+                modules: Vec::new(),
+            },
+            pre_spawn: Vec::new(),
+        },
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("bootstrap the UnifiedRuntime")
+}
+
+/// The identity context such a host installs over `runtime`: the state
+/// directory's continuity substrate, the identity bridge every composition
+/// builds (`gateway_wiring::identity_session_bridge`), a roster that lists
+/// [`MEMBER`], and `customizer` as the context's own.
+async fn bootstrap_identity_context(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    mob_id: &str,
+    state: &Path,
+    customizer: Option<Arc<dyn AgentCustomizer>>,
+) -> Arc<meerkat_meta::identity_first::IdentityFirstRuntimeContext> {
+    let substrate =
+        meerkat_meta::gateway_wiring::open_identity_substrate(&state.join("continuity.sqlite3"))
+            .await
+            .expect("open the identity substrate");
+    let handle = meerkat_meta::gateway_wiring::identity_mob_handle(runtime);
+    let bridge = meerkat_meta::gateway_wiring::identity_session_bridge(
+        runtime.mob_runtime(),
+        handle.clone(),
+    );
+    let identity_runtime = meerkat_meta::identity_first::IdentityRuntime::new(
+        meerkat_meta::identity_first::IdentityRuntimeConfig {
+            continuity_store: substrate.continuity_store,
+            lease_provider: substrate.lease_provider,
+            runtime_instance_id: mob_id.to_string(),
+            has_runtime_store: true,
+            durability_policy: meerkat_meta::identity_first::DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(Arc::new(bridge)),
+            default_timeout: None,
+        },
+    )
+    .with_runtime_services(meerkat_meta::identity_first::AgentRuntimeServices::new(
+        handle,
+    ));
+    Arc::new(
+        meerkat_meta::identity_first::IdentityFirstRuntimeContext::new(
+            Arc::new(identity_runtime),
+            Arc::new(ListedRoster(&[MEMBER])),
+            None,
+            customizer,
+            Some(runtime.mob_handle().definition().clone()),
+        ),
+    )
+}
+
+/// [`bootstrap_declaring`] with its identity context installed and
+/// bootstrapped. The context carries the declared customizer too.
+async fn boot_declaring(
+    mob_id: &str,
+    state: &Path,
+    model: WorkerModel,
+    customizer: Arc<dyn AgentCustomizer>,
+) -> meerkat_meta::UnifiedRuntime {
+    let mut runtime = bootstrap_declaring(mob_id, state, model, Arc::clone(&customizer)).await;
+    let context = bootstrap_identity_context(&runtime, mob_id, state, Some(customizer)).await;
+    runtime
+        .install_and_bootstrap_identity_first_context(context, &[durable_spec(MEMBER)])
+        .await
+        .expect("install and bootstrap the identity context");
+    runtime
+}
+
+/// A host that composes with `UnifiedRuntime::bootstrap` and declares its
+/// agent customizer on the spec (`MobBootstrapSpec::with_agent_customizer`)
+/// gets the builder's guarantee across a kill. The kill leaves the member's
+/// run open (no Stop is recorded, so the mob log stays Running), so the
+/// restart's mob restores the member while `UnifiedRuntime::bootstrap`
+/// builds it, before the host has composed its identity runtime, and the
+/// wiring the declaration armed holds that build. The identity bootstrap's
+/// roster pass publishes the member's tools with one `customize_build`, run
+/// with the runtime's real context, and releases the hold. Only then does the
+/// open run continue, and every request it makes offers the tool. RED with
+/// the declaration's early arming dropped (the spec's wiring deferred to the
+/// identity bootstrap): the start builds the member unprepared and unheld,
+/// its run continues without the tool, and no `customize_build` runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bootstrap_spec_declaring_its_customizer_continues_a_killed_run_only_with_its_tools() {
+    const MOB_ID: &str = "customizer-tools-restart-s";
+    if let Some(state) = std::env::var_os(DECLARED_CHILD_STATE) {
+        // The child: the member's run commits a round and waits on its
+        // model, then the process exits without shutdown.
+        let model = WorkerModel::holding();
+        let runtime = boot_declaring(
+            MOB_ID,
+            Path::new(&state),
+            model.clone(),
+            Arc::new(ToolCustomizer::default()),
+        )
+        .await;
+        send_member(&runtime, &worker_turn(MEMBER))
+            .await
+            .expect("send the member its work");
+        wait_for_round(&model, MEMBER).await;
+        std::process::exit(0);
+    }
+
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "a_bootstrap_spec_declaring_its_customizer_continues_a_killed_run_only_with_its_tools",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(DECLARED_CHILD_STATE, &state)
+        .status()
+        .expect("run the first boot in a child process");
+    assert!(child.success(), "the child's first boot failed: {child}");
+
+    let model = WorkerModel::default();
+    let customizer = Arc::new(RealContextCustomizer::default());
+    let runtime = boot_declaring(MOB_ID, &state, model.clone(), customizer.clone()).await;
+    wait_for_round(&model, MEMBER).await;
+    let continued = model.after_round_requests(MEMBER);
+    assert!(
+        continued.iter().all(|request| offers_tool(request)),
+        "the open run continued only with the customizer tool: {continued:?}"
+    );
+    assert_eq!(
+        customizer.calls.load(Ordering::SeqCst),
+        1,
+        "the roster pass's publication, with the real context; the declared wiring held the \
+         start's build without calling the host"
+    );
+    let status = member_status(&runtime).await;
+    assert!(status.customizer_tools_pending.is_none(), "{status:?}");
+    assert_eq!(member_run_starts_held(&runtime).await, Some(false));
+    assert!(resolved_tools(&runtime).await.contains(&TOOL.to_string()));
+    runtime.shutdown().await;
+}
+
+/// The customizer a bootstrap spec declares is the composition's: an
+/// identity context that carries another one is refused at the identity
+/// bootstrap, before the mob is lifted or anything is installed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bootstrap_spec_declared_customizer_refuses_a_context_carrying_another() {
+    const MOB_ID: &str = "customizer-tools-restart-t";
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let mut runtime = bootstrap_declaring(
+        MOB_ID,
+        &state,
+        WorkerModel::default(),
+        Arc::new(ToolCustomizer::default()),
+    )
+    .await;
+    let context = bootstrap_identity_context(
+        &runtime,
+        MOB_ID,
+        &state,
+        Some(Arc::new(ToolCustomizer::default())),
+    )
+    .await;
+    let refused = runtime
+        .install_and_bootstrap_identity_first_context(context, &[durable_spec(MEMBER)])
+        .await;
+    assert!(
+        matches!(
+            &refused,
+            Err(IdentityRuntimeError::Internal(message))
+                if message.starts_with("conflicting agent customizers")
+        ),
+        "{refused:?}"
+    );
 }

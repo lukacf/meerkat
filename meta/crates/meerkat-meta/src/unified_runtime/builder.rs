@@ -1434,6 +1434,18 @@ impl UnifiedRuntimeBuilder {
             ));
         }
 
+        // The builder composes its own agent customizer, so a spec's
+        // declaration would be dropped or fight it.
+        if self
+            .mob_spec
+            .as_ref()
+            .is_some_and(|spec| spec.agent_customizer.is_some())
+        {
+            return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
+                "mob_spec() declares an agent customizer (MobBootstrapSpec::with_agent_customizer), which only UnifiedRuntime::bootstrap composes: declare it with agent_customizer() on the builder".into(),
+            ));
+        }
+
         if self.mob_spec.is_some() && self.session_identity_config_root.is_some() {
             return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
                 "session_identity_config_root() requires builder-owned session services; mob_spec() is already erased; declare the factory root on the supplied spec with MobBootstrapSpec::with_session_identity_config_root".into(),
@@ -3907,6 +3919,41 @@ mod tests {
                 "{root:?}"
             );
         }
+    }
+
+    /// A supplied spec that declares an agent customizer is refused: the
+    /// builder composes its own customizer, which the declaration would be
+    /// dropped beside or fight.
+    #[tokio::test]
+    async fn supplied_spec_declaring_an_agent_customizer_is_refused_before_bootstrap() {
+        struct Customizer;
+        #[async_trait::async_trait]
+        impl crate::identity_first::AgentCustomizer for Customizer {
+            async fn customize_build(
+                &self,
+                _: &crate::identity_first::AgentBuildContext,
+                _: &crate::identity_first::DurableAgentSpec,
+                _: &mut crate::identity_first::AgentBuildDraft,
+            ) -> Result<(), crate::identity_first::CustomizerError> {
+                panic!("a refused composition builds no member")
+            }
+        }
+        let definition = MobDefinition::from_toml("[mob]\nid = \"declared-customizer-spec\"\n")
+            .expect("fixture definition");
+        let spec = UnifiedRuntimeBuilder::default()
+            .definition(definition)
+            .resolve_mob_spec()
+            .await
+            .expect("empty fixture spec")
+            .with_agent_customizer(Arc::new(Customizer));
+        let result = UnifiedRuntimeBuilder::default()
+            .mob_spec(spec)
+            .build()
+            .await;
+        assert!(matches!(result,
+            Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(detail))
+                if detail.contains("MobBootstrapSpec::with_agent_customizer")
+                    && detail.contains("agent_customizer()")));
     }
 
     /// The builder's fork instruction policy reaches the spec of each

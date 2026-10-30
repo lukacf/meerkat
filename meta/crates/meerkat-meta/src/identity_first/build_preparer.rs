@@ -28,11 +28,13 @@
 //! it runs inside Core's wake and inside the boot restore, so it never
 //! issues a mob command.
 //!
-//! A runtime composed with `UnifiedRuntime::bootstrap` learns whether it
-//! composes an agent customizer only at its identity bootstrap, so its mob
-//! is built with a deferred preparer: inert (Core builds as if the mob had
-//! none) until that bootstrap finds a customizer, and inert for good when it
-//! finds none.
+//! A runtime composed with `UnifiedRuntime::bootstrap` over a spec that
+//! declares its agent customizer (`MobBootstrapSpec::with_agent_customizer`)
+//! gets this preparer as the builder's runtime does. Without a declaration
+//! it learns whether it composes a customizer only at its identity
+//! bootstrap, so its mob is built with a deferred preparer: inert (Core
+//! builds as if the mob had none) until that bootstrap finds a customizer,
+//! and inert for good when it finds none.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Weak};

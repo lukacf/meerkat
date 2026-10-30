@@ -30314,7 +30314,9 @@ mod console_human_currentness_tests {
         publication: LocalAuthorizationPublication,
         /// The Console human that authenticated the decision event.
         event_human: Mutex<Option<AuthenticatedConsoleHuman>>,
-        /// Observe the human at this instant instead of now.
+        /// Observe the human at this instant instead of now, once: a later
+        /// observation (the approval owner asking again) reads the wall
+        /// clock, as a host's does.
         observe_at: Mutex<Option<SystemTime>>,
         /// Runs once right after an eligibility was resolved, before the
         /// decision commits.
@@ -30354,7 +30356,7 @@ mod console_human_currentness_tests {
             {
                 return Err(ConsentIneligible);
             }
-            let observe_at = *self.observe_at.lock().unwrap();
+            let observe_at = self.observe_at.lock().unwrap().take();
             let console = match observe_at {
                 Some(now) => self.fences.observe_current_human_at(&human, now),
                 None => self.fences.observe_current_human(&human),
@@ -30756,10 +30758,12 @@ mod console_human_currentness_tests {
     }
 
     /// The token's refusal second passes between the host's observation and
-    /// the commit: the commit's own check reads the wall clock and refuses
-    /// the decision as not eligible, and the approval stays pending. The
-    /// observation is made at the token's last accepted second, which the
-    /// wall clock is long past.
+    /// the commit: the commit's own check reads the wall clock and finds the
+    /// evidence stale, the approval owner asks the host again, and the
+    /// host's fresh observation, at the wall clock, refuses the lapsed
+    /// token: the decision is not eligible, and the approval stays pending.
+    /// The first observation is made at the token's last accepted second,
+    /// which the wall clock is long past; the refused one is not counted.
     #[tokio::test]
     async fn a_token_lapsing_before_the_decision_commits_leaves_it_pending() {
         let world = consent_world();

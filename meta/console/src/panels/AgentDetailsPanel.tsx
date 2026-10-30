@@ -86,12 +86,15 @@ export function AgentDetailsPanel({
   const directory = useAgentDirectory();
   const name = agent?.label || inspect?.display_name || agentDisplayName(identity, directory) || identity;
   const role = inspect?.role || agent?.role;
-  const status = stateLabel !== null ? agentStatusChip(stateLabel, inspect?.progress?.health) : null;
+  // The gateway's inspect payload carries no progress; the roster row does.
+  const health = inspect?.progress?.health ?? agent?.progress?.health;
+  const status = stateLabel !== null ? agentStatusChip(stateLabel, health) : null;
   const repair = inspect?.session_repair;
   const peers = inspect?.topology_peers || [];
+  const progress = inspect?.progress ?? agent?.progress;
   const lastActivity = inspect?.last_activity_ms && inspect.last_activity_ms > 0
     ? inspect.last_activity_ms
-    : inspect?.progress && inspect.progress.last_progress_at_ms > 0 ? inspect.progress.last_progress_at_ms : null;
+    : progress && progress.last_progress_at_ms > 0 ? progress.last_progress_at_ms : null;
   return (
     <PanelShell className="agent-details" testId={`inspect-panel:${identity}`}>
       <PanelHeader

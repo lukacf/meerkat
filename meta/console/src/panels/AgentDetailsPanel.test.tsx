@@ -78,6 +78,21 @@ describe("AgentDetailsPanel", () => {
     expect(view.queryByTestId("inspect-action:identity:coordinator:respawn") === null).toBe(true);
   });
 
+  it("takes health from the roster when the inspect payload carries no progress", () => {
+    const stalled = {
+      ...agent,
+      progress: { run_state: "run_open", in_flight_work: 1, last_progress_at_ms: NOW - 47 * 60_000, last_progress_event: "execution_advanced", health: "wedged" },
+    } as ConsoleAgent;
+    // The gateway's inspect payload has no progress field.
+    const view = render(
+      <AgentDetailsPanel identity="identity:coordinator" inspect={inspect()} agent={stalled} stateLabel="active" actions={{}} />,
+    );
+    expect(view.getByTestId("inspect-state:identity:coordinator").textContent).toBe("Stalled");
+    const chip = view.getByTestId("inspect-panel:identity:coordinator").querySelector(".cc-panel-head .cc-chip");
+    expect(chip?.textContent).toBe("Stalled");
+    expect(chip?.getAttribute("data-tone")).toBe("crit");
+  });
+
   it("explains a session repair with both commands, each copyable", () => {
     const repairing = inspect({
       session_repair: {

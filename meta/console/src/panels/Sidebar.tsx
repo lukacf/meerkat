@@ -1701,83 +1701,97 @@ function renderAgentRow({
   // The name for people; the raw identity is the tooltip and the copy action.
   const title = sidebarAgentTitle(agent);
   const movable = reorder?.enabled === true;
+  // The row is a role="button"; its pin and copy actions sit beside it in a
+  // wrapper that shares its grid (a subgrid), never inside it.
   return (
     <div
-      className={`agent ${childOfHost ? "agent--child" : ""} ${agent.member_id === selectedMemberId ? "is-active" : ""}`}
-      data-state={stateAttr}
-      data-child-of-host={childOfHost ? "true" : undefined}
-      data-side-chat={agent.side_chat_of ? "true" : undefined}
+      className={`agent-row ${childOfHost ? "agent-row--child" : ""}`}
       data-depth={childOfHost ? String(Math.min(depth, 3)) : undefined}
-      data-testid={`sidebar-agent:${agent.member_id}`}
-      data-sidebar-order-kind={movable ? "agent" : undefined}
-      data-sidebar-order-id={movable ? sidebarAgentOrderKey(agent) : undefined}
-      data-sidebar-order-container={movable ? reorder?.container : undefined}
-      data-drag-over={reorder?.dragOver}
-      data-dragging={reorder?.dragging ? "true" : undefined}
-      aria-keyshortcuts={movable ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
-      title={`Identity: ${identity}`}
-      onClick={() => onSelect(agent)}
-      onKeyDown={(event) => {
-        // Keys on the row's own buttons (pin, copy) stay theirs.
-        if (event.target !== event.currentTarget) return;
-        if (reorder?.onKeyDown(event)) return;
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onSelect(agent);
-        }
-      }}
-      role="button"
-      tabIndex={0}
     >
-      {movable ? (
-        <span
-          className="agent__grip"
-          aria-hidden="true"
-          title="Drag to reorder. Alt+Up and Alt+Down move the focused agent."
-          data-testid={`sidebar-agent-grip:${agent.member_id}`}
-          onPointerDown={reorder?.onGripPointerDown}
-          onClick={(event) => event.stopPropagation()}
-        />
-      ) : null}
-      {reorder?.dragOver ? <span className="agent__drop-line" data-where={reorder.dragOver} aria-hidden="true" /> : null}
-      <span className="agent__dot" />
-      <span className="agent__body">
-        <span className="agent__name">{title}</span>
-        {detail.kind || detail.status ? (
-          // The kind gives way first, so the status always shows in a narrow roster.
-          <span className="agent__detail" data-testid={`sidebar-agent-detail:${agent.member_id}`}>
-            {detail.kind ? <span className="agent__detail-kind" title={detail.kind}>{detail.kind}</span> : null}
-            {/* Outside the kind, so truncating the kind never hides it. */}
-            {detail.kind && detail.status ? <span className="agent__detail-separator"> · </span> : null}
-            {detail.status ? <span className="agent__detail-status">{detail.status}</span> : null}
-          </span>
+      <div
+        className={`agent ${childOfHost ? "agent--child" : ""} ${agent.member_id === selectedMemberId ? "is-active" : ""}`}
+        data-state={stateAttr}
+        data-child-of-host={childOfHost ? "true" : undefined}
+        data-side-chat={agent.side_chat_of ? "true" : undefined}
+        data-depth={childOfHost ? String(Math.min(depth, 3)) : undefined}
+        data-testid={`sidebar-agent:${agent.member_id}`}
+        data-sidebar-order-kind={movable ? "agent" : undefined}
+        data-sidebar-order-id={movable ? sidebarAgentOrderKey(agent) : undefined}
+        data-sidebar-order-container={movable ? reorder?.container : undefined}
+        data-drag-over={reorder?.dragOver}
+        data-dragging={reorder?.dragging ? "true" : undefined}
+        aria-keyshortcuts={movable ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
+        title={`Identity: ${identity}`}
+        onClick={() => onSelect(agent)}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) return;
+          if (reorder?.onKeyDown(event)) return;
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onSelect(agent);
+          }
+        }}
+        role="button"
+        tabIndex={0}
+      >
+        {movable ? (
+          <span
+            className="agent__grip"
+            aria-hidden="true"
+            title="Drag to reorder. Alt+Up and Alt+Down move the focused agent."
+            data-testid={`sidebar-agent-grip:${agent.member_id}`}
+            onPointerDown={reorder?.onGripPointerDown}
+            onClick={(event) => event.stopPropagation()}
+          />
         ) : null}
-        {badges.length > 0 || agent.side_chat_of ? (
-          <span className="agent__badges">
-            {agent.side_chat_of ? (
-              <span
-                className="agent__badge"
-                data-tone="neutral"
-                data-testid={`sidebar-side-chat:${agent.member_id}`}
-                title={`Side chat of ${agent.side_chat_of}`}
-              >
-                <span>Side chat</span>
-              </span>
-            ) : null}
-            {badges.map((badge) => (
-              <span
-                className="agent__badge"
-                data-tone={badge.tone || "neutral"}
-                key={badge.id}
-                title={`${badge.label}: ${badge.value}`}
-              >
-                <span>{badge.label}</span>
-                <strong>{badge.value}</strong>
-              </span>
+        {reorder?.dragOver ? <span className="agent__drop-line" data-where={reorder.dragOver} aria-hidden="true" /> : null}
+        <span className="agent__dot" />
+        <span className="agent__body">
+          <span className="agent__name">{title}</span>
+          {detail.kind || detail.status ? (
+            // The kind gives way first, so the status always shows in a narrow roster.
+            <span className="agent__detail" data-testid={`sidebar-agent-detail:${agent.member_id}`}>
+              {detail.kind ? <span className="agent__detail-kind" title={detail.kind}>{detail.kind}</span> : null}
+              {/* Outside the kind, so truncating the kind never hides it. */}
+              {detail.kind && detail.status ? <span className="agent__detail-separator"> · </span> : null}
+              {detail.status ? <span className="agent__detail-status">{detail.status}</span> : null}
+            </span>
+          ) : null}
+          {badges.length > 0 || agent.side_chat_of ? (
+            <span className="agent__badges">
+              {agent.side_chat_of ? (
+                <span
+                  className="agent__badge"
+                  data-tone="neutral"
+                  data-testid={`sidebar-side-chat:${agent.member_id}`}
+                  title={`Side chat of ${agent.side_chat_of}`}
+                >
+                  <span>Side chat</span>
+                </span>
+              ) : null}
+              {badges.map((badge) => (
+                <span
+                  className="agent__badge"
+                  data-tone={badge.tone || "neutral"}
+                  key={badge.id}
+                  title={`${badge.label}: ${badge.value}`}
+                >
+                  <span>{badge.label}</span>
+                  <strong>{badge.value}</strong>
+                </span>
+              ))}
+            </span>
+          ) : null}
+        </span>
+        <span className="agent__meta">
+          <span className="agent__pulse">
+            {pulse.map((v, i) => (
+              <span key={i} style={{ height: `${Math.max(1, Math.min(12, v * 2 + 1))}px` }} />
             ))}
           </span>
-        ) : null}
-      </span>
+          {inbox > 0 && <span className="agent__inbox">{inbox}</span>}
+        </span>
+      </div>
       <span className="agent__actions">
         <span
           className="agent__copy"
@@ -1808,14 +1822,6 @@ function renderAgentRow({
             <Icon name="i-pin" className="agent__pin-icon" />
           </button>
         ) : null}
-      </span>
-      <span className="agent__meta">
-        <span className="agent__pulse">
-          {pulse.map((v, i) => (
-            <span key={i} style={{ height: `${Math.max(1, Math.min(12, v * 2 + 1))}px` }} />
-          ))}
-        </span>
-        {inbox > 0 && <span className="agent__inbox">{inbox}</span>}
       </span>
     </div>
   );
@@ -2208,9 +2214,11 @@ export const Sidebar = React.memo(function Sidebar({
   const updatePointerOrderTarget = React.useCallback((clientX: number, clientY: number) => {
     const drag = pointerDragRef.current;
     if (!drag) return;
-    const target = document
-      .elementFromPoint(clientX, clientY)
-      ?.closest<HTMLElement>("[data-sidebar-order-kind]");
+    const hit = document.elementFromPoint(clientX, clientY);
+    // An agent's pin and copy actions sit beside its row's button, so a
+    // pointer on them is over that row too.
+    const target = hit?.closest<HTMLElement>("[data-sidebar-order-kind]")
+      ?? hit?.closest(".agent-row")?.querySelector<HTMLElement>("[data-sidebar-order-kind]");
     const kind = target?.dataset.sidebarOrderKind as SidebarOrderKind | undefined;
     const id = target?.dataset.sidebarOrderId;
     const bucket = target?.dataset.sidebarOrderBucket;

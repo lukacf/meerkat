@@ -1560,9 +1560,26 @@ svg[data-svg="fit"],
   font-weight: 600;
 }
 
+/* A roster row: the agent's button and, beside it, its pin and copy actions.
+   The button shares the row's columns (a subgrid), so the actions keep their
+   own column without sitting inside the button. The first column includes
+   the button's left padding. */
+.agent-row {
+  display: grid;
+  grid-template-columns: 22px 1fr auto auto;
+  column-gap: 10px;
+  align-items: center;
+  position: relative;
+}
+.agent-row--child { grid-template-columns: 40px 7px 1fr auto auto; }
+.agent-row--child[data-depth="2"] { grid-template-columns: 72px 7px 1fr auto auto; }
+.agent-row--child[data-depth="3"] { grid-template-columns: 104px 7px 1fr auto auto; }
+.agent-row > .agent__actions { grid-row: 1; grid-column: -3; }
 .agent {
   display: grid;
-  grid-template-columns: 10px 1fr auto auto;
+  grid-row: 1;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
@@ -1575,23 +1592,14 @@ svg[data-svg="fit"],
   background: transparent;
   color: var(--ink);
 }
-.agent:hover { background: var(--bg-elev-1); }
+.agent-row:hover > .agent { background: var(--bg-elev-1); }
 .agent.is-active {
   background: var(--bg-elev-1);
   box-shadow: inset 2px 0 0 var(--accent);
 }
-.agent--child {
-  grid-template-columns: 20px 7px 1fr auto auto;
-  padding-left: 20px;
-}
-.agent--child[data-depth="2"] {
-  grid-template-columns: 42px 7px 1fr auto auto;
-  padding-left: 30px;
-}
-.agent--child[data-depth="3"] {
-  grid-template-columns: 64px 7px 1fr auto auto;
-  padding-left: 40px;
-}
+.agent--child { padding-left: 20px; }
+.agent--child[data-depth="2"] { padding-left: 30px; }
+.agent--child[data-depth="3"] { padding-left: 40px; }
 .agent--child::before {
   content: "";
   width: 12px;
@@ -1608,8 +1616,6 @@ svg[data-svg="fit"],
 }
 .agent--child .agent__dot { grid-column: 2; }
 .agent--child .agent__body { grid-column: 3; }
-.agent--child .agent__actions { grid-column: 4; }
-.agent--child .agent__meta { grid-column: 5; }
 .agent__dot {
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--ink-faint);
@@ -1666,7 +1672,7 @@ svg[data-svg="fit"],
   background-size: 4px 4px;
   transition: opacity 120ms ease;
 }
-.agent:hover .agent__grip,
+.agent-row:hover .agent__grip,
 .agent:focus-visible .agent__grip { opacity: 1; }
 /* Without hover (touch screens) the grip always shows. */
 @media (hover: none) {
@@ -1719,6 +1725,7 @@ svg[data-svg="fit"],
 [data-cc-variant="terminal"] .agent__badge { border-radius: 0; }
 
 .agent__meta {
+  grid-column: -2;
   display: flex; flex-direction: column; align-items: flex-end;
   gap: 3px;
   color: var(--ink-dim);
@@ -1743,7 +1750,7 @@ svg[data-svg="fit"],
   opacity: 0;
   transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease, background 120ms ease;
 }
-.agent:hover .agent__pin,
+.agent-row:hover .agent__pin,
 .agent__pin:focus-visible {
   opacity: 1;
 }
@@ -1778,7 +1785,7 @@ svg[data-svg="fit"],
   background: var(--bg-elev-1);
 }
 .agent__actions:hover .agent__copy,
-.agent:focus-visible .agent__copy,
+.agent:focus-visible + .agent__actions .agent__copy,
 .agent__copy:focus-within { display: inline-flex; }
 .agent__copy .cc-copy-btn {
   width: 24px;

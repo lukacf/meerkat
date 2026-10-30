@@ -20,6 +20,12 @@ const rows = (container: HTMLElement) => [...container.querySelectorAll('[data-t
   .map(node => node.getAttribute("data-testid")?.slice("sidebar-agent:".length));
 const announced = (container: HTMLElement) =>
   container.querySelector('[data-testid="sidebar-reorder-live"]')?.textContent || "";
+// A control inside another control: a button or link in a button, or in
+// an element that claims the button role.
+const NESTED_CONTROLS = [
+  "button button", "button a", "button [role='button']",
+  "[role='button'] button", "[role='button'] a", "[role='button'] [role='button']",
+].join(", ");
 
 describe("Roster manual order", () => {
   it("moves the focused agent with Alt+ArrowDown, names it in the announcement and keeps focus", async () => {
@@ -173,6 +179,20 @@ describe("Roster manual order", () => {
     fireEvent.keyDown(view.getByTestId("sidebar-agent:a"), { key: "Enter" });
     expect(onSelect).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps an agent's pin and copy actions beside its row's button, never inside it", () => {
+    const onSelect = vi.fn();
+    const onTogglePinnedAgent = vi.fn();
+    const view = render(<Sidebar {...props} onSelect={onSelect} onTogglePinnedAgent={onTogglePinnedAgent} />);
+    const row = view.getByTestId("sidebar-agent:a");
+    expect(row.getAttribute("role")).toBe("button");
+    expect(view.container.querySelectorAll(NESTED_CONTROLS).length).toBe(0);
+    expect(row.contains(view.getByTestId("sidebar-agent-pin:a"))).toBe(false);
+    expect(row.contains(view.getByTestId("sidebar-agent-copy-identity:a"))).toBe(false);
+    fireEvent.click(view.getByTestId("sidebar-agent-pin:a"));
+    expect(onTogglePinnedAgent.mock.calls.length).toBe(1);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
 });
 
 describe("Roster pointer drag", () => {
@@ -209,6 +229,19 @@ describe("Roster pointer drag", () => {
     expect(rows(view.container)).toEqual(["a", "c", "b"]);
     expect(JSON.parse(localStorage.getItem(ORDER_KEY) || "[]")).toEqual(["agent:a", "agent:c", "agent:b"]);
     expect(announced(view.container)).toBe("Moved Charlie below Alpha.");
+  });
+
+  it("drops on a row while the pointer is on the row's pin", () => {
+    const view = render(<Sidebar {...props} onTogglePinnedAgent={vi.fn()} />);
+    Object.defineProperty(document, "elementFromPoint", {
+      value: vi.fn(() => view.getByTestId("sidebar-agent-pin:a")),
+      configurable: true,
+    });
+    fireEvent.pointerDown(view.getByTestId("sidebar-agent-grip:c"), { button: 0, clientX: 4, clientY: 80 });
+    fireEvent.pointerMove(window, { clientX: 4, clientY: 20 });
+    expect(view.getByTestId("sidebar-agent:a").getAttribute("data-drag-over")).toBe("after");
+    fireEvent.pointerUp(window);
+    expect(rows(view.container)).toEqual(["a", "c", "b"]);
   });
 
   it("shows no drop line over a row of another container and drops nothing there", () => {

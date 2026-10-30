@@ -3520,6 +3520,28 @@ pub(crate) async fn connector_fixture_with_owners(
     (startup, auth, control)
 }
 
+/// A governed realm's own native owner, opened by its durable posture exactly
+/// as `StandaloneContinuation::reopen` reopens it. `SessionStartup`'s own lazy
+/// open is ordinary, and Core refuses that for a governed realm
+/// (`RealmGoverned`). Provider authority exported from this owner keeps its
+/// execution custody but only a weak reference to its runtime store.
+pub(crate) async fn realm_native_owner(
+    storage: &meerkat_core::ResolvedStorage,
+) -> meerkat::PersistenceBundle {
+    let (_, bundle) = meerkat::governed_realm::open_stock_realm_persistence_as(
+        &meerkat::DiskStorageProvider,
+        &storage.locator.state_root,
+        storage.locator.realm.as_str(),
+        None,
+        Some(meerkat_store::RealmOrigin::Explicit),
+        Some(storage.layout.clone()),
+        meerkat::governed_realm::stock::issuance::DEFAULT_STOCK_AGENT,
+    )
+    .await
+    .unwrap();
+    bundle
+}
+
 async fn connector_native_session(startup: SessionStartup) -> Arc<ConnectSession> {
     let artifacts = crate::resources::reserve_setup_artifacts(&startup.storage).unwrap();
     let (approvals, _presenter) = LocalApprovals::create_browser(

@@ -101,7 +101,7 @@ pub struct ToolGrantPolicy {
 
 impl ToolGrantPolicy {
     /// The default maximum lifetime: 24 hours.
-    pub const DEFAULT_MAX_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+    pub const DEFAULT_MAX_LIFETIME: Duration = Duration::from_hours(24);
 
     /// The maximum lifetime in milliseconds, saturating.
     #[must_use]

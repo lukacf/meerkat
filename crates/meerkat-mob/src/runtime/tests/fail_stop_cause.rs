@@ -251,7 +251,7 @@ const RECORD_BUILDER: &str = "fn record_durability_fail_stop";
 /// The crate's shipped sources: every `.rs` file under `src/` outside test
 /// files, by path relative to `src/`, with comments and literals blanked and
 /// test-only items removed.
-fn shipped_sources() -> Vec<(String, String)> {
+pub(super) fn shipped_sources() -> Vec<(String, String)> {
     // Read when the test runs: cargo, nextest (also from an archive) and the
     // Bazel test rule set CARGO_MANIFEST_DIR for the test process, so an
     // archived test binary never carries the builder's path.
@@ -295,7 +295,7 @@ fn shipped_sources() -> Vec<(String, String)> {
 }
 
 /// The 1-based line of byte `index` in `code`.
-fn line_of(code: &str, index: usize) -> usize {
+pub(super) fn line_of(code: &str, index: usize) -> usize {
     code[..index].matches('\n').count() + 1
 }
 

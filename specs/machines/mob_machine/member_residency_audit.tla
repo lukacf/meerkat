@@ -512,11 +512,12 @@ RotationArms == RBeginRotation \/ RCommitRotation
 \* Member 1 seated again after its retirement, as a resume seat on the session
 \* its first seat named, at generation 1 with runtime 2 (no endpoint): the
 \* seat is unborn exactly when no build created that session, and exempt
-\* from the definition's wiring rules exactly when its input says so.
+\* from the definition's wiring rules exactly when its input says so. The
+\* opener carries no entry custody: the member is a worker.
 RReseatOpen ==
     BeginSpawnExecFresh(Id1, Rid2, 2, 1, AuditDigest, FALSE, AuditMode, Some(Sess1), None, None,
                         FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
-                        None, None, None, None, FALSE, FALSE)
+                        None, None, None, None, FALSE, FALSE, FALSE)
 RReseat ==
     \E unborn \in BOOLEAN, ex \in BOOLEAN :
         CommitDormantSeatRunning(Id1, Rid2, 2, 1, FALSE, AuditMode, Sess1, None, FALSE, FALSE, unborn, FALSE, ex)
@@ -725,11 +726,12 @@ SAuthorize(id) ==
     AuthorizeSpawnProfileRunning(id, AuditProfile, AuditModel, AuditDigest, AuditDigest, AuditDigest, None, None, FALSE, None)
 
 \* The fresh local spawn opener at generation 0, with every capability flag
-\* off: the seat and the embodied commit both start at Opened.
+\* off and no entry custody: the seat and the embodied commit both start at
+\* Opened.
 SOpen(id, rid, fence, s) ==
     BeginSpawnExecFresh(id, rid, fence, 0, AuditDigest, FALSE, AuditMode, Some(s), None, None,
                         FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
-                        None, None, None, None, FALSE, FALSE)
+                        None, None, None, None, FALSE, FALSE, FALSE)
 
 \* Member 1: Rid1, fence 1, session 1; member 2: Rid2, fence 2, session 2.
 SIncarnation(id) ==

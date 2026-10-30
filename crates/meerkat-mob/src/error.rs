@@ -680,6 +680,16 @@ pub enum MobError {
     #[error("mob member already exists: {0}")]
     MemberAlreadyExists(AgentIdentity),
 
+    /// The member is an identity entry (see
+    /// [`crate::runtime::IdentityEntryRead`]): a spawn without entry custody
+    /// cannot take its name, and the agent lane does not act on it as a
+    /// member. Its host acts on it.
+    #[error(
+        "member '{member_id}' is an identity entry: a spawn without entry custody cannot take its \
+         name, and the agent lane does not act on it"
+    )]
+    IdentityMember { member_id: AgentIdentity },
+
     /// A spawn that had not reached custody (still preparing, or staged and
     /// provisioning) was canceled by a lifecycle transition (stop, complete,
     /// reset, destroy, shutdown, or retire of the member). Nothing of it was
@@ -2741,6 +2751,11 @@ impl MobError {
                     "retryable": false,
                 }))
             }
+            Self::IdentityMember { member_id } => Some(serde_json::json!({
+                "kind": "identity_member",
+                "member_id": member_id.as_str(),
+                "retryable": false,
+            })),
             Self::MemberRegistrationRefused {
                 member_id,
                 session_id,
@@ -4467,6 +4482,9 @@ mod tests {
                 profile: ProfileName::from("worker"),
             },
             MobError::IdentityAdoptionRequiresPersistentRuntime {
+                member_id: AgentIdentity::from("m"),
+            },
+            MobError::IdentityMember {
                 member_id: AgentIdentity::from("m"),
             },
             MobError::MemberReloadTimedOut {

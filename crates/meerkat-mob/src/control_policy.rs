@@ -347,8 +347,10 @@ pub(crate) fn machine_principal(id: &PrincipalId) -> mob_dsl::PrincipalId {
 /// Which authority lane a mob actor command travels on.
 ///
 /// Sealed-ctor discipline (the `ToolExecutionPolicy` pattern): the inner
-/// lane is private; the ONLY public constructor is [`Self::principal`] (the
-/// console lane). `agent_lane()` and `internal()` are `pub(crate)` — both
+/// lane is private; the ONLY public constructors are [`Self::principal`]
+/// (the console lane) and [`Self::principal_for_agent`] (the console lane
+/// acting for an agent, which only adds checks). `agent_lane()` and
+/// `internal()` are `pub(crate)`: both
 /// legitimate mint sites (the member-tool dispatcher and the upcall
 /// executor; actor self-sends) are in-crate, so no surface crate can
 /// launder a console call onto the agent lane (§15.2 confinement).
@@ -375,6 +377,12 @@ pub(crate) struct MemberOperatorExecutionFence {
 enum CommandAuthorityLane {
     /// Console lane: a plane-(b) principal presented at a chokepoint.
     Principal(MobControlPrincipal),
+    /// Console lane, acting for an agent: the principal's grants gate the
+    /// command as on [`Self::Principal`], and the agent lane's own rules
+    /// apply too (the identity-entry admission of a member command, and no
+    /// host-only verb). A surface whose tools an agent calls (the agent mob
+    /// tools) mints it.
+    PrincipalForAgent(MobControlPrincipal),
     /// §15.2 agent authority lane: the machine-composed
     /// `MobToolAuthorityContext` gates already ran; principal grants
     /// neither gate nor are satisfied on this lane.
@@ -404,6 +412,21 @@ impl CommandAuthority {
         }
     }
 
+    /// Console lane, acting for an agent: a surface whose tools an agent
+    /// calls (the agent mob tools) mints it for the principal the surface
+    /// is bound to. The principal's grants gate every command as on
+    /// [`Self::principal`], and the agent lane's own rules apply too: a
+    /// member command addressed to an identity entry is refused
+    /// [`crate::MobError::IdentityMember`], and the legacy identity entry
+    /// adoption, a host verb, is refused.
+    #[must_use]
+    pub fn principal_for_agent(principal: MobControlPrincipal) -> Self {
+        Self {
+            lane: CommandAuthorityLane::PrincipalForAgent(principal),
+            member_operator_execution_fence: None,
+        }
+    }
+
     /// The principal this authority carries, if it rides the console lane.
     /// One acting principal per command: verbs that ALSO take an explicit
     /// `caller` argument (the grant trio, ADJ-P5-9) must present the same
@@ -413,7 +436,8 @@ impl CommandAuthority {
     #[must_use]
     pub(crate) fn carried_principal(&self) -> Option<&MobControlPrincipal> {
         match &self.lane {
-            CommandAuthorityLane::Principal(principal) => Some(principal),
+            CommandAuthorityLane::Principal(principal)
+            | CommandAuthorityLane::PrincipalForAgent(principal) => Some(principal),
             CommandAuthorityLane::AgentLane | CommandAuthorityLane::Internal => None,
         }
     }
@@ -449,17 +473,31 @@ impl CommandAuthority {
     #[must_use]
     pub fn kind(&self) -> CommandAuthorityKind {
         match &self.lane {
-            CommandAuthorityLane::Principal(_) => CommandAuthorityKind::Principal,
+            CommandAuthorityLane::Principal(_) | CommandAuthorityLane::PrincipalForAgent(_) => {
+                CommandAuthorityKind::Principal
+            }
             CommandAuthorityLane::AgentLane => CommandAuthorityKind::AgentLane,
             CommandAuthorityLane::Internal => CommandAuthorityKind::Internal,
         }
+    }
+
+    /// Whether an agent acts through this authority: the agent lane, or the
+    /// console lane acting for an agent ([`Self::principal_for_agent`]).
+    /// Chokepoint (a) applies the agent lane's own rules to both.
+    #[must_use]
+    pub(crate) fn acts_for_agent(&self) -> bool {
+        matches!(
+            self.lane,
+            CommandAuthorityLane::AgentLane | CommandAuthorityLane::PrincipalForAgent(_)
+        )
     }
 
     /// The console principal, iff this is the principal lane.
     #[must_use]
     pub(crate) fn control_principal(&self) -> Option<&MobControlPrincipal> {
         match &self.lane {
-            CommandAuthorityLane::Principal(principal) => Some(principal),
+            CommandAuthorityLane::Principal(principal)
+            | CommandAuthorityLane::PrincipalForAgent(principal) => Some(principal),
             CommandAuthorityLane::AgentLane | CommandAuthorityLane::Internal => None,
         }
     }

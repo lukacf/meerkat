@@ -220,7 +220,10 @@ impl AgentMobToolSurface {
     /// Acquire a mob handle bound to THIS surface's console principal
     /// (chokepoint-(b) principal minting; SD-7: this surface is gated
     /// exactly like the RPC/REST/MCP handlers). The agent-lane `ensure_*`
-    /// gates on the machine-composed authority context stay, additive.
+    /// gates on the machine-composed authority context stay, additive. The
+    /// principal acts for the calling agent, so chokepoint (a) also applies
+    /// the agent lane's own rules: a member command addressed to an
+    /// identity entry is refused `identity_member`.
     async fn bound_handle(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
         // Handle resolution (store restore + runtime rebind in
         // `MobMcpState::ensure_restored`) is reached from inside the calling
@@ -234,7 +237,7 @@ impl AgentMobToolSurface {
         })
         .await?;
         Ok(
-            handle.with_command_authority(meerkat_mob::CommandAuthority::principal(
+            handle.with_command_authority(meerkat_mob::CommandAuthority::principal_for_agent(
                 self.control_principal.clone(),
             )),
         )
@@ -7681,6 +7684,111 @@ mod tests {
         assert_eq!(audit_events[0].0, "mob_spawn_member");
         assert_eq!(audit_events[0].1, expected_principal);
         assert_eq!(audit_events[0].2.as_deref(), Some("audit-scope"));
+    }
+
+    /// The agent's mob tools act for the agent: Core refuses
+    /// `mob_retire_member`, `mob_wire` and `mob_unwire` addressed to an
+    /// identity entry typed (`identity_member`), even under a grant that
+    /// manages the whole mob, and the entry stays; the tools still act on
+    /// workers.
+    ///
+    /// RED: bind the surface's handles with `CommandAuthority::principal`
+    /// (`bound_handle`): the manage grant admits every command, and the
+    /// agent retires the host's entry.
+    #[tokio::test]
+    async fn agent_mob_tools_refuse_an_identity_entry() {
+        let state = MobMcpState::new_in_memory();
+        let mob_id = state
+            .mob_create_definition(sample_definition("entry-tools"))
+            .await
+            .expect("create mob");
+        let host = state.handle_for(&mob_id).await.expect("handle");
+        host.spawn_spec(
+            SpawnMemberSpec::new("worker", AgentIdentity::from("host-entry"))
+                .with_entry_custody(true),
+        )
+        .await
+        .expect("the host declares its entry");
+        for name in ["tool-worker", "tool-peer"] {
+            host.spawn_spec(SpawnMemberSpec::new("worker", AgentIdentity::from(name)))
+                .await
+                .expect("a worker");
+        }
+        host.wire(
+            AgentIdentity::from("tool-worker"),
+            AgentIdentity::from("host-entry"),
+        )
+        .await
+        .expect("the host wires its entry to a worker");
+        let surface = AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            scope_only_authority(mob_id.as_str(), live_incarnation(&state, &mob_id).await),
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+        );
+        let call = |name: &'static str, args: serde_json::Value| {
+            let surface = &surface;
+            async move {
+                let args = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+                surface
+                    .dispatch(ToolCallView {
+                        id: name,
+                        name,
+                        args: &args,
+                    })
+                    .await
+            }
+        };
+
+        for (name, args) in [
+            (
+                "mob_retire_member",
+                json!({ "mob_id": mob_id, "member_id": "host-entry" }),
+            ),
+            (
+                "mob_wire",
+                json!({ "mob_id": mob_id, "member_id": "tool-peer", "peer": { "local": "host-entry" } }),
+            ),
+            (
+                "mob_unwire",
+                json!({ "mob_id": mob_id, "member_id": "tool-worker", "peer": { "local": "host-entry" } }),
+            ),
+        ] {
+            let error = call(name, args)
+                .await
+                .expect_err("the agent's tool does not act on an identity entry");
+            assert_eq!(
+                error
+                    .structured_data()
+                    .and_then(|data| data.get("kind").and_then(Value::as_str).map(str::to_owned)),
+                Some("identity_member".to_string()),
+                "{name}: {error:?}"
+            );
+        }
+        assert!(
+            matches!(
+                host.identity_entry(&AgentIdentity::from("host-entry")),
+                Ok(meerkat_mob::IdentityEntryRead::Entry(_))
+            ),
+            "the entry stays"
+        );
+
+        call(
+            "mob_wire",
+            json!({ "mob_id": mob_id, "member_id": "tool-worker", "peer": { "local": "tool-peer" } }),
+        )
+        .await
+        .expect("the agent wires two workers");
+        call(
+            "mob_retire_member",
+            json!({ "mob_id": mob_id, "member_id": "tool-peer" }),
+        )
+        .await
+        .expect("the agent retires a worker");
     }
 
     #[tokio::test]

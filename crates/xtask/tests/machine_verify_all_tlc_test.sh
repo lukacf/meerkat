@@ -638,6 +638,48 @@ if run_part audits-g; then
   TLC_WORKERS="${tlc_workers}" "${member_residency_audit}"
 fi
 
+# MobMachine identity entries (an identity the host declared as its own,
+# as opposed to a worker member) are reached only with identities, which the
+# ci profile has none of. A hand-written audit over the same generated model
+# checks two runs over their whole reachable space. The entry run drives a
+# replayed member and a member seated by the spawn ladder with or without
+# entry custody, the replay of entry rows, every legacy adoption arm, the
+# admission probe, the agent lane's member admission, the worker reconcile
+# and ensure, Stop and Resume, under every generated invariant (the entry
+# ones among them: every entry is seated and local, no worker reconcile
+# spawns or retires an entry, entry custody belongs to an open ladder),
+# three ENABLED-form invariants (exactly one probe, agent-lane and adoption
+# arm answers each input), the probe's refusal of an entry's name and two
+# action properties (an entry only by custody, an observed adoption or a
+# replayed row; no entry from an unobserved adoption). The lifecycle run
+# takes the member residency audit's retire run with its member made an
+# entry (the replay of its row, or its reseat's ladder opened with entry
+# custody) through the dormant seat, the live and the archive-only
+# retirement to its archive terminal, the rotation and the mob's destroy
+# (DestroyMob and DestroyFromAny), under every generated invariant (every
+# unseat ends an entry; a destroyed mob holds no entry and no entry
+# custody), the retire run's own properties and three action properties (a
+# seat records an entry exactly when its ladder holds entry custody, a
+# rotation keeps the entry, an entry only by a custody seat or a replayed
+# row). Both run with TLC coverage and require every listed arm to fire, a
+# floor of distinct states and their twenty witnesses reached, and
+# --mutants refuses ten seeded defects: a reconcile that retires an entry, a
+# probe that answers an entry's name as a plain duplicate, an adoption
+# without the observation, the replay of an entry row on an unseated
+# identity, an archive and a destroy's member archive that keep the entry, a
+# DestroyMob that keeps the entries, a DestroyFromAny that keeps an open
+# ladder's entry custody, a rotation that drops the entry and a seat that
+# ignores its ladder's entry custody.
+identity_entry_audit="${workspace_root}/specs/machines/mob_machine/identity_entry_audit.sh"
+if [[ ! -x "${identity_entry_audit}" ]]; then
+  echo "error: identity entry audit runner is missing from workspace runfiles: ${identity_entry_audit}" >&2
+  exit 1
+fi
+if run_part audits-c; then
+  echo "running bounded identity entry TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${identity_entry_audit}" --mutants
+fi
+
 # The MobMachine arm-coverage gate: every arm of the generated model's Next
 # relation is either in a hand-written audit runner's covered_actions array
 # (each runner checks with TLC coverage that every listed arm fires) or named
@@ -786,7 +828,11 @@ run_machine_verify() {
 # on the rest of its shard), live delegation steer 37-51: 405-586 s;
 # audits-c = run-start hold 209-256, materialization-rollback keep with
 # --mutants 212-259, live worker start after close 20-27, approval
-# entered-step with --mutants 16-24: 457-566 s;
+# entered-step with --mutants 16-24: 457-566 s; plus the identity entry
+# audit with --mutants, added after these measurements: its two whole-space
+# runs (entry and lifecycle), twenty witnesses and ten mutants took about
+# 175 s locally with 8 TLC workers, more on the hosted runner's 4; the hosted
+# shard is measured at validation;
 # audits-d = durable-tail recovery ownership with --mutants 179-233,
 # live-context outbox 122-153, peer request maps with --mutants 93-131,
 # live-context result barrier with --mutants 27-37: 421-554 s;

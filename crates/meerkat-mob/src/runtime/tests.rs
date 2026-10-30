@@ -10,6 +10,8 @@ mod host_human_input;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod host_store_boot_reads;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod identity_entry_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod lazy_boot;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod lift_binding_rows;
@@ -12662,6 +12664,7 @@ async fn seed_operator_execution_residency(handle: &MobHandle, member_session_id
             )),
             effective_profile_override_present: false,
             effective_model_override_present: false,
+            entry_custody: false,
         },
     )
     .await;
@@ -76933,6 +76936,7 @@ async fn test_stale_external_peer_trust_obligation_cannot_readd_trust_when_machi
             placed_operation_owner_session_id: None,
             effective_profile_override_present: false,
             effective_model_override_present: false,
+            entry_custody: false,
         },
     )
     .expect("begin spawn exec for stale local member");
@@ -90393,13 +90397,14 @@ fn mob_runtime_parity_field_value(
         | "owed_external_edge_repairs"
         | "member_seat_session_unborn"
         | "unborn_seat_sessions"
-        | "member_definition_wiring_exempt" => {
-            Some(MobRuntimeParityExprValue::Set(BTreeSet::new()))
-        }
+        | "member_definition_wiring_exempt"
+        // Identity entries: the parity probes declare none.
+        | "spawn_exec_entry_custody" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
         "member_materialization_epoch"
         | "member_boot_obligation_owed"
         | "member_rotation_session_ids"
-        | "member_rotation_peer_endpoints" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
+        | "member_rotation_peer_endpoints"
+        | "identity_entry_origins" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
         "member_wake_attempt_sequence" | "member_materialization_drift_count" => {
             Some(MobRuntimeParityExprValue::U64(0))
         }
@@ -93721,6 +93726,7 @@ async fn test_ensure_member_retain_converges_before_roster_projection() {
                 placed_operation_owner_session_id: None,
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
+                entry_custody: false,
             },
         )
         .await

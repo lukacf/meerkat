@@ -750,6 +750,20 @@ pub(super) enum ShutdownAnswerClass {
     ActorCompletion,
 }
 
+/// What a [`MobCommand::AdmitControlScope`] admission is for: chokepoint (a)
+/// applies to it the lane rules the admitted operation meets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ScopeAdmissionSubject {
+    /// The operation addresses the mob, or nothing the lane rules name.
+    Mob,
+    /// A member command addressed to this member: an agent never acts on
+    /// an identity entry's member.
+    Member(crate::ids::AgentIdentity),
+    /// The legacy adoption of this member as an identity entry: a host
+    /// verb, which an agent never runs.
+    LegacyAdoption(crate::ids::AgentIdentity),
+}
+
 pub(super) enum MobCommand {
     Spawn {
         spec: Box<super::handle::SpawnMemberSpec>,
@@ -1227,8 +1241,12 @@ pub(super) enum MobCommand {
     },
     /// Actor-linearized operator admission for composite/projection paths
     /// whose first semantic action is not itself a scoped MobCommand.
+    /// `subject` names what the admitted operation acts on, so chokepoint
+    /// (a) applies the lane rules the operation itself meets before the
+    /// caller does anything (a retirement before it elects its shared slot).
     AdmitControlScope {
         required: mob_dsl::ControlScope,
+        subject: ScopeAdmissionSubject,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     /// Actor-authorized capacity reclamation for the durable member-operator
@@ -1490,6 +1508,17 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<
             Result<Vec<super::dormant_seat::DormantSeatOutcome>, crate::MobError>,
         >,
+    },
+    /// The adoption of one legacy member as an identity entry
+    /// (`MobHandle::adopt_legacy_identity_entry`). MobMachine decides it from
+    /// the handle's observation of the spawn row of the member's incarnation
+    /// at `generation`; an adoption's row is journaled before it commits.
+    AdoptLegacyIdentityEntry {
+        agent_identity: crate::ids::AgentIdentity,
+        generation: crate::ids::Generation,
+        legacy_roster_member: bool,
+        reply_tx:
+            oneshot::Sender<Result<mob_dsl::LegacyIdentityEntryAdoptionKind, crate::MobError>>,
     },
     /// An off-actor member-status observation returning to the actor, with
     /// every caller that joined it.
@@ -2241,6 +2270,7 @@ impl MobCommand {
             Self::PlanMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::StartMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::CommitDormantSeats { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::AdoptLegacyIdentityEntry { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityIntent { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityConvergenceStatus { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdoptMemberIdentityDeclaration { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2472,6 +2502,7 @@ impl MobCommand {
             Self::PlanMemberRotation { .. } => "PlanMemberRotation",
             Self::StartMemberRotation { .. } => "StartMemberRotation",
             Self::CommitDormantSeats { .. } => "CommitDormantSeats",
+            Self::AdoptLegacyIdentityEntry { .. } => "AdoptLegacyIdentityEntry",
             Self::ProjectMemberStatusObserved { .. } => "ProjectMemberStatusObserved",
             Self::GetIdentityIntent { .. } => "GetIdentityIntent",
             Self::GetIdentityConvergenceStatus { .. } => "GetIdentityConvergenceStatus",

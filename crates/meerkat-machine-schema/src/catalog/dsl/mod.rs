@@ -3556,7 +3556,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             // verdict/fault/policy/capability/timeout classifiers owned by MobMachine.
             NamedTypeBinding::string_enum(
                 "MemberAdmissionVerdictKind",
-                &["Admitted", "DuplicateRejected"],
+                &["Admitted", "DuplicateRejected", "IdentityMemberRejected"],
             ),
             NamedTypeBinding::string_enum("StepOutputFaultKind", &["MalformedJson"]),
             NamedTypeBinding::string_enum("StepFaultDispositionKind", &["Retry", "Terminal"]),
@@ -4182,6 +4182,25 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "NotYetReleasable",
                     "PinnedByPlacedPeer",
                 ],
+            ),
+            // Identity entries (0.9.8).
+            NamedTypeBinding::string_enum("IdentityEntryOrigin", &["Declared"]),
+            NamedTypeBinding::string_enum(
+                "LegacyIdentityEntryAdoptionKind",
+                &[
+                    "Adopted",
+                    "AlreadyAnEntry",
+                    "NameHeldByWorker",
+                    "NotAdoptable",
+                    "StaleObservation",
+                    "NotSeated",
+                    "NonAuthoritative",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "AgentLaneMemberAdmissionKind",
+                &["Admitted", "IdentityMember"],
             ),
             NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("ResumeAttemptId"),
@@ -4820,6 +4839,10 @@ runtime_internal_inputs!(
         BeginMemberRotation,
         CommitMemberRotation,
         ClassifyMemberRelease,
+        // Identity entries: the handle's legacy adoption and the actor's
+        // agent-lane member admission. Neither is a surface command.
+        AdoptLegacyIdentityEntry,
+        ResolveAgentLaneMemberAdmission,
     ]
 );
 

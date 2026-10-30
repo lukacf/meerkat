@@ -296,6 +296,7 @@ fn begin_spawn_local(
         placed_operation_owner_session_id: None,
         effective_profile_override_present: false,
         effective_model_override_present: false,
+        entry_custody: false,
     }
 }
 
@@ -335,6 +336,7 @@ fn begin_spawn_remote(
         placed_operation_owner_session_id: Some(session_id("owner-bridge")),
         effective_profile_override_present: false,
         effective_model_override_present: false,
+        entry_custody: false,
     }
 }
 

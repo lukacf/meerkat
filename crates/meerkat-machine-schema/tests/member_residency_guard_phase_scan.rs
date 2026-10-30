@@ -76,6 +76,35 @@ const REQUIRED_ARM_FAMILIES: &[&str] = &[
     "RecoverMemberSeatSession",
 ];
 
+/// Transition-name prefixes of the identity-entry arms: the admission probe,
+/// the spawn ladder that carries entry custody and the commits that consume
+/// it, the worker reconcile and ensure, the replay of an entry's row, the
+/// legacy adoption and the agent lane's member admission. They are written
+/// one arm per lifecycle phase as the residency arms are.
+const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
+    "ProbeMemberAdmission",
+    "BeginSpawnExec",
+    "CommitSpawnMembership",
+    "AbortSpawnExec",
+    "CommitDormantSeat",
+    "ReconcileRunning",
+    "EnsureMember",
+    "RecoverIdentityEntry",
+    "AdoptLegacyIdentityEntry",
+    "ResolveAgentLaneMemberAdmission",
+];
+
+/// Identity-entry families that must each name at least one arm.
+const REQUIRED_IDENTITY_ENTRY_ARM_FAMILIES: &[&str] = &[
+    "ProbeMemberAdmissionIdentityMember",
+    "BeginSpawnExecFresh",
+    "ReconcileRunning",
+    "RecoverIdentityEntrySeated",
+    "AdoptLegacyIdentityEntryAdopted",
+    "AdoptLegacyIdentityEntryMobNotRunning",
+    "ResolveAgentLaneMemberAdmissionIdentityMember",
+];
+
 /// Transition-name prefixes of the `MeerkatMachine` arms that serve member
 /// residency (the empty-resume verdict and the composition's residency
 /// claim). Each must name at least one arm.
@@ -350,6 +379,40 @@ fn residency_arm_guards_never_mix_the_lifecycle_phase() {
     assert!(
         missing.is_empty(),
         "expected member-residency arm families are missing from the DSL: {missing:?}"
+    );
+}
+
+/// The identity-entry arms follow the same rule: no guard of theirs reads the
+/// lifecycle phase beyond the plain source predicate, so the lowered model
+/// TLC checks is the production machine.
+#[test]
+fn identity_entry_arm_guards_never_mix_the_lifecycle_phase() {
+    let source = without_line_comments(&mob_machine_dsl_source());
+    let transitions = scanned_transitions(&source);
+    let is_identity_entry_arm = |name: &str| {
+        IDENTITY_ENTRY_ARM_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+    };
+    let violations = phase_mixing_guards(&transitions, is_identity_entry_arm);
+    assert!(
+        violations.is_empty(),
+        "identity-entry arms must split per lifecycle phase instead of reading it in a guard or \
+         a guard call (schema lowering strips those):\n{}",
+        violations.join("\n")
+    );
+    let missing: Vec<&str> = REQUIRED_IDENTITY_ENTRY_ARM_FAMILIES
+        .iter()
+        .copied()
+        .filter(|family| {
+            !transitions
+                .iter()
+                .any(|transition| transition.name.starts_with(family))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "expected identity-entry arm families are missing from the DSL: {missing:?}"
     );
 }
 

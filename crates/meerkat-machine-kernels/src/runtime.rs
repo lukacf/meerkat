@@ -1688,13 +1688,17 @@ impl GeneratedMachineKernel {
         args: Vec<KernelValue>,
         transition_name: &TransitionId,
     ) -> Result<KernelValue, TransitionRefusal> {
-        let [identity_to_runtime, desired]: [KernelValue; 2] = args.try_into().map_err(|_| {
-            self.eval_error(
-                transition_name,
-                "mob_machine_members_to_spawn expects two args",
-            )
-        })?;
+        let [identity_to_runtime, identity_entry_origins, desired]: [KernelValue; 3] =
+            args.try_into().map_err(|_| {
+                self.eval_error(
+                    transition_name,
+                    "mob_machine_members_to_spawn expects three args",
+                )
+            })?;
         let identity_to_runtime = identity_to_runtime
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let identity_entry_origins = identity_entry_origins
             .into_map()
             .map_err(|error| self.eval_error(transition_name, error))?;
         let desired = desired
@@ -1703,7 +1707,10 @@ impl GeneratedMachineKernel {
         Ok(KernelValue::Set(
             desired
                 .into_iter()
-                .filter(|identity| !identity_to_runtime.contains_key(identity))
+                .filter(|identity| {
+                    !identity_to_runtime.contains_key(identity)
+                        && !identity_entry_origins.contains_key(identity)
+                })
                 .collect(),
         ))
     }
@@ -1713,14 +1720,21 @@ impl GeneratedMachineKernel {
         args: Vec<KernelValue>,
         transition_name: &TransitionId,
     ) -> Result<KernelValue, TransitionRefusal> {
-        let [identity_to_runtime, desired, retire_stale]: [KernelValue; 3] =
-            args.try_into().map_err(|_| {
-                self.eval_error(
-                    transition_name,
-                    "mob_machine_members_to_retire expects three args",
-                )
-            })?;
+        let [
+            identity_to_runtime,
+            identity_entry_origins,
+            desired,
+            retire_stale,
+        ]: [KernelValue; 4] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "mob_machine_members_to_retire expects four args",
+            )
+        })?;
         let identity_to_runtime = identity_to_runtime
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let identity_entry_origins = identity_entry_origins
             .into_map()
             .map_err(|error| self.eval_error(transition_name, error))?;
         let desired = desired
@@ -1735,7 +1749,9 @@ impl GeneratedMachineKernel {
         Ok(KernelValue::Set(
             identity_to_runtime
                 .into_keys()
-                .filter(|identity| !desired.contains(identity))
+                .filter(|identity| {
+                    !desired.contains(identity) && !identity_entry_origins.contains_key(identity)
+                })
                 .collect(),
         ))
     }
@@ -4297,6 +4313,7 @@ mod tests {
                             field_id("effective_model_override_present"),
                             KernelValue::Bool(false),
                         ),
+                        (field_id("entry_custody"), KernelValue::Bool(false)),
                     ]),
                 },
             )
@@ -4776,11 +4793,16 @@ mod tests {
         );
 
         let identity_to_runtime = KernelValue::Map(BTreeMap::from([(agent_a.clone(), runtime_a)]));
+        let no_entries = KernelValue::Map(BTreeMap::new());
         let desired = KernelValue::Set(BTreeSet::from([agent_a.clone(), agent_b.clone()]));
         let members_to_spawn = kernel
             .eval_native_helper(
                 "mob_machine_members_to_spawn",
-                vec![identity_to_runtime.clone(), desired.clone()],
+                vec![
+                    identity_to_runtime.clone(),
+                    no_entries.clone(),
+                    desired.clone(),
+                ],
                 &transition,
             )
             .expect("members to spawn");
@@ -4793,6 +4815,7 @@ mod tests {
                 "mob_machine_members_to_retire",
                 vec![
                     identity_to_runtime.clone(),
+                    no_entries.clone(),
                     KernelValue::Set(BTreeSet::from([agent_b.clone()])),
                     KernelValue::Bool(true),
                 ],
@@ -4806,11 +4829,48 @@ mod tests {
         let retirement_disabled = kernel
             .eval_native_helper(
                 "mob_machine_members_to_retire",
-                vec![identity_to_runtime, desired, KernelValue::Bool(false)],
+                vec![
+                    identity_to_runtime.clone(),
+                    no_entries,
+                    desired.clone(),
+                    KernelValue::Bool(false),
+                ],
                 &transition,
             )
             .expect("retirement disabled");
         assert_eq!(retirement_disabled, KernelValue::Set(BTreeSet::new()));
+        // An identity entry is never spawned or retired by a worker
+        // reconcile: agent.a, bound and an entry, is spared from retirement,
+        // and agent.b, desired and an entry, is not spawned.
+        let declared = KernelValue::NamedVariant {
+            enum_name: enum_type_id("IdentityEntryOrigin"),
+            variant: enum_variant_id("Declared"),
+        };
+        let entries = KernelValue::Map(BTreeMap::from([
+            (agent_a.clone(), declared.clone()),
+            (agent_b.clone(), declared),
+        ]));
+        let entries_spawned = kernel
+            .eval_native_helper(
+                "mob_machine_members_to_spawn",
+                vec![identity_to_runtime.clone(), entries.clone(), desired],
+                &transition,
+            )
+            .expect("members to spawn over entries");
+        assert_eq!(entries_spawned, KernelValue::Set(BTreeSet::new()));
+        let entries_retired = kernel
+            .eval_native_helper(
+                "mob_machine_members_to_retire",
+                vec![
+                    identity_to_runtime,
+                    entries,
+                    KernelValue::Set(BTreeSet::new()),
+                    KernelValue::Bool(true),
+                ],
+                &transition,
+            )
+            .expect("members to retire over entries");
+        assert_eq!(entries_retired, KernelValue::Set(BTreeSet::new()));
 
         let obligation = kernel
             .eval_native_helper(

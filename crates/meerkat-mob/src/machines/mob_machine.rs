@@ -35,6 +35,11 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     MemberWakeVerdictKind, PeerInputClass, PeerNoticeDisposition, PeerTransportKind,
     RuntimeEpochId,
 };
+// Identity entries: the schema's own types, one definition for both
+// instantiations of the machine.
+pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
+    AgentLaneMemberAdmissionKind, IdentityEntryOrigin, LegacyIdentityEntryAdoptionKind,
+};
 
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
 pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
@@ -2717,6 +2722,25 @@ mod tests {
         runtime_id: &AgentRuntimeId,
         definition_wiring_exempt: bool,
     ) -> SessionId {
+        seed_membership_committed_member_with(
+            authority,
+            identity,
+            runtime_id,
+            definition_wiring_exempt,
+            false,
+        )
+    }
+
+    /// `seed_membership_committed_member_wired` whose spawn ladder opens
+    /// with `entry_custody`: the membership commit then records the member
+    /// an identity entry.
+    fn seed_membership_committed_member_with(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        runtime_id: &AgentRuntimeId,
+        definition_wiring_exempt: bool,
+        entry_custody: bool,
+    ) -> SessionId {
         let bridge_session_id = SessionId::from(format!("session-{}", identity.0.as_str()));
         let profile_material_digest = format!("test-profile-digest-{}", identity.0.as_str());
         MobMachineMutator::apply(
@@ -2766,6 +2790,7 @@ mod tests {
                 placed_operation_owner_session_id: None,
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
+                entry_custody,
             },
         )
         .expect("BeginSpawnExec should open the spawn-exec phase");
@@ -5933,6 +5958,7 @@ mod tests {
                     placed_operation_owner_session_id: None,
                     effective_profile_override_present: false,
                     effective_model_override_present: false,
+                    entry_custody: false,
                 },
             )
             .expect("begin peer-only spawn execution");
@@ -6686,6 +6712,7 @@ mod tests {
             placed_operation_owner_session_id: None,
             effective_profile_override_present: false,
             effective_model_override_present: false,
+            entry_custody: false,
         };
         assert!(
             MobMachineMutator::apply(&mut spawn_authority, begin(Generation(0))).is_err(),
@@ -7635,6 +7662,7 @@ mod tests {
                     placed_operation_owner_session_id: None,
                     effective_profile_override_present: false,
                     effective_model_override_present: false,
+                    entry_custody: false,
                 },
             )
             .expect("open the spawn execution");
@@ -8165,6 +8193,7 @@ mod tests {
             placed_operation_owner_session_id: Some(SessionId("owner-session".to_string())),
             effective_profile_override_present: true,
             effective_model_override_present: true,
+            entry_custody: false,
         }
     }
 
@@ -11298,6 +11327,7 @@ mod tests {
                 placed_operation_owner_session_id: None,
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
+                entry_custody: false,
             },
         )
         .expect("the seat opens the spawn ladder");
@@ -11762,6 +11792,7 @@ mod tests {
                 placed_operation_owner_session_id: None,
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
+                entry_custody: false,
             },
         )
         .expect("the seat opens the spawn ladder");
@@ -12453,5 +12484,411 @@ mod tests {
             MobMachineAuthority::recover_from_state(stale).is_err(),
             "an exemption of an identity that is not seated is refused"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Identity entries
+    // ---------------------------------------------------------------------
+
+    /// A live member whose spawn ladder opened with entry custody: an
+    /// identity entry, with its endpoint registered.
+    fn seat_live_entry_member(
+        authority: &mut MobMachineAuthority,
+        name: &str,
+        key_byte: u8,
+    ) -> SeatedMember {
+        let identity = AgentIdentity(name.to_string());
+        let runtime_id = AgentRuntimeId(format!("{name}:0"));
+        let session_id =
+            seed_membership_committed_member_with(authority, &identity, &runtime_id, false, true);
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::CommitSpawnActivation {
+                agent_identity: identity.clone(),
+            },
+        )
+        .expect("CommitSpawnActivation settles the seeded entry member");
+        register_test_member_peer(authority, &identity, name, [key_byte; 32]);
+        let fence_token = live_fence(authority, &runtime_id);
+        SeatedMember {
+            identity,
+            runtime_id,
+            session_id,
+            fence_token,
+        }
+    }
+
+    fn probe_admission(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        entry_custody: bool,
+    ) -> MemberAdmissionVerdictKind {
+        let transition = MobMachineMutator::apply(
+            authority,
+            MobMachineInput::ProbeMemberAdmission {
+                agent_identity: identity.clone(),
+                entry_custody,
+            },
+        )
+        .expect("the admission probe answers");
+        transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                MobMachineEffect::MemberAdmissionProbed { verdict, .. } => Some(*verdict),
+                _ => None,
+            })
+            .expect("the probe emits its verdict")
+    }
+
+    fn adopt_legacy(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        generation: Generation,
+        legacy_roster_member: bool,
+    ) -> LegacyIdentityEntryAdoptionKind {
+        let transition = MobMachineMutator::apply(
+            authority,
+            MobMachineInput::AdoptLegacyIdentityEntry {
+                agent_identity: identity.clone(),
+                generation,
+                legacy_roster_member,
+            },
+        )
+        .expect("the adoption answers");
+        transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                MobMachineEffect::LegacyIdentityEntryAdoptionResolved {
+                    agent_identity,
+                    verdict,
+                } if agent_identity == identity => Some(*verdict),
+                _ => None,
+            })
+            .expect("the adoption emits its verdict")
+    }
+
+    fn agent_lane_admission(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+    ) -> AgentLaneMemberAdmissionKind {
+        let transition = MobMachineMutator::apply(
+            authority,
+            MobMachineInput::ResolveAgentLaneMemberAdmission {
+                agent_identity: identity.clone(),
+            },
+        )
+        .expect("the agent lane's admission answers");
+        transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                MobMachineEffect::AgentLaneMemberAdmissionResolved {
+                    agent_identity,
+                    admission,
+                } if agent_identity == identity => Some(*admission),
+                _ => None,
+            })
+            .expect("the admission emits its verdict")
+    }
+
+    fn recover_entry_signal(
+        identity: &AgentIdentity,
+        runtime_id: &AgentRuntimeId,
+    ) -> MobMachineSignal {
+        MobMachineSignal::RecoverIdentityEntry {
+            agent_identity: identity.clone(),
+            agent_runtime_id: runtime_id.clone(),
+            origin: IdentityEntryOrigin::Declared,
+        }
+    }
+
+    /// A spawn whose ladder opened with entry custody records its member an
+    /// identity entry in its own membership commit, and the commit consumes
+    /// the ladder's custody; a spawn without it seats a worker.
+    #[test]
+    fn a_spawn_with_entry_custody_records_the_entry_in_its_membership_commit() {
+        let mut authority = MobMachineAuthority::new();
+        let entry = seat_live_entry_member(&mut authority, "declared-entry", 51);
+        let worker = seat_live_member_with_endpoint(&mut authority, "plain-worker", 52);
+        assert_eq!(
+            authority
+                .state()
+                .identity_entry_origins
+                .get(&entry.identity),
+            Some(&IdentityEntryOrigin::Declared)
+        );
+        assert!(
+            !authority
+                .state()
+                .identity_entry_origins
+                .contains_key(&worker.identity)
+        );
+        assert!(
+            authority.state().spawn_exec_entry_custody.is_empty(),
+            "the membership commit consumed the ladder's custody"
+        );
+        assert!(
+            MobMachineAuthority::recover_from_state(authority.state().clone()).is_ok(),
+            "a seated local entry recovers"
+        );
+    }
+
+    /// The admission probe refuses an identity entry's name to a spawn
+    /// without entry custody, typed, whether or not anything else holds the
+    /// name; with custody, and for any other name, it answers as before.
+    #[test]
+    fn the_admission_probe_refuses_an_entry_name_without_custody() {
+        let mut authority = MobMachineAuthority::new();
+        let entry = seat_live_entry_member(&mut authority, "reserved-entry", 53);
+        let worker = seat_live_member_with_endpoint(&mut authority, "probe-worker", 54);
+        let fresh = AgentIdentity::from("fresh-name");
+        assert_eq!(
+            probe_admission(&mut authority, &entry.identity, false),
+            MemberAdmissionVerdictKind::IdentityMemberRejected
+        );
+        assert_eq!(
+            probe_admission(&mut authority, &entry.identity, true),
+            MemberAdmissionVerdictKind::DuplicateRejected,
+            "the entry's member is seated: a spawn with custody is a duplicate"
+        );
+        assert_eq!(
+            probe_admission(&mut authority, &worker.identity, false),
+            MemberAdmissionVerdictKind::DuplicateRejected
+        );
+        assert_eq!(
+            probe_admission(&mut authority, &fresh, false),
+            MemberAdmissionVerdictKind::Admitted
+        );
+        assert_eq!(
+            probe_admission(&mut authority, &fresh, true),
+            MemberAdmissionVerdictKind::Admitted
+        );
+    }
+
+    /// A worker reconcile ranges over workers only: an identity entry is
+    /// never in the spawn or the retire set, desired or not.
+    #[test]
+    fn a_worker_reconcile_never_retires_or_spawns_an_entry() {
+        let mut authority = MobMachineAuthority::new();
+        let entry = seat_live_entry_member(&mut authority, "kept-entry", 55);
+        let worker = seat_live_member_with_endpoint(&mut authority, "stale-worker", 56);
+        let fresh = AgentIdentity::from("desired-worker");
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::Reconcile {
+                desired: std::collections::BTreeSet::from([fresh.clone()]),
+                retire_stale: true,
+            },
+        )
+        .expect("a reconcile without the entry");
+        assert_eq!(
+            authority.state().members_to_retire,
+            std::collections::BTreeSet::from([worker.identity.clone()]),
+            "the stale worker is retired, the entry is not"
+        );
+        assert_eq!(
+            authority.state().members_to_spawn,
+            std::collections::BTreeSet::from([fresh.clone()])
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::Reconcile {
+                desired: std::collections::BTreeSet::from([entry.identity.clone(), fresh.clone()]),
+                retire_stale: true,
+            },
+        )
+        .expect("a reconcile naming the entry");
+        assert_eq!(
+            authority.state().members_to_spawn,
+            std::collections::BTreeSet::from([fresh])
+        );
+        assert!(
+            !authority
+                .state()
+                .members_to_retire
+                .contains(&entry.identity)
+        );
+    }
+
+    /// The agent lane's member admission refuses an identity entry and
+    /// admits any other member, or an identity no member holds.
+    #[test]
+    fn the_agent_lane_member_admission_refuses_only_entries() {
+        let mut authority = MobMachineAuthority::new();
+        let entry = seat_live_entry_member(&mut authority, "lane-entry", 57);
+        let worker = seat_live_member_with_endpoint(&mut authority, "lane-worker", 58);
+        assert_eq!(
+            agent_lane_admission(&mut authority, &entry.identity),
+            AgentLaneMemberAdmissionKind::IdentityMember
+        );
+        assert_eq!(
+            agent_lane_admission(&mut authority, &worker.identity),
+            AgentLaneMemberAdmissionKind::Admitted
+        );
+        assert_eq!(
+            agent_lane_admission(&mut authority, &AgentIdentity::from("nobody")),
+            AgentLaneMemberAdmissionKind::Admitted
+        );
+    }
+
+    /// The legacy adoption decides from the shell's observation, once: the
+    /// observed current incarnation of a legacy member is adopted, a second
+    /// adoption changes nothing, a worker keeps the name, a stale
+    /// observation or a name no member holds adopts nothing, and a mob that
+    /// is not running adopts nothing.
+    #[test]
+    fn a_legacy_member_is_adopted_once_from_the_shell_observation() {
+        let mut authority = MobMachineAuthority::new();
+        let legacy = seat_live_member_with_endpoint(&mut authority, "legacy-member", 59);
+        let worker = seat_live_member_with_endpoint(&mut authority, "named-worker", 60);
+        assert_eq!(
+            adopt_legacy(&mut authority, &legacy.identity, Generation(0), true),
+            LegacyIdentityEntryAdoptionKind::Adopted
+        );
+        assert_eq!(
+            authority
+                .state()
+                .identity_entry_origins
+                .get(&legacy.identity),
+            Some(&IdentityEntryOrigin::Declared)
+        );
+        assert_eq!(
+            adopt_legacy(&mut authority, &legacy.identity, Generation(0), true),
+            LegacyIdentityEntryAdoptionKind::AlreadyAnEntry
+        );
+        assert_eq!(
+            adopt_legacy(&mut authority, &worker.identity, Generation(0), false),
+            LegacyIdentityEntryAdoptionKind::NameHeldByWorker
+        );
+        assert_eq!(
+            adopt_legacy(&mut authority, &worker.identity, Generation(3), true),
+            LegacyIdentityEntryAdoptionKind::StaleObservation
+        );
+        assert_eq!(
+            adopt_legacy(
+                &mut authority,
+                &AgentIdentity::from("never-seated"),
+                Generation(0),
+                true
+            ),
+            LegacyIdentityEntryAdoptionKind::NotSeated
+        );
+        assert!(
+            !authority
+                .state()
+                .identity_entry_origins
+                .contains_key(&worker.identity),
+            "no refused adoption records an entry"
+        );
+        MobMachineMutator::apply(&mut authority, MobMachineInput::Stop).expect("stop");
+        assert_eq!(
+            adopt_legacy(&mut authority, &worker.identity, Generation(0), true),
+            LegacyIdentityEntryAdoptionKind::MobNotRunning
+        );
+    }
+
+    /// The replay of an entry's row records the entry on the identity's
+    /// seated incarnation only, and only while the boot plan is not sealed.
+    #[test]
+    fn the_replay_of_an_entry_row_records_only_a_seated_incarnation() {
+        let mut authority = MobMachineAuthority::new();
+        let member = seat_live_member_with_endpoint(&mut authority, "replayed-entry", 61);
+        assert!(
+            authority
+                .apply_signal(recover_entry_signal(
+                    &member.identity,
+                    &AgentRuntimeId::from("replayed-entry:9"),
+                ))
+                .is_err(),
+            "another incarnation's row is refused"
+        );
+        assert!(
+            authority
+                .apply_signal(recover_entry_signal(
+                    &AgentIdentity::from("never-seated"),
+                    &AgentRuntimeId::from("never-seated:0"),
+                ))
+                .is_err(),
+            "an unseated identity's row is refused"
+        );
+        authority
+            .apply_signal(recover_entry_signal(&member.identity, &member.runtime_id))
+            .expect("the seated incarnation's row records the entry");
+        assert_eq!(
+            authority
+                .state()
+                .identity_entry_origins
+                .get(&member.identity),
+            Some(&IdentityEntryOrigin::Declared)
+        );
+
+        let mut sealed = MobMachineAuthority::new();
+        let late = seat_live_member_with_endpoint(&mut sealed, "late-row", 62);
+        MobMachineMutator::apply(&mut sealed, MobMachineInput::SealBootMaterializationPlan)
+            .expect("seal the boot plan");
+        assert!(
+            sealed
+                .apply_signal(recover_entry_signal(&late.identity, &late.runtime_id))
+                .is_err(),
+            "a sealed boot plan takes no replay row"
+        );
+    }
+
+    /// Every unseat ends the entry: the retirement of an entry's member
+    /// removes the entry in its own step, and recovery refuses a state that
+    /// keeps an entry for an identity that is not seated
+    /// (`entry_is_seated_or_has_an_unseated_cause`).
+    #[test]
+    fn the_retirement_of_an_entry_member_ends_the_entry() {
+        let (mut authority, member) = dormant_member_authority("retired-entry");
+        authority
+            .apply_signal(recover_entry_signal(&member.identity, &member.runtime_id))
+            .expect("the replay records the entry");
+        retire_and_archive(&mut authority, &member);
+        assert!(
+            !authority
+                .state()
+                .identity_entry_origins
+                .contains_key(&member.identity),
+            "the retirement ends the entry"
+        );
+        let mut stale = authority.state().clone();
+        stale
+            .identity_entry_origins
+            .insert(member.identity.clone(), IdentityEntryOrigin::Declared);
+        assert!(
+            MobMachineAuthority::recover_from_state(stale).is_err(),
+            "an entry of an unseated identity is refused at recovery"
+        );
+    }
+
+    /// A placed spawn never acts for an identity entry: the remote ladder
+    /// has no arm for an input that carries entry custody
+    /// (`placed_spawn_without_entry_custody`), while the same input without
+    /// it opens the ladder.
+    #[test]
+    fn a_placed_spawn_with_entry_custody_has_no_arm() {
+        let identity = AgentIdentity::from("placed-entry");
+        let host = HostId("entry-placed-host".to_string());
+        let spawn_id = PlacedSpawnId("entry-placed-spawn".to_string());
+        let mut authority = MobMachineAuthority::new();
+        authorize_remote_placed_spawn(&mut authority, &identity, &host, "spec-digest");
+        let mut with_custody = begin_remote_placed_spawn(&identity, &host, &spawn_id);
+        if let MobMachineInput::BeginSpawnExec { entry_custody, .. } = &mut with_custody {
+            *entry_custody = true;
+        }
+        assert!(
+            MobMachineMutator::apply(&mut authority, with_custody).is_err(),
+            "the remote ladder refuses entry custody"
+        );
+        assert!(authority.state().spawn_exec_entry_custody.is_empty());
+        assert!(!authority.state().spawn_exec_phase.contains_key(&identity));
+        MobMachineMutator::apply(
+            &mut authority,
+            begin_remote_placed_spawn(&identity, &host, &spawn_id),
+        )
+        .expect("the same placed spawn without entry custody opens its ladder");
     }
 }

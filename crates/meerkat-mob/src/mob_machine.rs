@@ -532,6 +532,12 @@ pub enum MobMachineRuntimeInternalReason {
     /// carry-out and the rotation seat. The actor and the wake paths drive
     /// them; none is an independent public command.
     MemberResidencyAuthority,
+    /// Identity entries: the adoption of a legacy member as an entry, driven
+    /// by the handle's adoption after it observed the member's spawn row, and
+    /// the agent lane's member admission, driven by the actor's command
+    /// admission for every agent-lane command addressed to a member. Neither
+    /// is an independent public command.
+    IdentityEntryAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1408,6 +1414,14 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::ClassifyMemberRelease,
         reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AdoptLegacyIdentityEntry,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveAgentLaneMemberAdmission,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
     },
 ];
 

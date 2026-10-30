@@ -362,6 +362,12 @@ pub use runtime::{
 };
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::{DurableResumeGate, DurableResumeRequest, DurableResumeVerdict};
+pub use runtime::{
+    EntryStanding, IDENTITY_ENTRY_PAGE_MAX, IdentityCensus, IdentityEntryOrigin, IdentityEntryPage,
+    IdentityEntryRead, IdentityEntryView, LegacyIdentityEntryAdoption, MemberBrokenFact,
+    MemberLifecycleEvent, MemberLifecyclePage, MemberLifecycleRecord, MobJournalCursor,
+    SeatedMember, WorkerMember,
+};
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{
     FlowTurnExecutor, FlowTurnFailureDisposition, FlowTurnOutcome, FlowTurnTicket,

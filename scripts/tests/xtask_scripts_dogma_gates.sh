@@ -391,6 +391,14 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # tool_grant_expiry_audit.sh (tool_grant_lifecycle) requires its eight
 # witnesses violated, and with --mutants each seeded defect's invariant or
 # action property violated.
+# identity_entry_audit.sh (mob_machine) requires a final distinct-state count
+# at or above each of its two runs' floors, a coverage block in which each
+# covered action of both runs generated a state, its sixteen step witnesses
+# and four state witnesses violated, and with --mutants its reconcile
+# mutant's generated invariant, its probe mutant's invariant, its adoption
+# mutant's invariant or property, its replay, archive and destroy mutants'
+# generated invariants, and its rotation and seat mutants' action
+# properties violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -658,6 +666,33 @@ printf '%s\n' \
   'echo "Error: Action property AuditTerminalLatched is violated."' \
   'echo "Error: Invariant AuditTerminalNeverAdmits is violated."' \
   'echo "Error: Invariant AuditVisibleOnlyWhileLive is violated."' \
+  'for action in AbortSpawnExecActiveRunning RecoverIdentityEntrySeatedRunning RecoverIdentityEntrySeatedStopped AdoptLegacyIdentityEntryAdopted AdoptLegacyIdentityEntryNameHeldByWorker AdoptLegacyIdentityEntryNotAdoptable AdoptLegacyIdentityEntryStaleObservation AdoptLegacyIdentityEntryNotSeated AdoptLegacyIdentityEntryAlreadyAnEntry AdoptLegacyIdentityEntryNonAuthoritative AdoptLegacyIdentityEntryMobNotRunningStopped ProbeMemberAdmissionDuplicateRunning ProbeMemberAdmissionAdmittedRunning ProbeMemberAdmissionIdentityMemberRunning ProbeMemberAdmissionDuplicateStopped ProbeMemberAdmissionAdmittedStopped ProbeMemberAdmissionIdentityMemberStopped ResolveAgentLaneMemberAdmissionAdmittedRunning ResolveAgentLaneMemberAdmissionIdentityMemberRunning ResolveAgentLaneMemberAdmissionAdmittedStopped ResolveAgentLaneMemberAdmissionIdentityMemberStopped ReconcileRunning ReconcileStopped EnsureMemberRunningExisting EnsureMemberRunningMissing DestroyFromAny; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Action property NotAuditWitnessCustodyCommit is violated."' \
+  'echo "Error: Action property NotAuditWitnessCustodyAborted is violated."' \
+  'echo "Error: Action property NotAuditWitnessReplayed is violated."' \
+  'echo "Error: Action property NotAuditWitnessReplayedStopped is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdopted is violated."' \
+  'echo "Error: Action property NotAuditWitnessReconcileSparesEntry is violated."' \
+  'echo "Error: Action property NotAuditWitnessReconcileSpawnsWorkerOnly is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnseated is violated."' \
+  'echo "Error: Invariant NotAuditWitnessProbeRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessLaneRefusedStopped is violated."' \
+  'echo "Error: Invariant NotAuditWitnessTwoEntries is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntrySeated is violated."' \
+  'echo "Error: Invariant NotAuditWitnessEntryLive is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryRetiredLive is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryArchived is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryRotated is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryDestroyArchived is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryDestroyedMob is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryDestroyedForced is violated."' \
+  'echo "Error: Action property NotAuditWitnessCustodyDestroyed is violated."' \
+  'echo "Error: Action property AuditRotationKeepsEntry is violated."' \
+  'echo "Error: Action property AuditSeatRecordsEntryFromCustody is violated."' \
+  'echo "Error: Invariant worker_reconcile_spares_entries is violated."' \
+  'echo "Error: Invariant AuditProbeExactlyOne is violated."' \
+  'echo "Error: Invariant AuditAdoptionExactlyOne is violated."' \
+  'echo "Error: Invariant entry_is_seated_or_has_an_unseated_cause is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

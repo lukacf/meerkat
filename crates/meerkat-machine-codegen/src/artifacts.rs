@@ -11248,26 +11248,28 @@ impl<'a> MachineTlaCompiler<'a> {
         // no longer desired, gated on `retire_stale` (empty set otherwise).
         // `identity_to_runtime` is the bound-identity function (DOMAIN = the
         // currently-bound identities); `desired` is the target identity set.
+        // Both range over workers only: an identity entry (DOMAIN of
+        // `identity_entry_origins`) is never spawned or retired by them.
         writeln!(
             out,
-            "{}(arg_identity_to_runtime, arg_desired) ==",
+            "{}(arg_identity_to_runtime, arg_identity_entry_origins, arg_desired) ==",
             prefix("mob_machine_members_to_spawn")
         )
         .expect("write to string");
         pushln!(
             out,
-            "    {{ member \\in arg_desired : member \\notin DOMAIN arg_identity_to_runtime }}"
+            "    {{ member \\in arg_desired : member \\notin DOMAIN arg_identity_to_runtime /\\ member \\notin DOMAIN arg_identity_entry_origins }}"
         );
         writeln!(
             out,
-            "{}(arg_identity_to_runtime, arg_desired, arg_retire_stale) ==",
+            "{}(arg_identity_to_runtime, arg_identity_entry_origins, arg_desired, arg_retire_stale) ==",
             prefix("mob_machine_members_to_retire")
         )
         .expect("write to string");
         pushln!(out, "    IF arg_retire_stale");
         pushln!(
             out,
-            "    THEN {{ member \\in DOMAIN arg_identity_to_runtime : member \\notin arg_desired }}"
+            "    THEN {{ member \\in DOMAIN arg_identity_to_runtime : member \\notin arg_desired /\\ member \\notin DOMAIN arg_identity_entry_origins }}"
         );
         pushln!(out, "    ELSE {{}}");
         // Placed-carrier cleanup is identity-exclusive and carries the exact

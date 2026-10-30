@@ -3091,6 +3091,113 @@ mod tests {
         Ok(())
     }
 
+    /// The session service's own hot swap, the path every live model change
+    /// passes (a direct `SessionService` caller included), refuses a target
+    /// that cannot carry the operator-instruction entry rows the session
+    /// wrote itself where they stand. The session's entry stands after a
+    /// conversation row: a target that lowers System rows only in the
+    /// leading prefix cannot carry it, nor can a wire that carries one
+    /// leading System row. The refusal is typed and changes nothing; a
+    /// target that lowers entries anywhere is admitted.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_direct_hot_swap_is_refused_where_the_target_cannot_carry_the_sessions_own_entries()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let mut builder = FactoryAgentBuilder::new(
+            AgentFactory::new(temp.path().join("sessions")),
+            Config::default(),
+        );
+        builder.default_llm_client = Some(Arc::new(MockLlmClient::default()));
+        let service = EphemeralSessionService::new(builder, 10);
+        let mut durable_session = Session::new();
+        durable_session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("Hello"),
+        ));
+        durable_session.append_operator_instruction_activation_for_test(
+            "app.example",
+            "tone",
+            1,
+            "Answer formally.",
+        )?;
+        let created = service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-5.5".to_string(),
+                prompt: "defer the next turn".to_string().into(),
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(durable_session),
+                    ..SessionBuildOptions::default()
+                }),
+                labels: None,
+            })
+            .await
+            .map_err(|err| err.to_string())?;
+        let durable = service
+            .live_session_llm_identity(&created.session_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        let swap = |lowering: meerkat_core::InstructionLowering| {
+            let client = meerkat_client::LlmClientAdapter::try_for_provider_identity(
+                Arc::new(MockLlmClient::default()),
+                durable.model.clone(),
+                durable.provider,
+            )
+            .map_err(|err| err.to_string())?;
+            let policy = meerkat_core::SessionLlmRequestPolicy {
+                model: durable.model.clone(),
+                credential_identity: None,
+                provider_params: durable.provider_params.clone(),
+                provider_tool_defaults: None,
+                provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,
+                operator_instruction_lowering: lowering,
+            };
+            Ok::<_, String>((
+                Arc::new(client) as Arc<dyn meerkat_core::AgentLlmClient>,
+                policy,
+            ))
+        };
+
+        for lowering in [
+            meerkat_core::InstructionLowering::LeadingPrefixOnly,
+            meerkat_core::InstructionLowering::Unavailable,
+        ] {
+            let (client, policy) = swap(lowering)?;
+            match service
+                .hot_swap_session_llm_identity(&created.session_id, client, durable.clone(), policy)
+                .await
+            {
+                Err(SessionError::Agent(meerkat_core::error::AgentError::ConfigError(message)))
+                    if message.contains("cannot represent the operator-instruction entries") => {}
+                other => {
+                    return Err(format!(
+                        "a {lowering:?} target must be refused typed, got {other:?}"
+                    ));
+                }
+            }
+            assert_eq!(
+                service
+                    .live_session_llm_identity(&created.session_id)
+                    .await
+                    .map_err(|err| err.to_string())?,
+                durable,
+                "a refused swap changes nothing"
+            );
+        }
+
+        let (client, policy) = swap(meerkat_core::InstructionLowering::MidConversation)?;
+        service
+            .hot_swap_session_llm_identity(&created.session_id, client, durable.clone(), policy)
+            .await
+            .map_err(|err| format!("a target that lowers entries anywhere is admitted: {err}"))?;
+        Ok(())
+    }
+
     #[async_trait]
     impl ImageGenerationExecutor for FakeImageGenerationExecutor {
         async fn execute_image_generation(

@@ -26454,9 +26454,24 @@ mod tests {
 
     /// The `global` realm of [`config_with_public_and_chatgpt_bindings`]
     /// (`public` its default binding) with a second public OpenAI API
-    /// binding, `public_b`, on backend and auth profiles of its own.
+    /// binding, `public_b`, on backend and auth profiles of its own, and an
+    /// OpenAI model without a catalog row, `custom-prefix-model`: a model
+    /// that lowers System rows only inside the leading System prefix.
     fn config_with_two_public_and_chatgpt_bindings() -> meerkat_core::Config {
         let mut config = config_with_public_and_chatgpt_bindings("public");
+        config.models.custom.insert(
+            "custom-prefix-model".into(),
+            meerkat_core::config::CustomModelConfig {
+                provider: meerkat_core::Provider::OpenAI,
+                display_name: None,
+                context_window: Some(128_000),
+                max_input_tokens: None,
+                max_output_tokens: Some(16_000),
+                vision: Some(false),
+                web_search: Some(false),
+                call_timeout_secs: None,
+            },
+        );
         let section = config.realm.get_mut("global").expect("global realm");
         section.backend.insert(
             "openai_api_b".into(),
@@ -26744,6 +26759,81 @@ mod tests {
             Some("Answer formally."),
             "the target stays pending"
         );
+    }
+
+    /// A live model change is refused, before any client for its target is
+    /// built, where the target cannot carry the operator-instruction entry
+    /// rows the session wrote itself where they stand. The session's entry
+    /// stands after its first turn's rows: a model that lowers System rows
+    /// only in the leading prefix cannot carry it, nor can the ChatGPT
+    /// backend, whose wire takes one leading System row. Each refusal is
+    /// typed, builds no client for the target (a build resolves the
+    /// target's credential and publishes its lease), and changes nothing.
+    #[tokio::test]
+    async fn a_swap_is_refused_before_its_client_is_built_where_the_target_cannot_carry_own_entries()
+     {
+        use meerkat_core::service::SessionServiceInstructionExt as _;
+
+        let client = Arc::new(RecordingMessagesLlmClient::default());
+        let (runtime, session_id, _temp) =
+            public_binding_session_with_recorded_requests(&client).await;
+        Arc::clone(&runtime.service)
+            .set_session_instruction(&session_id, tone_instruction(1, Some("Answer formally.")))
+            .await
+            .expect("the session records the target");
+        run_one_turn(&runtime, &session_id, "Again").await;
+        let request = client
+            .requests()
+            .last()
+            .cloned()
+            .expect("the turn reached the model");
+        assert_eq!(
+            entry_rows_in(&request),
+            1,
+            "the run start applied the entry after the first turn's rows: {request:?}"
+        );
+        let before = runtime
+            .current_materialized_llm_identity(&session_id)
+            .await
+            .unwrap();
+        let constructions = Arc::new(AtomicUsize::new(0));
+        runtime.set_agent_llm_client_decorator(Some(counting_agent_llm_client_decorator(
+            Arc::clone(&constructions),
+            Arc::new(AtomicUsize::new(0)),
+        )));
+
+        let prefix_only = crate::handlers::turn::TurnOverrides {
+            model: Some("custom-prefix-model".to_string()),
+            ..Default::default()
+        };
+        for (target, overrides) in [
+            ("a leading-prefix-only model", prefix_only),
+            ("the ChatGPT backend", swap_onto("chatgpt")),
+        ] {
+            let error = runtime
+                .hot_swap_llm_client(&session_id, &overrides)
+                .await
+                .expect_err("the target cannot carry the session's own entry where it stands");
+            assert!(
+                error
+                    .message
+                    .contains("cannot represent the operator-instruction entries"),
+                "unexpected reconfigure error for {target}: {error:?}"
+            );
+            assert_eq!(
+                constructions.load(AtomicOrdering::SeqCst),
+                0,
+                "a swap onto {target} refused by the guard builds no client for it"
+            );
+            assert_eq!(
+                runtime
+                    .current_materialized_llm_identity(&session_id)
+                    .await
+                    .unwrap(),
+                before,
+                "a refused swap onto {target} changes nothing"
+            );
+        }
     }
 
     #[tokio::test]

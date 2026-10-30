@@ -14375,6 +14375,123 @@ mod tests {
         );
     }
 
+    /// A resumed build is refused, before its client is built, where the
+    /// model it resumes on cannot carry the operator-instruction entry rows
+    /// the session wrote itself where they stand: an entry after a
+    /// conversation row on a model that lowers System rows only in the
+    /// leading prefix, and an entry beside the session's prompt on the
+    /// ChatGPT backend, whose wire takes one leading System row. The first
+    /// session resumes on a model that lowers entries anywhere.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_resumed_build_is_refused_where_its_model_cannot_carry_the_sessions_own_entries() {
+        const REALM: &str = "operator_instructions_resume";
+        let temp = tempfile::tempdir().expect("temp sessions");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .without_provider_auth_persistence()
+            .builtins(false);
+        let mut api_config = Config::default();
+        api_config.realm.insert(
+            REALM.to_string(),
+            inline_realm_section(&[("openai", "test-key")]),
+        );
+        api_config.models.custom.insert(
+            "custom-prefix-model".to_string(),
+            meerkat_core::config::CustomModelConfig {
+                provider: Provider::OpenAI,
+                display_name: None,
+                context_window: Some(128_000),
+                max_input_tokens: None,
+                max_output_tokens: Some(16_000),
+                vision: Some(false),
+                web_search: Some(false),
+                call_timeout_secs: None,
+            },
+        );
+        let mut chatgpt_config = Config::default();
+        let mut chatgpt_realm = inline_realm_section(&[("openai", "test-key")]);
+        chatgpt_realm
+            .backend
+            .get_mut("default_openai")
+            .expect("OpenAI backend")
+            .backend_kind = "chatgpt_backend".to_string();
+        chatgpt_realm
+            .auth
+            .get_mut("default_openai")
+            .expect("OpenAI auth")
+            .auth_method = "managed_chatgpt_oauth".to_string();
+        chatgpt_config
+            .realm
+            .insert(REALM.to_string(), chatgpt_realm);
+        let resume = |model: &str, session: Session| {
+            let mut build = AgentBuildConfig::new(model);
+            build.provider = Some(Provider::OpenAI);
+            build.realm_id = Some(RealmId::parse(REALM).expect("test realm"));
+            build.auth_binding = Some(configured_auth_binding(REALM, "default_openai"));
+            build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::for_provider(
+                Provider::OpenAI,
+            )));
+            build.resume_session = Some(session);
+            build.override_builtins = ToolCategoryOverride::Disable;
+            build.override_web_search = ToolCategoryOverride::Disable;
+            build
+        };
+        let mut after_conversation = Session::new();
+        after_conversation.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("Hello"),
+        ));
+        after_conversation
+            .append_operator_instruction_activation_for_test(
+                "app.example",
+                "tone",
+                1,
+                "Answer formally.",
+            )
+            .expect("an entry after the conversation row");
+        let mut beside_the_prompt = Session::new();
+        beside_the_prompt.push(meerkat_core::Message::System(
+            meerkat_core::SystemMessage::new("You are a careful assistant."),
+        ));
+        beside_the_prompt
+            .append_operator_instruction_activation_for_test(
+                "app.example",
+                "tone",
+                1,
+                "Answer formally.",
+            )
+            .expect("an entry beside the prompt");
+
+        for (target, build, config) in [
+            (
+                "a leading-prefix-only model",
+                resume("custom-prefix-model", after_conversation.clone()),
+                &api_config,
+            ),
+            (
+                "the ChatGPT backend",
+                resume("gpt-5.5", beside_the_prompt),
+                &chatgpt_config,
+            ),
+        ] {
+            let Err(error) = factory.build_agent(build, config).await else {
+                panic!("a resumed build on {target} must be refused");
+            };
+            assert!(
+                matches!(
+                    &error,
+                    BuildAgentError::Config(message)
+                        if message.contains("cannot represent the operator-instruction entries")
+                ),
+                "unexpected build error on {target}: {error}"
+            );
+        }
+
+        factory
+            .build_agent(resume("gpt-5.5", after_conversation), &api_config)
+            .await
+            .expect("a model that lowers entries anywhere resumes the session");
+    }
+
     /// An inherited tool-visibility ceiling keeps the identity witnesses that
     /// back it through a model-call boundary, so the session's committed
     /// record still witnesses every inherited name and the session resumes.

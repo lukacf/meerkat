@@ -257,10 +257,35 @@ budget runs out while waiting ends with the time-budget terminal, not a refusal.
 Waiting never weakens a check: the rebuild still needs a coherent observation
 and every current check.
 
+A governed step of a tool dispatch, a further step of an entered operation or
+a dispatch's own child issuance, takes its work owners' exclusion without
+waiting. When another actor holds that exclusion (an issuance with its
+acknowledged append, another dispatch's final entry, a host's owner change or
+held exclusion), the native work owner answers the step with a refusal to
+rebuild (`ReprepareRequired`: nothing ran and nothing was appended) and names
+the hold through `owner_change_in_progress` until it ends, published or not.
+The waiting forms wait for that hold outside every lock, with the bounds above
+and never past the call's remaining tool time, then take the step again; with
+no change in progress at that read they take it once more. They are
+`GovernedDispatchOperation::run_if_current_within_after_owner_change` and
+`issue_child_if_current_within_after_owner_change`, the same two on
+`EnteredDispatchOperation`, and
+`GovernedHelperChildIssuance::issue_or_recover_after_owner_change`. A
+dispatch's issuance makes its single consuming entry once and retries through
+the entry's witness, so an R2 review or an R3 consent is spent exactly once.
+Past the bounds the step's typed refusal is returned (a helper issuance
+answers `Unavailable`). The synchronous steps, the helper admission fence
+(which runs inside the WorkGraph store callback) and the host-facing entries
+that never wait answer at once, as before, and a poisoned publication is
+`Unavailable` and is never waited for. This is shell synchronization: no
+machine input or owner fact changes.
+
 A custom `WorkAuthorization` reports a change in progress through
 `owner_change_in_progress` (provided; default `None`), a waiting hint that is
-never a permission. `LocalAuthorizationPublication::change_in_progress` answers
-it for the local owners, and the native run and audit wrappers forward it.
+never a permission. `LocalAuthorizationPublication::change_in_progress` names a
+published change of the local owners; the native work owner's
+`owner_change_in_progress` also names a reservation of the publication's
+writer held now, and the native run and audit wrappers forward it.
 `meerkat_core::authorization::OwnerChangeChurn` implements the bounded wait
 (`OWNER_CHANGE_WAIT_BOUND` 2 s, `OWNER_CHANGE_FREE_REBUILDS` 3); a tool that
 waits inside its body bounds it by `ToolDispatchContext::remaining_tool_time`.

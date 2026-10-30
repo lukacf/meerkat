@@ -777,8 +777,10 @@ bounds.
   `OWNER_CHANGE_FREE_REBUILDS` (3 rebuilds that do not spend the operation's
   own). `WorkAuthorization::owner_change_in_progress` (provided, default `None`)
   reports such a change as a waiting hint, never a permission;
-  `LocalAuthorizationPublication::change_in_progress` answers it for the local
-  owners, and the native run and audit wrappers forward it.
+  `LocalAuthorizationPublication::change_in_progress` names a published change
+  of the local owners, the native work owner's `owner_change_in_progress` also
+  names a reservation of the publication's writer held now (published or not),
+  and the native run and audit wrappers forward it.
   `OwnerChangeChurn::wait_for_settled_change` takes the wait's trace site and
   operation: it records the debug event below and reports the wait to the
   host's [operation refusal observer](#observe-refusal-dispositions).
@@ -800,16 +802,45 @@ bounds.
   its wait, but the gate's own code already ran: a reviewed tool whose
   decision changed while the gate waited settles as `review_unsatisfied`
   (`context_changed`) and is not reviewed again.
+- A governed step takes the work owners' exclusion without waiting
+  (`WorkAuthorization::run_if_current_within`, `run_entered_if_current_within`
+  and `issue_child_if_current_within`). When another actor holds it (an
+  issuance with its acknowledged append, another operation's final entry, a
+  host's owner change or held exclusion), the native work owner answers
+  `Refused(ReprepareRequired)`, with nothing run or appended, and names the
+  hold as a change in progress until it ends; a poisoned, retired or exhausted
+  publication stays `Unavailable`. In core the dispatch steps then answer
+  `AuthorizationRefused` (`ReprepareRequired`). Their waiting forms,
+  `GovernedDispatchOperation::run_if_current_within_after_owner_change` and
+  `issue_child_if_current_within_after_owner_change` and the same two on
+  `EnteredDispatchOperation` (async), wait after each such refusal with a
+  fresh `OwnerChangeChurn` that reports as the call's, within the call's
+  remaining tool time, and take the step again; with no change in progress at
+  that read they take it once more, as a preparation rebuilds once. Every
+  attempt is the synchronous step, decided afresh, and releases the
+  exclusion, the owner locks, the run's custody read and the review owner's
+  step admission before any wait. An attempt whose operation ran is the
+  step's answer. The dispatch issuance makes its single consuming entry once,
+  its staging waiting out a change in progress as the root staging does, then
+  retries through the entry's witness: a review or consent is spent exactly
+  once. Past the bounds the last attempt's typed refusal is returned. This is
+  shell synchronization, like `OwnerChangeChurn`: no machine input changes.
 - A governed helper admission fence and a helper child issuance answer
   `Unavailable` instead of `Denied` when their check refuses to rebuild, on the
   prepared and dispatch paths alike: under the owner-change exclusion they
   cannot wait, and a refusal to rebuild is no verdict, so a later attempt may
   succeed. A denial and malformed facts stay `Denied`.
+  `GovernedHelperChildIssuance::issue_or_recover_after_owner_change` waits
+  first on the dispatch and entered paths (through the waiting dispatch
+  steps) and answers `Unavailable` only past the bounds; its prepared path
+  never waits. The fence runs inside the WorkGraph store callback and never
+  waits.
 - `OwnerChangeWait::trace` records each wait as one `debug` event of target
   `meerkat::authz::owner_change_wait` with `site` (`model_request`,
-  `compaction_summary`, `tool_dispatch`, `tool_entry`, `tool_policy_entry` or
-  `web_search_delegate`), `operation_id`, `waited_ms` and `settled`. Each
-  refused attempt keeps its own audit record.
+  `compaction_summary`, `tool_dispatch`, `tool_entry`, `tool_policy_entry`,
+  `tool_step`, `tool_child_issuance` or `web_search_delegate`),
+  `operation_id`, `waited_ms` and `settled`. Each refused attempt keeps its
+  own audit record.
 
 ## Continue a reviewed call with governed helper steps
 
@@ -866,7 +897,12 @@ for intent in intents {
   steps keep their effects, and the call's result is the host's to compose. In
   core a step answers `AuthorizationRefused` with no not-dispatched
   certificate, or `OperationAuthorizationUnavailable`, never a review
-  settlement.
+  settlement. Another actor's hold of the work owners' exclusion is a
+  refusal to rebuild there (`ReprepareRequired`), which the witness's waiting
+  forms (`run_if_current_within_after_owner_change`,
+  `issue_child_if_current_within_after_owner_change`) and
+  `GovernedHelperChildIssuance::issue_or_recover_after_owner_change` wait out
+  before they answer.
 - The witness is the capability of exactly the call that entered; use it only
   for that call's own steps. `WorkAuthorization::run_entered_if_current_within`
   is a provided method whose default answers unavailable: a work owner, or a

@@ -95,6 +95,37 @@ them.
   placeholder text must match the new form; the prompt still contains
   `CONTEXT COMPACTION`.
 
+- Behaviour-only (not measured by the gate): `meerkat-authorization`: the
+  native work owner's operation-time steps (`LocalWorkAuthorization`'s
+  `WorkAuthorization::run_if_current_within`,
+  `run_entered_if_current_within` and `issue_child_if_current_within`)
+  answer another actor's hold of the work's authorization publication
+  writer (an issuance with its acknowledged append, another operation's
+  final entry, a host's owner change or held exclusion) as a refusal to
+  rebuild, `Refused(ReprepareRequired)`, where they answered `Unavailable`.
+  Nothing ran and nothing was appended, as before, and a poisoned, retired
+  or exhausted publication stays `Unavailable`. In `meerkat-core` the
+  dispatch steps (`GovernedDispatchOperation::run_if_current_within` and
+  `issue_child_if_current_within`,
+  `EnteredDispatchOperation::run_if_current_within` and
+  `issue_child_if_current_within`) then answer `AuthorizationRefused`
+  (`ReprepareRequired`) where they answered
+  `OperationAuthorizationUnavailable`. The native work owner's
+  `owner_change_in_progress` also names such a hold until it ends, published
+  or not (`LocalAuthorizationPublication::change_in_progress` is
+  unchanged), so every owner-change wait now lasts until the holder releases
+  the writer, and a consent re-adjudication refused to rebuild while one is
+  held decides nothing now, as during a published change (a read keeps the
+  consent unchanged, a decision answers the retryable `StoreUnavailable`).
+  The governed helper fence and child issuance still answer `Unavailable`
+  for the hold, and the host-facing entries that never wait
+  (`LocalGrantAuthority::try_with_owner_changes_excluded`,
+  `issue_or_recover_child_under_exclusion`, `revoke`,
+  `LocalAuthorizationPublication::try_begin_owner_change`) still answer
+  `Unavailable`. A host that matched the unavailable answer for this
+  contention matches the refusal to rebuild instead, or uses the waiting
+  forms (see Added).
+
 ### Added
 
 - `meerkat-runtime`: `PromptInput::detached_job_completed_with_handling`
@@ -140,6 +171,26 @@ them.
   and keeps the default `eligibility_answer` answers an owner change in
   progress as a refusal, which withdraws an approved consent at its spend:
   such a route should override `eligibility_answer` with `observe_answer`.
+
+- `meerkat-core`: waiting forms of the governed dispatch steps,
+  `GovernedDispatchOperation::run_if_current_within_after_owner_change` and
+  `issue_child_if_current_within_after_owner_change`, and the same two on
+  `EnteredDispatchOperation` (async). After a step refused to rebuild (an
+  owner change in progress on the work's own publication, or another actor's
+  hold of the work owners' exclusion), they wait for the change to complete
+  with `OwnerChangeChurn` (2 s and three free rebuilds, never past the
+  call's `ToolDispatchContext::remaining_tool_time`), outside every lock, and
+  take the step again; with no change in progress at that read they take it
+  once more. Past the bounds they return the step's typed refusal. An
+  attempt whose operation ran is the step's answer. Each wait is traced at
+  site `tool_step` or `tool_child_issuance` and reported as the call's to
+  the operation refusal observer. The dispatch issuance makes its single
+  consuming entry once, its staging waiting as the dispatch's root staging
+  does, and retries through the entry's witness, so an R2 review or an R3
+  consent is spent exactly once. `meerkat`:
+  `GovernedHelperChildIssuance::issue_or_recover_after_owner_change` waits
+  the same way on the dispatch and entered paths, and answers `Unavailable`
+  only past the bounds; its prepared path does not wait.
 
 ### Fixed
 
@@ -241,6 +292,22 @@ them.
   media unchanged, as before. Summaries written before this fix keep their
   wording: an earlier summary is part of the next summary request, so what
   it says can carry into later summaries.
+
+- `meerkat-core`, `meerkat-authorization`, `meerkat`: concurrent actors on
+  one authorization publication no longer fail a governed tool step on
+  transient writer contention. While one actor briefly held the
+  publication's writer (an issuance with its fsync'd append, a dispatch's
+  final entry or an owner change), another actor's step (a child issuance,
+  a further step of an entered operation) failed at once as temporarily
+  unavailable: the step's reservation never waits, it answered contention
+  as unavailability, and Core's bounded owner-change wait never engaged,
+  since a hold that had not published was no change in progress. The step
+  now refuses to rebuild, the native work owner names the hold as a change
+  in progress until it ends, and the step's waiting form waits for it
+  within the existing owner-change bound, outside every lock, and takes it
+  again (see Added). This is shell synchronization only: no machine input,
+  generated authority or owner fact changed, and the review spend stays
+  single and machine-owned.
 
 ## [0.9.7] - 2026-10-28
 

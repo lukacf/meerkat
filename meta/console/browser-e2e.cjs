@@ -1879,6 +1879,27 @@ async function runSidebarManualAgentOrderProof() {
       "the identity is not the row's text");
     assert.equal(await page.getByTestId("sidebar-agent:team-ada").getAttribute("title"), "Identity: team-ada");
 
+    // The copy action shows when the pointer is on the row's actions or the
+    // row has keyboard focus, left of the pin and clear of the activity pulse
+    // and inbox count; hovering the row's name does not put it under the
+    // pointer.
+    const adaRow = page.getByTestId("sidebar-agent:team-ada");
+    const adaCopy = page.getByTestId("sidebar-agent-copy-identity:team-ada");
+    const copyClearOfActions = async (label) => {
+      const copyBox = await adaCopy.boundingBox();
+      const pinBox = await page.getByTestId("sidebar-agent-pin:team-ada").boundingBox();
+      const metaBox = await adaRow.locator(".agent__meta").boundingBox();
+      assert(copyBox && pinBox && metaBox, `${label}: the copy action, the pin and the pulse are on screen`);
+      assert(copyBox.x + copyBox.width <= pinBox.x && copyBox.x + copyBox.width <= metaBox.x,
+        `${label}: the copy action stays left of the pin and the pulse: ${JSON.stringify({ copyBox, pinBox, metaBox })}`);
+    };
+    await adaRow.locator(".agent__name").hover();
+    assert.equal(await adaCopy.isVisible(), false, "hovering the name does not show the copy action");
+    await page.getByTestId("sidebar-agent-pin:team-ada").hover();
+    await copyClearOfActions("on the pin");
+    await sidebar.screenshot({ path: path.join(evidenceDir, "sidebar-manual-order-copy.png") });
+    await page.mouse.move(0, 0);
+
     // Drag Dov Reviewer above Ada Reviewer by its grip.
     await page.getByTestId("sidebar-agent:team-dov").hover();
     await drag(page.getByTestId("sidebar-agent-grip:team-dov"), page.getByTestId("sidebar-agent:team-ada"), "before");
@@ -1901,6 +1922,7 @@ async function runSidebarManualAgentOrderProof() {
     await eventually(async () => (await announcement()) === "Moved Ada Reviewer above Dov Reviewer.", "the move is announced", 5_000);
     await eventually(async () => await page.evaluate(() => document.activeElement?.getAttribute("data-testid")) === "sidebar-agent:team-ada",
       "focus stays on the moved agent", 5_000);
+    await copyClearOfActions("on keyboard focus");
 
     // Sort by name and by last activity, then back to the manual order.
     const sort = page.getByTestId("sidebar-view-sort");

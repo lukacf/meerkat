@@ -43,6 +43,7 @@ import type {
 } from "../types";
 import { Icon } from "../icon";
 import { isAgentPinned, operatorPanelPath, sidebarAgentPinId } from "../lib/adapters";
+import { agentKindLabel } from "../lib/agents";
 import { countRender } from "../lib/render-counts";
 
 export { sidebarAgentPinId } from "../lib/adapters";
@@ -147,7 +148,17 @@ interface AgentRow {
 }
 
 type SidebarVirtualRow =
-  | { kind: "section"; key: string; bucket: string; count: number; collapsed: boolean; pinned?: boolean; reorderable: boolean }
+  | {
+    kind: "section";
+    key: string;
+    bucket: string;
+    count: number;
+    collapsed: boolean;
+    pinned?: boolean;
+    reorderable: boolean;
+    /** The key its collapse state is kept under, when not its name. */
+    collapseKey?: string;
+  }
   | { kind: "empty"; key: string; bucket: string; sectionConfig: ReturnType<typeof sectionConfigFor> }
   | { kind: "subgroup"; key: string; bucket: string; label: string; count: number; collapsed: boolean; storageKey: string; reorderable: boolean }
   /** `container` names the row's siblings: rows that share it can trade places. */
@@ -410,6 +421,7 @@ export const __sidebarTest = {
   agentDetailText,
   relativeActivityText,
   FLAT_SECTION_NAME,
+  FLAT_SECTION_KEY,
   SIDEBAR_AGENT_ORDER_STORAGE_PREFIX,
   SIDEBAR_VIEW_STORAGE_PREFIX,
   SIDEBAR_PINS_STORAGE_PREFIX,
@@ -719,10 +731,6 @@ function relativeActivityText(elapsedMs: number): string {
   return `${Math.floor(hours / 24)} d ago`;
 }
 
-function humanizeAgentKind(value: string | undefined): string {
-  return (value || "").trim().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
-}
-
 /** What the agent is doing, in words, or when it was last active. */
 function agentStatusText(agent: ConsoleAgent, lastActivityMs: number | undefined, nowMs: number): string {
   const state = (agent.state || "").toLowerCase();
@@ -749,10 +757,9 @@ function agentDetailParts(
   lastActivityMs: number | undefined,
   nowMs: number,
 ): { kind: string; status: string } {
-  const capitalize = (text: string) => text ? text[0]!.toUpperCase() + text.slice(1) : "";
-  const kind = humanizeAgentKind(agent.role || agent.group);
+  const kind = agentKindLabel(agent);
   const status = agentStatusText(agent, lastActivityMs, nowMs);
-  return kind ? { kind: capitalize(kind), status } : { kind: "", status: capitalize(status) };
+  return kind ? { kind, status } : { kind: "", status: status ? status[0]!.toUpperCase() + status.slice(1) : "" };
 }
 
 function agentDetailText(agent: ConsoleAgent, lastActivityMs: number | undefined, nowMs: number): string {
@@ -1247,7 +1254,9 @@ function buildSidebarVirtualRows(args: {
       // separates it from the Pinned section above.
       let collapsedFlat = false;
       if (pinnedRowIds.size > 0) {
-        collapsedFlat = args.searchActive ? false : args.collapsedSections.has(FLAT_SECTION_NAME);
+        // Its collapse state has a key of its own, so a configured category
+        // of the same name keeps its own.
+        collapsedFlat = args.searchActive ? false : args.collapsedSections.has(FLAT_SECTION_KEY);
         rows.push({
           kind: "section",
           key: FLAT_SECTION_KEY,
@@ -1255,6 +1264,7 @@ function buildSidebarVirtualRows(args: {
           count: list.length,
           collapsed: collapsedFlat,
           reorderable: false,
+          collapseKey: FLAT_SECTION_KEY,
         });
       }
       if (collapsedFlat) continue;
@@ -1542,7 +1552,7 @@ function renderSidebarDragPreviewRows(rows: SidebarVirtualRow[]): React.JSX.Elem
         <span className="agent__dot" />
         <span className="sidebar__drag-preview-agent-body">
           <span className="agent__name">{row.row.agent.label}</span>
-          <span className="agent__detail">{humanizeAgentKind(row.row.agent.role || row.row.agent.group)}</span>
+          {agentKindLabel(row.row.agent) ? <span className="agent__detail">{agentKindLabel(row.row.agent)}</span> : null}
         </span>
       </div>
     );
@@ -2229,11 +2239,13 @@ export const Sidebar = React.memo(function Sidebar({
     });
     updatePointerOrderTarget(event.clientX, event.clientY);
   }, [updatePointerOrderTarget]);
-  const finishPointerOrderDrag = React.useCallback(() => {
+  // A pointerup drops the dragged row where it is over; a pointercancel
+  // (the browser took the pointer away) ends the drag without moving it.
+  const finishPointerOrderDrag = React.useCallback((drop: boolean) => {
     const drag = pointerDragRef.current;
     if (!drag) return;
     pointerDragRef.current = null;
-    if (drag.moved && drag.over) {
+    if (drop && drag.moved && drag.over) {
       if (drag.kind === "section") {
         completeSectionDrop(drag.over.id, drag.over.where, drag.id, "pointer");
       } else if (drag.kind === "subgroup") {
@@ -2256,14 +2268,15 @@ export const Sidebar = React.memo(function Sidebar({
   React.useEffect(() => {
     if (!draggingOrder) return undefined;
     const onMove = (event: PointerEvent) => movePointerOrderDrag(event);
-    const onDone = () => finishPointerOrderDrag();
+    const onDrop = () => finishPointerOrderDrag(true);
+    const onCancel = () => finishPointerOrderDrag(false);
     window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onDone);
-    window.addEventListener("pointercancel", onDone);
+    window.addEventListener("pointerup", onDrop);
+    window.addEventListener("pointercancel", onCancel);
     return () => {
       window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onDone);
-      window.removeEventListener("pointercancel", onDone);
+      window.removeEventListener("pointerup", onDrop);
+      window.removeEventListener("pointercancel", onCancel);
     };
   }, [draggingOrder, finishPointerOrderDrag, movePointerOrderDrag]);
   const sidebarNavigationModel = React.useMemo<SidebarNavigationModel>(() => {
@@ -2584,10 +2597,11 @@ export const Sidebar = React.memo(function Sidebar({
                       onKeyDown={row.reorderable ? (event) => handleSectionOrderKeyDown(event, row.bucket) : undefined}
                       onClick={() => {
                         if (suppressOrderClickRef.current) return;
+                        const collapseKey = row.collapseKey ?? row.bucket;
                         setCollapsedSections((current) => {
                           const next = new Set(current);
-                          if (next.has(row.bucket)) next.delete(row.bucket);
-                          else next.add(row.bucket);
+                          if (next.has(collapseKey)) next.delete(collapseKey);
+                          else next.add(collapseKey);
                           writeSidebarStringSet(localSidebarStorage(), sectionCollapseStorageKey, next);
                           return next;
                         });

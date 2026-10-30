@@ -76,6 +76,12 @@ export function normalizeLastActivityMs(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+/** What an agent is, for people: its role, else its group, capitalized ("Reviewer"); empty when it has neither. */
+export function agentKindLabel(agent: Pick<ConsoleAgent, "role" | "group">): string {
+  const kind = (agent.role || agent.group || "").trim().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  return kind ? kind[0]!.toUpperCase() + kind.slice(1) : "";
+}
+
 /** The first well-formed last activity time among a row's sources, as an agent field. */
 function lastActivityField(...values: unknown[]): Pick<ConsoleAgent, "last_activity_ms"> {
   for (const value of values) {

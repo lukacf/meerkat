@@ -1316,6 +1316,7 @@ function sortedRows(
     order?: string[];
     activity?: Record<string, number>;
     pinnedAgentIds?: Set<string>;
+    collapsedSections?: Set<string>;
   } = {},
 ) {
   const order = {
@@ -1332,7 +1333,7 @@ function sortedRows(
     sectionNames,
     grouped,
     grouping,
-    collapsedSections: new Set(),
+    collapsedSections: options.collapsedSections ?? new Set(),
     collapsedSubgroups: new Set(),
     pinnedAgentIds: options.pinnedAgentIds,
     flat: options.flat,
@@ -1841,6 +1842,34 @@ test("sidebar Group None lists every agent in one list, keeping Pinned on top an
   );
   assert.deepEqual(agentRowIds(withPins), ["p", "a1", "b1", "b2"]);
   assert.equal(withPins.some((row) => row.kind === "subgroup"), false);
+});
+
+test("sidebar keeps the flat header's collapse state apart from a category of the same name", () => {
+  const agents = [
+    teamAgent("a", "Alpha", { group: __sidebarTest.FLAT_SECTION_NAME }),
+    teamAgent("b", "Bravo", { group: __sidebarTest.FLAT_SECTION_NAME }),
+  ];
+  const pinnedAgentIds = new Set(["agent:a"]);
+  const header = (rows: ReturnType<typeof sortedRows>) => rows.find((row) =>
+    row.kind === "section" && row.bucket === __sidebarTest.FLAT_SECTION_NAME);
+  const collapsedState = (rows: ReturnType<typeof sortedRows>) => {
+    const found = header(rows);
+    return found?.kind === "section" ? found.collapsed : null;
+  };
+
+  const categoryCollapsed = new Set([__sidebarTest.FLAT_SECTION_NAME]);
+  assert.equal(collapsedState(sortedRows(agents, { pinnedAgentIds, collapsedSections: categoryCollapsed })), true);
+  const flatOpen = sortedRows(agents, { pinnedAgentIds, flat: true, collapsedSections: categoryCollapsed });
+  assert.equal(collapsedState(flatOpen), false, "collapsing the category leaves the flat header open");
+  assert.deepEqual(agentRowIds(flatOpen), ["a", "b"]);
+
+  const flatCollapsed = new Set([__sidebarTest.FLAT_SECTION_KEY]);
+  const flatShut = sortedRows(agents, { pinnedAgentIds, flat: true, collapsedSections: flatCollapsed });
+  assert.equal(collapsedState(flatShut), true);
+  assert.deepEqual(agentRowIds(flatShut), ["a"]);
+  const shut = header(flatShut);
+  assert.equal(shut?.kind === "section" && shut.collapseKey, __sidebarTest.FLAT_SECTION_KEY);
+  assert.equal(collapsedState(sortedRows(agents, { pinnedAgentIds, collapsedSections: flatCollapsed })), false);
 });
 
 test("sidebar name sort is numeric and case-insensitive and ignores the host-first rule", () => {

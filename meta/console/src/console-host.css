@@ -2116,12 +2116,6 @@ svg[data-svg="fit"],
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .agent[data-state="retired"] .agent__name { color: var(--ink-dim); }
-.agent__id {
-  font-family: var(--mono);
-  font-size: 10.5px;
-  color: var(--ink-dim);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
 .agent__detail {
   display: flex;
   min-width: 0;
@@ -2150,6 +2144,10 @@ svg[data-svg="fit"],
 }
 .agent:hover .agent__grip,
 .agent:focus-visible .agent__grip { opacity: 1; }
+/* Without hover (touch screens) the grip always shows. */
+@media (hover: none) {
+  .agent__grip { opacity: 1; }
+}
 .agent__grip:hover { color: var(--ink-muted); }
 .agent__grip:active { cursor: grabbing; }
 .agent[data-dragging="true"] { opacity: 0.5; }
@@ -2202,6 +2200,7 @@ svg[data-svg="fit"],
   color: var(--ink-dim);
 }
 .agent__actions {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -2240,19 +2239,23 @@ svg[data-svg="fit"],
   fill: none;
   stroke-width: 1.8;
 }
-/* The copy action shows over the row's right edge while the row is hovered
-   or focused, so it never moves the row's other content. */
+/* The copy action shows just left of the pin while the pointer is on the
+   row's actions (the pin, or the copy action itself) or the row has keyboard
+   focus. It sits over the end of the name, so it moves nothing and covers
+   neither the pin nor the pulse and inbox count, and a click on the row's
+   name, even in a narrow roster, never lands on it. */
 .agent__copy {
   position: absolute;
-  right: 8px;
+  right: 100%;
   top: 50%;
   transform: translateY(-50%);
   display: none;
   border-radius: var(--r-sm);
   background: var(--bg-elev-1);
 }
-.agent:hover .agent__copy,
-.agent:focus-within .agent__copy { display: inline-flex; }
+.agent__actions:hover .agent__copy,
+.agent:focus-visible .agent__copy,
+.agent__copy:focus-within { display: inline-flex; }
 .agent__copy .cc-copy-btn {
   width: 24px;
   height: 24px;

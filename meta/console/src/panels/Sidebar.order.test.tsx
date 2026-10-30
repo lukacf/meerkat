@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { Sidebar } from "./Sidebar";
 import type { ConsoleAgent } from "../types";
 
@@ -115,5 +115,51 @@ describe("Roster manual order", () => {
     expect(onSelect).not.toHaveBeenCalled();
     fireEvent.keyDown(view.getByTestId("sidebar-agent:a"), { key: "Enter" });
     expect(onSelect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Roster pointer drag", () => {
+  beforeAll(() => {
+    // jsdom has no PointerEvent; a MouseEvent carries everything the drag reads.
+    if (!("PointerEvent" in window)) {
+      class TestPointerEvent extends MouseEvent {}
+      Object.defineProperty(window, "PointerEvent", { value: TestPointerEvent, configurable: true });
+    }
+  });
+  afterEach(() => { Reflect.deleteProperty(document, "elementFromPoint"); });
+
+  const dragCharlieOverAlpha = (view: ReturnType<typeof render>) => {
+    // jsdom does no layout: the pointer is always over Alpha's row.
+    Object.defineProperty(document, "elementFromPoint", {
+      value: vi.fn(() => view.getByTestId("sidebar-agent:a")),
+      configurable: true,
+    });
+    fireEvent.pointerDown(view.getByTestId("sidebar-agent-grip:c"), { button: 0, clientX: 4, clientY: 80 });
+    fireEvent.pointerMove(window, { clientX: 4, clientY: 20 });
+  };
+
+  it("drops on pointerup and ends without moving on pointercancel", () => {
+    const view = render(<Sidebar {...props} />);
+    dragCharlieOverAlpha(view);
+    fireEvent.pointerCancel(window);
+    expect(view.queryByTestId("sidebar-drag-preview") === null).toBe(true);
+    expect(rows(view.container)).toEqual(["a", "b", "c"]);
+    expect(localStorage.getItem(ORDER_KEY)).toBeNull();
+    expect(announced(view.container)).toBe("");
+
+    dragCharlieOverAlpha(view);
+    fireEvent.pointerUp(window);
+    expect(rows(view.container)).toEqual(["a", "c", "b"]);
+    expect(JSON.parse(localStorage.getItem(ORDER_KEY) || "[]")).toEqual(["agent:a", "agent:c", "agent:b"]);
+    expect(announced(view.container)).toBe("Moved Charlie below Alpha.");
+  });
+
+  it("previews the dragged agent's kind as its row shows it", () => {
+    const view = render(<Sidebar {...props} />);
+    dragCharlieOverAlpha(view);
+    const preview = view.getByTestId("sidebar-drag-preview").textContent || "";
+    expect(preview.includes("Analyst")).toBe(true);
+    expect(preview.includes("analyst")).toBe(false);
+    fireEvent.pointerCancel(window);
   });
 });

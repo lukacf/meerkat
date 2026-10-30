@@ -165,11 +165,12 @@ pub use instruction_activation::{
 pub(crate) use instruction_target::InstructionFold;
 pub use instruction_target::{
     InstructionDeferReason, InstructionLowering, InstructionRecordDisposition,
-    InstructionRecordReceipt, InstructionRunStart, InstructionSetErrorCode, InstructionStateError,
-    InstructionTargetOwner, InstructionTargetRecord, InstructionTargetRecordSlot,
-    InstructionTargetSlot, InstructionWriteDisposition, InstructionWriteError,
-    RunStartInstructionOutcome, SessionInstructionChange, SessionInstructionReceipt,
-    SessionInstructionState, SessionInstructionWrite,
+    InstructionRecordReceipt, InstructionReleaseDisposition, InstructionRunStart,
+    InstructionSetErrorCode, InstructionStateError, InstructionTargetOwner,
+    InstructionTargetRecord, InstructionTargetRecordSlot, InstructionTargetSlot,
+    InstructionWriteDisposition, InstructionWriteError, RunStartInstructionOutcome,
+    SessionInstructionChange, SessionInstructionReceipt, SessionInstructionState,
+    SessionInstructionWrite,
 };
 pub(crate) use operator_instructions::is_operator_instruction_entry;
 pub use operator_instructions::{

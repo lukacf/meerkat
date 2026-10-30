@@ -4432,6 +4432,14 @@ fn infer_expr_type(
                 .ok()
                 .map(TypeRef::Enum)
         }
+        Expr::Call { helper, args } if helper == "session_document_instruction_slot_after_set" => {
+            args.first().and_then(|current| {
+                infer_expr_type(current, field_types, helper_returns, binding_types)
+            })
+        }
+        Expr::Call { helper, .. } if helper == "session_document_instruction_active_bytes" => {
+            Some(TypeRef::U64)
+        }
         Expr::Call { helper, .. } if helper == "runtime_delivery_recipient_outcomes_after_set" => {
             Some(TypeRef::Map(
                 Box::new(TypeRef::String),
@@ -7531,6 +7539,10 @@ impl<'a> CompositionTlaCompiler<'a> {
                 compiler.render_runtime_delivery_native_helpers(&mut out);
                 pushln!(&mut out);
             }
+            if machine.machine.as_str() == "SessionDocumentMachine" {
+                compiler.render_session_document_native_helpers(&mut out);
+                pushln!(&mut out);
+            }
 
             let mut rendered_actions = Vec::new();
             for transition in &machine.transitions {
@@ -8839,6 +8851,10 @@ impl<'a> CompositionTlaCompiler<'a> {
             }
             if machine.machine.as_str() == "RuntimeDeliveryMachine" {
                 compiler.render_runtime_delivery_native_helpers(out);
+                pushln!(out);
+            }
+            if machine.machine.as_str() == "SessionDocumentMachine" {
+                compiler.render_session_document_native_helpers(out);
                 pushln!(out);
             }
 
@@ -10498,6 +10514,9 @@ impl<'a> MachineTlaCompiler<'a> {
         if self.schema.machine.as_str() == "RuntimeDeliveryMachine" {
             self.render_runtime_delivery_native_helpers(&mut out);
         }
+        if self.schema.machine.as_str() == "SessionDocumentMachine" {
+            self.render_session_document_native_helpers(&mut out);
+        }
         if !self.schema.helpers.is_empty() || !self.schema.derived.is_empty() {
             pushln!(&mut out);
         }
@@ -10769,6 +10788,53 @@ impl<'a> MachineTlaCompiler<'a> {
         )
         .expect("write to string");
         pushln!(out, "    MapSet(current, recipient, outcome)");
+    }
+
+    fn render_session_document_native_helpers(&self, out: &mut String) {
+        writeln!(
+            out,
+            "{}(current, slot, value) ==",
+            self.scoped_helper_name("session_document_instruction_slot_after_set")
+        )
+        .expect("write to string");
+        pushln!(out, "    MapSet(current, slot, value)");
+        // The body bytes of the Active slots; a slot the bytes map does not
+        // name counts nothing (the Rust authorities agree).
+        writeln!(
+            out,
+            "{}(slot_effect, slot_bytes) ==",
+            self.scoped_helper_name("session_document_instruction_active_bytes")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET RECURSIVE SessionDocumentInstructionActiveBytesOver(_)"
+        );
+        pushln!(
+            out,
+            "        SessionDocumentInstructionActiveBytesOver(instruction_slots) =="
+        );
+        pushln!(out, "            IF instruction_slots = {{}} THEN 0");
+        pushln!(
+            out,
+            "            ELSE LET instruction_slot == CHOOSE candidate_slot \\in instruction_slots : TRUE"
+        );
+        pushln!(
+            out,
+            "                 IN (IF slot_effect[instruction_slot] = \"Active\" /\\ instruction_slot \\in DOMAIN slot_bytes"
+        );
+        pushln!(
+            out,
+            "                     THEN slot_bytes[instruction_slot] ELSE 0)"
+        );
+        pushln!(
+            out,
+            "                    + SessionDocumentInstructionActiveBytesOver(instruction_slots \\ {{instruction_slot}})"
+        );
+        pushln!(
+            out,
+            "    IN SessionDocumentInstructionActiveBytesOver(DOMAIN slot_effect)"
+        );
     }
 
     fn render_meerkat_machine_native_helpers(&self, out: &mut String) {

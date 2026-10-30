@@ -5060,6 +5060,7 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
     for helper in &machine.helpers {
         emit_session_document_helper(&mut out, helper, machine)?;
     }
+    emit_session_document_native_helpers(&mut out)?;
     writeln!(
         &mut out,
         "impl Default for SessionDocumentMachineAuthority {{"
@@ -5584,6 +5585,50 @@ fn emit_session_document_helper(
     Ok(())
 }
 
+/// The natives the SessionDocumentMachine DSL calls, with the semantics the
+/// generated TLA operator (`MapSet`) and the machine-schema authority give
+/// them. Each is a pure construction; every decision stays in the
+/// transitions.
+fn emit_session_document_native_helpers(out: &mut String) -> Result<()> {
+    writeln!(
+        out,
+        "/// One session's slot map with one slot set to `value`."
+    )?;
+    writeln!(out, "fn session_document_instruction_slot_after_set<V>(")?;
+    writeln!(out, "    mut current: BTreeMap<String, V>,")?;
+    writeln!(out, "    slot: String,")?;
+    writeln!(out, "    value: V,")?;
+    writeln!(out, ") -> BTreeMap<String, V> {{")?;
+    writeln!(out, "    current.insert(slot, value);")?;
+    writeln!(out, "    current")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "/// The body bytes of one slot set's Active slots; a slot the bytes map"
+    )?;
+    writeln!(out, "/// does not name counts nothing.")?;
+    writeln!(out, "fn session_document_instruction_active_bytes(")?;
+    writeln!(out, "    effect: BTreeMap<String, InstructionEffect>,")?;
+    writeln!(out, "    bytes: BTreeMap<String, u64>,")?;
+    writeln!(out, ") -> u64 {{")?;
+    writeln!(out, "    effect")?;
+    writeln!(out, "        .iter()")?;
+    writeln!(
+        out,
+        "        .filter(|(_, slot_effect)| **slot_effect == InstructionEffect::Active)"
+    )?;
+    writeln!(out, "        .fold(0_u64, |total, (slot, _)| {{")?;
+    writeln!(
+        out,
+        "            total.saturating_add(bytes.get(slot).copied().unwrap_or(0))"
+    )?;
+    writeln!(out, "        }})")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
 fn render_session_document_type_ref(ty: &TypeRef) -> Result<String> {
     match ty {
         TypeRef::Bool => Ok("bool".to_string()),
@@ -5740,15 +5785,39 @@ fn render_session_document_expr(
         Expr::Phase(phase) => Ok(format!("{}::{phase}", machine.state.phase.name)),
         Expr::Field(field) => Ok(format!("self.state.{field}")),
         Expr::Binding(binding)
-            if matches!(binding_types.get(binding), Some(TypeRef::String))
-                || matches!(
-                    binding_types.get(binding),
-                    Some(TypeRef::Named(name)) if name.as_str() == SESSION_DOCUMENT_KEY_NAMED
-                ) =>
+            if matches!(
+                binding_types.get(binding),
+                Some(TypeRef::String | TypeRef::Map(_, _))
+            ) || matches!(
+                binding_types.get(binding),
+                Some(TypeRef::Named(name)) if name.as_str() == SESSION_DOCUMENT_KEY_NAMED
+            ) =>
         {
             Ok(format!("{binding}.clone()"))
         }
         Expr::Binding(binding) => Ok(binding.clone()),
+        Expr::EmptyMap => Ok("BTreeMap::new()".to_string()),
+        Expr::Len(inner) => Ok(format!(
+            "({}.len() as u64)",
+            render_session_document_receiver_expr(inner, binding_types, machine)?
+        )),
+        Expr::MapKeys(inner) => Ok(format!(
+            "{}.keys().cloned().collect::<std::collections::BTreeSet<_>>()",
+            render_session_document_receiver_expr(inner, binding_types, machine)?
+        )),
+        Expr::Quantified {
+            quantifier,
+            binding,
+            over,
+            body,
+        } => render_session_document_quantified(
+            quantifier,
+            binding,
+            over,
+            body,
+            binding_types,
+            machine,
+        ),
         Expr::None => Ok("None".to_string()),
         Expr::Some(inner) => Ok(format!(
             "Some({})",
@@ -5862,10 +5931,17 @@ fn render_session_document_expr(
                 render_session_document_expr(right, binding_types, machine)?
             )
         )),
-        Expr::MapContainsKey { map, key } => Ok(format!(
+        Expr::MapContainsKey { map, key } if matches!(map.as_ref(), Expr::Field(_)) => Ok(format!(
             "{}.contains_key({})",
             render_session_document_collection_expr(map)?,
             render_session_document_borrowed_key_expr(key, binding_types)?
+        )),
+        // A membership test on a map value (a nested slot map, a map
+        // input): the key is an owned expression.
+        Expr::MapContainsKey { map, key } => Ok(format!(
+            "{}.contains_key(&{})",
+            render_session_document_receiver_expr(map, binding_types, machine)?,
+            render_session_document_expr(key, binding_types, machine)?
         )),
         // Strict read (#1811): the same fail-closed accessor as the
         // optional-projection form; an absent key refuses the input.
@@ -5881,12 +5957,18 @@ fn render_session_document_expr(
         }
         Expr::MapGet { map, key } => {
             if let Some(rendered) =
-                render_session_document_optional_map_value_get(map, key, binding_types)?
+                render_session_document_optional_map_value_get(map, key, binding_types, machine)?
             {
                 return Ok(rendered);
             }
             let Expr::Field(field) = map.as_ref() else {
-                bail!("SessionDocumentMachine MapGet must read a state field: {map:?}");
+                // A read of a map value (inside the lowered option view,
+                // where the key is present).
+                return Ok(format!(
+                    "{}.get(&{}).cloned().unwrap_or_default()",
+                    render_session_document_receiver_expr(map, binding_types, machine)?,
+                    render_session_document_expr(key, binding_types, machine)?
+                ));
             };
             Ok(format!(
                 "self.{}_value({})?",
@@ -5914,6 +5996,7 @@ fn render_session_document_optional_map_value_get(
     map: &Expr,
     key: &Expr,
     binding_types: &std::collections::BTreeMap<String, TypeRef>,
+    machine: &MachineSchema,
 ) -> Result<Option<String>> {
     let Expr::String(projected_field) = key else {
         return Ok(None);
@@ -5953,13 +6036,203 @@ fn render_session_document_optional_map_value_get(
         bail!("SessionDocumentMachine optional map projection has incoherent key source");
     }
     let Expr::Field(field) = then_map.as_ref() else {
-        bail!("SessionDocumentMachine optional map projection must read a state field");
+        // A projection out of a map value (a nested slot map, a map input
+        // or helper parameter) defaults an absent key, exactly as the
+        // `machine!` DSL's `.get("value")` does; the region reads one only
+        // after a membership test or over the keys of a map in lockstep.
+        return Ok(Some(format!(
+            "{}.get(&{}).cloned().unwrap_or_default()",
+            render_session_document_receiver_expr(then_map, binding_types, machine)?,
+            render_session_document_expr(then_key, binding_types, machine)?
+        )));
     };
     Ok(Some(format!(
         "self.{}_value({})?",
         field,
         render_session_document_borrowed_key_expr(then_key, binding_types)?
     )))
+}
+
+/// `expr` as a method receiver: a state field or a binding by name, any
+/// other expression parenthesized.
+fn render_session_document_receiver_expr(
+    expr: &Expr,
+    binding_types: &std::collections::BTreeMap<String, TypeRef>,
+    machine: &MachineSchema,
+) -> Result<String> {
+    match expr {
+        Expr::Field(field) => Ok(format!("self.state.{field}")),
+        Expr::Binding(binding) => Ok(binding.clone()),
+        other => Ok(format!(
+            "({})",
+            render_session_document_expr(other, binding_types, machine)?
+        )),
+    }
+}
+
+/// `for_all` / `exists` over the keys of a map, as an iterator closure. The
+/// body may not read a state field strictly (that read refuses the input
+/// with `?`, which a closure cannot return); the region quantifies only in
+/// helpers over their map parameters.
+fn render_session_document_quantified(
+    quantifier: &meerkat_machine_schema::Quantifier,
+    binding: &str,
+    over: &Expr,
+    body: &Expr,
+    binding_types: &std::collections::BTreeMap<String, TypeRef>,
+    machine: &MachineSchema,
+) -> Result<String> {
+    let Expr::MapKeys(map) = over else {
+        bail!("SessionDocumentMachine quantifies only over map keys: {over:?}");
+    };
+    let Some(TypeRef::Map(key_ty, _)) =
+        infer_session_document_expr_type(map, binding_types, machine)
+    else {
+        bail!("SessionDocumentMachine cannot type the quantified map {map:?}");
+    };
+    if session_document_expr_reads_state_strictly(body) {
+        bail!(
+            "SessionDocumentMachine quantifier body over `{binding}` reads a state field strictly"
+        );
+    }
+    let mut nested = binding_types.clone();
+    nested.insert(binding.to_owned(), *key_ty);
+    let iterator = match quantifier {
+        meerkat_machine_schema::Quantifier::Any => "any",
+        meerkat_machine_schema::Quantifier::All => "all",
+    };
+    Ok(format!(
+        "{}.keys().{iterator}(|{binding}| {})",
+        render_session_document_receiver_expr(map, binding_types, machine)?,
+        render_session_document_expr(body, &nested, machine)?
+    ))
+}
+
+/// The type of a session-document expression, for the forms the region's
+/// quantifiers range over.
+fn infer_session_document_expr_type(
+    expr: &Expr,
+    binding_types: &std::collections::BTreeMap<String, TypeRef>,
+    machine: &MachineSchema,
+) -> Option<TypeRef> {
+    let value_of = |map: &Expr| match infer_session_document_expr_type(map, binding_types, machine)
+    {
+        Some(TypeRef::Map(_, value)) => Some(*value),
+        _ => None,
+    };
+    match expr {
+        Expr::Field(field) => machine
+            .state
+            .fields
+            .iter()
+            .find(|candidate| candidate.name.as_str() == field.as_str())
+            .map(|candidate| candidate.ty.clone()),
+        Expr::Binding(binding) => binding_types.get(binding).cloned(),
+        Expr::MapValue { map, .. } => value_of(map),
+        Expr::MapGet { map, key } => match (map.as_ref(), key.as_ref()) {
+            (Expr::IfElse { then_expr, .. }, Expr::String(projected)) if projected == "value" => {
+                match then_expr.as_ref() {
+                    Expr::Some(inner) => match inner.as_ref() {
+                        Expr::MapGet { map, .. } => value_of(map),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            _ => value_of(map),
+        },
+        _ => None,
+    }
+}
+
+/// Whether evaluating `expr` reads a state field through a fallible
+/// `*_value()?` accessor.
+fn session_document_expr_reads_state_strictly(expr: &Expr) -> bool {
+    match expr {
+        Expr::MapValue { map, .. } | Expr::MapGet { map, .. }
+            if matches!(map.as_ref(), Expr::Field(_)) =>
+        {
+            true
+        }
+        Expr::Bool(_)
+        | Expr::U64(_)
+        | Expr::U64Max
+        | Expr::String(_)
+        | Expr::NamedVariant { .. }
+        | Expr::EmptySet
+        | Expr::EmptyMap
+        | Expr::CurrentPhase
+        | Expr::Phase(_)
+        | Expr::Field(_)
+        | Expr::Binding(_)
+        | Expr::Variant(_)
+        | Expr::None => false,
+        Expr::FieldAccess { base: inner, .. }
+        | Expr::EnumVariantIs { value: inner, .. }
+        | Expr::EnumStringSetPayload { value: inner, .. }
+        | Expr::Not(inner)
+        | Expr::SeqElements(inner)
+        | Expr::Len(inner)
+        | Expr::Head(inner)
+        | Expr::MapKeys(inner)
+        | Expr::Some(inner) => session_document_expr_reads_state_strictly(inner),
+        Expr::SeqLiteral(items) | Expr::And(items) | Expr::Or(items) => {
+            items.iter().any(session_document_expr_reads_state_strictly)
+        }
+        Expr::Call { args, .. } => args.iter().any(session_document_expr_reads_state_strictly),
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            session_document_expr_reads_state_strictly(condition)
+                || session_document_expr_reads_state_strictly(then_expr)
+                || session_document_expr_reads_state_strictly(else_expr)
+        }
+        Expr::Eq(left, right)
+        | Expr::Neq(left, right)
+        | Expr::Add(left, right)
+        | Expr::Sub(left, right)
+        | Expr::Gt(left, right)
+        | Expr::Gte(left, right)
+        | Expr::Lt(left, right)
+        | Expr::Lte(left, right)
+        | Expr::Contains {
+            collection: left,
+            value: right,
+        }
+        | Expr::SeqStartsWith {
+            seq: left,
+            prefix: right,
+        }
+        | Expr::Count {
+            collection: left,
+            value: right,
+        }
+        | Expr::MapContainsKey {
+            map: left,
+            key: right,
+        }
+        | Expr::MapGet {
+            map: left,
+            key: right,
+        }
+        | Expr::MapValue {
+            map: left,
+            key: right,
+        } => {
+            session_document_expr_reads_state_strictly(left)
+                || session_document_expr_reads_state_strictly(right)
+        }
+        Expr::MapLiteral(entries) => entries.iter().any(|(key, value)| {
+            session_document_expr_reads_state_strictly(key)
+                || session_document_expr_reads_state_strictly(value)
+        }),
+        Expr::Quantified { over, body, .. } => {
+            session_document_expr_reads_state_strictly(over)
+                || session_document_expr_reads_state_strictly(body)
+        }
+    }
 }
 
 fn render_session_document_expr_joined(
@@ -6023,10 +6296,16 @@ fn render_session_document_owned_expr(
         {
             Ok(format!("{binding}.clone()"))
         }
-        Expr::Binding(binding) if matches!(binding_types.get(binding), Some(TypeRef::String)) => {
+        Expr::Binding(binding)
+            if matches!(
+                binding_types.get(binding),
+                Some(TypeRef::String | TypeRef::Map(_, _))
+            ) =>
+        {
             Ok(format!("{binding}.clone()"))
         }
         Expr::Binding(binding) => Ok(binding.clone()),
+        Expr::EmptyMap => Ok("BTreeMap::new()".to_string()),
         Expr::Bool(value) => Ok(value.to_string()),
         Expr::U64(value) => Ok(value.to_string()),
         Expr::U64Max => Ok("u64::MAX".to_string()),
@@ -6171,9 +6450,12 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "ResolveRuntimeCheckpointProjection",
         "ResolveSessionDocumentLifecycleMerge",
         "RecoverSessionInstructionState",
+        "RecoverSessionInstructionTarget",
+        "RecoverSessionInstructionEffective",
         "RecordInstructionTarget",
         "SetSessionInstruction",
         "RebindInstructionOwner",
+        "ReleaseInstructionTarget",
         "ResolveRunStartInstructions",
         "AuthorizeInstructionFold",
     ] {
@@ -6223,6 +6505,7 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "InstructionTargetRecorded",
         "InstructionTargetRefused",
         "InstructionOwnerRebound",
+        "InstructionTargetReleased",
         "InstructionEntryAuthorized",
         "InstructionEntryNotNeeded",
         "InstructionApplicationDeferred",

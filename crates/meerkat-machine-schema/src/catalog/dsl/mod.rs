@@ -1103,6 +1103,8 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                     "OwnedBySession",
                     "SlotLimitExceeded",
                     "UnknownSlot",
+                    "OwnedByOtherMob",
+                    "ActiveSetBudgetExceeded",
                 ],
             ),
             NamedTypeBinding::string_enum(

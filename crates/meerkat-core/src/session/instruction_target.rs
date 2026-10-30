@@ -1,22 +1,27 @@
 //! The recorded operator-instruction target of a session, and the
 //! session-document authority seam that decides every change to it.
 //!
-//! The target is the durable projection under
-//! [`SESSION_INSTRUCTION_STATE_KEY`]: the owner, the target generation, the
-//! entry-sequence high-water and one record per slot, with a body kept only
-//! while its slot is pending (an applied body lives in its entry row). The
-//! effective set is derived from the session's own entry rows
-//! ([`effective_operator_instructions`]). Before every decision this module
-//! seeds a fresh `SessionDocumentMachine` authority from both
-//! (`RecoverSessionInstructionState`), feeds it the mechanical observations
-//! the operation needs, and mirrors the verdict it emits. The machine decides
-//! ownership, revision order, the slot limit, whether a run start appends an
-//! entry, and what a compaction fold renders; this module decides nothing.
+//! `SessionDocumentMachine` holds a session's operator-instruction facts per
+//! slot: the recorded target (revision, effect and digest per slot), its
+//! owner (and the mob a mob owner is) and generation, the effective set (the
+//! same per slot), and the entry-sequence high-water. Before every operation
+//! this module seeds a fresh authority (`RecoverSessionInstructionState`):
+//! the target from its durable projection of that state under
+//! [`SESSION_INSTRUCTION_STATE_KEY`], the slots in effect from the session's
+//! own entry rows ([`effective_operator_instructions`]), a transcript fact.
+//! It then feeds the operation's request and transcript facts, lets the
+//! authority decide (ownership, revision order, the slot limit, whether a
+//! run start appends an entry, what a compaction fold renders), and writes
+//! the authority's resulting state back. Its own share is the bodies, kept
+//! by digest while their slot is pending (an applied body lives in its entry
+//! row), the rendering of entries from the authority's state, and request
+//! validation (body and active-set budgets, digests).
 //!
-//! Nothing here wakes a session or applies inside a running turn: a write or
-//! a record only changes the target, and the only application points are a
-//! fresh run start (one coalesced delta entry, appended before the run's own
-//! inputs) and a compaction fold at a run's first request.
+//! Nothing here wakes a session or applies inside a running turn: a write, a
+//! record, a rebind or a release only changes the target, and the only
+//! application points are a fresh run start (one coalesced delta entry,
+//! appended before the run's own inputs) and a compaction fold at a run's
+//! first request.
 //!
 //! A compaction folds every entry row into one snapshot
 //! ([`Session::authorize_instruction_fold`]): of what is in effect, or of the
@@ -25,8 +30,8 @@
 //! whose rewrite history holds entry rows always carries the state too.
 
 use super::operator_instructions::{
-    ActiveOperatorInstruction, EffectiveInstructionSlot, EffectiveOperatorInstructions,
-    InstructionEffect, InstructionRevision, InstructionSlot, MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES,
+    ActiveOperatorInstruction, EffectiveOperatorInstructions, InstructionEffect,
+    InstructionRevision, InstructionSlot, MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES,
     MAX_OPERATOR_INSTRUCTION_SLOTS, OperatorInstructionChangeContent,
     OperatorInstructionEntryHeader, effective_operator_instructions,
     mint_operator_instruction_delta, mint_operator_instruction_snapshot,
@@ -38,18 +43,21 @@ use crate::types::{
     InstructionContentDigest, InstructionKey, InstructionNamespace, Message, SystemMessage,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Who owns a session's recorded operator-instruction target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InstructionTargetOwner {
-    /// No owner recorded a target: the state holds only the entry-sequence
-    /// high-water a compaction fold recorded. Nothing is pending, and any
-    /// owner can take the target. A rebind never names it.
+    /// No owner holds a target: none was recorded, or the owning mob
+    /// released it. The state holds the entry-sequence high-water only.
+    /// Nothing of it is pending, and any owner can take the target. A rebind
+    /// never names it.
     Unowned,
     /// The session's own host writes the target slot by slot.
     Session,
-    /// A mob delivers the member's whole snapshot by generation.
+    /// A mob delivers the member's whole snapshot by generation. The target
+    /// belongs to that mob until the mob releases it.
     Mob {
         mob_id: String,
         agent_identity: String,
@@ -57,11 +65,13 @@ pub enum InstructionTargetOwner {
 }
 
 impl InstructionTargetOwner {
-    fn machine_owner(&self) -> document::InstructionTargetOwner {
+    /// The owner kind and the mob id the session-document authority records
+    /// (empty unless the owner is a mob).
+    fn machine_owner(&self) -> (document::InstructionTargetOwner, String) {
         match self {
-            Self::Unowned => document::InstructionTargetOwner::Unowned,
-            Self::Session => document::InstructionTargetOwner::Session,
-            Self::Mob { .. } => document::InstructionTargetOwner::Mob,
+            Self::Unowned => (document::InstructionTargetOwner::Unowned, String::new()),
+            Self::Session => (document::InstructionTargetOwner::Session, String::new()),
+            Self::Mob { mob_id, .. } => (document::InstructionTargetOwner::Mob, mob_id.clone()),
         }
     }
 }
@@ -100,24 +110,8 @@ impl InstructionTargetSlot {
         }
     }
 
-    fn names(&self, slot: &InstructionSlot) -> bool {
-        self.namespace == slot.namespace && self.key == slot.key
-    }
-
     fn order_key(&self) -> (&InstructionNamespace, &InstructionKey) {
         (&self.namespace, &self.key)
-    }
-
-    fn active(slot: &InstructionSlot, revision: InstructionRevision, body: String) -> Self {
-        Self {
-            namespace: slot.namespace.clone(),
-            key: slot.key.clone(),
-            revision,
-            effect: InstructionEffect::Active,
-            content_sha256: Some(InstructionContentDigest::for_body(&body)),
-            body_bytes: body.len() as u64,
-            pending_body: Some(body),
-        }
     }
 
     fn revoked(slot: &InstructionSlot, revision: InstructionRevision) -> Self {
@@ -133,10 +127,12 @@ impl InstructionTargetSlot {
     }
 }
 
-/// A session's recorded operator-instruction target: its owner, the target
-/// generation, the entry-sequence high-water and one record per slot, sorted
-/// by slot. Stored under [`SESSION_INSTRUCTION_STATE_KEY`]; a document that
-/// carries it is written at envelope 5.
+/// A session's recorded operator-instruction target, as the
+/// session-document authority holds it, with the bodies still pending: its
+/// owner, the target generation, the entry-sequence high-water and one
+/// record per slot, sorted by slot. Stored under
+/// [`SESSION_INSTRUCTION_STATE_KEY`]; a document that carries it is written
+/// at envelope 5.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct SessionInstructionState {
@@ -148,17 +144,6 @@ pub struct SessionInstructionState {
 }
 
 impl SessionInstructionState {
-    /// The state of a session no owner recorded a target for, holding only
-    /// the entry-sequence high-water.
-    fn unowned(entry_sequence: u64) -> Self {
-        Self {
-            owner: InstructionTargetOwner::Unowned,
-            target_generation: 0,
-            entry_sequence,
-            slots: Vec::new(),
-        }
-    }
-
     #[must_use]
     pub fn owner(&self) -> &InstructionTargetOwner {
         &self.owner
@@ -192,20 +177,6 @@ impl SessionInstructionState {
             .and_then(|index| self.slots.get(index))
     }
 
-    fn upsert(&mut self, record: InstructionTargetSlot) {
-        match self
-            .slots
-            .binary_search_by(|current| current.order_key().cmp(&record.order_key()))
-        {
-            Ok(index) => {
-                if let Some(current) = self.slots.get_mut(index) {
-                    *current = record;
-                }
-            }
-            Err(index) => self.slots.insert(index, record),
-        }
-    }
-
     fn active_body_bytes(&self) -> u64 {
         self.slots
             .iter()
@@ -215,20 +186,21 @@ impl SessionInstructionState {
             })
     }
 
-    fn clear_pending_bodies(&mut self) {
-        for record in &mut self.slots {
-            record.pending_body = None;
-        }
-    }
-
-    /// The recorded shape: sorted unique slots within the slot and byte
-    /// budgets, a digest and a length exactly for Active slots, and a
-    /// pending body that is the recorded content.
+    /// The recorded shape: an unowned target empty at generation 0 and a mob
+    /// owner naming its mob, sorted unique slots within the slot and byte
+    /// budgets, a digest and a length exactly for Active slots, and a pending
+    /// body that is the recorded content.
     fn validate(&self) -> Result<(), String> {
-        if self.owner == InstructionTargetOwner::Unowned
-            && (self.target_generation != 0 || !self.slots.is_empty())
-        {
-            return Err("an unowned target records no slot and no generation".to_string());
+        match &self.owner {
+            InstructionTargetOwner::Unowned
+                if self.target_generation != 0 || !self.slots.is_empty() =>
+            {
+                return Err("an unowned target records no slot and no generation".to_string());
+            }
+            InstructionTargetOwner::Mob { mob_id, .. } if mob_id.is_empty() => {
+                return Err("a mob-owned target names its mob".to_string());
+            }
+            _ => {}
         }
         if self.slots.len() > MAX_OPERATOR_INSTRUCTION_SLOTS {
             return Err(format!(
@@ -299,6 +271,7 @@ pub enum InstructionSetErrorCode {
     ActiveSetBudgetExceeded,
     OwnedByMob,
     OwnedBySession,
+    OwnedByOtherMob,
     SlotManagedByActivation,
     DurabilityUnavailable,
     MobTerminal,
@@ -314,8 +287,8 @@ pub enum InstructionStateError {
     MalformedHistory(String),
 }
 
-/// Why an operator-instruction write, record or rebind was refused. A
-/// refusal changes nothing.
+/// Why an operator-instruction write, record, rebind or release was refused.
+/// A refusal changes nothing.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InstructionWriteError {
     #[error("invalid operator instruction request: {0}")]
@@ -344,6 +317,8 @@ pub enum InstructionWriteError {
     OwnedByMob,
     #[error("the operator instruction target is owned by the session")]
     OwnedBySession,
+    #[error("the operator instruction target is owned by another mob")]
+    OwnedByOtherMob,
     #[error(
         "operator instruction slot {slot} is managed by instruction activations in this session"
     )]
@@ -368,6 +343,7 @@ impl InstructionWriteError {
             }
             Self::OwnedByMob => InstructionSetErrorCode::OwnedByMob,
             Self::OwnedBySession => InstructionSetErrorCode::OwnedBySession,
+            Self::OwnedByOtherMob => InstructionSetErrorCode::OwnedByOtherMob,
             Self::SlotManagedByActivation { .. } => {
                 InstructionSetErrorCode::SlotManagedByActivation
             }
@@ -451,6 +427,16 @@ pub struct InstructionRecordReceipt {
     pub disposition: InstructionRecordDisposition,
     /// The generation the session holds after the record.
     pub target_generation: u64,
+}
+
+/// What a release by a member's mob did to the member session's target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstructionReleaseDisposition {
+    /// The mob's target is now empty and unowned; what is in effect stays.
+    Released,
+    /// No owner held the target: a repeated release writes nothing.
+    AlreadyUnowned,
 }
 
 /// How a turn's run starts, from its resolved start disposition.
@@ -562,10 +548,10 @@ pub enum RunStartInstructionOutcome {
 /// A compaction fold of a session's operator-instruction entry rows, as the
 /// session-document authority authorized it: the one snapshot entry the
 /// rewrite puts right after its leading System prefix (none for an empty
-/// set), and the recorded target the rewrite commits with it (the fold's
-/// entry sequence as the high-water, and the pending bodies a fold at a
-/// run's first request applied cleared). Only the validated compaction path
-/// inserts the snapshot.
+/// set), and the recorded target the rewrite commits with it (the
+/// authority's state after the fold: the fold's entry sequence as the
+/// high-water, and no pending body a fold at a run's first request applied).
+/// Only the validated compaction path inserts the snapshot.
 #[derive(Debug, Clone)]
 pub(crate) struct InstructionFold {
     snapshot: Option<SystemMessage>,
@@ -583,54 +569,412 @@ impl InstructionFold {
 /// one fresh authority for its one session.
 const SESSION_DOCUMENT_INSTRUCTION_KEY: &str = "operator_instructions";
 
-fn count(value: usize) -> u64 {
-    u64::try_from(value).unwrap_or(u64::MAX)
+/// The canonical key the session-document authority holds a slot under:
+/// the JSON array `[namespace, key]`.
+fn slot_machine_key(slot: &InstructionSlot) -> String {
+    serde_json::Value::Array(vec![
+        serde_json::Value::String(slot.namespace.as_str().to_owned()),
+        serde_json::Value::String(slot.key.as_str().to_owned()),
+    ])
+    .to_string()
 }
 
-/// A `SessionDocumentMachine` authority seeded with one session's
-/// recorded target and effective set.
+fn slot_from_machine_key(key: &str) -> Result<InstructionSlot, InstructionStateError> {
+    let malformed = |detail: String| {
+        InstructionStateError::MalformedState(format!(
+            "the session-document authority holds the slot key {key}, which is not a slot: {detail}"
+        ))
+    };
+    let (namespace, slot_key): (String, String) =
+        serde_json::from_str(key).map_err(|error| malformed(error.to_string()))?;
+    Ok(InstructionSlot {
+        namespace: InstructionNamespace::new(namespace)
+            .map_err(|error| malformed(error.to_string()))?,
+        key: InstructionKey::new(slot_key).map_err(|error| malformed(error.to_string()))?,
+    })
+}
+
+/// One slot set as the session-document authority holds it: the revision,
+/// the effect, the digest (empty while Absent) and the body bytes (zero
+/// while Absent) per slot key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct InstructionSlotMaps {
+    revision: BTreeMap<String, u64>,
+    effect: BTreeMap<String, document::InstructionEffect>,
+    digest: BTreeMap<String, String>,
+    bytes: BTreeMap<String, u64>,
+}
+
+/// One slot of an authority slot set, read back in slot order.
+struct AuthoritySlot {
+    slot: InstructionSlot,
+    key: String,
+    revision: InstructionRevision,
+    effect: InstructionEffect,
+    digest: Option<InstructionContentDigest>,
+    bytes: u64,
+}
+
+impl InstructionSlotMaps {
+    fn insert(
+        &mut self,
+        slot: &InstructionSlot,
+        revision: InstructionRevision,
+        effect: InstructionEffect,
+        digest: Option<&InstructionContentDigest>,
+        body_bytes: u64,
+    ) {
+        let key = slot_machine_key(slot);
+        self.revision.insert(key.clone(), revision.get());
+        self.effect.insert(key.clone(), effect.into());
+        self.digest.insert(
+            key.clone(),
+            digest.map_or_else(String::new, |digest| digest.as_str().to_owned()),
+        );
+        self.bytes.insert(key, body_bytes);
+    }
+
+    /// The recorded target's slots, as its durable projection holds them.
+    fn from_target(state: &SessionInstructionState) -> Self {
+        let mut maps = Self::default();
+        for record in &state.slots {
+            maps.insert(
+                &record.slot(),
+                record.revision,
+                record.effect,
+                record.content_sha256.as_ref(),
+                record.body_bytes,
+            );
+        }
+        maps
+    }
+
+    /// The slots in effect, as the session's own entry rows leave them. A
+    /// slot an entry revoked is not in effect, exactly as a slot no entry
+    /// named.
+    fn from_effective(effective: &EffectiveOperatorInstructions) -> Self {
+        let mut maps = Self::default();
+        for (slot, current) in effective.slots() {
+            if let Some(body) = current.body() {
+                maps.insert(
+                    slot,
+                    current.revision(),
+                    InstructionEffect::Active,
+                    current.content_sha256(),
+                    body.len() as u64,
+                );
+            }
+        }
+        maps
+    }
+
+    /// The slot in effect at `key`, with its revision and digest; none when
+    /// the set holds the slot Absent or not at all.
+    fn active(&self, key: &str) -> Option<(u64, &str)> {
+        if self.effect.get(key) != Some(&document::InstructionEffect::Active) {
+            return None;
+        }
+        Some((
+            self.revision.get(key).copied()?,
+            self.digest.get(key).map(String::as_str)?,
+        ))
+    }
+
+    /// Every slot, in slot order.
+    fn slots(&self) -> Result<Vec<AuthoritySlot>, InstructionStateError> {
+        let malformed = |detail: String| {
+            InstructionStateError::MalformedState(format!(
+                "the session-document authority holds a malformed slot: {detail}"
+            ))
+        };
+        let mut slots = Vec::with_capacity(self.revision.len());
+        for (key, revision) in &self.revision {
+            let slot = slot_from_machine_key(key)?;
+            let revision = InstructionRevision::new(*revision)
+                .map_err(|error| malformed(error.to_string()))?;
+            let effect = match self.effect.get(key) {
+                Some(document::InstructionEffect::Active) => InstructionEffect::Active,
+                Some(document::InstructionEffect::Absent) => InstructionEffect::Absent,
+                None => return Err(malformed(format!("{slot} has no effect"))),
+            };
+            let digest = match self.digest.get(key).map(String::as_str) {
+                None => return Err(malformed(format!("{slot} has no digest"))),
+                Some("") => None,
+                Some(digest) => Some(
+                    InstructionContentDigest::new(digest)
+                        .map_err(|error| malformed(error.to_string()))?,
+                ),
+            };
+            let Some(bytes) = self.bytes.get(key).copied() else {
+                return Err(malformed(format!("{slot} has no body bytes")));
+            };
+            slots.push(AuthoritySlot {
+                slot,
+                key: key.clone(),
+                revision,
+                effect,
+                digest,
+                bytes,
+            });
+        }
+        slots.sort_by(|left, right| left.slot.cmp(&right.slot));
+        Ok(slots)
+    }
+
+    /// The Active slots with their bodies, in slot order.
+    fn active_instructions(
+        &self,
+        bodies: &InstructionBodies,
+    ) -> Result<Vec<ActiveOperatorInstruction>, InstructionStateError> {
+        let mut active = Vec::new();
+        for slot in self.slots()? {
+            if slot.effect != InstructionEffect::Active {
+                continue;
+            }
+            let body = bodies.body_of(&slot.slot, slot.digest.as_ref())?;
+            active.push(ActiveOperatorInstruction {
+                slot: slot.slot,
+                revision: slot.revision,
+                body: body.to_string(),
+            });
+        }
+        Ok(active)
+    }
+}
+
+/// The bodies the shell keeps, by digest: the recorded target's pending
+/// bodies, the bodies in effect (read from the entry rows) and a request's.
+#[derive(Debug, Default)]
+struct InstructionBodies(BTreeMap<InstructionContentDigest, String>);
+
+impl InstructionBodies {
+    fn from_sources(
+        state: Option<&SessionInstructionState>,
+        effective: &EffectiveOperatorInstructions,
+    ) -> Self {
+        let mut bodies = Self::default();
+        for record in state
+            .map(SessionInstructionState::slots)
+            .unwrap_or_default()
+        {
+            if let (Some(digest), Some(body)) = (&record.content_sha256, &record.pending_body) {
+                bodies.0.insert(digest.clone(), body.clone());
+            }
+        }
+        for (_, current) in effective.slots() {
+            if let (Some(digest), Some(body)) = (current.content_sha256(), current.body()) {
+                bodies.0.insert(digest.clone(), body.to_string());
+            }
+        }
+        bodies
+    }
+
+    /// Keep a request's body; answers its digest.
+    fn add(&mut self, body: String) -> InstructionContentDigest {
+        let digest = InstructionContentDigest::for_body(&body);
+        self.0.insert(digest.clone(), body);
+        digest
+    }
+
+    fn body_of(
+        &self,
+        slot: &InstructionSlot,
+        digest: Option<&InstructionContentDigest>,
+    ) -> Result<&str, InstructionStateError> {
+        digest
+            .and_then(|digest| self.0.get(digest))
+            .map(String::as_str)
+            .ok_or_else(|| {
+                InstructionStateError::MalformedState(format!(
+                    "the body of {slot} is neither pending nor in effect"
+                ))
+            })
+    }
+}
+
+/// A `SessionDocumentMachine` authority recovered with one session's
+/// recorded target and the slots in effect.
 struct InstructionDocument {
     authority: document::SessionDocumentMachineAuthority,
     key: document::SessionDocumentKey,
 }
 
 impl InstructionDocument {
+    /// Recover the authority in its three steps: the owner, the target
+    /// generation and the entry-sequence high-water, then the recorded
+    /// target, then the slots in effect (a transcript fact).
     fn seed(
         state: Option<&SessionInstructionState>,
         effective: &EffectiveOperatorInstructions,
     ) -> Result<Self, InstructionStateError> {
+        let refused = |error: document::SessionDocumentError| {
+            InstructionStateError::MalformedState(format!(
+                "the session-document authority refused the recorded projection: {error}"
+            ))
+        };
         let mut authority = document::SessionDocumentMachineAuthority::new();
         let key = document::SessionDocumentKey::new(SESSION_DOCUMENT_INSTRUCTION_KEY);
-        let (owner, generation, slot_count, recorded_sequence) = state.map_or(
-            (document::InstructionTargetOwner::Unowned, 0, 0, 0),
-            |state| {
-                (
-                    state.owner.machine_owner(),
-                    state.target_generation,
-                    count(state.slots.len()),
-                    state.entry_sequence,
-                )
-            },
+        let target = state
+            .map(InstructionSlotMaps::from_target)
+            .unwrap_or_default();
+        let in_effect = InstructionSlotMaps::from_effective(effective);
+        let (owner, owner_mob) = state.map_or_else(
+            || (document::InstructionTargetOwner::Unowned, String::new()),
+            |state| state.owner.machine_owner(),
         );
+        let target_generation = state.map_or(0, SessionInstructionState::target_generation);
+        let recorded_sequence = state.map_or(0, SessionInstructionState::entry_sequence);
         authority
             .recover_session_instruction_state(
                 key.clone(),
                 owner,
-                generation,
-                slot_count,
-                count(effective.active_count()),
+                owner_mob,
+                target_generation,
                 recorded_sequence.max(effective.last_entry_sequence()),
             )
-            .map_err(|error| {
-                InstructionStateError::MalformedState(format!(
-                    "the session-document authority refused the recorded projection: {error}"
-                ))
-            })?;
+            .map_err(refused)?;
+        authority
+            .recover_session_instruction_target(
+                key.clone(),
+                target.revision,
+                target.effect,
+                target.digest,
+                target.bytes,
+            )
+            .map_err(refused)?;
+        authority
+            .recover_session_instruction_effective(
+                key.clone(),
+                in_effect.revision,
+                in_effect.effect,
+                in_effect.digest,
+                in_effect.bytes,
+            )
+            .map_err(refused)?;
         Ok(Self { authority, key })
     }
 
     fn key(&self) -> document::SessionDocumentKey {
         self.key.clone()
+    }
+
+    /// The recorded target the authority holds now.
+    fn target(&self) -> InstructionSlotMaps {
+        InstructionSlotMaps {
+            revision: self
+                .authority
+                .session_instruction_target_revision_for(&self.key)
+                .unwrap_or_default(),
+            effect: self
+                .authority
+                .session_instruction_target_effect_for(&self.key)
+                .unwrap_or_default(),
+            digest: self
+                .authority
+                .session_instruction_target_digest_for(&self.key)
+                .unwrap_or_default(),
+            bytes: self
+                .authority
+                .session_instruction_target_bytes_for(&self.key)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The slots in effect the authority holds now.
+    fn effective(&self) -> InstructionSlotMaps {
+        InstructionSlotMaps {
+            revision: self
+                .authority
+                .session_instruction_effective_revision_for(&self.key)
+                .unwrap_or_default(),
+            effect: self
+                .authority
+                .session_instruction_effective_effect_for(&self.key)
+                .unwrap_or_default(),
+            digest: self
+                .authority
+                .session_instruction_effective_digest_for(&self.key)
+                .unwrap_or_default(),
+            bytes: self
+                .authority
+                .session_instruction_effective_bytes_for(&self.key)
+                .unwrap_or_default(),
+        }
+    }
+
+    fn owner_kind(&self) -> document::InstructionTargetOwner {
+        self.authority
+            .session_instruction_owner_for(&self.key)
+            .unwrap_or_default()
+    }
+
+    /// The recorded target as the authority holds it now, ready to store:
+    /// `owner` is the owner the operation knows (an owner's descriptive
+    /// facts, such as a mob member's identity, are the shell's), and each
+    /// Active slot that is not in effect keeps its body as pending.
+    fn recorded_state(
+        &self,
+        owner: InstructionTargetOwner,
+        bodies: &InstructionBodies,
+    ) -> Result<SessionInstructionState, InstructionStateError> {
+        let (owner_kind, owner_mob) = owner.machine_owner();
+        let held_mob = self
+            .authority
+            .session_instruction_owner_mob_for(&self.key)
+            .unwrap_or_default();
+        if owner_kind != self.owner_kind() || owner_mob != held_mob {
+            return Err(InstructionStateError::MalformedState(
+                "the stored owner is not the owner the session-document authority holds"
+                    .to_string(),
+            ));
+        }
+        let in_effect = self.effective();
+        let mut slots = Vec::new();
+        for slot in self.target().slots()? {
+            let record = match slot.effect {
+                InstructionEffect::Active => {
+                    let body = bodies.body_of(&slot.slot, slot.digest.as_ref())?;
+                    let applied = in_effect
+                        .active(&slot.key)
+                        .is_some_and(|(revision, digest)| {
+                            revision == slot.revision.get()
+                                && slot
+                                    .digest
+                                    .as_ref()
+                                    .is_some_and(|recorded| recorded.as_str() == digest)
+                        });
+                    InstructionTargetSlot {
+                        namespace: slot.slot.namespace.clone(),
+                        key: slot.slot.key.clone(),
+                        revision: slot.revision,
+                        effect: InstructionEffect::Active,
+                        content_sha256: slot.digest.clone(),
+                        body_bytes: slot.bytes,
+                        pending_body: (!applied).then(|| body.to_string()),
+                    }
+                }
+                InstructionEffect::Absent => {
+                    InstructionTargetSlot::revoked(&slot.slot, slot.revision)
+                }
+            };
+            slots.push(record);
+        }
+        let state = SessionInstructionState {
+            owner,
+            target_generation: self
+                .authority
+                .session_instruction_target_generation_for(&self.key)
+                .unwrap_or_default(),
+            entry_sequence: self
+                .authority
+                .session_instruction_entry_sequence_for(&self.key)
+                .unwrap_or_default(),
+            slots,
+        };
+        state
+            .validate()
+            .map_err(InstructionStateError::MalformedState)?;
+        Ok(state)
     }
 }
 
@@ -684,89 +1028,77 @@ enum RunStartVerdict {
     Deferred(document::InstructionDeferReason),
 }
 
-/// Everything a run start would apply: the changes from the effective set to
-/// the recorded target, and the whole active set after them.
+/// Everything a run start applies: the changes from the effective set to the
+/// recorded target, and the whole active set after them.
 struct PendingInstructionChanges {
     changes: Vec<OperatorInstructionChangeContent>,
     active_after: Vec<ActiveOperatorInstruction>,
 }
 
-/// Compare the recorded target with the effective set, slot by slot. A slot
-/// is unchanged when the target holds what is in effect (the same revision
-/// and content, or Absent where nothing applies); an effective slot the
-/// target no longer names is revoked at the revision in effect. An unowned
-/// state records no target, so nothing of it is pending.
-fn pending_instruction_changes(
-    state: &SessionInstructionState,
-    effective: &EffectiveOperatorInstructions,
+/// Render the changes a run start's entry carries from the authority's
+/// target and effective set, as they stood when it authorized the entry: an
+/// Active target slot not in effect at its revision and digest activates,
+/// an Absent target slot still in effect is revoked, and a slot in effect the
+/// target no longer names is revoked at the revision in effect.
+fn render_pending_changes(
+    target: &InstructionSlotMaps,
+    in_effect: &InstructionSlotMaps,
+    bodies: &InstructionBodies,
 ) -> Result<PendingInstructionChanges, InstructionStateError> {
+    let revision = |value: u64| {
+        InstructionRevision::new(value).map_err(|error| {
+            InstructionStateError::MalformedState(format!(
+                "the session-document authority holds an invalid revision: {error}"
+            ))
+        })
+    };
     let mut changes = Vec::new();
     let mut active_after = Vec::new();
-    if state.owner == InstructionTargetOwner::Unowned {
-        return Ok(PendingInstructionChanges {
-            changes,
-            active_after,
-        });
-    }
-    for record in &state.slots {
-        let slot = record.slot();
-        let in_effect = effective
-            .slot(&slot)
-            .filter(|current| current.effect() == InstructionEffect::Active);
-        match record.effect {
+    for slot in target.slots()? {
+        let current = in_effect.active(&slot.key);
+        match slot.effect {
             InstructionEffect::Active => {
-                let same_content = |current: &&EffectiveInstructionSlot| {
-                    current.content_sha256() == record.content_sha256.as_ref()
-                };
-                let body = match (record.pending_body.as_deref(), in_effect) {
-                    (Some(body), _) => body.to_string(),
-                    (None, Some(current)) if same_content(&current) => {
-                        current.body().map(str::to_string).ok_or_else(|| {
-                            InstructionStateError::MalformedHistory(format!(
-                                "the effective body of {slot} is missing"
-                            ))
-                        })?
-                    }
-                    (None, _) => {
-                        return Err(InstructionStateError::MalformedState(format!(
-                            "the recorded body of {slot} is neither pending nor in effect"
-                        )));
-                    }
-                };
-                let unchanged = in_effect.is_some_and(|current| {
-                    current.revision() == record.revision && same_content(&current)
+                let body = bodies.body_of(&slot.slot, slot.digest.as_ref())?;
+                let unchanged = current.is_some_and(|(current_revision, current_digest)| {
+                    current_revision == slot.revision.get()
+                        && slot
+                            .digest
+                            .as_ref()
+                            .is_some_and(|digest| digest.as_str() == current_digest)
                 });
                 if !unchanged {
                     changes.push(OperatorInstructionChangeContent::Activate {
-                        slot: slot.clone(),
-                        revision: record.revision,
-                        supersedes: in_effect.map(EffectiveInstructionSlot::revision),
-                        body: body.clone(),
+                        slot: slot.slot.clone(),
+                        revision: slot.revision,
+                        supersedes: current
+                            .map(|(current_revision, _)| revision(current_revision))
+                            .transpose()?,
+                        body: body.to_string(),
                     });
                 }
                 active_after.push(ActiveOperatorInstruction {
-                    slot,
-                    revision: record.revision,
-                    body,
+                    slot: slot.slot,
+                    revision: slot.revision,
+                    body: body.to_string(),
                 });
             }
             InstructionEffect::Absent => {
-                if let Some(current) = in_effect {
+                if let Some((current_revision, _)) = current {
                     changes.push(OperatorInstructionChangeContent::Revoke {
-                        slot,
-                        revision: record.revision,
-                        revokes: current.revision(),
+                        slot: slot.slot,
+                        revision: slot.revision,
+                        revokes: revision(current_revision)?,
                     });
                 }
             }
         }
     }
-    for (slot, current) in effective.slots() {
-        if current.effect() == InstructionEffect::Active && state.slot(slot).is_none() {
+    for slot in in_effect.slots()? {
+        if slot.effect == InstructionEffect::Active && !target.revision.contains_key(&slot.key) {
             changes.push(OperatorInstructionChangeContent::Revoke {
-                slot: slot.clone(),
-                revision: current.revision(),
-                revokes: current.revision(),
+                slot: slot.slot,
+                revision: slot.revision,
+                revokes: slot.revision,
             });
         }
     }
@@ -815,7 +1147,7 @@ impl Session {
 
     /// Whether an instruction activation row names `slot`: such a slot is
     /// managed by activations in this session and takes no operator
-    /// instruction.
+    /// instruction. This check only ever refuses; it admits nothing.
     fn slot_has_activation_rows(&self, slot: &InstructionSlot) -> bool {
         self.messages().iter().any(|message| {
             matches!(
@@ -842,7 +1174,7 @@ impl Session {
     }
 
     /// Record one session-owned write in the target. The session-document
-    /// authority decides it against the slot's record; a recorded write
+    /// authority decides it against the slot it holds; a recorded write
     /// changes only the target (it applies at the next fresh run start), and
     /// a refusal or a duplicate changes nothing.
     pub fn set_session_instruction(
@@ -874,22 +1206,29 @@ impl Session {
         }
         let state = self.instruction_target_state()?;
         let effective = self.own_effective_instructions()?;
-        let current = state.as_ref().and_then(|state| state.slot(&write.slot));
-        let digest = body.as_deref().map(InstructionContentDigest::for_body);
-        let current_matches = current
-            .is_some_and(|record| record.effect == effect && record.content_sha256 == digest);
-        let current_revision = current.map(|record| record.revision);
+        let mut bodies = InstructionBodies::from_sources(state.as_ref(), &effective);
+        let body_bytes = body.as_ref().map_or(0, |body| body.len() as u64);
+        let digest = body.map(|body| bodies.add(body));
         let mut document = InstructionDocument::seed(state.as_ref(), &effective)?;
         let key = document.key();
+        let slot_key = slot_machine_key(&write.slot);
+        let current_revision = document
+            .target()
+            .revision
+            .get(&slot_key)
+            .copied()
+            .and_then(|current| InstructionRevision::new(current).ok());
         let effects = document
             .authority
             .set_session_instruction(
                 key,
+                slot_key,
                 write.revision.get(),
                 effect.into(),
-                current.is_some(),
-                current_revision.map_or(0, InstructionRevision::get),
-                current_matches,
+                digest
+                    .as_ref()
+                    .map_or_else(String::new, |digest| digest.as_str().to_owned()),
+                body_bytes,
             )
             .map_err(|error| refused_by_authority(&error))?;
         let receipt = |disposition, target_generation| SessionInstructionReceipt {
@@ -900,25 +1239,7 @@ impl Session {
         };
         match write_verdict(&effects)? {
             WriteVerdict::Recorded(generation) => {
-                let record = match body {
-                    Some(body) => InstructionTargetSlot::active(&write.slot, write.revision, body),
-                    None => InstructionTargetSlot::revoked(&write.slot, write.revision),
-                };
-                let mut next = state.unwrap_or(SessionInstructionState {
-                    owner: InstructionTargetOwner::Session,
-                    target_generation: 0,
-                    entry_sequence: 0,
-                    slots: Vec::new(),
-                });
-                next.owner = InstructionTargetOwner::Session;
-                next.target_generation = generation;
-                next.entry_sequence = next.entry_sequence.max(effective.last_entry_sequence());
-                next.upsert(record);
-                if next.active_body_bytes() > MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES as u64 {
-                    return Err(InstructionWriteError::ActiveSetBudgetExceeded {
-                        max_bytes: MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES,
-                    });
-                }
+                let next = document.recorded_state(InstructionTargetOwner::Session, &bodies)?;
                 self.store_instruction_target_state(&next)?;
                 Ok(receipt(InstructionWriteDisposition::Recorded, generation))
             }
@@ -947,15 +1268,28 @@ impl Session {
                 document::InstructionWriteRefusal::OwnedBySession => {
                     InstructionWriteError::OwnedBySession
                 }
+                document::InstructionWriteRefusal::OwnedByOtherMob => {
+                    InstructionWriteError::OwnedByOtherMob
+                }
+                document::InstructionWriteRefusal::ActiveSetBudgetExceeded => {
+                    InstructionWriteError::ActiveSetBudgetExceeded {
+                        max_bytes: MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES,
+                    }
+                }
             }),
         }
     }
 
     /// Record a mob member's whole snapshot in the target. The
-    /// session-document authority accepts a snapshot by generation alone: a
-    /// generation at or below the recorded one answers "already recorded"
-    /// and writes nothing, so a repeated delivery never writes twice.
-    /// Recording changes only the target and wakes nothing.
+    /// session-document authority accepts a snapshot by generation alone, and
+    /// only from the mob that owns the target (or into an unowned one): a
+    /// generation at or below the recorded one answers "already recorded" and
+    /// writes nothing, so a repeated delivery never writes twice, and another
+    /// mob's snapshot is refused until the owning mob releases the target. It
+    /// also decides the slot limit and the active budget. A snapshot never
+    /// names a slot that instruction activations manage in this session,
+    /// whether it records the slot Active or Absent. Recording changes only
+    /// the target and wakes nothing.
     pub fn record_instruction_target(
         &mut self,
         record: InstructionTargetRecord,
@@ -966,82 +1300,80 @@ impl Session {
                     .to_string(),
             ));
         }
+        if record.mob_id.is_empty() {
+            return Err(InstructionWriteError::InvalidRequest(
+                "a recorded operator instruction target names its mob".to_string(),
+            ));
+        }
         if record.slots.len() > MAX_OPERATOR_INSTRUCTION_SLOTS {
             return Err(InstructionWriteError::SlotLimitExceeded);
         }
-        let mut slots = Vec::with_capacity(record.slots.len());
+        let state = self.instruction_target_state()?;
+        let effective = self.own_effective_instructions()?;
+        let mut bodies = InstructionBodies::from_sources(state.as_ref(), &effective);
+        let mut snapshot = InstructionSlotMaps::default();
+        let mut named = BTreeSet::new();
         for entry in record.slots {
-            let target = match entry.body {
+            if !named.insert(entry.slot.clone()) {
+                return Err(InstructionWriteError::InvalidRequest(
+                    "an operator instruction snapshot names a slot twice".to_string(),
+                ));
+            }
+            if self.slot_has_activation_rows(&entry.slot) {
+                return Err(InstructionWriteError::SlotManagedByActivation { slot: entry.slot });
+            }
+            match entry.body {
                 Some(body) => {
                     if body.len() > MAX_INSTRUCTION_BODY_BYTES {
                         return Err(InstructionWriteError::BodyTooLarge {
                             max_bytes: MAX_INSTRUCTION_BODY_BYTES,
                         });
                     }
-                    if self.slot_has_activation_rows(&entry.slot) {
-                        return Err(InstructionWriteError::SlotManagedByActivation {
-                            slot: entry.slot,
-                        });
-                    }
-                    InstructionTargetSlot::active(&entry.slot, entry.revision, body)
+                    let body_bytes = body.len() as u64;
+                    let digest = bodies.add(body);
+                    snapshot.insert(
+                        &entry.slot,
+                        entry.revision,
+                        InstructionEffect::Active,
+                        Some(&digest),
+                        body_bytes,
+                    );
                 }
-                None => InstructionTargetSlot::revoked(&entry.slot, entry.revision),
-            };
-            slots.push(target);
+                None => {
+                    snapshot.insert(
+                        &entry.slot,
+                        entry.revision,
+                        InstructionEffect::Absent,
+                        None,
+                        0,
+                    );
+                }
+            }
         }
-        slots.sort_by(|left, right| left.order_key().cmp(&right.order_key()));
-        if slots
-            .windows(2)
-            .any(|pair| pair[0].order_key() == pair[1].order_key())
-        {
-            return Err(InstructionWriteError::InvalidRequest(
-                "an operator instruction snapshot names a slot twice".to_string(),
-            ));
-        }
-        let active_bytes = slots
-            .iter()
-            .filter(|slot| slot.effect == InstructionEffect::Active)
-            .fold(0u64, |total, slot| total.saturating_add(slot.body_bytes));
-        if active_bytes > MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES as u64 {
-            return Err(InstructionWriteError::ActiveSetBudgetExceeded {
-                max_bytes: MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES,
-            });
-        }
-        let state = self.instruction_target_state()?;
-        let effective = self.own_effective_instructions()?;
         let mut document = InstructionDocument::seed(state.as_ref(), &effective)?;
         let key = document.key();
         let effects = document
             .authority
-            .record_instruction_target(key, record.generation, count(slots.len()))
+            .record_instruction_target(
+                key,
+                record.mob_id.clone(),
+                record.generation,
+                snapshot.revision,
+                snapshot.effect,
+                snapshot.digest,
+                snapshot.bytes,
+            )
             .map_err(|error| refused_by_authority(&error))?;
         match write_verdict(&effects)? {
             WriteVerdict::Recorded(generation) => {
-                // A body the effective set already holds lives in its entry
-                // row; only a pending body is kept.
-                for slot in &mut slots {
-                    let in_effect = effective.slot(&slot.slot()).is_some_and(|current| {
-                        current.effect() == InstructionEffect::Active
-                            && current.revision() == slot.revision
-                            && current.content_sha256() == slot.content_sha256.as_ref()
-                    });
-                    if in_effect {
-                        slot.pending_body = None;
-                    }
-                }
-                let entry_sequence = state
-                    .as_ref()
-                    .map_or(0, SessionInstructionState::entry_sequence)
-                    .max(effective.last_entry_sequence());
-                self.store_instruction_target_state(&SessionInstructionState {
-                    owner: InstructionTargetOwner::Mob {
+                let next = document.recorded_state(
+                    InstructionTargetOwner::Mob {
                         mob_id: record.mob_id,
                         agent_identity: record.agent_identity,
                     },
-                    target_generation: generation,
-                    entry_sequence,
-                    slots,
-                })?;
+                    &bodies,
+                )?;
+                self.store_instruction_target_state(&next)?;
                 Ok(InstructionRecordReceipt {
                     disposition: InstructionRecordDisposition::Recorded,
                     target_generation: generation,
@@ -1054,6 +1386,14 @@ impl Session {
             WriteVerdict::Refused(document::InstructionWriteRefusal::OwnedBySession) => {
                 Err(InstructionWriteError::OwnedBySession)
             }
+            WriteVerdict::Refused(document::InstructionWriteRefusal::OwnedByOtherMob) => {
+                Err(InstructionWriteError::OwnedByOtherMob)
+            }
+            WriteVerdict::Refused(document::InstructionWriteRefusal::ActiveSetBudgetExceeded) => {
+                Err(InstructionWriteError::ActiveSetBudgetExceeded {
+                    max_bytes: MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES,
+                })
+            }
             WriteVerdict::Refused(other) => Err(InstructionWriteError::Malformed(
                 InstructionStateError::MalformedState(format!(
                     "the session-document authority refused a record with {other:?}"
@@ -1065,81 +1405,123 @@ impl Session {
     /// Rebind the target to a new owner, on an explicit attach or a host's
     /// standalone adoption. The new owner starts from what is in effect: the
     /// target becomes the effective set, its generation restarts, and no
-    /// pending write of the previous owner carries over. Rebinding to the
-    /// owner the target already has, or to no owner, is refused.
+    /// pending write of the previous owner carries over. The authority binds
+    /// an unowned target to any owner and a session-owned one to a mob (an
+    /// attach); it refuses a rebind to the owner the target already has, to
+    /// no owner, and of a mob-owned target, which only its mob's release
+    /// frees.
     pub fn rebind_instruction_owner(
         &mut self,
         owner: InstructionTargetOwner,
     ) -> Result<(), InstructionWriteError> {
         let state = self.instruction_target_state()?;
         let effective = self.own_effective_instructions()?;
+        let bodies = InstructionBodies::from_sources(state.as_ref(), &effective);
         let mut document = InstructionDocument::seed(state.as_ref(), &effective)?;
         let key = document.key();
+        let (owner_kind, mob_id) = owner.machine_owner();
         document
             .authority
-            .rebind_instruction_owner(key, owner.machine_owner())
+            .rebind_instruction_owner(key, owner_kind, mob_id)
             .map_err(|error| {
                 InstructionWriteError::InvalidRequest(format!(
                     "the operator instruction target cannot be rebound to this owner: {error}"
                 ))
             })?;
-        let target_generation = document
-            .authority
-            .session_instruction_target_generation_for(&document.key)
-            .unwrap_or(0);
-        let slots = effective
-            .slots()
-            .filter_map(|(slot, current)| {
-                let body = current.body()?;
-                Some(InstructionTargetSlot {
-                    namespace: slot.namespace.clone(),
-                    key: slot.key.clone(),
-                    revision: current.revision(),
-                    effect: InstructionEffect::Active,
-                    content_sha256: current.content_sha256().cloned(),
-                    body_bytes: body.len() as u64,
-                    pending_body: None,
-                })
-            })
-            .collect();
-        let entry_sequence = state
-            .as_ref()
-            .map_or(0, SessionInstructionState::entry_sequence)
-            .max(effective.last_entry_sequence());
-        self.store_instruction_target_state(&SessionInstructionState {
-            owner,
-            target_generation,
-            entry_sequence,
-            slots,
-        })?;
+        let next = document.recorded_state(owner, &bodies)?;
+        self.store_instruction_target_state(&next)?;
         Ok(())
+    }
+
+    /// Release a member session's target on behalf of the mob that owns it
+    /// (its member retires, the mob is destroyed): the target empties and
+    /// is unowned, so another owner may bind it. What is in effect stays,
+    /// and nothing is pending until a new owner records a target. Another
+    /// owner's target is refused; a target no owner holds answers "already
+    /// unowned" and writes nothing.
+    pub fn release_instruction_target(
+        &mut self,
+        mob_id: &str,
+    ) -> Result<InstructionReleaseDisposition, InstructionWriteError> {
+        let state = self.instruction_target_state()?;
+        let effective = self.own_effective_instructions()?;
+        let bodies = InstructionBodies::from_sources(state.as_ref(), &effective);
+        let mut document = InstructionDocument::seed(state.as_ref(), &effective)?;
+        let key = document.key();
+        let held = document.owner_kind();
+        let effects = document
+            .authority
+            .release_instruction_target(key, mob_id.to_owned())
+            .map_err(|error| refused_by_authority(&error))?;
+        let refusal = effects.iter().find_map(|effect| match effect {
+            document::SessionDocumentEffect::InstructionTargetRefused { refusal } => Some(*refusal),
+            _ => None,
+        });
+        match refusal {
+            Some(document::InstructionWriteRefusal::OwnedByOtherMob) => {
+                return Err(InstructionWriteError::OwnedByOtherMob);
+            }
+            Some(document::InstructionWriteRefusal::OwnedBySession) => {
+                return Err(InstructionWriteError::OwnedBySession);
+            }
+            Some(other) => {
+                return Err(InstructionWriteError::Malformed(
+                    InstructionStateError::MalformedState(format!(
+                        "the session-document authority refused a release with {other:?}"
+                    )),
+                ));
+            }
+            None => {}
+        }
+        if !effects.iter().any(|effect| {
+            matches!(
+                effect,
+                document::SessionDocumentEffect::InstructionTargetReleased
+            )
+        }) {
+            return Err(InstructionWriteError::Malformed(
+                InstructionStateError::MalformedState(
+                    "the session-document authority emitted no release verdict".to_string(),
+                ),
+            ));
+        }
+        if held != document::InstructionTargetOwner::Mob {
+            return Ok(InstructionReleaseDisposition::AlreadyUnowned);
+        }
+        let next = document.recorded_state(InstructionTargetOwner::Unowned, &bodies)?;
+        self.store_instruction_target_state(&next)?;
+        Ok(InstructionReleaseDisposition::Released)
     }
 
     /// At a turn's run start, after its start disposition is resolved and
     /// before any input of the run is appended: let the session-document
-    /// authority decide whether the pending changes apply now and, if they
-    /// do, append the one delta entry that carries all of them at the
-    /// transcript tail. The entry and the cleared pending bodies persist with
-    /// the run's commits; a run that commits nothing leaves the changes
-    /// pending for the next run start.
+    /// authority decide, from the target and effective set it holds, whether
+    /// the pending changes apply now and, if they do, append the one delta
+    /// entry that carries all of them at the transcript tail. The entry and
+    /// the authority's resulting target persist with the run's commits; a
+    /// run that commits nothing leaves the changes pending for the next run
+    /// start.
     pub fn apply_run_start_instructions(
         &mut self,
         run_start: InstructionRunStart,
         lowering: InstructionLowering,
         run_id: Option<RunId>,
     ) -> Result<RunStartInstructionOutcome, InstructionStateError> {
-        let Some(mut state) = self.instruction_target_state()? else {
-            // No target was ever recorded, so nothing can be pending.
+        let Some(state) = self.instruction_target_state()? else {
+            // No target was ever recorded: the authority would hold the
+            // session unowned, and an unowned target has nothing pending.
             return Ok(RunStartInstructionOutcome::NotNeeded);
         };
         let effective = self.own_effective_instructions()?;
-        let pending = pending_instruction_changes(&state, &effective)?;
+        let bodies = InstructionBodies::from_sources(Some(&state), &effective);
         let transcript_is_system_prefix = self
             .messages()
             .iter()
             .all(|message| matches!(message, Message::System(_)));
         let mut document = InstructionDocument::seed(Some(&state), &effective)?;
         let key = document.key();
+        let target = document.target();
+        let in_effect = document.effective();
         let effects = document
             .authority
             .resolve_run_start_instructions(
@@ -1147,8 +1529,6 @@ impl Session {
                 run_start.into(),
                 lowering.into(),
                 transcript_is_system_prefix,
-                count(pending.changes.len()),
-                count(pending.active_after.len()),
             )
             .map_err(|error| refused_by_authority(&error))?;
         let verdict = effects
@@ -1179,6 +1559,7 @@ impl Session {
                 entry_sequence,
                 generation,
             } => {
+                let pending = render_pending_changes(&target, &in_effect, &bodies)?;
                 let entry = mint_operator_instruction_delta(
                     OperatorInstructionEntryHeader {
                         origin_session_id: self.id().clone(),
@@ -1193,9 +1574,8 @@ impl Session {
                 .map_err(InstructionStateError::MalformedHistory)?;
                 self.append_operator_instruction_entry(entry)
                     .map_err(InstructionStateError::MalformedHistory)?;
-                state.entry_sequence = entry_sequence;
-                state.clear_pending_bodies();
-                self.store_instruction_target_state(&state)?;
+                let next = document.recorded_state(state.owner.clone(), &bodies)?;
+                self.store_instruction_target_state(&next)?;
                 Ok(RunStartInstructionOutcome::Applied {
                     entry_sequence,
                     target_generation: generation,
@@ -1213,10 +1593,10 @@ impl Session {
     /// and mint the snapshot it renders. `at_run_start` is whether the
     /// compaction runs before the first model response of a fresh run,
     /// `lowering` how the session's model carries System rows, and `run_id`
-    /// the run in flight. The authority folds the recorded target at a
-    /// run's first request (unless the model carries no System row), and
-    /// what is in effect otherwise. None when the session carries no
-    /// operator-instruction fact: its compaction is unchanged.
+    /// the run in flight. The authority folds the recorded target of an
+    /// owned session at a run's first request (unless the model carries no
+    /// System row), and what is in effect otherwise. None when the session
+    /// carries no operator-instruction fact: its compaction is unchanged.
     ///
     /// Nothing changes here: the caller inserts the snapshot in the rebuilt
     /// transcript and records the fold with the rewrite
@@ -1232,22 +1612,14 @@ impl Session {
         }
         let state = self.instruction_target_state()?;
         let effective = self.own_effective_instructions()?;
-        // The target's whole active set, its bodies pending or in effect;
-        // nothing without a recorded target.
-        let target_active = match state.as_ref() {
-            Some(state) => pending_instruction_changes(state, &effective)?.active_after,
-            None => Vec::new(),
-        };
+        let bodies = InstructionBodies::from_sources(state.as_ref(), &effective);
         let mut document = InstructionDocument::seed(state.as_ref(), &effective)?;
         let key = document.key();
+        let target = document.target();
+        let in_effect = document.effective();
         let effects = document
             .authority
-            .authorize_instruction_fold(
-                key,
-                at_run_start,
-                lowering.into(),
-                count(target_active.len()),
-            )
+            .authorize_instruction_fold(key, at_run_start, lowering.into())
             .map_err(|error| refused_by_authority(&error))?;
         let (entry_sequence, source) = effects
             .iter()
@@ -1263,28 +1635,19 @@ impl Session {
                     "the session-document authority emitted no fold verdict".to_string(),
                 )
             })?;
-        let (active, target_generation, applies) = match source {
+        let (active, target_generation, run_id) = match source {
             document::InstructionFoldSource::Target => (
-                target_active,
+                target.active_instructions(&bodies)?,
                 document
                     .authority
                     .session_instruction_target_generation_for(&document.key)
-                    .unwrap_or(0),
-                true,
+                    .unwrap_or_default(),
+                run_id,
             ),
             document::InstructionFoldSource::Effective => (
-                effective
-                    .slots()
-                    .filter_map(|(slot, current)| {
-                        current.body().map(|body| ActiveOperatorInstruction {
-                            slot: slot.clone(),
-                            revision: current.revision(),
-                            body: body.to_string(),
-                        })
-                    })
-                    .collect(),
+                in_effect.active_instructions(&bodies)?,
                 effective.last_target_generation(),
-                false,
+                None,
             ),
         };
         let snapshot = mint_operator_instruction_snapshot(
@@ -1292,25 +1655,40 @@ impl Session {
                 origin_session_id: self.id().clone(),
                 entry_sequence,
                 target_generation,
-                run_id: if applies { run_id } else { None },
+                run_id,
             },
             active,
             crate::types::message_timestamp_now(),
         )
         .map_err(InstructionStateError::MalformedHistory)?;
-        let mut state_after =
-            state.unwrap_or_else(|| SessionInstructionState::unowned(entry_sequence));
-        state_after.entry_sequence = entry_sequence;
-        if applies {
-            state_after.clear_pending_bodies();
-        }
-        state_after
-            .validate()
-            .map_err(InstructionStateError::MalformedState)?;
+        let owner = state
+            .as_ref()
+            .map_or(InstructionTargetOwner::Unowned, |state| state.owner.clone());
+        let state_after = document.recorded_state(owner, &bodies)?;
         Ok(Some(InstructionFold {
             snapshot,
             state_after,
         }))
+    }
+
+    /// Record an unowned operator-instruction state (no owner, generation 0,
+    /// entry sequence 0, no slot) unless the session already records one. A
+    /// session that receives entry rows by copy (a fork child) records it, so
+    /// the state key alone answers whether a session carries
+    /// operator-instruction facts: the copied rows name another origin, and
+    /// this session's own entry sequence starts at zero.
+    pub(crate) fn record_inherited_instruction_state(
+        &mut self,
+    ) -> Result<(), InstructionStateError> {
+        if self.instruction_target_state()?.is_some() {
+            return Ok(());
+        }
+        self.store_instruction_target_state(&SessionInstructionState {
+            owner: InstructionTargetOwner::Unowned,
+            target_generation: 0,
+            entry_sequence: 0,
+            slots: Vec::new(),
+        })
     }
 
     /// Record an authorized fold's target state in the session whose

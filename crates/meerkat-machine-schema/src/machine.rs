@@ -9,6 +9,10 @@ use std::fmt;
 
 const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "runtime_delivery_recipient_outcomes_after_set",
+    // SessionDocumentMachine: one session's slot map with one slot set, and
+    // the body bytes of a slot set's Active slots.
+    "session_document_instruction_slot_after_set",
+    "session_document_instruction_active_bytes",
     "meerkat_machine_session_id_matches_string",
     "meerkat_peer_endpoint_set_cardinality_matches",
     "meerkat_peer_endpoint_set_contains_peer_id",

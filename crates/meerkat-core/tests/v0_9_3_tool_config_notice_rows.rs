@@ -186,6 +186,70 @@ fn v0_9_3_session_documents_load_and_reserialize_byte_exactly() {
     assert_no_failures(&failures);
 }
 
+/// Golden: a document written by a released binary, without any
+/// operator-instruction fact, reloads and writes back at envelope 4 with the
+/// exact bytes the released binary wrote, and its head is projected at
+/// envelope 4 too. Only documents carrying an instruction fact move to
+/// envelope 5, so a rollback to the released binaries reads every other
+/// session as before.
+#[test]
+fn documents_without_instruction_facts_stay_envelope_4_byte_identical() {
+    let mut failures = Vec::new();
+    for case in cases() {
+        let released: serde_json::Value = serde_json::from_str(&case.session_document).unwrap();
+        assert_eq!(
+            released["version"], 4,
+            "{}: the fixture is envelope 4",
+            case.name
+        );
+        assert_eq!(
+            case.head.version, 4,
+            "{}: the fixture head is envelope 4",
+            case.name
+        );
+        let session = match serde_json::from_str::<Session>(&case.session_document) {
+            Ok(session) => session,
+            Err(error) => {
+                failures.push(format!("{} document load: {error}", case.name));
+                continue;
+            }
+        };
+        let written = session.to_persisted_bytes().unwrap();
+        if written != case.session_document.as_bytes() {
+            failures.push(format!(
+                "{} document: wrote {}",
+                case.name,
+                String::from_utf8_lossy(&written)
+            ));
+        }
+        match meerkat_core::SessionHead::from_session(
+            &session,
+            meerkat_core::TranscriptStrandId::root(),
+            0,
+        ) {
+            Ok(head) if head.version == 4 => {}
+            Ok(head) => failures.push(format!("{} head: envelope {}", case.name, head.version)),
+            Err(error) => failures.push(format!("{} head: {error:?}", case.name)),
+        }
+        match case.head.clone().into_session(decoded(&case)) {
+            Ok(loaded) => match meerkat_core::SessionHead::from_session(
+                &loaded,
+                meerkat_core::TranscriptStrandId::root(),
+                0,
+            ) {
+                Ok(head) if head.version == case.head.version => {}
+                Ok(head) => failures.push(format!(
+                    "{} reprojected head: envelope {}",
+                    case.name, head.version
+                )),
+                Err(error) => failures.push(format!("{} reprojected head: {error:?}", case.name)),
+            },
+            Err(error) => failures.push(format!("{} typed load: {error:?}", case.name)),
+        }
+    }
+    assert_no_failures(&failures);
+}
+
 #[test]
 fn v0_9_3_sessions_extend_through_the_append_save_guard() {
     let mut failures = Vec::new();

@@ -11,6 +11,8 @@ pub use execution_custody::{
     RuntimeStoreExecutionClaim, RuntimeStoreExecutionCustody, RuntimeStoreExecutionCustodyError,
 };
 
+#[cfg(all(test, feature = "sqlite-store", not(target_arch = "wasm32")))]
+mod instruction_envelope_tests;
 pub mod memory;
 pub(crate) mod recovery_obligation;
 pub mod spi;

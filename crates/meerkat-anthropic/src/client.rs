@@ -1229,7 +1229,7 @@ impl AnthropicClient {
     }
 
     /// Lower a non-empty bare-string content as one text block, the form a
-    /// breakpoint is authored on.
+    /// breakpoint is authored on. The one place that shape is made.
     fn lower_anthropic_content_as_blocks(content: &mut Value) {
         if let Some(text) = content
             .as_str()
@@ -1241,37 +1241,25 @@ impl AnthropicClient {
     }
 
     /// Mark the last block of a message's content that can carry a
-    /// breakpoint, turning bare-string content into one text block. Thinking
+    /// breakpoint, lowering bare-string content as blocks first. Thinking
     /// blocks cannot carry one, so they are skipped.
     fn author_anthropic_content_breakpoint(
         content: &mut Value,
         cache_ttl: AnthropicCacheTtl,
     ) -> bool {
-        if let Some(blocks) = content.as_array_mut() {
-            let Some(block) = blocks.iter_mut().rev().find(|block| {
+        Self::lower_anthropic_content_as_blocks(content);
+        let Some(block) = content.as_array_mut().and_then(|blocks| {
+            blocks.iter_mut().rev().find(|block| {
                 !matches!(
                     block.get("type").and_then(Value::as_str),
                     Some("thinking" | "redacted_thinking")
                 )
-            }) else {
-                return false;
-            };
-            block["cache_control"] = Self::anthropic_cache_control_value(cache_ttl);
-            return true;
-        }
-        if let Some(text) = content
-            .as_str()
-            .filter(|text| !text.is_empty())
-            .map(str::to_owned)
-        {
-            *content = serde_json::json!([{
-                "type": "text",
-                "text": text,
-                "cache_control": Self::anthropic_cache_control_value(cache_ttl),
-            }]);
-            return true;
-        }
-        false
+            })
+        }) else {
+            return false;
+        };
+        block["cache_control"] = Self::anthropic_cache_control_value(cache_ttl);
+        true
     }
 
     /// Lowered `messages` index of the previous run's last output message

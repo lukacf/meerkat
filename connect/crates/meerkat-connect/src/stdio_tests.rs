@@ -3009,7 +3009,7 @@ async fn public_auth_declaration_does_not_infer_absent_or_nonempty_credential_ev
         Some(json!([])),
         Some(Value::Null),
         Some(json!({})),
-        Some(json!([{"field":"token_env","reference":"SELECTED_TOKEN"}])),
+        Some(json!([{"field_path":["config","token_env"],"environment_variable":"SELECTED"}])),
     ] {
         let root = tempfile::tempdir().unwrap();
         let storage = crate::RealmOptions {
@@ -3031,6 +3031,19 @@ async fn public_auth_declaration_does_not_infer_absent_or_nonempty_credential_ev
                 value.clone();
         }
         fixture.prime(true).await;
+        if references.as_ref().is_some_and(|value| value != &json!([])) {
+            // Malformed rows, or rows for a field help does not declare, are
+            // refused by the checked reference contract. Refusal is not
+            // evidence of absent or empty references.
+            assert!(
+                fixture
+                    .owner
+                    .connector_selection(&fixture.realm, &fixture.session, &"3".repeat(32))
+                    .is_err(),
+                "malformed or undeclared credential evidence must not be selectable"
+            );
+            continue;
+        }
         let selected = fixture
             .owner
             .connector_selection(&fixture.realm, &fixture.session, &"3".repeat(32))

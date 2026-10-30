@@ -762,6 +762,40 @@ agent-callable spawn tools, standing profiles, CLI spawn helpers, REST, public
 MCP, JSON-RPC/SDK spawn contracts, and the Web SDK.
 </Warning>
 
+### Declared identities (Rust hosts)
+
+A Rust host that keeps its own roster of durable identities declares it, and
+Core applies it: `MobHandle::apply_declared_roster`. Pass the host's whole
+roster as a complete one, and apply it once after every start, before the
+host wakes or seats its identities:
+
+```rust
+let roster = DeclaredRoster::complete(
+    identities
+        .iter()
+        .map(|identity| DeclaredEntry::new(SpawnMemberSpec::new("assistant", identity.clone()))),
+);
+let outcome = handle.apply_declared_roster(roster).await?;
+for (identity, answer) in &outcome.entries {
+    // Seated, Kept, Restamped, RoleMigrationHeld, Deferred, Refused, ...
+}
+```
+
+Each identity gets its own typed answer, and one identity's refusal never
+fails the pass. An unchanged roster writes nothing and wakes nothing. A
+changed runtime mode, or a role move declared with
+`DeclaredRoster::with_role_migration`, restamps the member on its own session;
+an undeclared role move holds the member until an apply declares the move or
+restores the role. A change of display name, labels, context or instructions
+alone keeps the seat. The full set of verdicts is in
+[The declared apply](/reference/mob-architecture#the-declared-apply).
+
+Retiring a declared identity that stays listed does not remove it: its
+member is retired, and the next apply seats it again on its own session. To
+remove an identity, unlist it: apply a complete roster without it, and Core
+retires its member and ends the entry. An identity unlisted and listed again
+comes back on the session it last had, with its history.
+
 ## Wire Peers
 
 Wiring controls which members can see and message each other.
@@ -1195,6 +1229,11 @@ embedded Rust all cascade (`MobHandle::retire_with_descendants` is an alias).
 Each retirement runs through the ordinary retire path and every one is
 attempted; the first failure is reported, and a retry converges. Members
 spawned by other means are not affected.
+
+Retiring a declared identity that its host's roster still lists does not
+remove it: the identity entry outlives the retirement, and the host's next
+declared apply seats it again. Unlist the identity first (see
+[Declared identities](#declared-identities-rust-hosts)).
 
 `rkat mob force-cancel <MOB_ID> <AGENT_IDENTITY>` (RPC `mob/force_cancel`)
 cooperatively cancels a member's in-flight turn without retiring it - the

@@ -142,9 +142,43 @@ custody of a name a worker holds is refused `MemberAlreadyExists` over the
 published facts. No other shell code records, removes or derives an entry.
 The ci profile has no identities, so the hand-written audit
 `specs/machines/mob_machine/identity_entry_audit.sh` drives the entry arms in
-two runs: one records, refuses and replays entries, the other takes an entry
+its runs: one records, refuses and replays entries, one takes an entry
 through the dormant seat, the live retirement, the rotation, the fresh-life
-respawn's refusal (in Running and Stopped) and the destroy.
+respawn's refusal (in Running and Stopped) and the destroy, and the others
+drive the declared apply below.
+
+The declared apply (`MobHandle::apply_declared_roster`; see
+[Mob Architecture](/reference/mob-architecture#the-declared-apply)) is
+`MobMachine`'s too. `DeclareIdentityEntry` answers one verdict per declared
+identity (`IdentityEntryVerdict`), one arm per verdict, each guarded by the
+pure helper `identity_entry_verdict` over the declaration and the member's
+facts, and each guarded to act only on an identity that is no entry or a
+`Declared` one, by an explicit check: an entry of another origin is taken by
+no arm. Its facts are the unseated entries with their typed cause
+(`identity_entry_unseated`: `SeatOwed`, `HostedOnFirstUse`, `HeldCreation`),
+the role hold (`member_host_preparation_causes`, cause
+`RoleMigrationUndeclared`, which refuses every wake as a first-boot
+preparation does and which only a later verdict ends) and the archived
+session of an entry's retired member (`identity_entry_archived_sessions`).
+None of them is journaled: the next apply derives them again. The seal of a
+complete roster (`SealDeclaredRoster`) marks the seated Declared entries it
+does not list (`identity_entry_retiring`) and removes the unseated ones; the
+shell retires each marked member, its start row records the cause, and its
+replay marks the entry again (`RecoverIdentityEntryRetiring`). The end of an
+entry's retirement records the session it archived, and removes the entry
+only when the seal marked it; any other end keeps the entry unseated, owed its
+seat (hosted on its first use when placed). The dormant seat binds an
+entry's archived session only when it is the entry's record, and takes a
+fresh session only once the record is let go (`ForgetArchivedSession`: the
+session was observed absent, or the host asked for a fresh life); it never
+seats an entry hosted on its first use or awaiting its held creation. A
+placed spawn holds an entry's custody only for an entry hosted on its first
+use (`placed_entry_custody_is_hosted_on_first_use`). The audit's apply part
+(its runs `apply`, `legacy`, `roles`, `held` and `placed`) drives the declare
+arms, the seal, the legacy adoption before an unlisted retirement, the
+dormant seat with and without an archived record, the retirement to its
+terminals, the role hold against the wakes of every cause, held creation
+and a placed identity's custody, with witnesses and mutants.
 
 Member rotations are `MobMachine` facts. A pending rotation records its
 identity's next session (`member_rotation_session_ids`), the endpoint it
@@ -171,10 +205,10 @@ re-issue finishes it. The start, the actor's own re-drive and the re-drive of
 a caller other than the host (`redrive_retirement_unless_held_for_host`)
 decide that hold by one shell predicate over the machine's facts, in the
 actor's own step: host-pending and a FreshSession target. A same-session
-terminal keeps a host's preparation mark
-(`member_host_preparation_pending`): only the host's seat step ends it, so the
-successor of a host-pending member is seated Dormant and every wake of it is
-refused until then. The same-session terminal keeps the member's wiring
+terminal keeps a host's first-boot preparation
+(`member_host_preparation_causes`, cause `FirstBootRow`): only the host's seat
+step ends it, so the successor of a host-pending member is seated Dormant and
+every wake of it is refused until then. The same-session terminal keeps the member's wiring
 and external peer edges, which the replay of its `MemberRetired` row ends, so
 its journal batch records them again after the next incarnation's row. The
 release verdict (`ClassifyMemberRelease`) takes the incarnation a scoped

@@ -3182,6 +3182,138 @@ mod tests {
         assert_eq!(request.messages, messages);
     }
 
+    /// An assistant web search round that ends at its result, the one kind of
+    /// assistant row a mid-conversation System row may follow.
+    fn web_search_round_ending_at_its_result() -> Message {
+        Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![
+                AssistantBlock::Text {
+                    text: "I'll look that up.".to_string(),
+                    meta: None,
+                },
+                AssistantBlock::ServerToolContent {
+                    id: Some("srvtoolu_1".to_string()),
+                    kind: ServerToolKind::WebSearch,
+                    content: serde_json::json!({
+                        "type": "server_tool_use",
+                        "input": {"query": "Paris population"}
+                    }),
+                    meta: None,
+                },
+                AssistantBlock::ServerToolContent {
+                    id: Some("srvtoolu_1".to_string()),
+                    kind: ServerToolKind::WebSearch,
+                    content: serde_json::json!({
+                        "type": "web_search_tool_result",
+                        "content": [{
+                            "type": "web_search_result",
+                            "title": "Paris",
+                            "url": "https://example.com",
+                            "encrypted_content": "enc"
+                        }]
+                    }),
+                    meta: None,
+                },
+            ],
+            StopReason::EndTurn,
+        ))
+    }
+
+    /// A System row after an assistant row that ends at a web search result
+    /// stays in place, both at the end of the transcript and when the next
+    /// assistant row flushes it.
+    #[test]
+    fn modern_model_keeps_a_mid_system_row_after_a_web_search_result() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        let at_the_end = vec![
+            Message::User(UserMessage::text("Population of Paris?")),
+            web_search_round_ending_at_its_result(),
+            Message::System(SystemMessage::new("late instruction")),
+        ];
+        let mut before_an_answer = at_the_end.clone();
+        before_an_answer.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "About 2.1 million.".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        )));
+
+        for (messages, roles) in [
+            (at_the_end, vec!["user", "assistant", "system"]),
+            (
+                before_an_answer,
+                vec!["user", "assistant", "system", "assistant"],
+            ),
+        ] {
+            let request = LlmRequest::new("claude-opus-5-5", messages.clone());
+            let body = client
+                .build_request_body(&request)
+                .expect("a System row may follow a web search result");
+            assert_eq!(request.messages, messages);
+            let lowered = body["messages"].as_array().expect("messages array");
+            assert_eq!(
+                lowered
+                    .iter()
+                    .map(|message| message["role"].as_str().unwrap_or_default())
+                    .collect::<Vec<_>>(),
+                roles
+            );
+            assert_eq!(
+                lowered[1]["content"]
+                    .as_array()
+                    .and_then(|blocks| blocks.last())
+                    .map(|block| block["type"].clone()),
+                Some(serde_json::json!("web_search_tool_result"))
+            );
+            assert_eq!(lowered[2]["content"], "late instruction");
+        }
+    }
+
+    /// A System row after a text answer is refused when the next assistant
+    /// row flushes it, not only at the end of the transcript: with a User row
+    /// after that assistant row, the end of the transcript would accept it.
+    #[test]
+    fn modern_model_refuses_a_mid_system_row_at_the_next_assistant() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        let answer = |text: &str| {
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: text.to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ))
+        };
+        let refused = vec![
+            Message::User(UserMessage::text("work")),
+            answer("first answer"),
+            Message::System(SystemMessage::new("late instruction")),
+            answer("second answer"),
+        ];
+        let mut followed = refused.clone();
+        followed.push(Message::User(UserMessage::text("continue")));
+
+        for messages in [refused, followed] {
+            let request = LlmRequest::new("claude-opus-5-5", messages.clone());
+            let error = client
+                .build_request_body(&request)
+                .expect_err("the System row cannot follow a text answer");
+            let LlmError::InvalidInputShape { message } = &error else {
+                panic!("expected an input-shape refusal, got {error:?}");
+            };
+            assert!(
+                message.contains("cannot place System message at transcript index 2;"),
+                "{message}"
+            );
+            assert!(
+                message.contains("must follow a user turn or an assistant server-tool result"),
+                "{message}"
+            );
+            assert_eq!(request.messages, messages);
+        }
+    }
+
     // =========================================================================
     // Thinking block SSE parsing tests (spec section 3.5)
     // =========================================================================

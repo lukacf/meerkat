@@ -1933,9 +1933,30 @@ svg[data-svg="fit"],
   cursor: pointer;
 }
 .signal:hover { background: var(--bg-elev-1); }
-.signal:focus-visible {
+/* The label is the row's button: it reads as the plain label, and the row
+   draws its focus ring. */
+.signal__hit {
+  display: block;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.signal__hit:focus-visible {
   outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
+  outline-offset: 2px;
+}
+@supports selector(:has(*)) {
+  .signal__hit:focus-visible { outline: none; }
+  .signal:has(> .signal__body > .signal__hit:focus-visible) {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -2px;
+  }
 }
 .signal__bar { background: var(--ink-faint); border-radius: 1px; }
 .signal[data-sev="critical"] .signal__bar { background: var(--crit); }

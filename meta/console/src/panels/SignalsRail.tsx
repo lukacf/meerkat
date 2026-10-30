@@ -23,7 +23,8 @@ interface SignalsRailProps {
   emptyText?: string;
   watchedIdentities?: Set<string>;
   /** Resolves agent keys to display names ("Support Triage replied"). Without
-   * it, or for agents it does not know, keys are prettified. */
+   * it, or for agents it does not know, a key gets the console's shared
+   * display title for it. */
   agentDirectory?: AgentDirectory;
   onPresetChange?: (presetId: string) => void;
   onSelect?: (frame: ConsoleFrame) => void;
@@ -566,6 +567,7 @@ export const SignalsRail = React.memo(function SignalsRail({
   }, [filterPresets]);
   const [filter, setFilter] = React.useState<string>(activePresetId || presets[0]?.id || "all");
   const [expandedGroups, setExpandedGroups] = React.useState<Set<string>>(() => new Set());
+  const detailIdPrefix = React.useId();
 
   React.useEffect(() => {
     if (activePresetId && presets.some((preset) => preset.id === activePresetId)) {
@@ -657,8 +659,9 @@ export const SignalsRail = React.memo(function SignalsRail({
             {emptyText || "No meaningful signals yet."}
           </div>
         )}
-        {shown.map((s) => {
+        {shown.map((s, index) => {
           const expanded = expandedGroups.has(s.id);
+          const detailId = `${detailIdPrefix}detail-${index}`;
           const grouped = s.items.length > 1;
           const agentKey = s.agent && s.agent !== "_system" ? s.agent : "";
           return (
@@ -668,27 +671,32 @@ export const SignalsRail = React.memo(function SignalsRail({
             data-sev={s.severity}
             data-testid={`signal:${s.id}`}
             data-expanded={expanded ? "true" : "false"}
-            onClick={() => toggleGroup(s)}
-            onKeyDown={(event) => {
-              // Keys on the controls inside the row belong to those controls.
-              if (event.target !== event.currentTarget) return;
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                toggleGroup(s);
-              }
+            onClick={(event) => {
+              // The label button and the row's other controls handle their
+              // own clicks; anywhere else on the row opens it.
+              const target = event.target as Element | null;
+              if (target?.closest?.("a, button, input, select, textarea, summary")) return;
+              toggleGroup(s);
             }}
-            role="button"
-            tabIndex={0}
-            aria-expanded={grouped ? expanded : undefined}
           >
             <span className="signal__bar" />
             <span className="signal__body">
-              <span className="signal__label">
-                {grouped && <span className="signal__chevron" aria-hidden="true" />}
-                {s.title}
-                {grouped && <span className="signal__count">{s.items.length}</span>}
-              </span>
-              <span className="signal__detail">{s.detail}</span>
+              {/* The label is the row's button; the Memory pivot and the
+                  grouped events sit beside it, never inside. */}
+              <button
+                type="button"
+                className="signal__hit"
+                aria-expanded={grouped ? expanded : undefined}
+                aria-describedby={detailId}
+                onClick={() => toggleGroup(s)}
+              >
+                <span className="signal__label">
+                  {grouped && <span className="signal__chevron" aria-hidden="true" />}
+                  {s.title}
+                  {grouped && <span className="signal__count">{s.items.length}</span>}
+                </span>
+              </button>
+              <span className="signal__detail" id={detailId}>{s.detail}</span>
               <span className="signal__agent cc-agent" title={agentKey || undefined}>
                 <span className="cc-agent__name">{nameOf(s.agent)}</span>
               </span>

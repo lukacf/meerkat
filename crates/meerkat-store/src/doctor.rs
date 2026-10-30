@@ -4791,6 +4791,94 @@ mod tests {
         );
     }
 
+    /// A JSONL realm keeps its session documents in its WholeBlob runtime
+    /// store: the doctor lists the documents there written at the
+    /// operator-instruction envelope (a committed body, and a run's
+    /// provisional candidate body), and the finding says which realm kinds
+    /// the census covers.
+    #[tokio::test]
+    async fn runtime_store_documents_at_the_operator_instruction_envelope_are_listed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "jsonl-envelopes", "jsonl");
+        let db_path = realm_dir.join("runtime.sqlite3");
+        let plain_id = Session::new().id().clone();
+        let instructed_id = Session::new().id().clone();
+        let candidate_id = Session::new().id().clone();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runtime_whole_blob_authority (
+                    runtime_id TEXT PRIMARY KEY, authority_version INTEGER, session_id TEXT,
+                    store_revision INTEGER, blob_sha256 TEXT);
+                 CREATE TABLE runtime_whole_blob_bodies (
+                    blob_sha256 TEXT PRIMARY KEY, session_snapshot BLOB);
+                 CREATE TABLE runtime_whole_blob_provisional_tails (
+                    runtime_id TEXT PRIMARY KEY, session_id TEXT, candidate_blob_sha256 TEXT);",
+            )
+            .unwrap();
+            let body = |blob: &str, version: u32| {
+                let document = format!(r#"{{"version":{version},"messages":[]}}"#);
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot) \
+                     VALUES (?1, ?2)",
+                    rusqlite::params![blob, document.as_bytes()],
+                )
+                .unwrap();
+            };
+            // Committed bodies: one at the baseline envelope, one at 5, and
+            // one at the baseline whose run left a candidate at 5.
+            for (id, blob, version) in [
+                (&plain_id, "row-sha256:plain", 4),
+                (&instructed_id, "row-sha256:instructed", 5),
+                (&candidate_id, "row-sha256:candidate-base", 4),
+            ] {
+                body(blob, version);
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_authority (runtime_id, authority_version, \
+                     session_id, store_revision, blob_sha256) VALUES (?1, 1, ?2, 1, ?3)",
+                    rusqlite::params![format!("rt:session:{id}"), id.to_string(), blob],
+                )
+                .unwrap();
+            }
+            body("row-sha256:candidate", 5);
+            conn.execute(
+                "INSERT INTO runtime_whole_blob_provisional_tails (runtime_id, session_id, \
+                 candidate_blob_sha256) VALUES (?1, ?2, 'row-sha256:candidate')",
+                rusqlite::params![
+                    format!("rt:session:{candidate_id}"),
+                    candidate_id.to_string()
+                ],
+            )
+            .unwrap();
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let listed = finding(&diagnosis, FINDING_OPERATOR_INSTRUCTION_ENVELOPE)
+            .expect("operator-instruction envelope finding");
+        assert_eq!(listed.severity, FindingSeverity::Info);
+        assert_eq!(listed.realm.as_deref(), Some("jsonl-envelopes"));
+        assert_eq!(listed.path.as_deref(), Some(db_path.as_path()));
+        assert!(
+            listed.message.contains("2 session(s)"),
+            "{}",
+            listed.message
+        );
+        assert!(listed.message.contains(&instructed_id.to_string()));
+        assert!(listed.message.contains(&candidate_id.to_string()));
+        assert!(
+            !listed.message.contains(&plain_id.to_string()),
+            "a session at the baseline envelope is not listed: {}",
+            listed.message
+        );
+        assert!(
+            listed.message.contains("host-store realms"),
+            "the finding says which realm kinds the census covers: {}",
+            listed.message
+        );
+    }
+
     #[tokio::test]
     async fn headless_strand_rows_are_not_misread_as_inline_history() {
         let temp = tempfile::tempdir().unwrap();

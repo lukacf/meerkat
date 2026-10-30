@@ -57055,12 +57055,39 @@ mod tests {
             assert!(!service.has_live_session(&id).await.unwrap());
         }
 
+        /// Whether `error` is the refusal of a session commit by the failing
+        /// test store.
+        fn is_store_commit_refusal(error: &SessionInstructionError) -> bool {
+            match error {
+                SessionInstructionError::Session(SessionError::Agent(
+                    AgentError::InternalError(message),
+                )) => message.contains("synthetic runtime snapshot commit"),
+                _ => false,
+            }
+        }
+
+        /// The target generation the committed session document holds.
+        async fn committed_target_generation<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+            id: &SessionId,
+        ) -> Option<u64> {
+            service
+                .load_authoritative_session(id)
+                .await
+                .expect("authoritative load")
+                .expect("the session document")
+                .instruction_target_state()
+                .expect("the target reads typed")
+                .map(|state| state.target_generation())
+        }
+
         #[tokio::test]
         async fn a_repeated_record_of_the_same_slot_revision_is_a_noop() {
             let gated = Arc::new(GatedSnapshotRuntimeStore::new());
             let (service, _builds) = counting_service(gated.clone());
-            let id = dormant_session(&service).await;
-            let first = service
+            let service = Arc::new(service);
+            let id = dormant_session(service.as_ref()).await;
+            let first = Arc::clone(&service)
                 .record_instruction_target(&id, record(1))
                 .await
                 .expect("the first delivery records");
@@ -57069,7 +57096,7 @@ mod tests {
             // From here on every session snapshot commit fails: a repeated
             // delivery that tried to write would fail with it.
             gated.set_fail_snapshot_commits(true);
-            let repeated = service
+            let repeated = Arc::clone(&service)
                 .record_instruction_target(&id, record(1))
                 .await
                 .expect("a repeated delivery of the same (slot, revision) writes nothing");
@@ -57078,62 +57105,148 @@ mod tests {
                 InstructionRecordDisposition::AlreadyRecorded
             );
             assert_eq!(repeated.target_generation, 1);
+            let refused = Arc::clone(&service)
+                .record_instruction_target(&id, record(2))
+                .await
+                .expect_err("a new generation does write, and the failing store refuses it");
             assert!(
-                service
-                    .record_instruction_target(&id, record(2))
-                    .await
-                    .is_err(),
-                "a new generation does write, and the failing store refuses it"
+                is_store_commit_refusal(&refused),
+                "the store's commit refusal: {refused:?}"
             );
         }
 
         #[tokio::test]
         async fn concurrent_dormant_records_for_different_sessions_do_not_serialize_on_a_realm_lock()
          {
-            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
-            let (service, _builds) = counting_service(runtime_store);
+            let gated = Arc::new(GatedSnapshotRuntimeStore::new());
+            let (service, _builds) = counting_service(gated.clone());
             let service = Arc::new(service);
             let held = dormant_session(service.as_ref()).await;
             let free = dormant_session(service.as_ref()).await;
 
-            // Hold everything a slow write of `held` holds: its turn boundary
-            // and its recovery gate.
-            let turn_boundary = service.acquire_runtime_turn_finalization_guard(&held).await;
-            let recovery_gate = service
-                .recovery_gate_for_session(&held)
-                .await
-                .lock_owned()
-                .await;
+            // Stop one record inside its store write: from here on it holds
+            // whatever a slow write holds (its session's turn boundary and
+            // recovery gate, and whatever the write path takes) across the
+            // write itself.
+            gated.set_pause_session_boundary_commit(true);
             let blocked = tokio::spawn({
                 let service = Arc::clone(&service);
                 let held = held.clone();
                 async move { service.record_instruction_target(&held, record(1)).await }
             });
+            gated.await_session_boundary_commit_entered().await;
+            // Later commits pass straight through; the stopped write waits
+            // for its release.
+            gated.set_pause_session_boundary_commit(false);
 
             let other = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                service.record_instruction_target(&free, record(1)),
+                Arc::clone(&service).record_instruction_target(&free, record(1)),
             )
             .await
-            .expect("another session's record does not wait for the held one")
+            .expect("another session's record does not wait for a store write in flight")
             .expect("the other session records");
             assert_eq!(other.disposition, InstructionRecordDisposition::Recorded);
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             assert!(
                 !blocked.is_finished(),
-                "the held session's own record waits for its own boundary only"
+                "the held record is still inside its store write"
             );
 
-            drop(recovery_gate);
-            drop(turn_boundary);
+            gated.release_session_boundary_commit();
             let held_receipt = tokio::time::timeout(std::time::Duration::from_secs(5), blocked)
                 .await
-                .expect("the held record proceeds once its boundary is free")
+                .expect("the held record completes once its write is released")
                 .expect("join")
                 .expect("the held session records");
             assert_eq!(
                 held_receipt.disposition,
                 InstructionRecordDisposition::Recorded
+            );
+        }
+
+        /// A caller that stops waiting once the live actor has applied its
+        /// record, while the record's commit is still in flight, does not
+        /// leave the record in the actor alone: the session document holds
+        /// it, and a retry never answers "already recorded" for a record the
+        /// document does not hold.
+        #[tokio::test]
+        async fn a_cancelled_live_record_is_durable_or_redelivered() {
+            let gated = Arc::new(GatedSnapshotRuntimeStore::new());
+            let (service, _builds) = counting_service(gated.clone());
+            let service = Arc::new(service);
+            let id = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed")
+                .session_id;
+            assert!(service.has_live_session(&id).await.unwrap());
+
+            // The record's commit stops inside the store: the actor has
+            // applied the record and the session document does not hold it.
+            gated.set_pause_session_boundary_commit(true);
+            let caller = Arc::clone(&service);
+            let mut cancelled = Box::pin(caller.record_instruction_target(&id, record(1)));
+            tokio::select! {
+                outcome = &mut cancelled => unreachable!(
+                    "the record cannot complete while its commit is held: {outcome:?}"
+                ),
+                () = gated.await_session_boundary_commit_entered() => {}
+            }
+            // The caller goes away exactly here.
+            drop(cancelled);
+            gated.release_session_boundary_commit();
+
+            let retry = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                Arc::clone(&service).record_instruction_target(&id, record(1)),
+            )
+            .await
+            .expect("the retry is not left waiting")
+            .expect("the retry answers");
+            assert_eq!(
+                committed_target_generation(service.as_ref(), &id).await,
+                Some(1),
+                "the retry answered {:?}; the session document must hold the record",
+                retry.disposition
+            );
+        }
+
+        /// A live write whose commit fails leaves no actor serving it, even
+        /// when that actor cannot be discarded: a retry records the write in
+        /// the session document instead of answering "duplicate" for a write
+        /// the document does not hold.
+        #[tokio::test]
+        async fn a_live_write_whose_commit_and_discard_fail_is_recorded_by_its_retry() {
+            let gated = Arc::new(GatedSnapshotRuntimeStore::new());
+            let (service, _builds) = counting_service(gated.clone());
+            let service = Arc::new(service);
+            let id = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed")
+                .session_id;
+
+            gated.set_fail_snapshot_commits(true);
+            service.inner.fail_next_discard();
+            let failed = Arc::clone(&service)
+                .set_session_instruction(&id, write("tone", 1, "Answer formally."))
+                .await
+                .expect_err("the store refuses the write's commit");
+            assert!(
+                is_store_commit_refusal(&failed),
+                "the store's commit refusal: {failed:?}"
+            );
+            gated.set_fail_snapshot_commits(false);
+
+            let retry = Arc::clone(&service)
+                .set_session_instruction(&id, write("tone", 1, "Answer formally."))
+                .await
+                .expect("the retry answers");
+            assert_eq!(
+                committed_target_generation(service.as_ref(), &id).await,
+                Some(1),
+                "the retry answered {:?}; the session document must hold the write",
+                retry.disposition
             );
         }
 

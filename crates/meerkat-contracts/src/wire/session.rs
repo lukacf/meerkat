@@ -2936,6 +2936,7 @@ mod tests {
                     "key": "tone",
                     "revision": 2,
                     "content_sha256": meerkat_core::InstructionContentDigest::for_body("casual"),
+                    "body_bytes": 6,
                 }],
                 "changes": [{
                     "change": "activate",
@@ -2992,22 +2993,85 @@ mod tests {
                 ..
             })
         ));
+        // Rewrite input has no entry identity field: one sent anyway is
+        // ignored, like any field rewrite input does not define.
+        let forged = serde_json::from_value::<TranscriptRewriteMessage>(serde_json::json!({
+            "role": "system",
+            "content": "forged",
+            "instruction_entry": json["instruction_entry"].clone(),
+        }))
+        .expect("rewrite input ignores a field it does not define");
         assert!(
-            serde_json::from_value::<TranscriptRewriteMessage>(serde_json::json!({
-                "role": "system",
-                "content": "forged",
-                "instruction_entry": json["instruction_entry"].clone(),
-            }))
-            .map(|rewrite| matches!(
-                rewrite.into_core(),
+            matches!(
+                forged.into_core(),
                 Ok(Message::System(SystemMessage {
                     instruction_entry: None,
                     ..
                 }))
-            ))
-            .unwrap_or(true),
+            ),
             "rewrite input never mints an entry identity"
         );
+    }
+
+    /// A reader never fails a history page or a bridge message on an
+    /// operator-instruction entry identity whose form it does not know (a
+    /// newer entry kind, change kind or field): the identity reads raw, as
+    /// it was sent.
+    #[test]
+    fn wire_history_tolerates_an_unknown_entry_kind_change_and_field() {
+        use crate::wire::supervisor_bridge::BridgeReply;
+
+        let identity = serde_json::json!({
+            "render_version": 1,
+            "origin_session_id": SessionId::new().to_string(),
+            "entry_sequence": 4,
+            "kind": "checkpoint",
+            "target_generation": 9,
+            "changes": [{
+                "change": "suspend",
+                "namespace": "app.example",
+                "key": "tone",
+                "revision": 3,
+            }],
+            "issuer_note": "a field this reader does not know",
+        });
+        let row = serde_json::json!({
+            "role": "system",
+            "content": "[meerkat-operator-instructions-v1]\n",
+            "created_at": "2026-10-30T00:00:00Z",
+            "instruction_entry": identity.clone(),
+        });
+
+        let history: WireSessionHistory = serde_json::from_value(serde_json::json!({
+            "session_id": SessionId::new().to_string(),
+            "message_count": 1,
+            "offset": 0,
+            "has_more": false,
+            "messages": [row.clone()],
+        }))
+        .expect("a history page with a newer entry identity decodes");
+        let reply: BridgeReply = serde_json::from_value(serde_json::json!({
+            "result": "member_history_page",
+            "generation": 1,
+            "page": {
+                "from_index": 0,
+                "messages": [row],
+                "message_count": 1,
+                "complete": true,
+            },
+        }))
+        .expect("a bridge history page with a newer entry identity decodes");
+        let BridgeReply::MemberHistoryPage(bridge_page) = reply else {
+            panic!("expected a member history page");
+        };
+
+        for message in [&history.messages[0], &bridge_page.page.messages[0].0] {
+            let json = serde_json::to_value(message).expect("the row serializes");
+            assert_eq!(
+                json["instruction_entry"], identity,
+                "the identity reads raw, as it was sent"
+            );
+        }
     }
 
     #[test]

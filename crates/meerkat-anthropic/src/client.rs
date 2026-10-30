@@ -1013,6 +1013,13 @@ impl AnthropicClient {
             AnthropicCacheControlPolicy::SystemAndConversation
         ) && let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut)
         {
+            // The recent-boundary breakpoints move with each request's end,
+            // and a breakpoint turns bare-string content into one text
+            // block. Lower every message's content as blocks, so a message
+            // keeps the bytes it was sent with once they move past it.
+            for message in messages.iter_mut() {
+                Self::lower_anthropic_content_as_blocks(&mut message["content"]);
+            }
             // Anthropic accepts four breakpoints: the system prefix, the
             // previous run's output (see the automatic arm), and the most
             // recent conversation boundaries.
@@ -1204,6 +1211,18 @@ impl AnthropicClient {
             AnthropicCacheTtl::OneHour => {
                 serde_json::json!({"type": "ephemeral", "ttl": "1h"})
             }
+        }
+    }
+
+    /// Lower a non-empty bare-string content as one text block, the form a
+    /// breakpoint is authored on.
+    fn lower_anthropic_content_as_blocks(content: &mut Value) {
+        if let Some(text) = content
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+        {
+            *content = serde_json::json!([{"type": "text", "text": text}]);
         }
     }
 

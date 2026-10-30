@@ -911,6 +911,16 @@ them.
   the client was built with. The strip now applies to every model attempt and
   to the summary request.
 
+- `meerkat-anthropic`: the `system_and_conversation` prompt-cache policy now
+  lowers every message's text content as content blocks. Before, a message's
+  plain text went out as a bare string, and as a one-block array only while
+  the message was among the most recent messages the policy marks with a
+  breakpoint, so a message changed shape once later turns moved the
+  breakpoints past it: a request no longer repeated the previous request's
+  messages byte for byte, and a cache that keys the two forms differently
+  missed from that message on. The other cache policies lower messages as
+  before.
+
 ### Upgrade notes
 
 - A session's grant gate is recorded in its tooling metadata, which a binary

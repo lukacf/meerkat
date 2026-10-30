@@ -141,7 +141,9 @@ pub trait ConsoleLogStore: Send + Sync {
     /// from session history or synthesized by the console are stamped when the
     /// console observes them, so they do not count. An identity without such a
     /// frame is absent. Stores that cannot answer keep the default and report
-    /// none, so every identity's activity reads as unknown.
+    /// none, so every identity's activity reads as unknown. A store that
+    /// wraps another must forward this method, or the console silently reads
+    /// every agent's activity as unknown.
     async fn latest_activity_times(
         &self,
         _identities: &[String],

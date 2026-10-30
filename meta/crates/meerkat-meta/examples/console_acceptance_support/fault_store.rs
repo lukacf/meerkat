@@ -134,6 +134,14 @@ impl ConsoleLogStore for FaultStore {
     async fn history_prefix_revision(&self) -> ConsoleLogResult<Option<String>> {
         self.inner.history_prefix_revision().await
     }
+    // The activity read passes through as well: the trait's default would
+    // report every agent's last activity as unknown.
+    async fn latest_activity_times(
+        &self,
+        identities: &[String],
+    ) -> ConsoleLogResult<std::collections::HashMap<String, u64>> {
+        self.inner.latest_activity_times(identities).await
+    }
     async fn record_source_watermark(
         &self,
         runtime: &str,

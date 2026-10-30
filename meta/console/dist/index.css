@@ -13024,15 +13024,6 @@ svg[data-svg=fit],
   color: var(--ink-dim);
   margin-left: 2px;
 }
-.pane__id {
-  font-family: var(--mono);
-  font-size: 10.5px;
-  color: var(--ink-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 180px;
-}
 .pane__spacer {
   flex: 1;
 }

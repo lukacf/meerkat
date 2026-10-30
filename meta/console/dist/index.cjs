@@ -45525,6 +45525,28 @@ function describeFailure(data, fallback = "error") {
   return message || reasonType || fallback;
 }
 
+// src/lib/agent-title.ts
+function agentKindLabel(agent) {
+  const kind = (agent.role || agent.group || "").trim().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  return kind ? kind[0].toUpperCase() + kind.slice(1) : "";
+}
+function isOpaqueIdPart(part) {
+  return part.length >= 8 && /\d/.test(part) && !/^\p{L}+\d{1,4}$/u.test(part);
+}
+function agentDisplayTitle(agent) {
+  const label = (agent.label || "").trim();
+  const ids = [agent.identity, agent.member_id, agent.agent_id, agent.labels?.agent_identity].map((value) => typeof value === "string" ? value.trim() : "").filter(Boolean);
+  if (label && !ids.includes(label)) return label;
+  const id = label || ids[0] || "";
+  const parts = id.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  if (parts.length === 0) return id || "Agent";
+  if (parts.some(isOpaqueIdPart)) {
+    return "".concat(agentKindLabel(agent) || "Agent", " ").concat(parts.join("").slice(-6).toLowerCase());
+  }
+  const words2 = parts.join(" ");
+  return words2[0].toUpperCase() + words2.slice(1);
+}
+
 // src/lib/id.ts
 function randomUuidFromValues(cryptoSource) {
   if (typeof cryptoSource.getRandomValues !== "function") {
@@ -45624,7 +45646,7 @@ function buildDockTarget2(agent) {
     addressingMode: "identity",
     memberId: agent.member_id,
     identity,
-    title: agent.label,
+    title: agentDisplayTitle(agent),
     subtitle,
     iconName: "i-team"
   };
@@ -45635,7 +45657,7 @@ function buildInspectTarget2(agent) {
     kind: "identity-inspect",
     identity: agent.identity || agent.member_id,
     memberId: agent.member_id,
-    title: "".concat(agent.label, " Details"),
+    title: "".concat(agentDisplayTitle(agent), " Details"),
     subtitle: agent.identity || agent.member_id,
     iconName: "i-terminal"
   };
@@ -45692,7 +45714,7 @@ var USER_IDENTITY = {
 function agentIdentity(agent) {
   return {
     id: agent?.member_id || "agent",
-    label: agent?.label || "Agent",
+    label: agent ? agentDisplayTitle(agent) : "Agent",
     role: "assistant"
   };
 }
@@ -49743,26 +49765,6 @@ function normalizeModelCapabilities(entry) {
 }
 function normalizeLastActivityMs(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : void 0;
-}
-function agentKindLabel(agent) {
-  const kind = (agent.role || agent.group || "").trim().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
-  return kind ? kind[0].toUpperCase() + kind.slice(1) : "";
-}
-function isOpaqueIdPart(part) {
-  return part.length >= 8 && /\d/.test(part) && !/^\p{L}+\d{1,4}$/u.test(part);
-}
-function agentDisplayTitle(agent) {
-  const label = (agent.label || "").trim();
-  const ids = [agent.identity, agent.member_id, agent.agent_id, agent.labels?.agent_identity].map((value) => typeof value === "string" ? value.trim() : "").filter(Boolean);
-  if (label && !ids.includes(label)) return label;
-  const id = label || ids[0] || "";
-  const parts = id.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  if (parts.length === 0) return id || "Agent";
-  if (parts.some(isOpaqueIdPart)) {
-    return "".concat(agentKindLabel(agent) || "Agent", " ").concat(parts.join("").slice(-6).toLowerCase());
-  }
-  const words2 = parts.join(" ");
-  return words2[0].toUpperCase() + words2.slice(1);
 }
 function agentDirectoryEntry(agent) {
   return {
@@ -65548,12 +65550,11 @@ function PaneView({
               "data-testid": "pane-title:".concat(panelId),
               title: "Retarget pane",
               children: [
-                /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "pane__title-text", children: title }),
+                /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "pane__title-text", title: subId, children: title }),
                 /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "pane__caret", children: "\u25BE" })
               ]
             }
           ),
-          subId && /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "pane__id", children: subId }),
           /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "pane__spacer" }),
           /* @__PURE__ */ (0, import_jsx_runtime76.jsx)(
             "button",
@@ -65666,7 +65667,7 @@ function PaneMenu({ agents, visibleControls, customPanels = [], onClose, onPick 
           "data-testid": "pane-menu-agent:".concat(a.member_id),
           children: [
             /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "agent__dot" }),
-            /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { children: a.label }),
+            /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { children: agentDisplayTitle(a) }),
             /* @__PURE__ */ (0, import_jsx_runtime76.jsx)("span", { className: "pane-menu__id", children: a.identity || a.member_id })
           ]
         },
@@ -68331,7 +68332,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const peerLabels = import_react54.default.useMemo(() => {
     const labels2 = /* @__PURE__ */ new Map();
     for (const agent of agents) {
-      const label = agent.label?.trim();
+      const label = agentDisplayTitle(agent);
       if (!label) continue;
       const identity = agent.identity?.trim();
       if (identity) labels2.set(identity, label);
@@ -70820,7 +70821,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   function pendingRowNames(identity, destination) {
     const agent = agentsRef.current.find((candidate) => [candidate.identity, candidate.member_id, candidate.agent_id].includes(destination)) ?? agentsRef.current.find((candidate) => [candidate.identity, candidate.member_id, candidate.agent_id].includes(identity));
     const host = experience?.console_config?.brand?.label?.trim();
-    return { agent: agent?.label || destination, host: host || void 0 };
+    return { agent: agent ? agentDisplayTitle(agent) : destination, host: host || void 0 };
   }
   function setPendingCheck(identity, id, view) {
     setPendingChecks((current) => {
@@ -71633,7 +71634,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         PendingStack3,
         {
           items: stackItems,
-          agentLabel: target.title || agent?.label || identity,
+          agentLabel: target.title || (agent ? agentDisplayTitle(agent) : identity),
           hostLabel: experience?.console_config?.brand?.label?.trim() || void 0,
           resendUncertain,
           checks: pendingChecks[identity],
@@ -71673,7 +71674,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           sourceIdentity: identity,
           messageId: quote.messageId,
           quote: quote.text,
-          label: target.title || agent?.label || identity
+          label: target.title || (agent ? agentDisplayTitle(agent) : identity)
         });
         const next = [...quotedContexts, context];
         validateConsoleContexts(next);
@@ -71694,12 +71695,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         approvalSnapshot: activeApprovals,
         onApprovalDecision: onGatingDecision,
         peerLabels,
-        agentLabel: target.title || agent?.label || identity,
+        agentLabel: target.title || (agent ? agentDisplayTitle(agent) : identity),
         identity,
         viewportKey: { authority: sendScope, identity, conversation: identity, pane: panel.id },
         submittedRowId,
         onQuoteSelection: addQuote,
-        contextSlot: /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(QuoteContextChips, { records: quotedContexts, destinationLabel: target.title || agent?.label || identity, onEdit: (id, quote) => {
+        contextSlot: /* @__PURE__ */ (0, import_jsx_runtime78.jsx)(QuoteContextChips, { records: quotedContexts, destinationLabel: target.title || (agent ? agentDisplayTitle(agent) : identity), onEdit: (id, quote) => {
           if (sendScope !== sendScopeRef.current || !lifetimeRef.current.active) throw new Error("This draft is no longer active.");
           const latest = storedComposerDraft(identity, panelKey);
           const next = editConsoleContextQuote(latest.contexts, id, quote);
@@ -71746,7 +71747,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         runStopNotice: runStopNotices[identity] ?? null,
         onForkSideChat: canForkSideChat && agent ? () => void onForkSideChat(panel.id, agent) : void 0,
         forkSideChatDisabledReason: canForkSideChat ? forkSideChatBlocked : null,
-        sideChatOfLabel: sideChatOf ? sideChatSourceAgent?.label || sideChatOf : null,
+        sideChatOfLabel: sideChatOf ? sideChatSourceAgent ? agentDisplayTitle(sideChatSourceAgent) : sideChatOf : null,
         onCloseSideChat: canCloseSideChat ? () => void onCloseSideChat(panel.id, identity) : void 0,
         sideChatNotice: sideChatNotices[identity] ?? null,
         inspectLabel: configuredActionLabels.inspect,
@@ -71762,7 +71763,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           if (voiceState.target?.identity === identity && voiceState.phase !== "idle" && voiceState.phase !== "error") {
             void voice.close();
           } else {
-            void voice.start({ identity, label: target.title || agent?.label || identity });
+            void voice.start({ identity, label: target.title || (agent ? agentDisplayTitle(agent) : identity) });
           }
         } : void 0,
         voiceActive: voiceState.target?.identity === identity && voiceState.phase !== "idle" && voiceState.phase !== "error",
@@ -71966,7 +71967,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           readOnly: frontendReadOnly || experience?.console_policy?.read_only === true,
           agents: agents.map((agent) => ({
             identity: agent.identity || agent.member_id,
-            label: agent.label
+            label: agentDisplayTitle(agent)
           })),
           onRefresh: () => void refreshAccessData(),
           onSetEnabled: (enabled, base) => runAccessMutation(CONSOLE_COMMAND_NAMES2.enableAccess, { enabled }, base),

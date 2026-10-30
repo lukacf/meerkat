@@ -1024,7 +1024,7 @@
             "optional_fields": [
               "name"
             ],
-            "note": "A deferred send of content (a non-empty string) to the agent identity names, at the trigger's times: the scheduler's trigger, tagged by type (once {due_at_utc}, interval {start_at_utc, every_seconds, end_at_utc?} or calendar {timezone, minute, hour, day_of_month, month, day_of_week, year?}, each calendar field {kind: any} or {kind: values, values}). Gated as meta/console/send is on this route, for the caller as the console resolves it, signed in or not: a writable console (-32010), a valid public alias, and agent.send for the agent under the live access policy (-32030). The schedule records that caller as its sender: the principal the console send would use, with its issuer and subject only for a verified signed-in human."
+            "note": "A deferred send of content (a non-empty string) to the agent identity names, at the trigger's times: the scheduler's trigger, tagged by type (once {due_at_utc}, interval {start_at_utc, every_seconds, end_at_utc?} or calendar {timezone, minute, hour, day_of_month, month, day_of_week, year?}, each calendar field {kind: any} or {kind: values, values}); an interval repeats at most once a minute (every_seconds of at least 60). Gated as meta/console/send is on this route, for the caller as the console resolves it, signed in or not: a writable console (-32010), a valid public alias, and agent.send for the agent under the live access policy (-32030). The schedule records that caller as its sender: the principal the console send would use, with its issuer and subject only for a verified signed-in human."
           },
           "success": {
             "body": "console_schedule",
@@ -1039,7 +1039,7 @@
               "sender",
               "next_due_at_utc"
             ],
-            "note": "The schedule as meta/schedule/list answers it. Each due time is sent as a console send by the recorded sender, judged when it fires through the same gate as a live send: a writable console, agent.send for the sender under the access policy then, an addressable agent whose input is not governed, and, for a signed-in human sender, Console sessions not revoked since the schedule was defined. A refused or failed send fails that occurrence (delivery_failed) and the schedule keeps its later times; an agent the console no longer knows (a deleted identity, or a member without one that was retired) fails its sends the same way, and the schedule stays until it is deleted, while an identity released with meta/retire is materialized by the send, as by any console send. A send is deduplicated under its occurrence's delivery key in the sender's send scope, as a live send by the sender is, so a redelivered occurrence is sent once while the console's dedupe store holds the key (an in-memory store forgets it on restart). Sends carry origin console:schedule and the scheduler turn origin."
+            "note": "The schedule as meta/schedule/list answers it. Each due time is sent as a console send by the recorded sender, judged when it fires. The Console first admits the sender as it admits a live request by it: an anonymous sender only while the Console requires no sign-in; a principal only under the issuer the Console trusts then, past its provider policy and allowlist where sign-in is required, and past its session fence (Console sessions revoked after the schedule was defined refuse it, for every signed-in principal, a service identity included). Then it sends exactly as /console/send does once its caller is admitted: the candidate-launch refusal, a writable console, agent.send for the sender under the access policy then, an addressable agent whose input is not governed, and the identity-first send or the member lane. A refused or failed send fails that occurrence (delivery_failed) and the schedule keeps its later times; an agent the console no longer knows (a deleted identity, or a member without one that was retired) fails its sends the same way, and the schedule stays until it is deleted, while an identity released with meta/retire is materialized by the send, as by any console send. A send is deduplicated under its occurrence's delivery key in the sender's send scope, as a live send by the sender is, so a redelivered occurrence is sent once while the console's dedupe store holds the key (an in-memory store forgets it on restart); a send whose admission the Console could not observe (a timeout) is recorded failed although it may have been admitted. Sends carry origin console:schedule and the scheduler turn origin, through the Console router built last (its decisions and visibility); a fire on a gateway with no Console send path waits for one only in the gateway's first 30 seconds, and otherwise fails at once."
           },
           "errors": [
             {
@@ -1050,7 +1050,7 @@
                 -32602,
                 -32000
               ],
-              "note": "-32001 data.kind unknown_identity when no agent of the console has the name; -32002 data.kind not_addressable for an agent that takes no console sends; -32004 data.kind governed_target for an agent whose input is governed (a governed send needs its Console human present, and a fire has none) or data.kind schedule_host_unavailable where no schedule firing host sends the gateway's schedules; -32602 for an invalid identity, a blank content or an invalid trigger (the scheduler's validation, an unknown time zone among them)."
+              "note": "-32001 data.kind unknown_identity when no agent of the console has the name; -32002 data.kind not_addressable for an agent that takes no console sends; -32004 data.kind governed_target for an agent whose input is governed (a governed send needs its Console human present, and a fire has none) or data.kind schedule_host_unavailable where no schedule firing host sends the gateway's schedules; -32602 for an invalid identity, a blank content, an interval under 60 seconds, or an invalid trigger (the scheduler's validation, an unknown time zone among them)."
             }
           ]
         },
@@ -1070,7 +1070,7 @@
               "trigger",
               "name"
             ],
-            "note": "Changes the console schedule schedule_id of the agent identity names: its content, trigger or name, each kept when absent. Gated as meta/schedule/create. The update records the caller as the schedule's sender, whatever it changes, and judges the agent again as a create does."
+            "note": "Changes the console schedule schedule_id of the agent identity names: its content, trigger or name, each kept when absent. Gated as meta/schedule/create. The update records the caller as the schedule's sender, whatever it changes, judges the agent again as a create does, and writes at the revision it read."
           },
           "success": {
             "body": "console_schedule",
@@ -1093,10 +1093,11 @@
                 -32001,
                 -32002,
                 -32004,
+                -32009,
                 -32602,
                 -32000
               ],
-              "note": "-32001 data.kind schedule_not_found for a schedule that does not exist, was deleted, is no console schedule, or is another agent's. The other refusals are meta/schedule/create's."
+              "note": "-32001 data.kind schedule_not_found for a schedule that does not exist, was deleted, is no console schedule, or is another agent's. The other refusals are meta/schedule/create's. -32009 data.kind schedule_revision_conflict (expected_revision, actual_revision) when the schedule changed between this call's read and its write: nothing is changed, so the call never reverts that change."
             }
           ]
         },
@@ -1111,7 +1112,7 @@
               "identity",
               "schedule_id"
             ],
-            "note": "Stops the console schedule's sends until it is resumed. Gated on a writable console and agent.send for the agent; the sender stays as it is."
+            "note": "Stops the console schedule's sends until it is resumed; pausing a paused schedule answers it as it is. Gated on a writable console and agent.send for the agent; the sender stays as it is."
           },
           "success": {
             "body": "console_schedule",
@@ -1135,7 +1136,7 @@
                 -32602,
                 -32000
               ],
-              "note": "-32001 data.kind schedule_not_found for a schedule that does not exist, was deleted, is no console schedule, or is another agent's. -32602 for a schedule the scheduler's lifecycle refuses to pause (one already paused)."
+              "note": "-32001 data.kind schedule_not_found for a schedule that does not exist, was deleted, is no console schedule, or is another agent's; -32602 for an invalid identity or schedule_id."
             }
           ]
         },
@@ -1150,7 +1151,7 @@
               "identity",
               "schedule_id"
             ],
-            "note": "Resumes a paused console schedule. Gated as meta/schedule/create: the resume records the caller as the schedule's sender while it is still paused, so no send goes out as the earlier sender, and judges the agent again as a create does."
+            "note": "Resumes a paused console schedule. Gated as meta/schedule/create: the resume records the caller as the schedule's sender while it is still paused, at the revision it read, so no send goes out as the earlier sender and no change made meanwhile is put back, and judges the agent again as a create does."
           },
           "success": {
             "body": "console_schedule",
@@ -1172,10 +1173,11 @@
                 -32001,
                 -32002,
                 -32004,
+                -32009,
                 -32602,
                 -32000
               ],
-              "note": "-32001 data.kind schedule_not_found for a schedule that does not exist, was deleted, is no console schedule, or is another agent's. -32602 for a schedule that is not paused. The other refusals are meta/schedule/create's."
+              "note": "-32001 data.kind schedule_not_found for a schedule that does not exist, was deleted, is no console schedule, or is another agent's. -32602 for a schedule that is not paused. The other refusals are meta/schedule/create's. -32009 data.kind schedule_revision_conflict (expected_revision, actual_revision) when the schedule changed between this call's read and its write: nothing is changed, so the call never reverts that change."
             }
           ]
         },

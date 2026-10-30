@@ -73,9 +73,10 @@ runnable `meta.console.scheduled_send`, which the gateway reserves: an
 application cannot register a host runnable or callback under that name, an
 agent's schedule tools cannot create a schedule that names it, and those tools
 neither list nor change console schedules. Each fire is a Console send by the
-caller who defined the schedule, through the gate a live send by that caller
-takes, judged when it fires. A refused send fails that occurrence, and the
-schedule keeps its later times. See [Schedules](/guides/console#schedules) for
+caller who defined the schedule, judged when it fires: the Console admits that
+caller as it would admit a live request by them, then sends as a live send by
+them is sent. A refused send fails that occurrence, and the schedule keeps its
+later times. See [Schedules](/guides/console#schedules) for
 the Console and [Console schedules](/api/rpc#console-schedules-console) for the
 methods.
 

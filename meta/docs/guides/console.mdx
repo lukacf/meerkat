@@ -443,13 +443,20 @@ its next send while it is active and who it sends as, with **Edit**,
 keeps the timing unless you change it.
 
 - Each send is a Console send by the schedule's sender, judged when it goes
-  out: it needs what a message sent then would need, `agent.send` on the
-  agent under the access policy at that time, a writable console, and an
-  agent that takes console messages. A refused send fails that time only;
-  the schedule keeps its later times.
+  out: the Console must still admit the sender as it would admit them then
+  (sign-in where it is required, the allowlist, the trusted issuer, and no
+  sessions revoked since the schedule was defined), and the send needs what
+  a message sent then would need, `agent.send` on the agent under the access
+  policy at that time, a writable console, and an agent that takes console
+  messages. A refused send fails that time only; the schedule keeps its
+  later times.
 - Creating, editing or resuming a schedule makes you its sender. On a
   console without sign-in the sender is the console's shared account, as it
-  is for a message you send there.
+  is for a message you send there; once the console requires sign-in, such
+  schedules stop sending until someone signed in edits them.
+- A change that races another change of the same schedule is refused and
+  the list is read again: check the schedule and repeat the change.
+- A schedule repeats at most once a minute.
 - Viewers who may see the agent but not message it see its schedules
   read-only, and so does everyone on a read-only console or on a gateway
   that does not offer schedule changes; the pane says why.
@@ -460,8 +467,9 @@ keeps the timing unless you change it.
   schedules (its schedule tools) are not listed, and the agent's tools
   neither see nor change the Console's.
 
-The section appears where the gateway runs a schedule host. Schedules are the
-`meta/schedule/*` methods on the console RPC (see
+The section appears where the gateway keeps console schedules. A gateway
+that sends none of them (a candidate launch, for one) lists them read-only.
+Schedules are the `meta/schedule/*` methods on the console RPC (see
 [Console schedules](/api/rpc#console-schedules-console)).
 
 ### Local action feedback

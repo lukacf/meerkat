@@ -69,17 +69,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the caller, signed in or not; a read-only console and a viewer without
   `agent.send` see the list read-only. Each fire is a console send by the
   caller who last created, edited or resumed the schedule, judged when it
-  fires through the gate and governance a live send by that caller takes
-  (`agent.send` under the access policy then, a writable console, an
-  addressable agent and, for a signed-in human, Console sessions not revoked
-  since), and deduplicated under its occurrence's delivery key; a refused
-  send fails that occurrence and the schedule keeps its later times.
-  `meta/capabilities` lists the list where the gateway runs a schedule host
-  and the writes where the console is writable and a firing host sends the
-  schedules. Refusals are typed (`schedule_not_found`, `unknown_identity`,
-  `not_addressable`, `governed_target`, `schedule_host_unavailable`), and a
+  fires: the Console admits that caller as it admits a live request by it
+  (sign-in where required, the allowlist and provider policy, the trusted
+  issuer, and Console sessions not revoked since the schedule was defined,
+  for every signed-in principal), then sends through the same post-admission
+  path as `/console/send` (`agent.send` under the access policy then, a
+  writable console, an addressable agent, governance), deduplicated under
+  its occurrence's delivery key; a refused send fails that occurrence and
+  the schedule keeps its later times. An update and a resume write at the
+  revision they read, so a change racing another answers `-32009`
+  `schedule_revision_conflict` and changes nothing; an interval repeats at
+  most once a minute. `meta/capabilities` lists the list where the gateway
+  runs a schedule host and the writes where the console is writable and a
+  firing host sends the schedules. Refusals are typed (`schedule_not_found`,
+  `unknown_identity`, `not_addressable`, `governed_target`,
+  `schedule_host_unavailable`, `schedule_revision_conflict`), and a
   candidate launch refuses the writes (`-32047`). Agents' schedule tools
-  neither list nor change console schedules, and their host runnable name
+  neither list nor change console schedules (a verb on a schedule they
+  cannot read is refused), and their host runnable name
   (`meta.console.scheduled_send`) is reserved: SDK callbacks and host
   runnables may not take it.
 
@@ -154,7 +161,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A gateway whose Console send dedupe store is in memory forgets a schedule
   fire's key on restart, so an occurrence redelivered after a crash can send
   twice. The Console shows no fire history: a failed fire is recorded on its
-  occurrence in the schedule store and in the gateway's log.
+  occurrence in the schedule store and in the gateway's log, and a fire whose
+  admission the Console could not observe (a timeout) is recorded failed
+  although the message may have been admitted.
+- Console schedule fires go through the Console router built last, under
+  its decisions and visibility policy. A schedule of a deleted agent stays
+  until it is deleted, and fires into a new agent declared later under the
+  same name while its sender may still send to it.
 
 ## [0.9.6] - 2026-10-27
 

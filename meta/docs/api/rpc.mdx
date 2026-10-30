@@ -2618,7 +2618,8 @@ trigger, as the schedule tools take it, tagged by `type`: `once`
 (`due_at_utc`), `interval` (`start_at_utc`, `every_seconds`, optional
 `end_at_utc`) or `calendar` (`timezone` and the `minute`, `hour`,
 `day_of_month`, `month` and `day_of_week` fields, each `{"kind": "any"}` or
-`{"kind": "values", "values": [...]}`). An update keeps each of `content`,
+`{"kind": "values", "values": [...]}`). An interval repeats at most once a
+minute (`every_seconds` of at least 60). An update keeps each of `content`,
 `trigger` and `name` it does not name.
 
 <Accordion title="Result">
@@ -2644,22 +2645,33 @@ schedule; delete answers `{identity, schedule_id, deleted: true}`.
 **The sender.** A create, an update and a resume record the caller as the
 schedule's sender: the principal the console's send would use for that
 caller (a verified signed-in human, another authenticated principal, or the
-open Console's shared account), with its issuer and subject only for a
-verified human. A pause or a delete leaves the sender as it is. A resume
-records its caller while the schedule is still paused, so no send goes out
-as the earlier sender.
+open Console's shared account), with the provider and issuer its token
+verified under, and the subject only for a verified human. A pause or a
+delete leaves the sender as it is. A resume records its caller while the
+schedule is still paused, so no send goes out as the earlier sender. The
+list shows each schedule's sender principal to everyone who may view the
+agent.
 
 **Each fire is a console send by its sender.** At each due time the Console
-sends `content` to the agent as the recorded sender, through the gate a live
-`meta/console/send` by that sender takes, judged then: a writable console,
-`agent.send` for the sender under the access policy at that time, an
-addressable agent, and governance. A fire of a signed-in human's schedule is
-also refused once that human's Console sessions were revoked
-(`meta/console/revoke_sessions`) after the schedule was defined. The send is
+first admits the recorded sender as it admits a live request by it, under
+its decisions then: an anonymous sender only while the Console requires no
+sign-in; a principal only under the issuer the Console trusts then, past its
+provider policy and allowlist where sign-in is required, and past its
+session fence, so Console sessions revoked (`meta/console/revoke_sessions`)
+after the schedule was defined end its sends, for a service identity as for
+a human. It then sends `content` to the agent exactly as `meta/console/send`
+does once its caller is admitted, as the sender: the candidate-launch
+refusal, a writable console, `agent.send` for the sender under the access
+policy at that time, an addressable agent, and governance. The send is
 deduplicated under its occurrence's delivery key in the sender's send scope,
 as a live send by the sender is, so a redelivered occurrence sends once. It
 reaches the agent with origin `console:schedule` and the scheduler turn
 origin.
+
+**Changes made meanwhile.** An update and a resume write at the revision
+they read: one that raced another change answers `-32009`
+(`schedule_revision_conflict`) and changes nothing, so it never puts back
+what the other change replaced. Read the schedule again and repeat it.
 
 A refused or failed send fails that occurrence (`delivery_failed` in the
 schedule store), and the schedule keeps its later times. That covers a
@@ -2674,9 +2686,10 @@ console send.
 | `-32001` | `schedule_not_found` | The schedule does not exist, was deleted, is no console schedule, or is another agent's |
 | `-32001` | `unknown_identity` | A create, update or resume names an agent the console does not know |
 | `-32002` | `not_addressable` | A create, update or resume names an agent that takes no console sends |
-| `-32004` | `governed_target` | The agent's input is governed: a governed send needs its Console human present, and a fire has none |
+| `-32004` | `governed_target` | The agent's input is governed: a governed send needs its Console human present, and a fire has none. A capability refusal, unlike the `-32003` a live send to a governed agent answers, since no human can be present at a fire |
 | `-32004` | `schedule_host_unavailable` | No schedule firing host sends the gateway's schedules, or the schedule store is unavailable |
-| `-32602` | none | A blank `content`, an invalid `trigger` (an unknown time zone among them), a resume of a schedule that is not paused, or a pause of one already paused |
+| `-32009` | `schedule_revision_conflict` | An update or resume raced another change of the schedule (with `expected_revision` and `actual_revision`); nothing changed |
+| `-32602` | none | A blank `content`, an interval under 60 seconds, an invalid `trigger` (an unknown time zone among them), or a resume of a schedule that is not paused. Pausing a paused schedule answers it as it is |
 
 Known limits:
 
@@ -2684,18 +2697,32 @@ Known limits:
   schedule: the create is refused (`governed_target`), and the fires of a
   schedule whose agent became governed fail the same way.
 - **The agent's own schedule tools.** Console schedules are the Console's:
-  an agent's schedule tools neither list nor change them, and their host
-  runnable name (`meta.console.scheduled_send`) is reserved, so an agent or
-  host schedule that names it is refused. The Console lists console
-  schedules only.
-- **Only a Console sends them.** A schedule host on a gateway that serves no
-  Console and drains the same store fails their fires.
+  an agent's schedule tools neither list nor change them (a verb on a
+  schedule whose kind they cannot read is refused), they cannot create a
+  schedule that names the host runnable (`meta.console.scheduled_send`), and
+  an application cannot register a host runnable or callback under that
+  name. A schedule a Rust embedder writes to the store directly is not
+  checked. The Console lists console schedules only.
+- **One Console sends them.** Fires go through the Console router built
+  last, under its decisions and visibility policy. A schedule host on a
+  gateway that serves no Console and drains the same store fails their
+  fires: a fire waits for a Console only in the gateway's first 30 seconds,
+  and otherwise fails at once. Replacing the Console's log store, and
+  shutdown, end the fires until a Console router is built again.
 - **Dedupe across a restart.** A gateway whose console send dedupe store is
   in memory forgets a fire's key when it restarts, so an occurrence
   redelivered after a crash can send twice.
+- **Unobserved admission.** A fire whose admission the Console could not
+  observe (a timeout) is recorded failed, although the message may have been
+  admitted; it is never sent twice under its key.
 - **No fire history in the Console.** A failed fire is recorded on its
   occurrence in the schedule store and in the gateway's log, not in the list.
-- **Last write wins.** The writes take no expected revision.
+- **Edits from an older view.** An update is checked against the revision
+  the gateway read for that call, so an edit made from an older view of a
+  schedule still replaces a newer one.
+- **Names reused.** A schedule of an agent that is deleted stays until it is
+  deleted, and fires into a new agent declared later under the same name,
+  as its sender, while that sender may still send to it.
 
 ### Scheduling migration
 

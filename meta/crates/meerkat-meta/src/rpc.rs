@@ -8739,6 +8739,11 @@ mod tests {
             self.create_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.last_create_spec.lock().await = Some(spec.clone());
+            // Core's rotation retires the live incarnation, then seats the
+            // next one.
+            if let Some(live) = self.core.live_member(identity)? {
+                self.core.retire(&live.agent_runtime_id);
+            }
             let generation = self.create_calls.load(std::sync::atomic::Ordering::SeqCst) as u64;
             let alias = format!("rt:{}:{generation}", identity.as_str());
             let agent_runtime_id =
@@ -8849,6 +8854,61 @@ mod tests {
 
         async fn retire_member(&self, runtime_id: &AgentRuntimeId) -> Result<(), BridgeError> {
             self.core.retire(runtime_id);
+            Ok(())
+        }
+
+        async fn member_lifecycle_journal_head(
+            &self,
+        ) -> Result<crate::identity_first::MemberLifecycleJournalHead, BridgeError> {
+            self.core.journal_head()
+        }
+
+        async fn member_lifecycle_journal_page(
+            &self,
+            after: u64,
+            limit: usize,
+        ) -> Result<crate::identity_first::MemberLifecycleJournalPage, BridgeError> {
+            self.core.journal_page(after, limit)
+        }
+    }
+
+    /// A customizer that changes no build and records each seat it is told
+    /// of.
+    #[derive(Default)]
+    struct RecordingAfterCreate {
+        told: std::sync::Mutex<Vec<(AgentIdentity, meerkat_core::types::SessionId)>>,
+    }
+
+    impl RecordingAfterCreate {
+        fn told(&self) -> Vec<(AgentIdentity, meerkat_core::types::SessionId)> {
+            self.told
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl crate::identity_first::AgentCustomizer for RecordingAfterCreate {
+        async fn customize_build(
+            &self,
+            _context: &crate::identity_first::AgentBuildContext,
+            _spec: &DurableAgentSpec,
+            _draft: &mut AgentBuildDraft,
+        ) -> Result<(), crate::identity_first::CustomizerError> {
+            Ok(())
+        }
+
+        async fn after_create(
+            &self,
+            identity: &AgentIdentity,
+            session_id: &meerkat_core::types::SessionId,
+            _context: &crate::mob_handle_runtime::SessionCreatedContext,
+        ) -> Result<(), crate::identity_first::CustomizerError> {
+            self.told
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((identity.clone(), session_id.clone()));
             Ok(())
         }
     }
@@ -10696,6 +10756,142 @@ shell = true
             .expect("methods array");
         assert!(methods.contains(&json!("meta/status_identity_bootstrap")));
         assert!(methods.contains(&json!("meta/wait_identity_bootstrap")));
+        Ok(())
+    }
+
+    /// An embedder that hands the RPC handler an identity context without
+    /// attaching one to the unified runtime still gets a reset's lifecycle
+    /// side effects: the public view the context carries binds the runtime's
+    /// lifecycle projection, so the retirement hook hears of the incarnation
+    /// the reset ended, and the runtime's customizer is told the fresh life's
+    /// session.
+    ///
+    /// RED before that view bound the projection: nothing ran it for such a
+    /// runtime, so the reset's retirement hook and its successor's
+    /// `after_create` never came.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unattached_rpc_identity_context_still_runs_a_reset_s_side_effects()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = Box::pin(
+            UnifiedRuntime::builder()
+                .mob_spec(rpc_reprofile_mob_spec(&temp_dir)?)
+                .module_config(MetaConfig {
+                    modules: Vec::new(),
+                    discovery: DiscoverySpec {
+                        namespace: "rpc-unattached-reset-effects-test".to_string(),
+                        modules: Vec::new(),
+                    },
+                    pre_spawn: Vec::new(),
+                })
+                .timeout(Duration::from_secs(1))
+                .build(),
+        )
+        .await?;
+        let bridge = Arc::new(RpcResetTestBridge::default());
+        bridge.core.keep_journal();
+        let identity_rt = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: "rpc-unattached-reset-effects-test".to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(bridge.clone()),
+            default_timeout: None,
+        }));
+        let identity = AgentIdentity::parse("domain:security")?;
+        register_live(
+            &identity_rt,
+            &bridge.core,
+            rpc_durable_spec(identity.as_str(), "domain"),
+            0,
+            meerkat_core::types::SessionId::new(),
+        )
+        .await?;
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        let observer: crate::identity_first::runtime::RetiredMemberObserver =
+            Arc::new(move |retired| {
+                recorded
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(retired);
+                Box::pin(async { Ok(()) })
+            });
+        identity_rt.set_retired_member_observer(Some(observer));
+        let customizer = Arc::new(RecordingAfterCreate::default());
+        identity_rt
+            .set_agent_customizer(Some(
+                Arc::clone(&customizer) as Arc<dyn crate::identity_first::AgentCustomizer>
+            ))
+            .await;
+        let roster_provider = Arc::new(ContextRequiredStaticRosterProvider::new(vec![
+            rpc_durable_spec(identity.as_str(), "domain"),
+        ]));
+        let identity_ctx = IdentityFirstContext {
+            runtime: crate::identity_first::PublicIdentityRuntime::new(
+                identity_rt.clone(),
+                runtime.mob_runtime().clone(),
+            ),
+            roster_provider: roster_provider.clone(),
+            topology_provider: None,
+            customizer: None,
+            agent_memory_provider: None,
+            mob_definition: Some(runtime.mob_handle().definition().clone()),
+            transcript_edit_service: None,
+            compaction_floors: None,
+        };
+
+        let response: Value = serde_json::from_str(
+            &handle_unified_rpc_json(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "meta/reset",
+                    "params": { "identity": identity.as_str() },
+                })
+                .to_string(),
+                Duration::from_secs(5),
+                None,
+                Some(&identity_ctx),
+            )
+            .await,
+        )?;
+        assert!(response["error"].is_null(), "{response:#?}");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let hooked = !seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty();
+            if hooked && !customizer.told().is_empty() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the reset's side effects did not run: hook {:?}, after_create {:?}",
+                seen.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .len(),
+                customizer.told()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let calls = seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].cause.as_str(), "reset");
+        assert_eq!(calls[0].generation, 0);
+        let fresh = bridge
+            .core
+            .live_member(&identity)?
+            .and_then(|live| live.session_id)
+            .ok_or("the reset seats a fresh life")?;
+        assert_eq!(customizer.told(), vec![(identity.clone(), fresh)]);
         Ok(())
     }
 

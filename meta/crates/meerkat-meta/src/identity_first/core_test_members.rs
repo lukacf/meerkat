@@ -5,8 +5,10 @@
 //! the double's create, resume, reset and retire calls committed. Once
 //! [`CoreTestMembers::keep_journal`] was called, the member lifecycle journal
 //! reads answer too: each bind journals a seat, each retire a retirement.
+//! [`CoreTestMembers::mark_host_made`] makes an identity's member one a host
+//! made directly on the mob under the identity's member id.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
@@ -39,6 +41,9 @@ pub(crate) struct CoreTestMembers {
     facts: Mutex<Vec<MemberLifecycleFact>>,
     /// Set by [`Self::keep_journal`]: the journal reads answer.
     journal: AtomicBool,
+    /// The identities whose member a host made directly on the mob
+    /// ([`Self::mark_host_made`]).
+    host_made: Mutex<BTreeSet<AgentIdentity>>,
 }
 
 impl CoreTestMembers {
@@ -101,6 +106,24 @@ impl CoreTestMembers {
                 });
             }
         }
+    }
+
+    /// From now on `identity`'s member, live or ended, reads as one a host
+    /// made directly on the mob under the identity's member id: its binding
+    /// carries neither the durable-identity marker nor the identity's label,
+    /// so no identity-first spawn made it.
+    pub(crate) fn mark_host_made(&self, identity: &AgentIdentity) {
+        self.host_made
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(identity.clone());
+    }
+
+    fn is_host_made(&self, identity: &AgentIdentity) -> bool {
+        self.host_made
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(identity)
     }
 
     /// From now on the member lifecycle journal reads answer, with every
@@ -200,14 +223,14 @@ impl CoreTestMembers {
         let members = self.members.lock().unwrap_or_else(PoisonError::into_inner);
         Ok(members
             .get(identity)
-            .map(|member| member_binding(identity, member)))
+            .map(|member| member_binding(identity, member, self.is_host_made(identity))))
     }
 
     pub(crate) fn history(&self) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
         let members = self.members.lock().unwrap_or_else(PoisonError::into_inner);
         let bindings = members
             .iter()
-            .map(|(identity, member)| member_binding(identity, member))
+            .map(|(identity, member)| member_binding(identity, member, self.is_host_made(identity)))
             .collect::<Vec<_>>();
         // Ended bindings first, so a session a live binding still names
         // resolves to that binding.
@@ -216,7 +239,7 @@ impl CoreTestMembers {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .map(|(identity, member)| member_binding(identity, member))
+            .map(|(identity, member)| member_binding(identity, member, self.is_host_made(identity)))
             .chain(bindings.iter().cloned())
             .collect::<Vec<_>>();
         Ok(meerkat_mob::MemberBindingHistory::for_test(
@@ -267,8 +290,14 @@ fn generation_of(runtime_id: &AgentRuntimeId) -> u64 {
         .unwrap_or(0)
 }
 
-fn member_binding(identity: &AgentIdentity, member: &TestMember) -> meerkat_mob::MemberBinding {
-    meerkat_mob::MemberBinding::for_test(
+/// `identity`'s binding as Core's history reads it; a member a host made
+/// (`host_made`) carries neither the durable-identity marker nor the label.
+fn member_binding(
+    identity: &AgentIdentity,
+    member: &TestMember,
+    host_made: bool,
+) -> meerkat_mob::MemberBinding {
+    let binding = meerkat_mob::MemberBinding::for_test(
         crate::member_comms_id::roster_member_id_for_identity(identity.as_str()),
         meerkat_mob::Generation::new(member.generation),
         member.session_id.clone(),
@@ -278,13 +307,20 @@ fn member_binding(identity: &AgentIdentity, member: &TestMember) -> meerkat_mob:
             meerkat_mob::MemberBindingState::Retired
         },
         member.profile.clone(),
-        meerkat_mob::SpawnContinuityIntent::DurableIdentity {
-            continuity_key: identity.as_str().to_string(),
+        if host_made {
+            meerkat_mob::SpawnContinuityIntent::Ephemeral
+        } else {
+            meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+                continuity_key: identity.as_str().to_string(),
+            }
         },
         meerkat_mob::MemberIdentityManagement::CommandDriven,
-    )
+    );
+    if host_made {
+        return binding;
+    }
     // Every identity-first spawn labels its member with the identity.
-    .with_labels(BTreeMap::from([(
+    binding.with_labels(BTreeMap::from([(
         "agent_identity".to_owned(),
         identity.as_str().to_owned(),
     )]))

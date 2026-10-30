@@ -578,6 +578,25 @@ fn failed_effects_of(
         .collect()
 }
 
+/// The failed releases of `identity` the error hook was handed (its
+/// retirement hook answered an error, or never answered), each in its wire
+/// form.
+fn failed_releases_of(
+    events: &Mutex<Vec<ErrorEvent>>,
+    identity: &AgentIdentity,
+) -> Vec<serde_json::Value> {
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|event| serde_json::to_value(event).expect("an error event serializes"))
+        .filter(|event| {
+            event["category"] == "retired_member_release_failed"
+                && event["identity"] == identity.as_str()
+        })
+        .collect()
+}
+
 /// From now on, every write to the exit-interview queue in `store` fails.
 async fn refuse_exit_interviews(store: &SqliteAgentMemoryStore) {
     // A read opens the realm's database, and its tables, first.
@@ -1046,9 +1065,9 @@ async fn a_replayed_seat_of_an_incarnation_that_ended_is_not_told() {
 
 /// The host's retirement hook never answers for one identity the roster
 /// stops listing. Each attempt to call it is bounded: once every attempt
-/// missed its deadline, the failure is reported typed
-/// (`lifecycle_effect_failed`, effect `retirement_hook`), and the retirement
-/// Core journaled after it reaches the hook.
+/// missed its deadline, the failure is reported as a retirement hook's
+/// failure is (`retired_member_release_failed`, its error saying the hook
+/// timed out), and the retirement Core journaled after it reaches the hook.
 ///
 /// RED before each lifecycle side effect was bounded: the projection waited
 /// for the hook forever, and every side effect journaled after it waited
@@ -1094,14 +1113,23 @@ async fn a_retirement_hook_that_never_answers_is_reported_and_later_effects_run(
     })
     .await;
     eventually("the reported failure of the hook", || {
-        (!failed_effects_of(&events, &beta.identity).is_empty()).then_some(())
+        (!failed_releases_of(&events, &beta.identity).is_empty()).then_some(())
     })
     .await;
     tokio::time::sleep(SETTLE).await;
-    let failed = failed_effects_of(&events, &beta.identity);
+    let failed = failed_releases_of(&events, &beta.identity);
     assert_eq!(failed.len(), 1, "reported once: {failed:?}");
-    assert_eq!(failed[0]["effect"], "retirement_hook", "{failed:?}");
-    assert_eq!(failed[0]["attempts"], SHORT_ATTEMPTS, "{failed:?}");
+    assert_eq!(failed[0]["cause"], "unlisted", "{failed:?}");
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("timed out")),
+        "the error says the hook timed out: {failed:?}"
+    );
+    assert!(
+        failed_effects_of(&events, &beta.identity).is_empty(),
+        "a retirement hook's failure is reported once, as a failed release"
+    );
     assert_eq!(
         hook_calls_of(&seen, &beta.identity).len(),
         SHORT_ATTEMPTS as usize,

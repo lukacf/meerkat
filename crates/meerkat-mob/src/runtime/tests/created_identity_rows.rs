@@ -860,7 +860,8 @@ fn rollback_fixture_dir(name: &str) -> std::path::PathBuf {
 
 /// Rollback of a fresh created owner under an identity-first host, lane-run leg:
 /// `fresh_created_owner_is_not_retired_by_the_identity_first_pass_under_<pair>`
-/// for each pair (P1 and P2), against the pair's recorded artifacts.
+/// for each published pair it runs against, with the pair's recorded
+/// artifacts.
 ///
 /// This build writes the fixture (`write_created_owner_fixture`). The lane
 /// runs the pair's identity-first host over it and checks: the created row

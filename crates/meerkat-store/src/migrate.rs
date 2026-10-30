@@ -62,6 +62,10 @@ pub const REALM_SQLITE_FILES: &[&str] = &[
     "memory/memory.sqlite3",
     "tasks.db",
     "sessions_jsonl/session_index.sqlite3",
+    // Durable decisions under the store path (the realm root, or
+    // `sessions_jsonl/` on the JSONL backend), created by the first hold.
+    "approval_decisions.sqlite3",
+    "sessions_jsonl/approval_decisions.sqlite3",
 ];
 
 /// Stable finding code: a legacy `<home>/.rkat/sessions` directory exists
@@ -1005,6 +1009,9 @@ pub fn supported_domain_version(domain: &str) -> Option<i64> {
             Some(crate::schedule_sqlite_store::SCHEDULE_STORE_DOMAIN.supported_version())
         }
         "jsonl-index" => Some(crate::index::JSONL_INDEX_DOMAIN.supported_version()),
+        "approval-decisions" => {
+            Some(crate::approval_decision_store::APPROVAL_DECISIONS_DOMAIN.supported_version())
+        }
         _ => None,
     }
 }

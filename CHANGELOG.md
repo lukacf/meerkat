@@ -401,6 +401,12 @@ them.
   struct literal needs them; `Default` and `AgentBuildConfig::new` fill them
   with `false` and `None`, which keep every existing build unchanged.
 
+- `meerkat`: `BuildAgentError` gains `AuthorityOnlyWithMobTools`, the
+  refusal of a build that sets `mob_operator_authority_only` while it
+  enables mob tools (see Added). `BuildAgentError` is exhaustive, so a
+  downstream exhaustive match needs the arm. A session service surfaces it
+  as its generic build error (`AgentError::BuildError`).
+
 ### Added
 
 - `meerkat-mob`, `meerkat-mob-mcp`: identity entries. A Rust host can tell
@@ -748,9 +754,13 @@ them.
   can bind its mob operator authority without mounting any mob operator
   tool surface: with `SessionBuildOptions::mob_operator_authority_only` (and
   `AgentBuildConfig::mob_operator_authority_only`) set, the build's mob tools
-  resolve to disabled, whatever its mob override says, and a generated
-  authority is still bound to the session's external tools, where a host's
-  own tools read it.
+  resolve to disabled, and a generated authority is still bound to the
+  session's external tools, where a host's own tools read it. A build that
+  enables mob tools (a member whose profile enables them, whose own mob
+  operator tools the mob runtime composes) refuses the flag with
+  `BuildAgentError::AuthorityOnlyWithMobTools` before it binds anything:
+  such a creator takes the normal path, its full mob operator authority with
+  the creation scope granted into it (`grant_identity_creation_in_mob`).
   `mob_operator_authority::identity_creation_only_mob_operator_authority`
   mints the authority such a creator holds: the creation scope for its
   templates in one mob, bound to the mob's incarnation, and nothing else (no

@@ -483,7 +483,9 @@ where
 /// an identity creator whose profile disables mob tools, with the witness
 /// the build carries (`SessionBuildOptions::mob_incarnation`), and binds it
 /// to the creator's session without mounting the mob tools (the build's
-/// `mob_operator_authority_only`). Every step is a generated MeerkatMachine
+/// `mob_operator_authority_only`, which a build with mob tools refuses: a
+/// creator with mob tools gets the scope granted into its full authority by
+/// [`grant_identity_creation_in_mob`]). Every step is a generated MeerkatMachine
 /// input: `create_only_mob_operator_authority` -> `set_create_authority`
 /// (off) -> `set_profile_mutation` (off) ->
 /// [`grant_identity_creation_in_mob`].

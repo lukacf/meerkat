@@ -1229,14 +1229,19 @@ pub struct SessionBuildOptions {
     pub override_mob: ToolCategoryOverride,
     /// Bind this build's mob operator authority without mounting any mob
     /// operator tool surface ("authority only"). The build's mob tool
-    /// category then resolves to `Disable`, whatever `override_mob` says, so
-    /// the build mounts no mob tools, and a generated
-    /// `mob_tool_authority_context` is still bound to the session's external
-    /// tools, where a host's own tools read it. A host sets it for an
-    /// identity creator whose profile disables mob tools (a mob runtime
-    /// composes a member's own mob tools from its profile), with an
-    /// authority that holds the creation scope and nothing else
+    /// category then resolves to `Disable`, so the build mounts no mob tools,
+    /// and a generated `mob_tool_authority_context` is still bound to the
+    /// session's external tools, where a host's own tools read it. A host
+    /// sets it for an identity creator whose profile disables mob tools,
+    /// with an authority that holds the creation scope and nothing else
     /// (`meerkat_runtime::mob_operator_authority::identity_creation_only_mob_operator_authority`).
+    /// A build that enables mob tools (`override_mob` is `Enable`, as a mob
+    /// runtime sets it for a member whose profile enables them, whose own
+    /// mob operator tools it composes from that profile) refuses the flag
+    /// with `meerkat::BuildAgentError::AuthorityOnlyWithMobTools`: such a
+    /// creator takes the normal path, its full mob operator authority with
+    /// the creation scope granted into it
+    /// (`meerkat_runtime::mob_operator_authority::grant_identity_creation_in_mob`).
     /// `false`, the default, binds an authority only to a build with mob
     /// tools enabled.
     pub mob_operator_authority_only: bool,

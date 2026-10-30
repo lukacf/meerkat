@@ -908,11 +908,13 @@ pub struct AgentBuildConfig {
     /// Bind this build's mob operator authority without mounting any mob
     /// operator tool surface ("authority only"); see
     /// `SessionBuildOptions::mob_operator_authority_only`. The build's mob
-    /// tool category resolves to `Disable`, whatever `override_mob` says, so
-    /// the factory mounts no mob tools, and a generated
-    /// `mob_tool_authority_context` is still bound to the session's external
-    /// tools, where a host's own tools read it. `false`, the default, binds
-    /// an authority only to a build with mob tools enabled.
+    /// tool category resolves to `Disable`, so the factory mounts no mob
+    /// tools, and a generated `mob_tool_authority_context` is still bound to
+    /// the session's external tools, where a host's own tools read it. A
+    /// build that enables mob tools (`override_mob` is `Enable`, as a mob
+    /// runtime sets it for a member whose profile enables them) refuses the
+    /// flag with [`BuildAgentError::AuthorityOnlyWithMobTools`]. `false`, the
+    /// default, binds an authority only to a build with mob tools enabled.
     pub mob_operator_authority_only: bool,
     /// Per-build override for factory-level comms tooling.
     /// `Inherit` defers to the factory/runtime default.
@@ -1462,12 +1464,11 @@ impl AgentBuildConfig {
         self.override_workgraph = build.override_workgraph;
         self.override_comms = build.override_comms;
         let (override_mob, mob_tool_authority_context) = if build.mob_operator_authority_only {
-            // Authority only: mob tools stay disabled and the authority is
-            // kept for the build to restore and bind.
-            (
-                ToolCategoryOverride::Disable,
-                build.mob_tool_authority_context.clone(),
-            )
+            // Authority only: the build itself refuses a requested `Enable`
+            // and resolves any other category to `Disable`, so the request
+            // is kept as given, and so is the authority, for the build to
+            // restore and bind.
+            (build.override_mob, build.mob_tool_authority_context.clone())
         } else {
             meerkat_runtime::mob_operator_authority::resolve_mob_operator_access(
                 build.override_mob,
@@ -2042,6 +2043,20 @@ pub enum BuildAgentError {
     #[error("keep_alive requires comms_name to be set")]
     #[cfg(feature = "comms")]
     KeepAliveRequiresCommsName,
+
+    /// The build sets `mob_operator_authority_only` while it enables mob
+    /// tools (`override_mob` is `Enable`, as a mob runtime sets it for a
+    /// member whose profile enables them). Authority only binds an authority
+    /// with mob tools disabled; a member with mob tools has its own mob
+    /// operator tools composed already, which a creation-only authority
+    /// would leave listed. Such a creator takes its full mob operator
+    /// authority, with the identity creation scope granted into it. The
+    /// build fails before it binds or mounts anything.
+    #[error(
+        "mob_operator_authority_only cannot be set on a build that enables mob tools; \
+         grant the identity creation scope into the build's mob operator authority instead"
+    )]
+    AuthorityOnlyWithMobTools,
 }
 
 /// Authoritative, side-effect-free-with-respect-to-session-state LLM
@@ -7463,8 +7478,15 @@ impl AgentFactory {
         build_config.resume_override_mask.override_comms |=
             !matches!(build_config.override_comms, ToolCategoryOverride::Inherit);
         // An authority-only build mounts no mob tool surface: its mob tool
-        // category is Disable, which resumed metadata cannot override.
+        // category is Disable, which resumed metadata cannot override. A
+        // build that enables mob tools (a member whose profile enables them,
+        // whose own mob operator tools the mob runtime has composed) refuses
+        // the flag before it binds anything: such a creator takes its full
+        // mob operator authority, with the creation scope granted into it.
         if build_config.mob_operator_authority_only {
+            if matches!(build_config.override_mob, ToolCategoryOverride::Enable) {
+                return Err(BuildAgentError::AuthorityOnlyWithMobTools);
+            }
             build_config.override_mob = ToolCategoryOverride::Disable;
         }
         let has_explicit_mob_authority_context = build_config

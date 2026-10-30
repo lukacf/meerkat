@@ -979,3 +979,85 @@ async fn a_creation_only_creator_has_the_scope_and_no_mob_tool_surfaces() {
         "no mob operator tool is listed: {visible:?}"
     );
 }
+
+/// Row (RED): authority only is refused on a build whose profile enables mob
+/// tools. The mob runtime composed that member's own mob operator tools from
+/// its profile before the host's hook ran, so a creation-only authority bound
+/// there would leave them listed. The build fails with
+/// `AuthorityOnlyWithMobTools` before it binds anything: the member's tools
+/// stay unbound and deny every call. Such a creator takes the normal path
+/// instead, its full mob operator authority with the creation scope granted
+/// into it, which builds, admits the creation, and keeps its mob tools.
+///
+/// RED on the old tree: the build accepted the flag (the error does not exist
+/// there), resolved the mob tools to disabled and bound the creation-only
+/// authority to the member's own mob operator tools, which stayed listed.
+#[tokio::test]
+async fn authority_only_with_a_profile_that_enables_mob_tools_is_refused_at_build() {
+    use meerkat_runtime::mob_operator_authority::{
+        admit_identity_creation_from_template, grant_identity_creation_in_mob,
+        identity_creation_only_mob_operator_authority,
+    };
+
+    let (handle, service, session_id) = mob_with_spawned_worker().await;
+    let tools = recorded_member_tools(&service, &session_id).await;
+    let mob_id = handle.definition().id.to_string();
+    let config = worker_build_config(&handle, MEMBER, Arc::clone(&tools)).await;
+    assert_eq!(config.override_mob, ToolCategoryOverride::Enable);
+    let witness = config
+        .mob_incarnation
+        .expect("the build carries the runtime's witness");
+
+    // The host's hook sets authority only on a member whose profile enables
+    // mob tools.
+    let mut request = crate::build::to_create_session_request(
+        &config,
+        meerkat_core::types::ContentInput::Text(String::new()),
+    );
+    let build = request.build.as_mut().expect("the member's build");
+    build.mob_tool_authority_context = Some(
+        identity_creation_only_mob_operator_authority(mob_id.clone(), witness, [CREATION_TEMPLATE])
+            .expect("mint the creation-only authority"),
+    );
+    build.mob_operator_authority_only = true;
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+    let rebuilt = meerkat::AgentBuildConfig::from_create_session_request(&request, event_tx);
+    let temp = tempfile::tempdir().expect("factory dir");
+    let refused = meerkat::AgentFactory::new(temp.path().join("sessions"))
+        .builtins(false)
+        .workgraph(false)
+        .build_agent(rebuilt, &meerkat_core::Config::default())
+        .await;
+    match refused {
+        Err(meerkat::BuildAgentError::AuthorityOnlyWithMobTools) => {}
+        Err(other) => panic!("expected AuthorityOnlyWithMobTools, got {other}"),
+        Ok(_) => panic!("authority only on a build with mob tools must be refused"),
+    }
+    assert_denied(
+        spawn(&tools, "worker", "w-2").await,
+        "the refused build bound no authority to the member's tools",
+    );
+
+    // The normal path: the full authority with the creation scope granted
+    // into it.
+    let mut config = worker_build_config(&handle, MEMBER, Arc::clone(&tools)).await;
+    let full = config
+        .mob_tool_authority_context
+        .clone()
+        .expect("a tools.mob member gets a default authority");
+    let creator =
+        grant_identity_creation_in_mob(&full, mob_id.clone(), witness, [CREATION_TEMPLATE])
+            .expect("grant the creation scope into the full authority");
+    assert_eq!(
+        admit_identity_creation_from_template(
+            Some(&creator),
+            &mob_id,
+            handle.incarnation(),
+            CREATION_TEMPLATE
+        ),
+        Ok(())
+    );
+    config.mob_tool_authority_context = Some(creator);
+    let (_dir, _agent) = build_through_factory(config, None).await;
+    assert_spawned(spawn(&tools, "worker", "w-2").await, "w-2");
+}

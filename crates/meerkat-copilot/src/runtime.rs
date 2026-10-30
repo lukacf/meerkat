@@ -1194,8 +1194,15 @@ struct CopilotAccountState {
 
 struct CopilotRefreshOutcome {
     flight_id: u64,
-    source_generation: u64,
+    source: CopilotRefreshSource,
     error: Option<ProviderAuthError>,
+}
+
+#[derive(PartialEq, Eq)]
+enum CopilotRefreshSource {
+    OAuthGeneration(u64),
+    // Private flight correlation only; never persisted or formatted.
+    PersonalAccessToken(String),
 }
 
 struct CopilotRefreshFlight<'a>(&'a CopilotAccountState);
@@ -1286,15 +1293,15 @@ impl CopilotAuthorizer {
     }
 
     async fn ensure_token(&self) -> Result<CachedTokenView, ProviderAuthError> {
-        if uses_pat(&self.binding) {
-            return self.ensure_pat().await;
-        }
         let entry_flight_id = self
             .state
             .last_refresh_outcome
             .lock()
             .as_ref()
             .map_or(0, |outcome| outcome.flight_id);
+        if uses_pat(&self.binding) {
+            return self.ensure_pat(entry_flight_id).await;
+        }
         loop {
             let source = self.load_source_tokens().await?;
             let source_generation = meerkat_core::tokens_lifecycle_published_generation(&source)
@@ -1312,7 +1319,7 @@ impl CopilotAuthorizer {
             }
             if let Some(outcome) = self.state.last_refresh_outcome.lock().as_ref()
                 && outcome.flight_id != entry_flight_id
-                && outcome.source_generation == source_generation
+                && outcome.source == CopilotRefreshSource::OAuthGeneration(source_generation)
                 && let Some(error) = outcome.error.as_ref()
             {
                 return Err(error.clone());
@@ -1330,7 +1337,7 @@ impl CopilotAuthorizer {
                 }
                 if let Some(outcome) = self.state.last_refresh_outcome.lock().as_ref()
                     && outcome.flight_id != entry_flight_id
-                    && outcome.source_generation == source_generation
+                    && outcome.source == CopilotRefreshSource::OAuthGeneration(source_generation)
                     && let Some(error) = outcome.error.as_ref()
                 {
                     return Err(error.clone());
@@ -1347,7 +1354,7 @@ impl CopilotAuthorizer {
                 .await;
             *self.state.last_refresh_outcome.lock() = Some(CopilotRefreshOutcome {
                 flight_id,
-                source_generation,
+                source: CopilotRefreshSource::OAuthGeneration(source_generation),
                 error: result.as_ref().err().cloned(),
             });
             return result;
@@ -1501,7 +1508,23 @@ impl CopilotAuthorizer {
             })
     }
 
-    async fn ensure_pat(&self) -> Result<CachedTokenView, ProviderAuthError> {
+    fn completed_pat_flight_error(
+        &self,
+        entry_flight_id: u64,
+        token: &str,
+    ) -> Option<ProviderAuthError> {
+        let last = self.state.last_refresh_outcome.lock();
+        let outcome = last.as_ref()?;
+        if outcome.flight_id != entry_flight_id
+            && let CopilotRefreshSource::PersonalAccessToken(previous) = &outcome.source
+            && previous == token
+        {
+            return outcome.error.clone();
+        }
+        None
+    }
+
+    async fn ensure_pat(&self, entry_flight_id: u64) -> Result<CachedTokenView, ProviderAuthError> {
         loop {
             let token = meerkat_auth_core::resolver::resolve_simple_secret(
                 &self.binding.auth_profile().source,
@@ -1527,6 +1550,9 @@ impl CopilotAuthorizer {
                     model_discovery_due: false,
                 });
             }
+            if let Some(error) = self.completed_pat_flight_error(entry_flight_id, &token) {
+                return Err(error);
+            }
             let notified = self.state.refresh_notify.notified();
             if self
                 .state
@@ -1540,7 +1566,16 @@ impl CopilotAuthorizer {
                 continue;
             }
             let _flight = CopilotRefreshFlight(self.state.as_ref());
-            let models = self
+            // The previous leader may have finished between the first
+            // outcome check and our acquisition of the flight.
+            if let Some(error) = self.completed_pat_flight_error(entry_flight_id, &token) {
+                return Err(error);
+            }
+            let flight_id = self
+                .state
+                .next_refresh_flight
+                .fetch_add(1, Ordering::Relaxed);
+            let result = self
                 .fetch_models(DEFAULT_COPILOT_API_BASE, &token)
                 .await
                 .map_err(|error| match error.status() {
@@ -1551,7 +1586,13 @@ impl CopilotAuthorizer {
                     None => ProviderAuthError::SourceResolutionFailed(
                         "Copilot PAT model discovery failed".to_string(),
                     ),
-                })?;
+                });
+            *self.state.last_refresh_outcome.lock() = Some(CopilotRefreshOutcome {
+                flight_id,
+                source: CopilotRefreshSource::PersonalAccessToken(token.clone()),
+                error: result.as_ref().err().cloned(),
+            });
+            let models = result?;
             let generation = self.state.next_generation.fetch_add(1, Ordering::Relaxed);
             let api_base = DEFAULT_COPILOT_API_BASE.to_string();
             *self.state.cache.write() = Some(CachedCopilotToken {
@@ -3519,6 +3560,114 @@ mod tests {
         first_result.expect("first authorization");
         second_result.expect("second authorization");
         assert_eq!(transport.inner.request_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn pat_waiters_share_discovery_failure_but_later_call_can_retry() {
+        for expired_cache in [false, true] {
+            let binding = pat_binding(Provider::OpenAI, serde_json::Value::Null);
+            let env = ResolverEnvironment::testing().with_env_lookup(|name| {
+                (name == "SERVICE_COPILOT_TOKEN").then(|| "test-pat".to_string())
+            });
+            let mut responses = Vec::new();
+            if expired_cache {
+                responses.push(models_response());
+            }
+            responses.push(json_response(
+                429,
+                serde_json::json!({"message": "rate limited"}),
+            ));
+            responses.push(models_response());
+            let transport = Arc::new(DelayedTransport {
+                inner: ScriptedTransport::new(responses),
+            });
+            let runtime = CopilotRuntime::new();
+            let state = runtime
+                .account_state(
+                    None,
+                    binding.credential_identity(),
+                    CopilotBackendConfig::from_pat_options(&serde_json::Value::Null).unwrap(),
+                )
+                .unwrap();
+            let authorizer = CopilotAuthorizer {
+                state,
+                binding,
+                env,
+                transport: transport.clone(),
+            };
+            if expired_cache {
+                authorizer.prime().await.expect("seed cache");
+                authorizer.state.cache.write().as_mut().unwrap().refresh_at =
+                    Utc::now() - Duration::seconds(1);
+            }
+            let before = transport.inner.request_count();
+            let mut leader = Box::pin(authorizer.prime());
+            assert!(futures::poll!(leader.as_mut()).is_pending());
+            let mut waiters: Vec<_> = (0..8).map(|_| Box::pin(authorizer.prime())).collect();
+            for waiter in &mut waiters {
+                assert!(futures::poll!(waiter.as_mut()).is_pending());
+            }
+            let error = leader.await.expect_err("leader discovery fails");
+            for result in futures::future::join_all(waiters).await {
+                assert_eq!(
+                    result.expect_err("waiter shares failure").to_string(),
+                    error.to_string(),
+                );
+            }
+            assert_eq!(
+                transport.inner.request_count(),
+                before + 1,
+                "one failing discovery for all overlapping callers"
+            );
+            authorizer
+                .prime()
+                .await
+                .expect("a new call may retry the same PAT");
+            assert_eq!(transport.inner.request_count(), before + 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn pat_waiters_can_retry_a_rotated_token_after_the_old_flight_fails() {
+        let binding = pat_binding(Provider::OpenAI, serde_json::Value::Null);
+        let token = Arc::new(RwLock::new("old-test-pat".to_string()));
+        let source = token.clone();
+        let env = ResolverEnvironment::testing().with_env_lookup(move |name| {
+            (name == "SERVICE_COPILOT_TOKEN").then(|| source.read().clone())
+        });
+        let transport = Arc::new(DelayedTransport {
+            inner: ScriptedTransport::new([
+                json_response(429, serde_json::json!({"message": "rate limited"})),
+                models_response(),
+            ]),
+        });
+        let runtime = CopilotRuntime::new();
+        let state = runtime
+            .account_state(
+                None,
+                binding.credential_identity(),
+                CopilotBackendConfig::from_pat_options(&serde_json::Value::Null).unwrap(),
+            )
+            .unwrap();
+        let authorizer = CopilotAuthorizer {
+            state,
+            binding,
+            env,
+            transport: transport.clone(),
+        };
+        let mut leader = Box::pin(authorizer.prime());
+        let mut waiter = Box::pin(authorizer.prime());
+        assert!(futures::poll!(leader.as_mut()).is_pending());
+        assert!(futures::poll!(waiter.as_mut()).is_pending());
+        *token.write() = "rotated-test-pat".to_string();
+        leader.await.expect_err("old PAT failed");
+        waiter
+            .await
+            .expect("new PAT must not inherit the old PAT's failure");
+        let requests = transport.inner.requests.lock();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].1["authorization"], "Bearer old-test-pat");
+        assert_eq!(requests[1].1["authorization"], "Bearer rotated-test-pat");
     }
 
     #[tokio::test]

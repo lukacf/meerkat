@@ -76,6 +76,20 @@ pub(super) fn is_activity_frame(frame: &ConsoleFrame) -> bool {
         && !frame.kind.starts_with(MEMORY_EVENT_KIND_PREFIX)
 }
 
+/// Live event kinds that record an identity leaving: retired or deleted. The
+/// aggregator drops a departed identity's in-memory last activity
+/// ([`super::last_activity::LastActivityCache`]), and its next read walks the
+/// log again. Each is also a [`NON_ACTIVITY_EVENT_KINDS`] kind: a departure is
+/// never the identity acting.
+const DEPARTURE_EVENT_KINDS: [&str; 2] = ["identity_retired", "identity_deleted"];
+
+/// Whether a frame records its identity leaving: a live runtime event of a
+/// [`DEPARTURE_EVENT_KINDS`] kind.
+pub(super) fn is_departure_frame(frame: &ConsoleFrame) -> bool {
+    frame.source.kind == ConsoleFrameSourceKind::ConsoleEvent
+        && DEPARTURE_EVENT_KINDS.contains(&frame.kind.as_str())
+}
+
 /// A comma-separated list of SQL string literals, for fixed values only.
 fn sql_string_list<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
     values
@@ -2262,6 +2276,47 @@ mod tests {
                     .expect("no identities"),
                 HashMap::new(),
             );
+        }
+    }
+
+    /// A departure is a live runtime event that retires or deletes its
+    /// identity; a reset, a respawn or a frame rebuilt from history is not.
+    /// No departure counts as the identity acting.
+    #[tokio::test]
+    async fn departure_frames_are_live_retire_and_delete_events_and_never_activity() {
+        for kind in DEPARTURE_EVENT_KINDS {
+            assert!(
+                NON_ACTIVITY_EVENT_KINDS.contains(&kind),
+                "{kind} must not count as acting"
+            );
+        }
+        let store = InMemoryConsoleLogStore::new();
+        let mut history_retired = event_frame("history-retired", "worker", 5, "identity_retired");
+        history_retired.source.kind = ConsoleFrameSourceKind::SessionHistory;
+        for (frame, departs) in [
+            (
+                event_frame("retired", "worker", 1, "identity_retired"),
+                true,
+            ),
+            (
+                event_frame("deleted", "worker", 2, "identity_deleted"),
+                true,
+            ),
+            (event_frame("reset", "worker", 3, "identity_reset"), false),
+            (
+                event_frame("respawned", "worker", 4, "identity_respawned"),
+                false,
+            ),
+            (history_retired, false),
+        ] {
+            let stored = store.append_if_absent(frame).await.expect("append").frame;
+            assert_eq!(
+                is_departure_frame(&stored),
+                departs,
+                "{}",
+                stored.dedupe_key
+            );
+            assert!(!is_activity_frame(&stored), "{}", stored.dedupe_key);
         }
     }
 

@@ -9,7 +9,8 @@
 //! every read, so the aggregator walks each identity once, on its first read
 //! (its seed), and from then on keeps its time from the frames the aggregator
 //! appends itself ([`LastActivityCache::append`]). Which frames record an
-//! identity acting is the store's one rule, [`is_activity_frame`].
+//! identity acting is the store's one rule, [`is_activity_frame`]; which
+//! record it leaving is the rule beside it, [`is_departure_frame`].
 //!
 //! # Why an append that races a seed is never lost
 //!
@@ -34,17 +35,24 @@
 //! flight and empties the map in the same hold, so no time merged after a
 //! clear belongs to a frame the clear removed.
 //!
+//! A departure (the identity retired or deleted) drops that identity's entry
+//! holding `log` alone too, after its own append has let go of it. No seed is
+//! then between its walk and its merge: one that walked before the drop has
+//! merged, and one after it walks the log again. Without that, a seed that
+//! walked before the drop and merged after it could leave an older time where
+//! an append had merged a newer one. The identity's frames stay in the log,
+//! so its next read finds them.
+//!
 //! # Memory
 //!
-//! One entry per identity this process has read or seen act: the identity
-//! and an optional time. Only a clear drops entries. Retiring an identity
-//! keeps its frames in the log and a respawned identity keeps its activity,
-//! so an entry lives as long as the frames it summarizes.
+//! One entry per identity this process has read or seen act and that has not
+//! left since: the identity and an optional time. A departure drops one
+//! entry and a clear drops them all.
 
 use std::collections::HashMap;
 use std::sync::{MutexGuard, PoisonError};
 
-use super::store::{ConsoleLogResult, ConsoleLogStore, is_activity_frame};
+use super::store::{ConsoleLogResult, ConsoleLogStore, is_activity_frame, is_departure_frame};
 use super::{AppendDisposition, AppendOutcome, NewConsoleFrame};
 
 /// The aggregator's in-memory last activity, shared by every policy view of
@@ -53,13 +61,13 @@ use super::{AppendDisposition, AppendOutcome, NewConsoleFrame};
 pub(super) struct LastActivityCache {
     /// Each identity's newest activity time, or `None` when its walk found
     /// no acting frame. An identity without an entry has neither been read
-    /// nor acted in this process.
+    /// nor acted in this process since it last left, if it did.
     times: std::sync::Mutex<HashMap<String, Option<u64>>>,
     /// Held by a seed for its walk and merge, so concurrent first reads walk
     /// each identity once.
     seeding: tokio::sync::Mutex<()>,
     /// Shared by appends and seeds from their store call to their merge;
-    /// held alone by a clear.
+    /// held alone by a clear and by a departure's drop.
     log: tokio::sync::RwLock<()>,
 }
 
@@ -87,19 +95,30 @@ impl LastActivityCache {
     }
 
     /// Append a frame to the log, then merge its time into its identity's
-    /// entry when the store inserted it and it records the identity acting.
-    /// A frame the store already held (a replayed dedupe key) is not merged:
-    /// it may be older than the identity's newest acting frame, so it cannot
-    /// stand in for a walk.
+    /// entry when the store inserted it and it records the identity acting,
+    /// or drop the entry when it records the identity leaving. A frame the
+    /// store already held (a replayed dedupe key) changes nothing: it may be
+    /// older than the identity's newest acting frame, so it cannot stand in
+    /// for a walk, and a replayed departure was dropped when it was first
+    /// stored.
     pub(super) async fn append(
         &self,
         store: &dyn ConsoleLogStore,
         frame: NewConsoleFrame,
     ) -> ConsoleLogResult<AppendOutcome> {
-        let _log = self.log.read().await;
-        let outcome = store.append_if_absent(frame).await?;
-        if outcome.disposition == AppendDisposition::Inserted && is_activity_frame(&outcome.frame) {
-            self.record(&outcome.frame.identity, outcome.frame.timestamp_ms);
+        let outcome = {
+            let _log = self.log.read().await;
+            let outcome = store.append_if_absent(frame).await?;
+            if outcome.disposition == AppendDisposition::Inserted
+                && is_activity_frame(&outcome.frame)
+            {
+                self.record(&outcome.frame.identity, outcome.frame.timestamp_ms);
+            }
+            outcome
+        };
+        if outcome.disposition == AppendDisposition::Inserted && is_departure_frame(&outcome.frame)
+        {
+            self.drop_entry(&outcome.frame.identity).await;
         }
         Ok(outcome)
     }
@@ -113,6 +132,13 @@ impl LastActivityCache {
         // log, and the next read walks the log again.
         self.times().clear();
         cleared
+    }
+
+    /// Drop a departed identity's entry, holding `log` alone as a clear does
+    /// (see the module documentation). Its next read walks the log again.
+    async fn drop_entry(&self, identity: &str) {
+        let _log = self.log.write().await;
+        self.times().remove(identity);
     }
 
     fn times(&self) -> MutexGuard<'_, HashMap<String, Option<u64>>> {

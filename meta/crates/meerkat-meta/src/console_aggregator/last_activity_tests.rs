@@ -588,3 +588,108 @@ async fn a_clear_waits_for_appends_in_flight_and_drops_every_time() {
         assert_eq!(observed.walks(), 1, "{name}");
     }
 }
+
+/// A departure (the identity retired or deleted) drops its entry: the next
+/// read walks the log again, finds the identity's newest acting frame, and is
+/// kept in memory again.
+#[tokio::test]
+async fn a_departure_drops_the_entry_and_a_later_read_walks_the_log_again() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        let aggregator = MetaConsoleAggregator::new(observed.clone());
+        for (identity, departure) in [
+            ("worker", "identity_retired"),
+            ("router", "identity_deleted"),
+        ] {
+            append(
+                &aggregator,
+                acting(&format!("{identity}-acted"), identity, 100),
+            )
+            .await;
+            assert_eq!(
+                read(&aggregator, &[identity]).await,
+                times(&[(identity, 100)]),
+                "{name}"
+            );
+            let walks = observed.walks();
+            append(
+                &aggregator,
+                frame(
+                    &format!("{identity}-left"),
+                    identity,
+                    200,
+                    ConsoleFrameSourceKind::ConsoleEvent,
+                    departure,
+                ),
+            )
+            .await;
+            assert_eq!(
+                read(&aggregator, &[identity]).await,
+                times(&[(identity, 100)]),
+                "{name}: {departure}"
+            );
+            assert_eq!(
+                observed.walks(),
+                walks + 1,
+                "{name}: {departure} drops the entry, so the next read walks the log"
+            );
+            assert_eq!(
+                read(&aggregator, &[identity]).await,
+                times(&[(identity, 100)]),
+                "{name}: {departure}"
+            );
+            assert_eq!(
+                observed.walks(),
+                walks + 1,
+                "{name}: the walk's result is kept again"
+            );
+        }
+    }
+}
+
+/// A departure drops its entry only once a seed in flight has merged. The
+/// seed walked the older time, an acting append merged a newer one, and the
+/// drop waits for the seed, so the seed cannot leave its older time behind
+/// after the drop. The store holds the walk after its read.
+#[tokio::test]
+async fn a_departure_waits_for_a_seed_in_flight_before_dropping() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        stored_before(&observed, acting("worker-earlier", "worker", 100)).await;
+        let aggregator = MetaConsoleAggregator::new(observed.clone());
+        let shared = &aggregator;
+        let HoldHandle { reached, resume } = observed.hold_next_walk();
+        let (first, ((), ())) = tokio::join!(read(shared, &["worker"]), async move {
+            reached.await.expect("the walk read the log");
+            append(shared, acting("worker-racing", "worker", 300)).await;
+            tokio::join!(
+                async move {
+                    append(
+                        shared,
+                        frame(
+                            "worker-left",
+                            "worker",
+                            400,
+                            ConsoleFrameSourceKind::ConsoleEvent,
+                            "identity_retired",
+                        ),
+                    )
+                    .await;
+                },
+                async move {
+                    tokio::task::yield_now().await;
+                    resume.send(()).expect("resume the walk");
+                },
+            )
+        });
+        assert_eq!(first, times(&[("worker", 300)]), "{name}");
+        // The drop came after the seed's merge, so the next read walks the
+        // log and finds the racing append, not the seed's older time.
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            times(&[("worker", 300)]),
+            "{name}"
+        );
+        assert_eq!(observed.walks(), 2, "{name}");
+    }
+}

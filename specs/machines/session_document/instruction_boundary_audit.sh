@@ -52,7 +52,8 @@ MODEL="${spec_dir}/model.tla" python3 - <<'PY'
 import os, re
 text = open(os.environ["MODEL"]).read()
 recover = "session_id, owner, owner_mob, target_generation, entry_sequence"
-recover_slots = "session_id, revision, effect, digest, bytes"
+recover_target = "session_id, revision, effect, digest, bytes"
+recover_effective = "session_id, revision, effect, digest, bytes, generation, last_entry_sequence"
 record = "session_id, mob_id, generation, revision, effect, digest, bytes"
 write = "session_id, slot, revision, effect, digest, body_bytes"
 rebind = "session_id, owner, mob_id"
@@ -61,8 +62,8 @@ resolve = "session_id, run_start, lowering, transcript_is_system_prefix"
 fold = "session_id, at_run_start, lowering"
 arms = {
     "RecoverSessionInstructionState": recover,
-    "RecoverSessionInstructionTarget": recover_slots,
-    "RecoverSessionInstructionEffective": recover_slots,
+    "RecoverSessionInstructionTarget": recover_target,
+    "RecoverSessionInstructionEffective": recover_effective,
     "RecordInstructionTargetAdvance": record,
     "RecordInstructionTargetActiveBudgetExceeded": record,
     "RecordInstructionTargetAlreadyRecorded": record,

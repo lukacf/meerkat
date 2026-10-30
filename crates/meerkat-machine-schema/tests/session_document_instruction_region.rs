@@ -144,9 +144,14 @@ struct Seed {
     owner: InstructionTargetOwner,
     owner_mob: &'static str,
     target_generation: u64,
+    /// The recorded high-water.
     entry_sequence: u64,
     target: Slots,
     effective: Slots,
+    /// The target generation the session's last entry row realized.
+    effective_generation: u64,
+    /// The sequence of the session's last entry row.
+    last_entry_sequence: u64,
 }
 
 impl Seed {
@@ -158,6 +163,8 @@ impl Seed {
             entry_sequence: 0,
             target: Slots::empty(),
             effective: Slots::empty(),
+            effective_generation: 0,
+            last_entry_sequence: 0,
         }
     }
 
@@ -180,8 +187,13 @@ impl Seed {
         }
     }
 
+    /// Slots in effect that the last entry row, at `entry_sequence` and
+    /// realizing generation 1, put there; the recorded high-water is that
+    /// entry's sequence.
     fn in_effect(mut self, entry_sequence: u64, effective: Slots) -> Self {
         self.entry_sequence = entry_sequence;
+        self.last_entry_sequence = entry_sequence;
+        self.effective_generation = 1;
         self.effective = effective;
         self
     }
@@ -208,6 +220,8 @@ impl Seed {
                 effect: self.effective.effect.clone(),
                 digest: self.effective.digest.clone(),
                 bytes: self.effective.bytes.clone(),
+                generation: self.effective_generation,
+                last_entry_sequence: self.last_entry_sequence,
             },
         ]
     }
@@ -327,6 +341,14 @@ fn generation(authority: &Authority) -> Option<u64> {
         .copied()
 }
 
+fn effective_generation(authority: &Authority) -> Option<u64> {
+    authority
+        .state()
+        .session_instruction_effective_generation
+        .get(&session())
+        .copied()
+}
+
 fn entry_sequence(authority: &Authority) -> Option<u64> {
     authority
         .state()
@@ -426,6 +448,27 @@ fn recovering_the_owner_empties_both_slot_sets() {
     assert_eq!(generation(&authority), Some(5));
     assert_eq!(target(&authority), Slots::empty());
     assert_eq!(effective(&authority), Slots::empty());
+}
+
+#[test]
+fn recovering_what_is_in_effect_takes_the_later_entry_sequence() {
+    let in_effect = Slots::empty().active("tone", 3, DIGEST_X, 5);
+    for (recorded, last_row, expected) in [(2, 5, 5), (5, 2, 5), (4, 4, 4), (0, 3, 3)] {
+        let seed = Seed {
+            entry_sequence: recorded,
+            last_entry_sequence: last_row,
+            effective_generation: 7,
+            effective: in_effect.clone(),
+            ..Seed::session_owned(1, Slots::empty())
+        };
+        let authority = seeded(&seed);
+        assert_eq!(
+            entry_sequence(&authority),
+            Some(expected),
+            "recorded {recorded}, last row {last_row}"
+        );
+        assert_eq!(effective_generation(&authority), Some(7));
+    }
 }
 
 #[test]
@@ -1106,6 +1149,7 @@ fn fresh_run_start_applies_the_pending_changes_in_one_entry() {
             seed.target,
             "the target is now in effect"
         );
+        assert_eq!(effective_generation(&authority), Some(2));
         assert_eq!(target(&authority), seed.target, "applying records nothing");
         assert_eq!(generation(&authority), Some(2));
         // Nothing is pending after the application.
@@ -1252,12 +1296,14 @@ fn run_start_fold_applies_the_target() {
             transition.effects(),
             [Effect::InstructionFoldAuthorized {
                 entry_sequence: 2,
-                source: InstructionFoldSource::Target
+                source: InstructionFoldSource::Target,
+                generation: 2
             }]
             .as_slice(),
             "{lowering:?}"
         );
         assert_eq!(effective(&authority), seed.target);
+        assert_eq!(effective_generation(&authority), Some(2));
         assert_eq!(entry_sequence(&authority), Some(2));
     }
 }
@@ -1302,11 +1348,13 @@ fn other_folds_keep_the_slots_in_effect() {
             transition.effects(),
             [Effect::InstructionFoldAuthorized {
                 entry_sequence: 2,
-                source: InstructionFoldSource::Effective
+                source: InstructionFoldSource::Effective,
+                generation: 1
             }]
             .as_slice(),
             "{case}"
         );
+        assert_eq!(effective_generation(&authority), Some(1), "{case}");
         assert_eq!(
             effective(&authority),
             seed.effective,

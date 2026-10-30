@@ -64,7 +64,10 @@ export function agentDisplayTitle(agent: AgentTitleSource): string {
     .filter(Boolean);
   if (label && !ids.includes(label)) return label;
   const id = label || ids[0] || "";
-  const parts = stripAgentKeyPrefix(id).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const bare = stripAgentKeyPrefix(id);
+  // An email already reads as a person's address; it is not an agent key.
+  if (bare.includes("@")) return bare;
+  const parts = bare.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
   if (parts.length === 0) return id || "Agent";
   if (parts.some(isOpaqueIdPart)) {
     return `${agentKindLabel(agent) || "Agent"} ${parts.join("").slice(-6).toLowerCase()}`;

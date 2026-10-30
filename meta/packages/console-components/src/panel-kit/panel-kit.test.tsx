@@ -177,6 +177,8 @@ describe("agent names", () => {
     expect(agentDisplayName("member:release-manager")).toBe("Release manager");
     expect(agentDisplayName("household-agent")).toBe("Household agent");
     expect(agentDisplayName("agent:01HXYZ8Q9ABCDEF")).toBe("Agent abcdef");
+    // A person's email stays as written: it is not an agent key.
+    expect(agentDisplayName("admin@example.test")).toBe("admin@example.test");
     expect(agentDisplayName("", directory)).toBe("");
     expect(agentDisplayName(undefined, directory)).toBe("");
     expect(stripAgentKeyPrefix("identity:agent:x")).toBe("x");

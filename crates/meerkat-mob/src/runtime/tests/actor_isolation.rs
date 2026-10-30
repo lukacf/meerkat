@@ -70,6 +70,12 @@ pub(super) struct FaultInjectingRuntimeStore {
     /// Sessions whose unregister finalization fails, and how.
     failed_unregister_finalizations:
         std::sync::Mutex<HashMap<LogicalRuntimeId, UnregisterFinalizationFault>>,
+    /// Sessions whose next admission write commits and then answers
+    /// `WriteFailed`, as if the store lost the acknowledgement of the commit.
+    lose_admission_acknowledgement: std::sync::Mutex<HashSet<LogicalRuntimeId>>,
+    /// The input ids of each session's admission write whose acknowledgement
+    /// was lost.
+    lost_admission_acknowledgements: std::sync::Mutex<HashMap<LogicalRuntimeId, Vec<InputId>>>,
 }
 
 /// How [`FaultInjectingRuntimeStore`] fails a session's unregister
@@ -110,7 +116,29 @@ impl FaultInjectingRuntimeStore {
             release_unregister_finalizations: Notify::new(),
             parked_unregister_finalization_arrivals: std::sync::Mutex::new(HashMap::new()),
             failed_unregister_finalizations: std::sync::Mutex::new(HashMap::new()),
+            lose_admission_acknowledgement: std::sync::Mutex::new(HashSet::new()),
+            lost_admission_acknowledgements: std::sync::Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Commit the next admission write for `session_id`, then answer it with
+    /// `WriteFailed`, as a store that lost the acknowledgement after the
+    /// commit does: the input is durably admitted and its admission refused.
+    fn lose_next_admission_acknowledgement(&self, session_id: &SessionId) {
+        self.lose_admission_acknowledgement
+            .lock()
+            .expect("lose_admission_acknowledgement mutex")
+            .insert(LogicalRuntimeId::for_session(session_id));
+    }
+
+    /// The input ids of the admission write for `session_id` whose
+    /// acknowledgement was lost, once one was.
+    fn lost_admission_acknowledgement(&self, session_id: &SessionId) -> Option<Vec<InputId>> {
+        self.lost_admission_acknowledgements
+            .lock()
+            .expect("lost_admission_acknowledgements mutex")
+            .get(&LogicalRuntimeId::for_session(session_id))
+            .cloned()
     }
 
     /// Park every committed-boundary commit for `session_id` until
@@ -616,7 +644,28 @@ impl RuntimeStore for FaultInjectingRuntimeStore {
         self.park_admission_if_flagged(runtime_id).await;
         self.inner
             .persist_input_states_atomically(runtime_id, states)
-            .await
+            .await?;
+        let acknowledgement_lost = self
+            .lose_admission_acknowledgement
+            .lock()
+            .expect("lose_admission_acknowledgement mutex")
+            .remove(runtime_id);
+        if acknowledgement_lost {
+            self.lost_admission_acknowledgements
+                .lock()
+                .expect("lost_admission_acknowledgements mutex")
+                .insert(
+                    runtime_id.clone(),
+                    states
+                        .iter()
+                        .map(|state| state.as_stored().state.input_id.clone())
+                        .collect(),
+                );
+            return Err(meerkat_runtime::store::RuntimeStoreError::WriteFailed(
+                format!("injected lost admission acknowledgement for {runtime_id}"),
+            ));
+        }
+        Ok(())
     }
 
     async fn compare_and_swap_input_states_atomically(
@@ -2623,6 +2672,68 @@ async fn reload_member_registration_replaces_the_degraded_registration_in_place(
         .expect("second reload succeeds");
     assert_eq!(again.disposition, MemberReloadDisposition::NotDegraded);
     assert_eq!(again.generation, generation_before);
+}
+
+/// The store commits member 0's admission and then loses its
+/// acknowledgement: the delivery is refused, the input is durably admitted,
+/// and the member's registration needs a reload (`admission_commit`) while
+/// its runtime loop is idle and attached. The reload replaces the degraded
+/// registration in place within its deadline and keeps the committed input,
+/// which then runs once on the reloaded member. Before, nothing detached the
+/// idle loop: the reload's runtime discard waited for the loop's teardown
+/// handoff past the reload deadline and kept the member's lane after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reload_after_a_lost_admission_acknowledgement_keeps_the_committed_input() {
+    let mob = create_isolation_mob(1).await;
+    mob.store
+        .lose_next_admission_acknowledgement(mob.session(0));
+    let refused = tokio::time::timeout(Duration::from_secs(5), mob.send(0, "lost acknowledgement"))
+        .await
+        .expect("the delivery answers");
+    assert!(
+        refused.is_err(),
+        "the delivery whose acknowledgement was lost is refused: {refused:?}"
+    );
+    let committed = mob
+        .store
+        .lost_admission_acknowledgement(mob.session(0))
+        .expect("the admission committed before its acknowledgement was lost");
+    let [input_id] = committed.as_slice() else {
+        panic!("the lost acknowledgement committed one input: {committed:?}");
+    };
+    let required = mob
+        .adapter
+        .durability_reload_required(mob.session(0))
+        .await
+        .expect("the lost acknowledgement degraded the member's registration");
+    assert_eq!(required.operation, "admission_commit");
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        mob.handle.reload_member_registration(mob.member(0)),
+    )
+    .await
+    .expect("the reload answers")
+    .expect("the reload settles within its deadline");
+    assert_eq!(outcome.disposition, MemberReloadDisposition::Discarded);
+    assert!(
+        mob.adapter.is_durability_ready(mob.session(0)).await,
+        "the fresh registration is durability-ready"
+    );
+    assert!(
+        mob.store
+            .load_input_state(&LogicalRuntimeId::for_session(mob.session(0)), input_id)
+            .await
+            .expect("read the committed input")
+            .is_some(),
+        "the reload keeps the committed input"
+    );
+    mob.wait_for_executed_prompts(0, 1).await;
+    assert_eq!(
+        mob.executed_prompts(0).await,
+        ["lost acknowledgement"],
+        "the committed input runs once on the reloaded member"
+    );
 }
 
 /// A reply timeout does not cancel admission already in flight. Only the

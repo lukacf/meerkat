@@ -1352,9 +1352,9 @@ pub fn require_source_original_live(
 
 /// A grant-lineage mandate must resolve in the actual grant owner for the
 /// executor and represented subject. Other bases are the host invocation
-/// policy's, consulted by its own owner. Admission and a retained resume
-/// both resolve the original's own mandate here, and a refusal is
-/// classified by [`lineage_refusal`].
+/// policy's, consulted by its own owner. Admission, a retained resume and
+/// [`require_source_original_live`] all resolve the original's own mandate
+/// here, and a refusal is classified by [`lineage_refusal`].
 pub(super) fn resolve_original_basis(
     grants: &LocalGrantAuthority,
     basis: &WorkAuthorityBasis,

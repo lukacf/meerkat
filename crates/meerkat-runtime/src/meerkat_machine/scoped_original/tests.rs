@@ -2380,6 +2380,59 @@ fn a_current_source_original_is_retained_and_its_mandate_resolves() {
     );
 }
 
+/// Outside an exclusion of owner changes, an owner change in progress while
+/// the current-source conjuncts resolve the original's own mandate is a
+/// changed policy (`PolicyChanged`), as at admission, never an owner that
+/// cannot say now. The original is current again once the change completes.
+#[test]
+fn a_source_original_read_during_an_owner_change_is_a_changed_policy() {
+    let f = fixture();
+    let source = f.claims.contributing_work[1].clone();
+    let lineage = f
+        .grants
+        .issue_root(
+            &f.root,
+            id("source-leaf"),
+            f.claims.logical_executor.clone(),
+            None,
+            ExecutionRestrictions::unrestricted(),
+        )
+        .expect("the source original's grant");
+    f.originals.contributors.lock().expect("fixture").insert(
+        source.work.clone(),
+        contributor_custody(
+            &f.claims,
+            &source,
+            WorkAuthorityBasis::GrantLineage {
+                lineage: vec![lineage],
+            },
+        ),
+    );
+    let current = || {
+        require_source_original_live(
+            &f.grants,
+            f.originals.as_ref(),
+            &f.claims.ingress_namespace,
+            &source,
+            &f.claims.logical_executor,
+            None,
+        )
+    };
+    assert!(current().is_ok(), "no change in progress");
+    let change = f
+        .publication
+        .begin_owner_change()
+        .expect("an owner change in progress");
+    let during = current();
+    drop(change);
+    assert_eq!(
+        readiness(during),
+        Some(ControllerReadinessFailure::PolicyChanged),
+        "a change met outside an exclusion"
+    );
+    assert!(current().is_ok(), "current once the change completes");
+}
+
 /// The fixture's source owner, interfering once when a contributor's
 /// retained custody is read: inside the preparation's observation of the
 /// grant publication, just before contributor lineages are resolved.

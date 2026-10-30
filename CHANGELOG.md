@@ -75,6 +75,25 @@ them.
   release. Shell synchronization only: no machine input, owner fact, wire
   type or error variant changes.
 
+### Upgrade notes
+
+- No storage migration: this release changes no stored format. It opens
+  every 0.9.7 store as it is, and 0.9.7 reads everything it writes.
+
+- Pin the Core crates exactly at `=0.9.8`, as for every release. Meta 0.9.7
+  pins Core `=0.9.8`.
+
+- A host whose own pure observation of a work's publication answered a
+  stale read as unavailable, or stopped when `wait_for_settled_change`
+  answered `None`, can wait with `OwnerChangeChurn::wait_after_stale_read`
+  between attempts of that observation and keep the answer typed as stale
+  once the wait answers `NotSettled` (see Added). Nothing changes for a host
+  that does not.
+
+### Known limitations
+
+- None new.
+
 ## [0.9.7] - 2026-10-28
 
 ### Breaking

@@ -1433,11 +1433,14 @@ mod tests {
             let config = selection
                 .secret_configuration(&BTreeSet::from(["list_cards".into()]))
                 .unwrap();
+            // The governed realm's own native owner, as the continuation
+            // reopens it; an ordinary startup open of it is refused.
+            let native = crate::stdio::tests::realm_native_owner(&fixture.storage).await;
             let mut startup = SessionStartup {
                 storage: fixture.storage.clone(),
                 config: meerkat::Config::default(),
                 factory: fixture.factory.clone(),
-                persistence: None,
+                persistence: Some(native),
                 connector_auth: None,
                 standalone: None,
             };

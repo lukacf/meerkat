@@ -221,7 +221,10 @@ fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended()
                 }
                 (
                     Expected::Refused,
-                    Err(TransitionError::NoMatchingTransition { phase: at, .. }),
+                    Err(
+                        TransitionError::NoMatchingTransition { phase: at, .. }
+                        | TransitionError::GuardRejected { phase: at, .. },
+                    ),
                 ) => {
                     assert_eq!(at, phase);
                     assert_eq!(

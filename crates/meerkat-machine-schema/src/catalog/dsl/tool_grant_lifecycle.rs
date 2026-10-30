@@ -31,8 +31,9 @@
 //!
 //! Every input has an explicit transition in every issued phase. `Expire`,
 //! `Revoke` and `AdmitUse` against an `Unissued` record are refused by the
-//! generated kernel (`NoMatchingTransition`): the owner service creates a row
-//! only through `Issue`, so it never sends them.
+//! generated kernel: their arms' phase guards fail there, so it answers
+//! `GuardRejected`. The owner service creates a row only through `Issue`, so
+//! it never sends them.
 
 use super::OptionValueExt;
 

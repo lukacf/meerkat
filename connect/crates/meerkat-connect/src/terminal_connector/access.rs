@@ -971,7 +971,13 @@ mod tests {
             Ok(())
         }
     }
-    async fn answer(seen: &Seen, lines: &mpsc::Sender<io::Result<String>>, approve: bool) {
+    // Change review requires a protected terminal (`require_terminal`); scripted
+    // input is a non-terminal by design. The human types on the PTY master.
+    fn protected_terminal() -> (TerminalInput, std::os::fd::OwnedFd) {
+        let pair = nix::pty::openpty(None, None).unwrap();
+        (TerminalInput::from_owned_fd(pair.slave), pair.master)
+    }
+    async fn answer(seen: &Seen, lines: &std::os::fd::OwnedFd, approve: bool) {
         while !seen.text().contains("Type 'approve ") {
             tokio::task::yield_now().await;
         }
@@ -983,13 +989,8 @@ mod tests {
             .split('\'')
             .next()
             .unwrap();
-        lines
-            .send(Ok(format!(
-                "{} {id}",
-                if approve { "approve" } else { "deny" }
-            )))
-            .await
-            .unwrap();
+        let line = format!("{} {id}\n", if approve { "approve" } else { "deny" });
+        nix::unistd::write(lines, line.as_bytes()).unwrap();
     }
     fn request(session: &SessionId, change: Change) -> (Request, oneshot::Receiver<Value>) {
         let (response, receive) = oneshot::channel();
@@ -1224,8 +1225,7 @@ mod tests {
                 let (approvals, mut presenter) =
                     LocalApprovals::create_paired_host(root.path()).unwrap();
                 approvals.bind_session(&session).unwrap();
-                let (lines, receive_lines) = mpsc::channel(1);
-                let mut input = TerminalInput::scripted(receive_lines);
+                let (mut input, lines) = protected_terminal();
                 let seen = Seen::default();
                 let mut output = seen.clone();
                 for (request_session, proposal) in [
@@ -1385,8 +1385,7 @@ mod tests {
                     let (approvals, mut presenter) =
                         LocalApprovals::create_paired_host(root.path()).unwrap();
                     approvals.bind_session(&session).unwrap();
-                    let (lines, receive_lines) = mpsc::channel(1);
-                    let mut input = TerminalInput::scripted(receive_lines);
+                    let (mut input, lines) = protected_terminal();
                     let seen = Seen::default();
                     let mut output = seen.clone();
                     let (request, receive) = request(&session, change("mail", "reader"));
@@ -1532,8 +1531,7 @@ mod tests {
             let (approvals, mut presenter) =
                 LocalApprovals::create_paired_host(root.path()).unwrap();
             approvals.bind_session(&session).unwrap();
-            let (lines, receive_lines) = mpsc::channel(1);
-            let mut input = TerminalInput::scripted(receive_lines);
+            let (mut input, lines) = protected_terminal();
             let seen = Seen::default();
             let mut output = seen.clone();
             let target = Change::Revoke {
@@ -1658,8 +1656,7 @@ mod tests {
             let (approvals, mut presenter) =
                 LocalApprovals::create_paired_host(root.path()).unwrap();
             approvals.bind_session(&session).unwrap();
-            let (lines, receive_lines) = mpsc::channel(1);
-            let mut input = TerminalInput::scripted(receive_lines);
+            let (mut input, lines) = protected_terminal();
             let seen = Seen::default();
             let mut output = seen.clone();
             let (request, receive) = request(
@@ -1775,8 +1772,7 @@ mod tests {
                 let (approvals, mut presenter) =
                     LocalApprovals::create_paired_host(root.path()).unwrap();
                 approvals.bind_session(&session).unwrap();
-                let (lines, receive_lines) = mpsc::channel(1);
-                let mut input = TerminalInput::scripted(receive_lines);
+                let (mut input, lines) = protected_terminal();
                 let seen = Seen::default();
                 let mut output = seen.clone();
                 let (first, receive) = request(&session, change("mail", "reader"));

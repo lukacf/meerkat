@@ -76,7 +76,10 @@ issuance before its acknowledged append publishes), a held exclusion
 operation's final entry. `LocalAuthorizationPublication::change_in_progress`
 still names published changes only. Every owner-change wait, Core's own and
 a host's, now lasts until such a holder releases the writer, within the same
-bounds (2 s, or the budget passed when less). No step answers differently.
+bounds (2 s, or the budget passed when less). The operation-time steps and the
+host-facing entries that never wait answer as before; Core's own waits may now
+wait, within the same bounds, for such a holder and rebuild where they answered
+at once.
 
 **Do:** nothing, unless your code reads the native work owner's
 `owner_change_in_progress` as "a published change is in progress": read

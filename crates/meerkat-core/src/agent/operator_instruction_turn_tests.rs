@@ -669,9 +669,14 @@ fn conversed_session_served_by(identity: &meerkat_core::SessionLlmIdentity) -> S
     session
 }
 
+/// Swap the agent's model as a live hot swap does: the request policy
+/// carries the lowering the host resolved for `identity`, with the config
+/// that resolves its binding.
 fn hot_swap(
     agent: &mut TestAgent,
     client: &Arc<RecordingClient>,
+    config: &meerkat_core::Config,
+    registry: &meerkat_core::ModelRegistry,
     identity: meerkat_core::SessionLlmIdentity,
 ) {
     let request_policy = meerkat_core::SessionLlmRequestPolicy {
@@ -680,19 +685,21 @@ fn hot_swap(
         provider_params: None,
         provider_tool_defaults: None,
         provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,
+        operator_instruction_lowering: registry
+            .instruction_lowering_for_identity(config, &identity),
     };
     agent
         .hot_swap_llm_identity(Arc::clone(client), identity, request_policy)
         .expect("the hot swap commits");
 }
 
-/// A live model hot swap holds no config that resolves the new identity's
-/// binding to its backend. Onto the ChatGPT backend's binding, operator
-/// instructions lower nowhere until a build judges that binding: a pending
-/// target stays pending and no entry row is appended. An identity naming no
-/// binding is served by the API-key backend, and every Anthropic backend
-/// carries every leading System row: both keep the leading prefix a swap
-/// claims.
+/// A live model hot swap installs the lowering the host resolved for the
+/// new identity's binding. Onto the ChatGPT backend's binding, operator
+/// instructions lower nowhere: a pending target stays pending and no entry
+/// row is appended. Onto a named public API binding, an identity naming no
+/// binding, or an Anthropic binding, the swap keeps what the model row
+/// lowers (the test catalog's rows lower System rows only as a leading
+/// prefix).
 #[tokio::test]
 async fn a_hot_swap_onto_a_chatgpt_backend_binding_defers_operator_instructions() {
     let config = backend_realms_config();
@@ -717,6 +724,8 @@ async fn a_hot_swap_onto_a_chatgpt_backend_binding_defers_operator_instructions(
     hot_swap(
         &mut agent,
         &client,
+        &config,
+        &registry,
         openai_identity(Some(chatgpt_binding())),
     );
     assert_eq!(
@@ -746,7 +755,25 @@ async fn a_hot_swap_onto_a_chatgpt_backend_binding_defers_operator_instructions(
         "the target stays pending"
     );
 
-    hot_swap(&mut agent, &client, openai_identity(None));
+    hot_swap(
+        &mut agent,
+        &client,
+        &config,
+        &registry,
+        openai_identity(Some(configured_binding("public_realm", "default_openai"))),
+    );
+    assert_eq!(
+        agent.operator_instruction_lowering(),
+        InstructionLowering::LeadingPrefixOnly,
+        "a named public API binding keeps what the model row lowers"
+    );
+    hot_swap(
+        &mut agent,
+        &client,
+        &config,
+        &registry,
+        openai_identity(None),
+    );
     assert_eq!(
         agent.operator_instruction_lowering(),
         InstructionLowering::LeadingPrefixOnly,
@@ -755,6 +782,8 @@ async fn a_hot_swap_onto_a_chatgpt_backend_binding_defers_operator_instructions(
     hot_swap(
         &mut agent,
         &client,
+        &config,
+        &registry,
         llm_identity(
             meerkat_core::Provider::Anthropic,
             crate::model_profile::test_catalog::ANTHROPIC_MODEL,
@@ -765,5 +794,47 @@ async fn a_hot_swap_onto_a_chatgpt_backend_binding_defers_operator_instructions(
         agent.operator_instruction_lowering(),
         InstructionLowering::LeadingPrefixOnly,
         "every Anthropic backend carries every leading System row"
+    );
+}
+
+/// Every request carries the entry rows a session wrote itself; a fork
+/// child's copied rows are left out wherever its model cannot lower them. A
+/// recorded target is no row, an applied entry is the session's own, and a
+/// fork child that copied it holds none of its own.
+#[tokio::test]
+async fn own_operator_instruction_entries_are_the_rows_the_session_wrote() {
+    let client = Arc::new(RecordingClient::default());
+    let mut agent = build_agent(
+        conversed_session(),
+        &client,
+        Some(InstructionLowering::MidConversation),
+    )
+    .await;
+    agent
+        .session_mut()
+        .set_session_instruction(write("tone", 1, "Answer formally."))
+        .unwrap();
+    assert!(
+        !agent.session().holds_own_operator_instruction_entries(),
+        "a recorded target is no row"
+    );
+    agent
+        .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+        .unwrap();
+    agent.run("next".into()).await.unwrap();
+    assert!(
+        agent.session().holds_own_operator_instruction_entries(),
+        "the applied entry is the session's own"
+    );
+
+    let child = agent.session().fork();
+    assert_eq!(
+        entry_rows(child.messages()).len(),
+        1,
+        "the child copied the row"
+    );
+    assert!(
+        !child.holds_own_operator_instruction_entries(),
+        "a copied row is history, not the child's own"
     );
 }

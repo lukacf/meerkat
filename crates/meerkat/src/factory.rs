@@ -14038,6 +14038,53 @@ mod tests {
         );
     }
 
+    /// The request policy a live hot swap installs carries the
+    /// operator-instruction lowering the identity's binding serves: none on
+    /// the ChatGPT backend, whose wire carries only the prompt's leading
+    /// System row, and what the model row lowers on the public API, for an
+    /// identity naming no binding too.
+    #[test]
+    fn a_request_policy_carries_the_operator_instruction_lowering_its_binding_serves() {
+        let temp = tempfile::tempdir().expect("temp sessions");
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let (mut config, chatgpt_binding) = chatgpt_backend_cache_config();
+        config.realm.insert(
+            "public".to_string(),
+            inline_realm_section(&[("openai", "test-key")]),
+        );
+        let lowering = |auth_binding: Option<AuthBindingRef>| {
+            factory
+                .request_policy_for_llm_identity(
+                    &config,
+                    &SessionLlmIdentity {
+                        model: "gpt-5.6-sol".to_string(),
+                        provider: Provider::OpenAI,
+                        self_hosted_server_id: None,
+                        provider_params: None,
+                        auth_binding,
+                    },
+                    ToolCategoryOverride::Disable,
+                )
+                .expect("request policy")
+                .operator_instruction_lowering
+        };
+        assert_eq!(
+            lowering(Some(chatgpt_binding)),
+            meerkat_core::InstructionLowering::Unavailable,
+            "the ChatGPT backend's wire carries no entry"
+        );
+        assert_eq!(
+            lowering(Some(configured_auth_binding("public", "default_openai"))),
+            meerkat_core::InstructionLowering::MidConversation,
+            "the public API carries the row's mid-conversation System rows"
+        );
+        assert_eq!(
+            lowering(None),
+            meerkat_core::InstructionLowering::MidConversation,
+            "an identity naming no binding is served by the API-key backend"
+        );
+    }
+
     /// Lower `identity`'s request policy through a ChatGPT-backend client, as
     /// the session's turn does, and return the body the wire would carry.
     #[cfg(feature = "openai")]

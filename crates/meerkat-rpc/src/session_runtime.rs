@@ -26452,6 +26452,300 @@ mod tests {
         );
     }
 
+    /// The `global` realm of [`config_with_public_and_chatgpt_bindings`]
+    /// (`public` its default binding) with a second public OpenAI API
+    /// binding, `public_b`, on backend and auth profiles of its own.
+    fn config_with_two_public_and_chatgpt_bindings() -> meerkat_core::Config {
+        let mut config = config_with_public_and_chatgpt_bindings("public");
+        let section = config.realm.get_mut("global").expect("global realm");
+        section.backend.insert(
+            "openai_api_b".into(),
+            meerkat_core::BackendProfileConfig {
+                provider: "openai".into(),
+                backend_kind: meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi
+                    .as_str()
+                    .into(),
+                base_url: None,
+                options: serde_json::Value::Null,
+                server: None,
+            },
+        );
+        section.auth.insert(
+            "openai_key_b".into(),
+            meerkat_core::AuthProfileConfig {
+                provider: "openai".into(),
+                auth_method: meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey
+                    .as_str()
+                    .into(),
+                source: meerkat_core::CredentialSourceSpec::InlineSecret {
+                    secret: "sk-public-b-test".into(),
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "public_b".into(),
+            meerkat_core::ProviderBindingConfig {
+                backend_profile: "openai_api_b".into(),
+                auth_profile: "openai_key_b".into(),
+                credential_account: None,
+                default_model: None,
+                policy: Default::default(),
+                provider_default: false,
+            },
+        );
+        config
+    }
+
+    /// A session on the `public` binding of
+    /// [`config_with_two_public_and_chatgpt_bindings`], after one turn.
+    /// `client` serves its build and every hot swap, so no provider resolves
+    /// a credential; the named bindings still decide what each backend's
+    /// wire carries. The returned directory holds the runtime's sessions.
+    async fn public_binding_session_with_recorded_requests(
+        client: &Arc<RecordingMessagesLlmClient>,
+    ) -> (Arc<SessionRuntime>, SessionId, tempfile::TempDir) {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_with_two_public_and_chatgpt_bindings();
+        let runtime = make_runtime_with_config(temp_factory(&temp), 10, config.clone());
+        runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
+            Arc::new(meerkat_core::MemoryConfigStore::new(
+                config,
+                meerkat_models::canonical(),
+            )),
+            temp.path().join("config_state.json"),
+        )));
+        let served_by: Arc<dyn LlmClient> = Arc::clone(client) as Arc<dyn LlmClient>;
+        runtime.set_default_llm_client(Some(Arc::clone(&served_by)));
+        let build_config = AgentBuildConfig {
+            llm_client_override: Some(served_by),
+            auth_binding: Some(test_auth_binding("global", "public")),
+            ..AgentBuildConfig::new("gpt-5.6-sol")
+        };
+        let session_id = runtime
+            .create_session(build_config, None, None, Vec::new())
+            .await
+            .unwrap();
+        run_one_turn(&runtime, &session_id, "Hello").await;
+        (runtime, session_id, temp)
+    }
+
+    async fn run_one_turn(runtime: &SessionRuntime, session_id: &SessionId, prompt: &str) {
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(session_id, prompt.into(), event_tx, None, None, None, None)
+            .await
+            .unwrap();
+    }
+
+    /// A session-owned write of the `tone` slot: an activation of `body`, or
+    /// a revoke when there is none.
+    fn tone_instruction(
+        revision: u64,
+        body: Option<&str>,
+    ) -> meerkat_core::SessionInstructionWrite {
+        meerkat_core::SessionInstructionWrite {
+            slot: meerkat_core::InstructionSlot {
+                namespace: meerkat_core::InstructionNamespace::new("app.example").unwrap(),
+                key: meerkat_core::InstructionKey::new("tone").unwrap(),
+            },
+            revision: meerkat_core::InstructionRevision::new(revision).unwrap(),
+            change: match body {
+                Some(body) => meerkat_core::SessionInstructionChange::Activate {
+                    body: body.to_string(),
+                    content_sha256: None,
+                },
+                None => meerkat_core::SessionInstructionChange::Revoke,
+            },
+        }
+    }
+
+    fn entry_rows_in(request: &[meerkat_core::Message]) -> usize {
+        request
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message,
+                    meerkat_core::Message::System(system) if system.instruction_entry.is_some()
+                )
+            })
+            .count()
+    }
+
+    fn swap_onto(binding: &str) -> crate::handlers::turn::TurnOverrides {
+        crate::handlers::turn::TurnOverrides {
+            auth_binding: Some(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                    test_auth_binding("global", binding),
+                ),
+            ),
+            ..Default::default()
+        }
+    }
+
+    /// A live swap between two named public OpenAI API bindings keeps the
+    /// lowering their backend serves: the operator instruction recorded
+    /// before the swap applies at the next fresh run start, and that run's
+    /// request carries its entry.
+    #[tokio::test]
+    async fn a_swap_between_named_openai_bindings_keeps_applying_operator_instructions() {
+        use meerkat_core::service::SessionServiceInstructionExt as _;
+
+        let client = Arc::new(RecordingMessagesLlmClient::default());
+        let (runtime, session_id, _temp) =
+            public_binding_session_with_recorded_requests(&client).await;
+        Arc::clone(&runtime.service)
+            .set_session_instruction(&session_id, tone_instruction(1, Some("Answer formally.")))
+            .await
+            .expect("the session records the target");
+        runtime
+            .hot_swap_llm_client(&session_id, &swap_onto("public_b"))
+            .await
+            .expect("a swap between two public API bindings is admitted");
+        assert_eq!(
+            runtime
+                .current_materialized_llm_identity(&session_id)
+                .await
+                .unwrap()
+                .auth_binding,
+            Some(test_auth_binding("global", "public_b"))
+        );
+
+        run_one_turn(&runtime, &session_id, "Again").await;
+        let request = client
+            .requests()
+            .last()
+            .cloned()
+            .expect("the turn reached the model");
+        assert!(
+            request.iter().any(|message| matches!(
+                message,
+                meerkat_core::Message::System(system)
+                    if system.instruction_entry.is_some()
+                        && system.content.contains("Answer formally.")
+            )),
+            "the next fresh run start applies the entry: {request:?}"
+        );
+    }
+
+    /// A live swap onto the ChatGPT backend, whose wire takes exactly one
+    /// leading System row (the prompt holds it), is refused while the
+    /// session's own operator-instruction entry rows remain in its
+    /// transcript: every request carries them as System rows. That holds
+    /// with an active slot and after the slot's revoke applied (no slot is
+    /// active, the rows remain). The refusal is typed, as for recorded
+    /// instruction activations, and changes nothing: the session keeps its
+    /// binding and its rows.
+    #[tokio::test]
+    async fn a_swap_onto_a_single_system_row_backend_is_refused_while_own_entries_remain() {
+        use meerkat_core::service::SessionServiceInstructionExt as _;
+
+        let client = Arc::new(RecordingMessagesLlmClient::default());
+        let (runtime, session_id, _temp) =
+            public_binding_session_with_recorded_requests(&client).await;
+        let before = runtime
+            .current_materialized_llm_identity(&session_id)
+            .await
+            .unwrap();
+        for (revision, body) in [(1, Some("Answer formally.")), (2, None)] {
+            Arc::clone(&runtime.service)
+                .set_session_instruction(&session_id, tone_instruction(revision, body))
+                .await
+                .expect("the session records the target");
+            run_one_turn(&runtime, &session_id, "Again").await;
+            let request = client
+                .requests()
+                .last()
+                .cloned()
+                .expect("the turn reached the model");
+            assert_eq!(
+                entry_rows_in(&request),
+                usize::try_from(revision).unwrap(),
+                "the run start applied revision {revision}: {request:?}"
+            );
+
+            let error = runtime
+                .hot_swap_llm_client(&session_id, &swap_onto("chatgpt"))
+                .await
+                .expect_err("the ChatGPT backend's wire cannot carry the session's own entry rows");
+            assert!(
+                error
+                    .message
+                    .contains("cannot represent the operator-instruction entries"),
+                "unexpected reconfigure error: {error:?}"
+            );
+            assert_eq!(
+                runtime
+                    .current_materialized_llm_identity(&session_id)
+                    .await
+                    .unwrap(),
+                before,
+                "a refused swap changes nothing"
+            );
+        }
+
+        run_one_turn(&runtime, &session_id, "Still").await;
+        let request = client
+            .requests()
+            .last()
+            .cloned()
+            .expect("the turn reached the model");
+        assert_eq!(
+            entry_rows_in(&request),
+            2,
+            "the session keeps its rows on its binding: {request:?}"
+        );
+    }
+
+    /// The control: a session whose operator instruction is recorded but not
+    /// applied yet holds no entry row, so a live swap onto the ChatGPT
+    /// backend is admitted; on that wire the target stays pending and the
+    /// next request carries no entry.
+    #[tokio::test]
+    async fn a_swap_onto_a_single_system_row_backend_is_admitted_without_own_entries() {
+        use meerkat_core::service::SessionServiceInstructionExt as _;
+
+        let client = Arc::new(RecordingMessagesLlmClient::default());
+        let (runtime, session_id, _temp) =
+            public_binding_session_with_recorded_requests(&client).await;
+        Arc::clone(&runtime.service)
+            .set_session_instruction(&session_id, tone_instruction(1, Some("Answer formally.")))
+            .await
+            .expect("the session records the target");
+        runtime
+            .hot_swap_llm_client(&session_id, &swap_onto("chatgpt"))
+            .await
+            .expect("a session without its own entry rows swaps onto the ChatGPT backend");
+        assert_eq!(
+            runtime
+                .current_materialized_llm_identity(&session_id)
+                .await
+                .unwrap()
+                .auth_binding,
+            Some(test_auth_binding("global", "chatgpt"))
+        );
+
+        run_one_turn(&runtime, &session_id, "Again").await;
+        let request = client
+            .requests()
+            .last()
+            .cloned()
+            .expect("the turn reached the model");
+        assert_eq!(entry_rows_in(&request), 0, "no entry reaches that wire");
+        let read = runtime
+            .service
+            .read_session_instructions(&session_id)
+            .await
+            .expect("the committed instruction state reads");
+        let target = read.target.expect("the target is recorded");
+        assert_eq!(
+            target.slots()[0].pending_body.as_deref(),
+            Some("Answer formally."),
+            "the target stays pending"
+        );
+    }
+
     #[tokio::test]
     async fn reconfigure_build_threads_auth_lease_for_managed_store_resolution() {
         let temp = tempfile::tempdir().unwrap();

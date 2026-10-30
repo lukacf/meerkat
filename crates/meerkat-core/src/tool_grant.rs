@@ -36,6 +36,7 @@ pub const TOOL_GRANT_UNAVAILABLE_CODE: &str = "tool_grant_unavailable";
 /// honour. The agent factory answers it, and a session service surfaces it as
 /// [`crate::error::AgentError::ToolGrantGateRefused`], whose wire form is an
 /// invalid-params error carrying this refusal, tagged by `kind`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]

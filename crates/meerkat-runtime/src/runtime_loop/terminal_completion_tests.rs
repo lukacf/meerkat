@@ -14,6 +14,9 @@ use std::sync::Arc;
 const FAILURE: &str =
     "Internal error: terminal peer-response apply intent requires exactly one SystemNotice append";
 
+/// Failed attempts that bring a batch's inputs to the stage-attempt cap.
+const STAGE_ATTEMPTS_TO_CAP: usize = 3;
+
 struct NoExecution;
 
 #[async_trait::async_trait]
@@ -66,6 +69,20 @@ impl Fixture {
         failure: CoreApplyFailureCause,
         registered_placement: bool,
     ) -> Self {
+        Self::failed_attempts(failure, registered_placement, STAGE_ATTEMPTS_TO_CAP).await
+    }
+
+    /// One failed attempt of a fresh batch: its inputs are requeued, not
+    /// terminal, and the attempt's teardown carrier holds the failure.
+    async fn requeued_attempt_with_cause(failure: CoreApplyFailureCause) -> Self {
+        Self::failed_attempts(failure, false, 1).await
+    }
+
+    async fn failed_attempts(
+        failure: CoreApplyFailureCause,
+        registered_placement: bool,
+        attempts: usize,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SqliteRuntimeStore::new(dir.path().join("runtime.sqlite")).unwrap());
         let session_id = SessionId::new();
@@ -93,7 +110,7 @@ impl Fixture {
         let driver = Arc::new(crate::tokio::sync::Mutex::new(
             owner::DriverEntry::Persistent(persistent),
         ));
-        let (inputs, run_id, carrier) = Self::fail_another_batch(&driver, failure).await;
+        let (inputs, run_id, carrier) = Self::fail_batch_attempts(&driver, failure, attempts).await;
         Self {
             _dir: dir,
             store,
@@ -109,6 +126,18 @@ impl Fixture {
     async fn fail_another_batch(
         driver: &owner::SharedDriver,
         failure: CoreApplyFailureCause,
+    ) -> (Vec<InputId>, RunId, Arc<RuntimeLoopTeardownSlot>) {
+        Self::fail_batch_attempts(driver, failure, STAGE_ATTEMPTS_TO_CAP).await
+    }
+
+    /// Accept two independent inputs and fail `attempts` batches of them.
+    /// The last attempt terminalizes through the owned realization and its
+    /// teardown carrier; [`STAGE_ATTEMPTS_TO_CAP`] attempts reach the
+    /// stage-attempt cap, fewer leave the inputs requeued.
+    async fn fail_batch_attempts(
+        driver: &owner::SharedDriver,
+        failure: CoreApplyFailureCause,
+        attempts: usize,
     ) -> (Vec<InputId>, RunId, Arc<RuntimeLoopTeardownSlot>) {
         let mut inputs = Vec::new();
         for body in ["first independent input", "second independent input"] {
@@ -145,7 +174,7 @@ impl Fixture {
         }
         let mut last_run = None;
         let carrier = RuntimeLoopTeardownSlot::pending();
-        for attempt in 0..3 {
+        for attempt in 0..attempts {
             let batch = owner::machine_authorize_runtime_loop_batch(&*driver.lock().await).unwrap();
             assert_eq!(batch.input_ids().len(), 2);
             let run_id = RunId::new();
@@ -160,7 +189,7 @@ impl Fixture {
                 .unwrap(),
                 owner::RuntimeLoopBatchStart::Started
             ));
-            if attempt == 2 {
+            if attempt + 1 == attempts {
                 let gate = Arc::new(crate::tokio::sync::Mutex::new(()));
                 let waited = realize_runtime_loop_terminal_owned(
                     gate.lock_owned().await,
@@ -789,6 +818,150 @@ async fn failed_completion_pre_executor_causes_share_exact_durable_and_retry_det
         .await
         .unwrap();
         fixture.finalized().await;
+    }
+}
+
+/// A failure that keeps a typed reason: a scoped tool grant gate the
+/// session's build refused.
+fn grant_gate_refused_failure() -> CoreApplyFailureCause {
+    CoreApplyFailureCause::runtime_turn(FAILURE).with_reason(
+        meerkat_core::event::AgentErrorReason::ToolGrantGateRefused {
+            refusal: meerkat_core::tool_grant::GrantGateRefusal::UnknownFamily {
+                family: "shel".to_string(),
+            },
+        },
+    )
+}
+
+/// The failed-turn error `failure` is staged and delivered with: the runtime
+/// apply failure over its message, with its typed reason.
+fn staged_error_of(failure: &CoreApplyFailureCause) -> meerkat_core::TurnErrorMetadata {
+    let mut error = meerkat_core::TurnErrorMetadata::runtime_apply_failure(failure.message());
+    error.reason = failure.reason().cloned();
+    error
+}
+
+/// A failure that keeps a typed reason reaches the stage-attempt cap with
+/// it: the realization stages the reason on the batch's terminal candidate
+/// and on the teardown carrier, and the waiters the same cause's detail and
+/// reason resolve finalize the batch and receive it.
+#[tokio::test]
+async fn failed_completion_stages_and_delivers_the_apply_failure_reason() {
+    let failure = grant_gate_refused_failure();
+    let expected = staged_error_of(&failure);
+    assert!(
+        expected.reason.is_some(),
+        "the fixture's cause keeps a reason"
+    );
+    let fixture = Fixture::failed_batch_with_cause(failure.clone()).await;
+    fixture.pending().await;
+
+    let row = fixture
+        .store
+        .load_input_state(&fixture.runtime_id, &fixture.inputs[0])
+        .await
+        .unwrap()
+        .unwrap();
+    let owner_id = row.state.terminal_completion.unwrap().owner_input_id;
+    let owner_row = fixture
+        .store
+        .load_input_state(&fixture.runtime_id, &owner_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let candidate = owner_row
+        .state
+        .terminal_completion
+        .unwrap()
+        .candidate
+        .expect("the owner row holds the batch's candidate");
+    assert_eq!(
+        candidate.completion_error_metadata(),
+        Some(expected.clone()),
+        "the realization stages the cause's typed reason on the batch's candidate"
+    );
+    let pending = fixture.carrier.pending_nondirected_run_terminal().unwrap();
+    assert_eq!(
+        pending.completion_error_metadata,
+        Some(expected.clone()),
+        "the teardown carrier keeps the cause's typed reason"
+    );
+
+    let completions = Arc::new(crate::tokio::sync::Mutex::new(
+        crate::completion::CompletionRegistry::new(),
+    ));
+    let mut handles = Vec::new();
+    for id in &fixture.inputs {
+        handles.push(completions.lock().await.register(id.clone()));
+    }
+    let gate = Arc::new(crate::tokio::sync::Mutex::new(()));
+    resolve_machine_terminal_completion_waiters_under_authority(
+        &fixture.driver,
+        Some(&completions),
+        gate.lock_owned().await,
+        &fixture.carrier,
+        &fixture.inputs,
+        &fixture.run_id,
+        RunFailureCompletionDetail::of_apply_failure(&failure),
+    )
+    .await
+    .expect("the cause's detail and reason finalize the staged batch");
+    assert!(fixture.carrier.pending_nondirected_run_terminal().is_none());
+    for handle in handles {
+        let outcome = handle.wait_authorized().await;
+        let crate::completion::CompletionOutcome::AbandonedWithError { error, .. } = &outcome
+        else {
+            panic!("expected the failed attempt, got {outcome:?}");
+        };
+        assert_eq!(error, &expected, "the waiter receives the typed reason");
+    }
+}
+
+/// Abnormal teardown recovers a failed attempt's waiters from its carrier
+/// with the failure's typed reason. The attempt requeued its inputs, so the
+/// waiters are process-local: they receive the refusal the live path gives
+/// them, never a reason-less runtime apply failure.
+#[tokio::test]
+async fn teardown_recovery_delivers_the_carried_apply_failure_reason() {
+    let failure = grant_gate_refused_failure();
+    let expected = staged_error_of(&failure);
+    let fixture = Fixture::requeued_attempt_with_cause(failure).await;
+    let pending = fixture
+        .carrier
+        .pending_nondirected_run_terminal()
+        .expect("the failed attempt keeps its teardown carrier");
+    assert_eq!(pending.completion_error_metadata, Some(expected.clone()));
+
+    let completions = Arc::new(crate::tokio::sync::Mutex::new(
+        crate::completion::CompletionRegistry::new(),
+    ));
+    let mut handles = Vec::new();
+    for id in &fixture.inputs {
+        handles.push(completions.lock().await.register(id.clone()));
+    }
+    let recovery = RuntimeLoopRecoveryContext {
+        authority_binding: RuntimeLoopAuthorityBinding::detached_for_test(),
+        completions: Some(Arc::clone(&completions)),
+    };
+    recover_committed_runtime_projections_before_teardown(
+        &fixture.driver,
+        &mut NoExecution,
+        &fixture.carrier,
+        &recovery,
+    )
+    .await
+    .expect("teardown recovers the failed attempt's waiters");
+    assert!(fixture.carrier.pending_nondirected_run_terminal().is_none());
+    for handle in handles {
+        let outcome = handle.wait_authorized().await;
+        let crate::completion::CompletionOutcome::AbandonedWithError { error, .. } = &outcome
+        else {
+            panic!("expected the failed attempt, got {outcome:?}");
+        };
+        assert_eq!(
+            error, &expected,
+            "teardown recovery delivers the carried typed reason"
+        );
     }
 }
 

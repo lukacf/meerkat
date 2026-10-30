@@ -103,6 +103,12 @@ impl CoreApplyFailureCauseKind {
 pub struct CoreApplyFailureCause {
     pub kind: CoreApplyFailureCauseKind,
     pub message: String,
+    /// The typed reason of the agent error that failed the apply, when the
+    /// failed turn's error must carry it: a scoped tool grant gate the
+    /// session's build refused. The runtime puts it on the failed run's
+    /// [`TurnErrorMetadata::reason`], so a surface answers the refusal as it
+    /// answers the session error. `None` for every other failure.
+    pub reason: Option<crate::event::AgentErrorReason>,
 }
 
 impl CoreApplyFailureCause {
@@ -110,7 +116,15 @@ impl CoreApplyFailureCause {
         Self {
             kind,
             message: message.into(),
+            reason: None,
         }
+    }
+
+    /// This cause carrying `reason` as its typed reason.
+    #[must_use]
+    pub fn with_reason(mut self, reason: crate::event::AgentErrorReason) -> Self {
+        self.reason = Some(reason);
+        self
     }
 
     pub fn primitive_rejected(message: impl Into<String>) -> Self {
@@ -159,6 +173,12 @@ impl CoreApplyFailureCause {
             | AgentError::HookExecutionFailed { .. }
             | AgentError::HookConfigInvalid { .. }
             | AgentError::HookLaunchRefused { .. } => Self::hook_runtime_failure(error.to_string()),
+            // The refusal keeps its type, so the failed turn's error carries
+            // it to the surface that answers the turn.
+            AgentError::ToolGrantGateRefused(refusal) => Self::runtime_turn(error.to_string())
+                .with_reason(crate::event::AgentErrorReason::ToolGrantGateRefused {
+                    refusal: (**refusal).clone(),
+                }),
             _ => Self::runtime_turn(error.to_string()),
         }
     }
@@ -172,6 +192,11 @@ impl CoreApplyFailureCause {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// The typed reason this cause carries, if any.
+    pub fn reason(&self) -> Option<&crate::event::AgentErrorReason> {
+        self.reason.as_ref()
     }
 }
 
@@ -2536,5 +2561,37 @@ mod tests {
         let cause = CoreApplyFailureCause::from_agent_error(&error);
         assert_eq!(cause.kind, CoreApplyFailureCauseKind::HookRuntimeFailure);
         assert!(cause.message().contains("missing runtime"));
+    }
+
+    /// A scoped tool grant gate the session's build refused keeps its typed
+    /// refusal at the executor boundary, as the apply failure's reason the
+    /// failed turn's error carries. An apply failure of any other cause
+    /// carries no typed reason.
+    #[test]
+    fn refused_grant_gate_keeps_its_typed_reason_at_runtime_executor_boundary() {
+        let refusal = crate::tool_grant::GrantGateRefusal::UnknownFamily {
+            family: "shel".to_string(),
+        };
+        let err = CoreExecutorError::apply_failed_from_session_error(SessionError::Agent(
+            AgentError::ToolGrantGateRefused(Box::new(refusal.clone())),
+        ));
+
+        let cause = err.apply_failure_cause();
+        assert_eq!(cause.kind, CoreApplyFailureCauseKind::RuntimeTurn);
+        assert_eq!(
+            cause.reason(),
+            Some(&crate::event::AgentErrorReason::ToolGrantGateRefused { refusal })
+        );
+        assert_eq!(
+            CoreApplyFailureCause::from_agent_error(&AgentError::InternalError(
+                "store fault".to_string()
+            ))
+            .reason(),
+            None
+        );
+        assert_eq!(
+            CoreApplyFailureCause::runtime_turn("loop-minted").reason(),
+            None
+        );
     }
 }

@@ -308,6 +308,17 @@ them.
   fields default to empty. `AgentBuildPolicyError` gains
   `ToolGrantGateWithoutAdjudication`: an agent with a scoped tool grant gate
   requires a dispatcher whose `adjudicates_tool_grants` answers true.
+  `AgentErrorReason` gains `ToolGrantGateRefused { refusal }`, appended last
+  (the enum is exhaustive, so a `match` on it needs the arm), and
+  `lifecycle::CoreApplyFailureCause` gains the public field `reason` (a
+  struct literal needs it; `CoreApplyFailureCause::new` leaves it `None`).
+  Wire change: a turn whose session's build refused its gate carries the
+  refusal as its turn error's `reason`, `{"reason_type":
+  "tool_grant_gate_refused", "refusal": ...}`, so JSON-RPC answers that turn
+  with the typed invalid-params refusal. The SDKs' event readers keep it as
+  an unknown reason, raw. Downgrade: `AgentErrorReason` decodes strictly, so
+  a binary without the variant cannot read a runtime store whose failed-turn
+  completion row carries it.
 
 - `meerkat`: `AgentBuildConfig` gains `grant_gated_tools`, and
   `BuildAgentError` gains `GrantGate(GrantGateBuildError)`, where
@@ -954,6 +965,11 @@ them.
   machine-wide refusals of controller grant changes, credential
   publications and auth lease releases and replacements last until an
   executor attaches or the registration ends.
+
+- `meerkat-rpc`: a `session/create` with `keep_alive: true` answers before
+  its first turn builds the session, so it does not report a scoped tool
+  grant gate no grant could honour: the create succeeds, and the refused
+  build is only logged.
 
 ## [0.9.7] - 2026-10-28
 

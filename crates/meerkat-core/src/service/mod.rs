@@ -783,6 +783,21 @@ impl SessionError {
             .and_then(DurableResumeHold::from_wire_str)
     }
 
+    /// Read a refused scoped tool grant gate back off the wire: the typed
+    /// refusal of the [`Self::TOOL_GRANT_GATE_REFUSED_KIND`] projection
+    /// [`Self::structured_data`] gives. Other or malformed structured data
+    /// fails closed as `None`.
+    pub fn tool_grant_gate_refusal_from_data(
+        data: &serde_json::Value,
+    ) -> Option<crate::tool_grant::GrantGateRefusal> {
+        if data.get("kind").and_then(serde_json::Value::as_str)
+            != Some(Self::TOOL_GRANT_GATE_REFUSED_KIND)
+        {
+            return None;
+        }
+        serde_json::from_value(data.get("tool_grant_gate_refusal")?.clone()).ok()
+    }
+
     /// Secret-free projection of a resume hold: the hold class, the session it
     /// applies to, and the invariant every hold path upholds — durable content
     /// is retained intact, never discarded, so a later reconciliation can
@@ -4513,6 +4528,42 @@ mod tests {
             SessionError::durable_resume_hold_from_data(&serde_json::json!({})),
             None
         );
+    }
+
+    /// A refused scoped tool grant gate reads back off its own wire
+    /// projection as the same typed refusal; data of another kind, or a
+    /// refusal this binary cannot read, fails closed.
+    #[test]
+    fn a_refused_grant_gate_reads_back_off_its_structured_data() {
+        let refusal = crate::tool_grant::GrantGateRefusal::ToolNotMounted {
+            tool: "deploy".to_string(),
+        };
+        let error = SessionError::Agent(crate::error::AgentError::ToolGrantGateRefused(Box::new(
+            refusal.clone(),
+        )));
+        let data = error.structured_data().unwrap();
+        assert_eq!(
+            SessionError::tool_grant_gate_refusal_from_data(&data),
+            Some(refusal)
+        );
+        for other in [
+            serde_json::json!({}),
+            serde_json::json!({
+                "kind": SessionError::FORK_INSTRUCTION_REFUSED_KIND,
+                "tool_grant_gate_refusal": {"kind": "no_grant_service"},
+            }),
+            serde_json::json!({"kind": SessionError::TOOL_GRANT_GATE_REFUSED_KIND}),
+            serde_json::json!({
+                "kind": SessionError::TOOL_GRANT_GATE_REFUSED_KIND,
+                "tool_grant_gate_refusal": {"kind": "a_later_refusal"},
+            }),
+        ] {
+            assert_eq!(
+                SessionError::tool_grant_gate_refusal_from_data(&other),
+                None,
+                "{other}"
+            );
+        }
     }
 
     #[test]

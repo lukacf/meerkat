@@ -427,6 +427,23 @@
               "stop"
             ],
             "type": "object"
+          },
+          {
+            "description": "The session's build refused its scoped tool grant gate\n([`AgentError::ToolGrantGateRefused`]): no grant could honour it. A\nturn whose build was refused carries it, so a surface answers the\nturn with the refusal it answers the session error with.",
+            "properties": {
+              "reason_type": {
+                "const": "tool_grant_gate_refused",
+                "type": "string"
+              },
+              "refusal": {
+                "$ref": "#/$defs/GrantGateRefusal"
+              }
+            },
+            "required": [
+              "reason_type",
+              "refusal"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -2056,6 +2073,126 @@
           "high"
         ],
         "type": "string"
+      },
+      "GrantGateRefusal": {
+        "description": "Why a build's scoped tool grant gate was refused: a gate no grant could\nhonour. The agent factory answers it, and a session service surfaces it as\n[`crate::error::AgentError::ToolGrantGateRefused`], whose wire form is an\ninvalid-params error carrying this refusal, tagged by `kind`.",
+        "oneOf": [
+          {
+            "description": "A gated family is not a built-in tool family.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown_family",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A gated family is disabled by this build; a gated family is mounted\nclosed, never disabled.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family_disabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A gated family none of whose names this build's final dispatcher\nmounts: no grant could ever open it.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family_not_mounted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A gated name a known tool source can provide, that this build's final\ndispatcher does not mount and no pending source could provide once it\nconnects.",
+            "properties": {
+              "kind": {
+                "const": "tool_not_mounted",
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A gated tool name that no tool source of this build provides, and no\npending source could provide once it connects.",
+            "properties": {
+              "kind": {
+                "const": "unknown_tool",
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The build's tool policy refuses a gated name, so no grant could ever\nopen it.",
+            "properties": {
+              "kind": {
+                "const": "policy_refused",
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The build has no grant service: a gate needs the runtime's, carried\non the session's runtime bindings.",
+            "properties": {
+              "kind": {
+                "const": "no_grant_service",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "HookFailureReason": {
         "description": "Typed reason a hook execution failed (engine-level fault, not a guardrail\ndenial).\n\nMirrors the [`HookReasonCode`] precedent: the variant is the typed owner of\nthe failure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-stored field.\n\n[`Display`]: std::fmt::Display",
@@ -8353,6 +8490,23 @@
               "stop"
             ],
             "type": "object"
+          },
+          {
+            "description": "The session's build refused its scoped tool grant gate\n([`AgentError::ToolGrantGateRefused`]): no grant could honour it. A\nturn whose build was refused carries it, so a surface answers the\nturn with the refusal it answers the session error with.",
+            "properties": {
+              "reason_type": {
+                "const": "tool_grant_gate_refused",
+                "type": "string"
+              },
+              "refusal": {
+                "$ref": "#/$defs/GrantGateRefusal"
+              }
+            },
+            "required": [
+              "reason_type",
+              "refusal"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -11554,6 +11708,126 @@
           "high"
         ],
         "type": "string"
+      },
+      "GrantGateRefusal": {
+        "description": "Why a build's scoped tool grant gate was refused: a gate no grant could\nhonour. The agent factory answers it, and a session service surfaces it as\n[`crate::error::AgentError::ToolGrantGateRefused`], whose wire form is an\ninvalid-params error carrying this refusal, tagged by `kind`.",
+        "oneOf": [
+          {
+            "description": "A gated family is not a built-in tool family.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown_family",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A gated family is disabled by this build; a gated family is mounted\nclosed, never disabled.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family_disabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A gated family none of whose names this build's final dispatcher\nmounts: no grant could ever open it.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family_not_mounted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A gated name a known tool source can provide, that this build's final\ndispatcher does not mount and no pending source could provide once it\nconnects.",
+            "properties": {
+              "kind": {
+                "const": "tool_not_mounted",
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A gated tool name that no tool source of this build provides, and no\npending source could provide once it connects.",
+            "properties": {
+              "kind": {
+                "const": "unknown_tool",
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The build's tool policy refuses a gated name, so no grant could ever\nopen it.",
+            "properties": {
+              "kind": {
+                "const": "policy_refused",
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The build has no grant service: a gate needs the runtime's, carried\non the session's runtime bindings.",
+            "properties": {
+              "kind": {
+                "const": "no_grant_service",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "HookFailureReason": {
         "description": "Typed reason a hook execution failed (engine-level fault, not a guardrail\ndenial).\n\nMirrors the [`HookReasonCode`] precedent: the variant is the typed owner of\nthe failure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-stored field.\n\n[`Display`]: std::fmt::Display",

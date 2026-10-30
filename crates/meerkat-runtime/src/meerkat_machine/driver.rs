@@ -5722,11 +5722,17 @@ impl DriverEntry {
                 error,
             ));
         }
+        // The apply failure's typed reason (a refused scoped tool grant gate)
+        // rides on the staged error, as the live completion paths give it.
+        let mut terminal_error_metadata =
+            meerkat_core::TurnErrorMetadata::runtime_apply_failure(terminal_error.clone());
+        terminal_error_metadata.reason = runtime_apply_failure
+            .as_ref()
+            .and_then(CoreApplyFailureCause::reason)
+            .cloned();
         let terminal_candidate =
             crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure {
-                error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
-                    terminal_error.clone(),
-                ),
+                error: terminal_error_metadata,
             };
         let completion_batch = if terminal_input_ids.is_empty() {
             None

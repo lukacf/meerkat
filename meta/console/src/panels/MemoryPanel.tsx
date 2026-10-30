@@ -3295,6 +3295,7 @@ export function MemoryPanel({
 }: MemoryPanelProps): React.JSX.Element {
   const nameOf = useNameOf();
   const [tab, setTab] = React.useState<MemoryTab>("holdings");
+  const tabIds = React.useId();
   // The outcome of the last quarantine decision, shown on the Biography it
   // navigated to (the released record after a release, the origin otherwise).
   const [decisionNotice, setDecisionNotice] = React.useState<QuarantineNotice | null>(null);
@@ -4332,7 +4333,7 @@ export function MemoryPanel({
           </>
         }
       />
-      <PanelTabs<MemoryTab> tabs={tabs} active={tab} onSelect={setTab} ariaLabel="Memory views" />
+      <PanelTabs<MemoryTab> tabs={tabs} active={tab} onSelect={setTab} ariaLabel="Memory views" idBase={tabIds} />
       {/* One-release redirect alias (open Q6): the quarantine tab folded into
           Pipeline; automation addressing memory-tab:quarantine keeps working
           until the next release removes this. Outside the tab list, invisible
@@ -4352,7 +4353,7 @@ export function MemoryPanel({
       <StatusRow error={error} errorTestId="memory-error" updatedAt={updatedAt ?? undefined}>
         {!loaded ? "Loading memory" : undefined}
       </StatusRow>
-      <PanelBody className="memory-panel__body">
+      <PanelBody className="memory-panel__body" tabPanel={{ idBase: tabIds, tab }}>
         {tab === "holdings" ? renderHoldings() : null}
         {tab === "records" ? renderRecords() : null}
         {tab === "knowledge" ? renderKnowledge() : null}

@@ -39,7 +39,17 @@ export type { KeyValueItem } from "./key-value";
 export { ListRow, RowList } from "./list-row";
 export { Meter } from "./meter";
 export type { MeterSegment } from "./meter";
-export { PanelBody, PanelHeader, PanelSection, PanelShell, PanelTabs, SectionHeader, StatusRow } from "./panel";
+export {
+  PanelBody,
+  PanelHeader,
+  PanelSection,
+  PanelShell,
+  PanelTabPanel,
+  PanelTabs,
+  SectionHeader,
+  StatusRow,
+  panelTabIds,
+} from "./panel";
 export type { PanelTab } from "./panel";
 export { RelativeTime, useNow } from "./relative-time";
 export { SplitDetail } from "./split-detail";

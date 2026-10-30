@@ -11,7 +11,9 @@ import {
   ListRow,
   Meter,
   Notice,
+  PanelBody,
   PanelHeader,
+  PanelTabPanel,
   PanelTabs,
   RelativeTime,
   RowList,
@@ -31,6 +33,7 @@ import {
   formatRelativeTime,
   humanizeEnum,
   joinMeta,
+  panelTabIds,
   plural,
   priorityTone,
   riskTone,
@@ -351,6 +354,71 @@ describe("panel frame", () => {
 
     fireEvent.click(view.getByTestId("tab:pipeline"));
     expect(onSelect.mock.calls[0]?.[0]).toBe("pipeline");
+  });
+
+  it("ties each tab to the panel it controls", () => {
+    function Tabs() {
+      const [active, setActive] = useState<"holdings" | "records">("holdings");
+      return (
+        <>
+          <PanelTabs
+            ariaLabel="Memory views"
+            idBase="memory"
+            active={active}
+            onSelect={setActive}
+            tabs={[
+              { id: "holdings", label: "Holdings", testId: "tab:holdings" },
+              { id: "records", label: "Records", testId: "tab:records" },
+            ]}
+          />
+          <PanelBody testId="body" tabPanel={{ idBase: "memory", tab: active }}>
+            {active === "holdings" ? "Scopes and sizes" : "Every record"}
+          </PanelBody>
+        </>
+      );
+    }
+    const view = render(<Tabs />);
+    const holdings = view.getByTestId("tab:holdings");
+    const records = view.getByTestId("tab:records");
+    expect(panelTabIds("memory", "records")).toEqual({ tabId: "memory-tab-records", panelId: "memory-panel-records" });
+    expect(holdings.getAttribute("id")).toBe("memory-tab-holdings");
+    expect(holdings.getAttribute("aria-controls")).toBe("memory-panel-holdings");
+    expect(records.getAttribute("aria-controls")).toBe("memory-panel-records");
+    const body = view.getByTestId("body");
+    expect(body.getAttribute("role")).toBe("tabpanel");
+    expect(body.getAttribute("id")).toBe("memory-panel-holdings");
+    expect(body.getAttribute("aria-labelledby")).toBe("memory-tab-holdings");
+    expect(view.getByRole("tabpanel", { name: "Holdings" }).textContent).toBe("Scopes and sizes");
+
+    fireEvent.click(records);
+    expect(body.getAttribute("id")).toBe("memory-panel-records");
+    expect(body.getAttribute("aria-labelledby")).toBe("memory-tab-records");
+    expect(view.getByRole("tabpanel", { name: "Records" }).textContent).toBe("Every record");
+  });
+
+  it("makes content inside the body the panel with PanelTabPanel", () => {
+    const view = render(
+      <PanelTabPanel idBase="approvals" tab="audit" className="gating-content" data-testid="content">
+        Recorded approvals
+      </PanelTabPanel>,
+    );
+    const panel = view.getByTestId("content");
+    expect(panel.getAttribute("role")).toBe("tabpanel");
+    expect(panel.getAttribute("id")).toBe("approvals-panel-audit");
+    expect(panel.getAttribute("aria-labelledby")).toBe("approvals-tab-audit");
+    expect(panel.classList.contains("gating-content")).toBe(true);
+    expect(panel.textContent).toBe("Recorded approvals");
+  });
+
+  it("leaves tabs and the body untied without an id base", () => {
+    const view = render(
+      <>
+        <PanelTabs active="a" onSelect={() => {}} tabs={[{ id: "a", label: "A", testId: "tab:a" }]} />
+        <PanelBody testId="body">Body</PanelBody>
+      </>,
+    );
+    expect(view.getByTestId("tab:a").getAttribute("aria-controls") === null).toBe(true);
+    expect(view.getByTestId("body").getAttribute("role") === null).toBe(true);
   });
 
   it("reserves the status row and shows either the error or the freshness", () => {

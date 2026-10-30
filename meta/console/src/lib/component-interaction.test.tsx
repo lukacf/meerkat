@@ -610,6 +610,63 @@ test("MemoryPanel pending promotions keep their decision beside the row's button
   }
 });
 
+test("MemoryPanel tabs each control the panel they show", async () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://console.test" });
+  const previousWindow = globalThis.window;
+  const previousDocument = globalThis.document;
+  const previousActEnv = (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  globalThis.window = dom.window as unknown as Window & typeof globalThis;
+  globalThis.document = dom.window.document;
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  const host = dom.window.document.createElement("div");
+  dom.window.document.body.appendChild(host);
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => {
+      root.render(
+        <MemoryPanel
+          records={[]}
+          realms={["default"]}
+          quarantineRecords={[]}
+          pendingPromotions={[]}
+          dreams={[]}
+          detail={null}
+          onRefresh={() => undefined}
+          onSelectRecord={() => undefined}
+          onClearDetail={() => undefined}
+        />,
+      );
+    });
+    for (const tab of ["holdings", "records", "knowledge", "pipeline", "dreams"]) {
+      const control = host.querySelector(`[data-testid='memory-tab:${tab}']`) as HTMLElement | null;
+      assert.equal(control === null, false, `missing the ${tab} tab`);
+      await React.act(async () => {
+        control?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+      });
+      assert.equal(control?.getAttribute("aria-selected"), "true");
+      const panel = dom.window.document.getElementById(control?.getAttribute("aria-controls") ?? "");
+      assert.equal(panel?.getAttribute("role"), "tabpanel", `${tab} controls a tab panel`);
+      assert.equal(panel?.getAttribute("aria-labelledby"), control?.getAttribute("id"), `${tab} labels its panel`);
+      assert.equal(host.querySelectorAll("[role='tabpanel']").length, 1);
+    }
+    const pipeline = host.querySelector("[data-testid='memory-tab:pipeline']");
+    await React.act(async () => {
+      pipeline?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    });
+    const shown = host.querySelector("[role='tabpanel'] [data-testid='memory-pipeline']");
+    assert.equal(shown === null, false, "the Pipeline content sits in the tab panel");
+  } finally {
+    await React.act(async () => {
+      root.unmount();
+    });
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = previousActEnv;
+    globalThis.window = previousWindow;
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
 test("MemoryPanel walks the lattice over its first records page, never over the placeholder before it", async () => {
   const dom = new JSDOM("<!doctype html><html><body></body></html>");
   const previousWindow = globalThis.window;

@@ -277,4 +277,18 @@ describe("Approvals accessibility", () => {
     expect(view.getByText("Request ID")).toBeTruthy();
     expect(onDecide).not.toHaveBeenCalled();
   });
+
+  it("ties each tab to the panel it shows", () => {
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={snapshot("ready")} />);
+    for (const tab of ["pending", "auto", "audit", "policies"]) {
+      const control = view.getByTestId(`gating-tab:${tab}`);
+      fireEvent.click(control);
+      expect(control.getAttribute("aria-selected")).toBe("true");
+      const panel = document.getElementById(control.getAttribute("aria-controls") ?? "");
+      expect(panel?.getAttribute("role")).toBe("tabpanel");
+      expect(panel?.getAttribute("aria-labelledby")).toBe(control.getAttribute("id"));
+      expect(view.getAllByRole("tabpanel").length).toBe(1);
+    }
+    expect(view.getByRole("tabpanel").textContent?.includes("Policy details are not available in this console.")).toBe(true);
+  });
 });

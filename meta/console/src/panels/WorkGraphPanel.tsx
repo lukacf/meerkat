@@ -39,7 +39,7 @@ import {
   plural,
   priorityTone,
   statusTone,
-  stripAgentKeyPrefix,
+  agentDisplayName,
   toEpochMs,
   useAgentDirectory,
   useNow,
@@ -313,7 +313,7 @@ export function workGraphBindingTarget(
   if (!id) return null;
   const kind = target.owner_key?.kind?.trim() || "";
   const key = kind ? `${kind}:${id}` : id;
-  return { name: directory?.lookup(key)?.label.trim() || stripAgentKeyPrefix(id), key };
+  return { name: directory?.lookup(key)?.label.trim() || agentDisplayName(id), key };
 }
 
 /// The agent a binding rests on, named for a sentence; null for a session

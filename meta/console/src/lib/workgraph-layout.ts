@@ -1,5 +1,5 @@
 import type { WorkGraphWireEdge, WorkGraphWireItem } from "../types";
-import { stripAgentKeyPrefix, type AgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
+import { agentDisplayName, type AgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
 import { humanizeEnum } from "../../../packages/console-components/src/panel-kit/format";
 
 /// Deterministic layered-DAG layout for the WorkGraph graph view.
@@ -61,13 +61,11 @@ export interface WorkGraphLayout {
 }
 
 /// Owner-label precedence shared by the tree rows, the graph nodes, and the
-/// graph selection footer: display name, then key id, then the claim's.
+/// graph selection footer: the owner's stored name, else its key named by the
+/// shared naming function, then the claim's (workGraphItemOwner without a
+/// roster).
 export function workGraphItemOwnerLabel(item: WorkGraphWireItem): string {
-  return item.owner?.display_name
-    || item.owner?.key?.id
-    || item.claim?.owner?.display_name
-    || item.claim?.owner?.key?.id
-    || "";
+  return workGraphItemOwner(item)?.name ?? "";
 }
 
 /// An item's owner as people read it, with the raw key for a tooltip.
@@ -95,7 +93,7 @@ export function workGraphItemOwner(
       : undefined;
     const name = known?.label.trim()
       || owner.display_name?.trim()
-      || (kind === "session" && id ? "Agent session" : stripAgentKeyPrefix(id));
+      || (kind === "session" && id ? "Agent session" : agentDisplayName(id));
     if (name) return { name, key };
   }
   return null;

@@ -153,7 +153,7 @@ test("workgraph layout carries status, owner, priority, and blocked onto nodes",
   const stuck = layout.nodes.find((node) => node.itemId === "stuck");
   assert.equal(busy?.status, "in_progress");
   assert.equal(busy?.priority, "high");
-  assert.equal(busy?.ownerLabel, "helper");
+  assert.equal(busy?.ownerLabel, "Helper");
   assert.equal(busy?.blocked, false);
   assert.equal(stuck?.blocked, true);
 });

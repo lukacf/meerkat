@@ -62,7 +62,7 @@ test("signals rail deduplicates live and history copies of the same visible repl
 
   const groups = buildSignalGroupsForTest(frames);
   const commanderReplies = groups.filter((group) =>
-    group.title === "Incident Commander replied"
+    group.title === "Incident commander replied"
     && group.detail.startsWith("Image generation succeeded")
   );
 
@@ -152,7 +152,7 @@ test("signals rail previews never leak the meerkat 0.7.1 peer transport projecti
   const kickoff = groups.find((group) => group.title === "Kickoff started");
 
   assert.ok(kickoff, "a kickoff notice produces its typed kickoff signal");
-  assert.equal(kickoff?.detail, "Incident Commander");
+  assert.equal(kickoff?.detail, "Incident commander");
   for (const group of groups) {
     for (const item of group.items) {
       assert.ok(
@@ -268,7 +268,7 @@ test("signals rail shows a typed kickoff lifecycle notice by its phase, never it
   const groups = buildSignalGroupsForTest(frames);
   const failed = groups.find((group) => group.title === "Kickoff failed");
   assert.ok(failed, "a failed kickoff produces its typed signal");
-  assert.equal(failed?.detail, "Delivery Lead (delivery)");
+  assert.equal(failed?.detail, "Delivery lead (delivery)");
   for (const group of groups) {
     for (const item of group.items) {
       assert.ok(
@@ -304,12 +304,12 @@ test("signals rail titles use display names when the directory knows the agent",
 
   const named = buildSignalGroupsForTest(frames, directory);
   assert.ok(named.some((group) => group.title === "Support Desk replied"));
-  // An agent the directory does not know keeps the prettified key.
+  // An agent the directory does not know reads as the shared naming function names it.
   assert.ok(named.some((group) => group.title === "Scribe replied"));
 
-  // Without a directory the key is prettified, never shown with its prefix.
+  // Without a directory the key reads as words, never with its prefix.
   const prettified = buildSignalGroupsForTest(frames);
-  assert.ok(prettified.some((group) => group.title === "Support Triage replied"));
+  assert.ok(prettified.some((group) => group.title === "Support triage replied"));
   assert.ok(!prettified.some((group) => /identity:/i.test(group.title)));
 });
 
@@ -321,7 +321,11 @@ test("signals rail names console events System and resolves aliases", () => {
   assert.equal(name("identity:coordinator"), "Coordinator");
   assert.equal(name("_system"), "System");
   assert.equal(name(""), "System");
-  assert.equal(signalNameResolver()("agent:nightly-monitor"), "Nightly Monitor");
+  // Keys outside the roster read as every other surface reads them.
+  assert.equal(signalNameResolver()("agent:nightly-monitor"), "Nightly monitor");
+  assert.equal(signalNameResolver()("router:main"), "Router main");
+  assert.equal(signalNameResolver()("agent:01HXYZ8Q9ABCDEF"), "Agent abcdef");
+  assert.equal(signalNameResolver()("admin@example.test"), "admin@example.test");
 });
 
 test("signals rail names who sent a turn: a scheduled run, a connector, another operator or you", () => {
@@ -342,10 +346,10 @@ test("signals rail names who sent a turn: a scheduled run, a connector, another 
     turn("mine", 3_000, { content: "Summarize the night.", origin: "console:pane-2", origin_kind: "operator", idempotency_key: "send-key-mine" }),
   ];
   const titles = buildSignalGroupsForTest(frames).map((group) => group.title);
-  assert.ok(titles.includes("Scheduled run for Nightly Monitor"), JSON.stringify(titles));
-  assert.ok(titles.includes("A connector sent Nightly Monitor a message"), JSON.stringify(titles));
-  assert.ok(titles.includes("An operator asked Nightly Monitor"), JSON.stringify(titles));
-  assert.ok(titles.includes("You asked Nightly Monitor"), JSON.stringify(titles));
+  assert.ok(titles.includes("Scheduled run for Nightly monitor"), JSON.stringify(titles));
+  assert.ok(titles.includes("A connector sent Nightly monitor a message"), JSON.stringify(titles));
+  assert.ok(titles.includes("An operator asked Nightly monitor"), JSON.stringify(titles));
+  assert.ok(titles.includes("You asked Nightly monitor"), JSON.stringify(titles));
   assert.equal(titles.filter((title) => title.startsWith("You asked")).length, 1, JSON.stringify(titles));
 });
 

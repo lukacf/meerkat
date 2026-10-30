@@ -314,18 +314,23 @@ test("workgraph graph view reports overflow past the node cap", () => {
   assert.ok(html.includes("+5 more items not drawn"));
 });
 
-test("workgraph owner labels prefer display names, then key ids, then claim owners", () => {
+test("workgraph owner labels prefer display names, then the key named in words, then claim owners", () => {
   assert.equal(
     workGraphOwnerLabelOf({ owner: { key: { kind: "agent", id: "planner" }, display_name: "Planner" } }),
     "Planner",
   );
   assert.equal(
     workGraphOwnerLabelOf({ owner: { key: { kind: "agent", id: "planner" } } }),
-    "planner",
+    "Planner",
+  );
+  // A key outside the roster reads as every other surface names it.
+  assert.equal(
+    workGraphOwnerLabelOf({ owner: { key: { kind: "agent", id: "01HXYZ8Q9ABCDEF" } } }),
+    "Agent abcdef",
   );
   assert.equal(
     workGraphOwnerLabelOf({ claim: { owner: { key: { kind: "session", id: "sess-42" } } } }),
-    "sess-42",
+    "Agent session",
   );
   assert.equal(workGraphOwnerLabelOf({}), "");
 });
@@ -448,7 +453,11 @@ test("workgraph names resolve through the agent directory and never show an unkn
   );
   assert.deepEqual(
     workGraphBindingTarget({ target: { kind: "lowered_owner", owner_key: { kind: "agent", id: "planner" } } }),
-    { name: "planner", key: "agent:planner" },
+    { name: "Planner", key: "agent:planner" },
+  );
+  assert.deepEqual(
+    workGraphBindingTarget({ target: { kind: "lowered_owner", owner_key: { kind: "agent", id: "support-triage" } } }),
+    { name: "Support triage", key: "agent:support-triage" },
   );
   assert.equal(workGraphBindingTarget({}), null);
 
@@ -504,7 +513,7 @@ test("workgraph activity reads as sentences about item titles, without item ids"
   assert.equal(workGraphEventSentence({ kind: "item_claimed", item_id: "item-1" }, context), "Freeze the release branch was claimed");
   assert.equal(
     workGraphEventSentence({ kind: "claimed", item_id: "item-1", payload: { item: { claim: { owner: { key: { kind: "agent", id: "builder" } } } } } }, context),
-    "builder claimed Freeze the release branch",
+    "Builder claimed Freeze the release branch",
   );
   assert.equal(
     workGraphEventSentence({ kind: "closed", item_id: "item-1", payload: { item: { status: "completed" } } }, context),

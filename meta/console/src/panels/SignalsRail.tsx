@@ -10,7 +10,7 @@ import { turnSenderLine } from "../lib/turn-origin";
 // from the kit package, so it uses the kit's CSS classes in its own markup.
 import {
   EMPTY_AGENT_DIRECTORY,
-  stripAgentKeyPrefix,
+  agentDisplayName,
   type AgentDirectory,
 } from "../../../packages/console-components/src/panel-kit/agents";
 import { formatAbsoluteTime, formatRelativeTime, humanizeEnum } from "../../../packages/console-components/src/panel-kit/format";
@@ -109,25 +109,17 @@ function truncate(value: string, max = 110): string {
   return `${normalized.slice(0, Math.max(0, max - 1)).trimEnd()}...`;
 }
 
-/** A key read as words: "support-triage" reads "Support Triage". */
-function prettifyKey(value: string): string {
-  return value
-    .split(/[-_\s]+/)
-    .filter(Boolean)
-    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
-    .join(" ");
-}
-
 type NameResolver = (value: string) => string;
 
-/** Names agents the way the rail shows them: the directory's display name
- * when it knows the agent, else the key without its kind prefix, prettified,
- * and "System" for console events. */
+/** Names agents the way every surface does: the directory's display name
+ * when it knows the agent, else the name the shared naming function gives
+ * the key ("identity:support-triage" reads "Support triage"), and "System"
+ * for console events. */
 export function signalNameResolver(directory: AgentDirectory = EMPTY_AGENT_DIRECTORY): NameResolver {
   return (value) => {
     if (!value || value === "_system") return "System";
     const label = directory.lookup(value)?.label?.trim();
-    return label || prettifyKey(stripAgentKeyPrefix(value));
+    return label || agentDisplayName(value, directory);
   };
 }
 

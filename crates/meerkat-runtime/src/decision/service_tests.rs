@@ -21,6 +21,8 @@ use meerkat_core::approval::decision::{
 use meerkat_core::approval::{ApprovalAssurance, ApprovalConsentDeliveryState, ApprovalStoreError};
 use meerkat_core::{PrincipalKind, PrincipalRef, SessionId, TrustDomainId};
 
+use super::dsl::{DecisionDigest, DurableDecisionEffect};
+use super::service::issued_permit;
 use super::{
     DecisionClock, DecisionClockError, DecisionError, DecisionRefusal, DecisionWithdrawer,
     DecisionWriteMode, DurableDecisionService,
@@ -1036,6 +1038,47 @@ fn the_permit_carries_decided_consent_and_the_held_binding() {
         row,
         "nothing changed"
     );
+}
+
+#[test]
+fn a_permit_comes_only_from_the_machine_authorization() {
+    let (_store, _clock, service) = fixture();
+    let rendering = rendering();
+    let decision_id = approved(&service, &rendering);
+    let row = service.get(&decision_id).expect("read");
+    let authorized = |decision: &DecisionId| DurableDecisionEffect::ExecutionAuthorized {
+        decision_id: decision.as_str().to_owned(),
+        operation_id: operation_id().as_str().to_owned(),
+        request_digest: DecisionDigest(request_digest().as_str().to_owned()),
+        deadline_at_ms: DEADLINE,
+    };
+
+    // No authorization, or another decision's, mints nothing: an approved
+    // row and the absence of a refusal are not a permit.
+    assert!(matches!(
+        issued_permit(&row, &[]),
+        Err(DecisionError::Machine(_))
+    ));
+    let other = DecisionId::derive(
+        &DecisionKind::new("release").expect("kind"),
+        &DecisionSubjectKey::new("subject:other").expect("subject key"),
+    );
+    assert!(matches!(
+        issued_permit(&row, &[authorized(&other)]),
+        Err(DecisionError::Machine(_))
+    ));
+
+    // The machine's authorization mints it, with the binding and the
+    // deadline the authorization names and the consent the row decided.
+    let permit = issued_permit(&row, &[authorized(&decision_id)])
+        .expect("the machine's authorization mints the permit");
+    assert_eq!(permit.decision_id(), &decision_id);
+    assert!(permit.binds(&operation_id(), &request_digest()));
+    assert_eq!(permit.deadline_at_ms(), DEADLINE);
+    assert!(matches!(
+        permit.consent(),
+        ConsentProvenance::Decided { decision_id: consent, .. } if *consent == decision_id
+    ));
 }
 
 #[test]

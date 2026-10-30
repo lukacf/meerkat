@@ -601,20 +601,44 @@ fn hold_input(
     }
 }
 
-/// The permit of an approved row: its held binding, its deadline and the
-/// consent it decided.
-fn permit_of(row: &StoredDecision) -> Result<DecisionExecutionPermit, DecisionError> {
+/// The permit the machine issued: the `ExecutionAuthorized` effect among
+/// `effects` names the decision, its binding and its deadline, and `row`
+/// (the row the authorization left) carries the consent it decided. With no
+/// such effect for this decision, no permit is issued: only the machine's
+/// authorization mints one, never the absence of a refusal.
+pub(super) fn issued_permit(
+    row: &StoredDecision,
+    effects: &[DurableDecisionEffect],
+) -> Result<DecisionExecutionPermit, DecisionError> {
+    let machine =
+        |what: &str| DecisionError::Machine(format!("decision {}: {what}", row.decision_id));
+    let Some((operation_id, request_digest, deadline_at_ms)) =
+        effects.iter().find_map(|effect| match effect {
+            DurableDecisionEffect::ExecutionAuthorized {
+                decision_id,
+                operation_id,
+                request_digest,
+                deadline_at_ms,
+            } if decision_id.as_str() == row.decision_id.as_str() => {
+                Some((operation_id, request_digest, *deadline_at_ms))
+            }
+            _ => None,
+        })
+    else {
+        return Err(machine("the machine authorized no execution"));
+    };
+    let operation_id = DecisionOperationId::new(operation_id.as_str())
+        .map_err(|_| machine("the authorization names an invalid operation id"))?;
+    let request_digest = Sha256Digest::new(request_digest.0.as_str())
+        .map_err(|_| machine("the authorization names an invalid request digest"))?;
     let (Some(outcome), Some(decided_at_ms)) = (&row.outcome, row.state.decided_at_ms) else {
-        return Err(DecisionError::Machine(format!(
-            "decision {} was authorized without an outcome",
-            row.decision_id
-        )));
+        return Err(machine("the authorized decision has no outcome"));
     };
     Ok(DecisionExecutionPermit::new(
         row.decision_id.clone(),
-        row.descriptor.operation_id.clone(),
-        row.descriptor.request_digest.clone(),
-        row.descriptor.deadline_at_ms,
+        operation_id,
+        request_digest,
+        deadline_at_ms,
         ConsentProvenance::Decided {
             decision_id: row.decision_id.clone(),
             subject_digest: row.descriptor.subject_digest.clone(),
@@ -1115,7 +1139,10 @@ impl DurableDecisionService {
     /// binding must be the held one, and the clock before the deadline. The
     /// decision records the permit as outstanding, and from then on waits
     /// for its settlement instead of expiring. Authorizing again before the
-    /// deadline (an owner retrying after a crash) gives the same permit.
+    /// deadline (an owner retrying after a crash) gives the same permit. The
+    /// permit is minted from the machine's authorization alone: its binding
+    /// and deadline are the ones the machine's `ExecutionAuthorized` effect
+    /// names.
     ///
     /// # Errors
     /// [`DecisionError::Refused`] with `BindingMismatch`, `NotApproved`,
@@ -1129,6 +1156,7 @@ impl DurableDecisionService {
         operation_id: &DecisionOperationId,
         request_digest: &Sha256Digest,
     ) -> Result<DecisionExecutionPermit, DecisionError> {
+        let mut authorization = Vec::new();
         let row = self.commit_row(decision_id, |loaded, now_ms| {
             let input = DurableDecisionInput::AuthorizeExecution {
                 operation_id: operation_id.as_str().to_owned(),
@@ -1136,9 +1164,11 @@ impl DurableDecisionService {
                 now_ms,
             };
             let (effects, state) = transition(loaded, input)?;
-            Ok(Step::of(&effects, successor(loaded, state, |_| {})))
+            let step = Step::of(&effects, successor(loaded, state, |_| {}));
+            authorization = effects;
+            Ok(step)
         })?;
-        permit_of(&row)
+        issued_permit(&row, &authorization)
     }
 
     /// Settle an outstanding permit under which no commit was made (a

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # usage: machine_verify_all_tlc_test.sh <xtask-bin> [--part <part>]
 #        machine_verify_all_tlc_test.sh --part audits-a|...|audits-g|audits-i|
-#                                              audits-j|audits-k
+#                                              audits-k|audits-l
 # The canonical TLC lane, split into parts so each fits a CI job limit:
 #   machine-verify  the bounded adaptive witness plus `machine-verify --all`
 #   audits-a        hand-written audit shard A
@@ -14,8 +14,8 @@ set -euo pipefail
 #   audits-f        hand-written audit shard F
 #   audits-g        hand-written audit shard G
 #   audits-i        hand-written audit shard I
-#   audits-j        hand-written audit shard J
 #   audits-k        hand-written audit shard K
+#   audits-l        hand-written audit shard L
 #   all             every part (the default: `make machine-verify`, the
 #                   nightly bounded TLC job and the release gate)
 # Bazel runs the eleven parts as separate targets
@@ -23,14 +23,14 @@ set -euo pipefail
 # machine_verify_audits_b_tlc_test, machine_verify_audits_c_tlc_test,
 # machine_verify_audits_d_tlc_test, machine_verify_audits_e_tlc_test,
 # machine_verify_audits_f_tlc_test, machine_verify_audits_g_tlc_test,
-# machine_verify_audits_i_tlc_test, machine_verify_audits_j_tlc_test,
-# machine_verify_audits_k_tlc_test) so the BuildBuddy machine-authority lane
+# machine_verify_audits_i_tlc_test, machine_verify_audits_k_tlc_test,
+# machine_verify_audits_l_tlc_test) so the BuildBuddy machine-authority lane
 # runs them in parallel; together they are exactly `all`. CI's tlc-audits job
 # runs the ten audit shards, one job each.
 # The audit shards never execute xtask, so they alone may omit its path.
 audit_shard() {
   case "$1" in
-    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-i|audits-j|audits-k) return 0 ;;
+    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-i|audits-k|audits-l) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -39,13 +39,13 @@ if [[ "${1:-}" == "--part" ]] && audit_shard "${2:-}"; then
   xtask_bin=""
   lane_part="$2"
 else
-  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-g, audits-i..audits-k may omit it)}"
+  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-g, audits-i, audits-k or audits-l may omit it)}"
   if [[ "${2:-}" == "--part" ]]; then
-    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-g, audits-i..audits-k) or all}"
+    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-g, audits-i, audits-k, audits-l) or all}"
   fi
 fi
 if [[ "${lane_part}" != "machine-verify" && "${lane_part}" != "all" ]] && ! audit_shard "${lane_part}"; then
-  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-g, audits-i..audits-k, all)" >&2
+  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-g, audits-i, audits-k, audits-l, all)" >&2
   exit 2
 fi
 # run_part <part>: whether this invocation runs <part>.
@@ -635,7 +635,7 @@ fi
 # as opposed to a worker member) are reached only with identities, which the
 # ci profile has none of. A hand-written audit over the same generated model
 # checks seven runs over their whole reachable space, in two parts, each in a
-# shard of its own. Its entry part (--part entry, shard audits-j) has two
+# shard of its own. Its entry part (--part entry, shard audits-l) has two
 # runs. The entry run drives a replayed member and a member seated by the
 # spawn ladder with or without entry custody, the replay of entry rows,
 # every legacy adoption arm, the admission probe, the agent lane's member
@@ -697,7 +697,7 @@ if [[ ! -x "${identity_entry_audit}" ]]; then
   echo "error: identity entry audit runner is missing from workspace runfiles: ${identity_entry_audit}" >&2
   exit 1
 fi
-if run_part audits-j; then
+if run_part audits-l; then
   echo "running bounded identity entry TLC audit"
   TLC_WORKERS="${tlc_workers}" "${identity_entry_audit}" --mutants --part entry
 fi
@@ -881,7 +881,7 @@ run_machine_verify() {
 # audits-i = member residency's witness runs (--part witnesses), alone: its
 # 44 witness runs took 212 s locally with 4 TLC workers, each run's JVM start
 # and model parse most of it;
-# audits-j = the identity entry audit's entry part with --mutants (--part
+# audits-l = the identity entry audit's entry part with --mutants (--part
 # entry), alone: its two whole-space runs, 25 witnesses and 12 mutants took
 # 267 s locally with 4 TLC workers, most of it each run's JVM start and model
 # parse. It ran in audits-c, which took 562 and 576 s without it on main's
@@ -890,7 +890,7 @@ run_machine_verify() {
 # audits-k = the identity entry audit's declared apply part with --mutants
 # (--part apply), alone: its five whole-space runs, 28 witnesses and 17
 # mutants took 300-305 s locally with 4 TLC workers. None of audits-g,
-# audits-i, audits-j and audits-k has been measured on a hosted runner yet.
+# audits-i, audits-k and audits-l has been measured on a hosted runner yet.
 # Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
 # inside the 1080 s execution budget even on a runner 1.6x slower than the
 # faster ones here. As three shards these audits ran 13-18 minutes (audits-a),

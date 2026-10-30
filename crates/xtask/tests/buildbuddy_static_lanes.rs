@@ -220,8 +220,8 @@ fn buildbuddy_machine_authority_lane_runs_tlc_machine_verify() {
         ("machine_verify_audits_f_tlc_test", "audits-f"),
         ("machine_verify_audits_g_tlc_test", "audits-g"),
         ("machine_verify_audits_i_tlc_test", "audits-i"),
-        ("machine_verify_audits_j_tlc_test", "audits-j"),
         ("machine_verify_audits_k_tlc_test", "audits-k"),
+        ("machine_verify_audits_l_tlc_test", "audits-l"),
     ] {
         assert!(
             build.contains(&format!("name = \"{target}\""))

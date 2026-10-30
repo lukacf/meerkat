@@ -800,7 +800,7 @@ lane_part_output() {
 audit_lines() {
   grep -E '^running (bounded .* TLC audit|member [a-z]+ TLC audit|MobMachine arm coverage gate)$' | sort
 }
-audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-i audits-j audits-k"
+audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-i audits-k audits-l"
 shard_outputs="$(mktemp -d)"
 failed_parts=""
 idle_shards=""

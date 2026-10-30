@@ -1444,9 +1444,9 @@ sh_test(
 )
 
 sh_test(
-    name = "machine_verify_audits_j_tlc_test",
+    name = "machine_verify_audits_k_tlc_test",
     srcs = ["tests/machine_verify_all_tlc_test.sh"],
-    args = ["$(rootpath :xtask_bin)", "--part", "audits-j"],
+    args = ["$(rootpath :xtask_bin)", "--part", "audits-k"],
     data = [
         ":xtask_bin",
         "//:workspace_runfiles",
@@ -1476,9 +1476,9 @@ sh_test(
 )
 
 sh_test(
-    name = "machine_verify_audits_k_tlc_test",
+    name = "machine_verify_audits_l_tlc_test",
     srcs = ["tests/machine_verify_all_tlc_test.sh"],
-    args = ["$(rootpath :xtask_bin)", "--part", "audits-k"],
+    args = ["$(rootpath :xtask_bin)", "--part", "audits-l"],
     data = [
         ":xtask_bin",
         "//:workspace_runfiles",

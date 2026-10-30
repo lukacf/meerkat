@@ -934,7 +934,7 @@ jobs:
   # 40721495692 and 40721504088, an eighth (audits-i) for the member
   # residency audit's witness runs, split from audits-g, whose whole-space
   # runs stay there (179 s and 212 s locally with 4 workers), and a ninth
-  # and tenth (audits-j, audits-k) for the identity entry audit's entry part
+  # and tenth (audits-l, audits-k) for the identity entry audit's entry part
   # and its declared apply part (267 s and 300-305 s locally with 4
   # workers); none of these four is measured on a hosted runner yet.
   # The `machine-verify --all` sweep stays on nightly, the release gate and
@@ -951,7 +951,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [audits-a, audits-b, audits-c, audits-d, audits-e, audits-f, audits-g, audits-i, audits-j, audits-k]
+        part: [audits-a, audits-b, audits-c, audits-d, audits-e, audits-f, audits-g, audits-i, audits-k, audits-l]
     env:
       # A 4-vCPU runner: four TLC workers, and a heap that leaves room for
       # the runner.

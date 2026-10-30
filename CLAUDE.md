@@ -478,7 +478,7 @@ and its CI must be green before a release tag (`require_ci_green`):
   gate` requires both on such a change.
 - `tlc-audits`: on a machine-authority change, the ten hand-written TLC
   audit shards of the canonical TLC lane
-  (`machine_verify_all_tlc_test.sh --part audits-a` through `audits-g`, and `audits-i` through `audits-k`) in parallel,
+  (`machine_verify_all_tlc_test.sh --part audits-a` through `audits-g`, and `audits-i`, `audits-k` and `audits-l`) in parallel,
   needing only a JDK and the TLC jar (`.github/actions/setup-tlc-ci`, the one
   TLC install for every lane: an immutable repository mirror of the tlaplus
   v1.8.0 jar pinned by sha256); the `CI gate` requires them on such a change. The `machine-verify --all` sweep is not in PR CI.

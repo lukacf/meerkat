@@ -2982,10 +2982,10 @@ for (const pkg of localPackages.values()) {
       ["machine_verify_audits_i_tlc_test", "audits-i", "8", "24GB",
         `"TLC_WORKERS": "8",
         "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
-      ["machine_verify_audits_j_tlc_test", "audits-j", "8", "24GB",
+      ["machine_verify_audits_k_tlc_test", "audits-k", "8", "24GB",
         `"TLC_WORKERS": "8",
         "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
-      ["machine_verify_audits_k_tlc_test", "audits-k", "8", "24GB",
+      ["machine_verify_audits_l_tlc_test", "audits-l", "8", "24GB",
         `"TLC_WORKERS": "8",
         "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
     ]) {

@@ -264,7 +264,7 @@ async fn a_lost_admission_ack_hands_off_the_settlement_owned_child() {
     lost_acknowledgement_hands_off_the_settlement(AdmissionWritePath::OwnedChild).await;
 }
 
-/// The consumer's sequence: the admission loses its acknowledgement, and the
+/// A host's sequence: the admission loses its acknowledgement, and the
 /// reload of the degraded registration settles within its bound. It
 /// replaces the registration with a cold successor, the committed input
 /// stays pending there, and a resubmission with the same idempotency key is

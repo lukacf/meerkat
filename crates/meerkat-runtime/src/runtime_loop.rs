@@ -1602,13 +1602,13 @@ async fn realize_runtime_loop_terminal_owned(
                 crate::meerkat_machine::cancel_runtime_loop_run(&driver, run_id.clone())
                     .await
                     .map_err(|error| error.to_string()),
-                "runtime run cancelled".to_string(),
+                RunFailureCompletionDetail::from("runtime run cancelled".to_string()),
             ),
             OwnedRuntimeLoopTerminalization::Failed {
                 failure,
                 contributor_disposition,
             } => {
-                let completion_reason = failure.message().to_owned();
+                let completion_reason = RunFailureCompletionDetail::of_apply_failure(&failure);
                 (
                     crate::meerkat_machine::fail_runtime_loop_run(
                         &driver,
@@ -2836,10 +2836,10 @@ fn resolve_process_local_failed_run_waiters(
     completions: &mut crate::completion::CompletionRegistry,
     input_ids: Vec<InputId>,
     run_id: &RunId,
-    reason: String,
+    failure: RunFailureCompletionDetail,
 ) -> Result<(), crate::completion::CompletionWaitError> {
     let finalization = machine_failed_completion_finalization(driver);
-    let error_metadata = machine_terminal_completion_error(driver, reason).map_err(|error| {
+    let error_metadata = machine_terminal_completion_error(driver, failure).map_err(|error| {
         crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
             "runtime process-local completion metadata missing: {error}"
         ))
@@ -2871,8 +2871,9 @@ async fn resolve_machine_terminal_completion_waiters_under_authority(
     teardown_slot: &RuntimeLoopTeardownSlot,
     input_ids: &[InputId],
     run_id: &RunId,
-    reason: String,
+    failure: impl Into<RunFailureCompletionDetail>,
 ) -> Result<(), crate::completion::CompletionWaitError> {
+    let failure = failure.into();
     let _authority_guard = authority_guard;
     let mut driver_guard = driver.lock().await;
     let durable_batch = driver_guard
@@ -2907,7 +2908,7 @@ async fn resolve_machine_terminal_completion_waiters_under_authority(
                 &mut *completions.lock().await,
                 process_local_input_ids,
                 run_id,
-                reason,
+                failure,
             )?;
         }
         teardown_slot.clear_pending_nondirected_run_terminal(run_id);
@@ -2933,7 +2934,7 @@ async fn resolve_machine_terminal_completion_waiters_under_authority(
         })?;
     let (finalization, error_metadata) =
         if let Some(receipt_error) = receipt_error {
-            if receipt_error.detail.as_deref() != Some(reason.as_str()) {
+            if receipt_error.detail.as_deref() != Some(failure.detail.as_str()) {
                 return Err(crate::completion::CompletionWaitError::AuthorityUnavailable(
                 "runtime retry detail differs from its exact abandoned completion candidate"
                     .to_string(),
@@ -2948,7 +2949,7 @@ async fn resolve_machine_terminal_completion_waiters_under_authority(
         } else {
             (
                 machine_failed_completion_finalization(&driver_guard),
-                machine_terminal_completion_error(&driver_guard, reason).map_err(|error| {
+                machine_terminal_completion_error(&driver_guard, failure).map_err(|error| {
                     crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
                         "runtime terminal completion metadata missing: {error}"
                     ))
@@ -3006,8 +3007,9 @@ async fn resolve_machine_terminal_completion_waiters(
     teardown_slot: &std::sync::Arc<RuntimeLoopTeardownSlot>,
     input_ids: &[InputId],
     run_id: &RunId,
-    reason: String,
+    failure: impl Into<RunFailureCompletionDetail>,
 ) -> Result<(), crate::completion::CompletionWaitError> {
+    let failure = failure.into();
     let driver = std::sync::Arc::clone(driver);
     let completions = completions.cloned();
     let teardown_slot = std::sync::Arc::clone(teardown_slot);
@@ -3021,7 +3023,7 @@ async fn resolve_machine_terminal_completion_waiters(
             &teardown_slot,
             &owned_input_ids,
             &owned_run_id,
-            reason,
+            failure,
         )
         .await
     })
@@ -4723,10 +4725,44 @@ fn fail_completion_waiters(
     fail_closed_completion_waiters(registry, input_ids, reason);
 }
 
+/// What a failed run's completion error reports of its apply failure: the
+/// cause's message as the detail, and the typed reason the cause keeps (a
+/// refused scoped tool grant gate). These are the facts the failed-run
+/// realization stages on the run's terminal completion candidate, so the
+/// error a waiter receives on either completion path stays byte-identical to
+/// it.
+#[derive(Debug, Clone)]
+struct RunFailureCompletionDetail {
+    detail: String,
+    reason: Option<meerkat_core::event::AgentErrorReason>,
+}
+
+impl RunFailureCompletionDetail {
+    /// The detail and typed reason of `failure`.
+    fn of_apply_failure(failure: &CoreApplyFailureCause) -> Self {
+        Self {
+            detail: failure.message().to_owned(),
+            reason: failure.reason().cloned(),
+        }
+    }
+}
+
+/// A failure known only by its detail: a cancellation, or a cause the loop
+/// minted itself, which carries no typed reason.
+impl From<String> for RunFailureCompletionDetail {
+    fn from(detail: String) -> Self {
+        Self {
+            detail,
+            reason: None,
+        }
+    }
+}
+
 fn machine_terminal_completion_error(
     driver: &crate::meerkat_machine::driver::DriverEntry,
-    detail: String,
+    failure: impl Into<RunFailureCompletionDetail>,
 ) -> Result<Option<meerkat_core::TurnErrorMetadata>, crate::RuntimeDriverError> {
+    let RunFailureCompletionDetail { detail, reason } = failure.into();
     let authority = driver.shared_dsl_authority();
     let auth = authority
         .lock()
@@ -4867,11 +4903,13 @@ fn machine_terminal_completion_error(
                         .to_string(),
                 ));
             }
-            Ok(Some(meerkat_core::TurnErrorMetadata::terminal(
+            let mut metadata = meerkat_core::TurnErrorMetadata::terminal(
                 meerkat_core::TurnTerminalCauseKind::from(cause_kind),
                 meerkat_core::TurnTerminalOutcome::from(outcome),
                 detail,
-            )))
+            );
+            metadata.reason = reason;
+            Ok(Some(metadata))
         }
         crate::meerkat_machine::dsl::TurnTerminalOutcome::Completed => {
             // A runtime-failed run may legitimately still hold a `Completed`
@@ -4983,11 +5021,13 @@ fn machine_terminal_completion_error(
                 Some(_) => meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure,
                 None => meerkat_core::TurnTerminalCauseKind::Unknown,
             };
-            Ok(Some(meerkat_core::TurnErrorMetadata::terminal(
+            let mut metadata = meerkat_core::TurnErrorMetadata::terminal(
                 cause_kind,
                 meerkat_core::TurnTerminalOutcome::Failed,
                 detail,
-            )))
+            );
+            metadata.reason = reason;
+            Ok(Some(metadata))
         }
         crate::meerkat_machine::dsl::TurnTerminalOutcome::None => {
             // Unlike `Completed`, `None` is not preserved: the generated
@@ -9612,12 +9652,14 @@ async fn process_queue(
                         // one the failed-run realization stages on the input
                         // terminal-completion batch
                         // (`TurnErrorMetadata::runtime_apply_failure` over the
-                        // apply-failure cause message). The completion authority
-                        // refuses to deliver a payload whose digest differs from
-                        // the staged candidate, so a second wording here would
-                        // resolve the caller with `AuthorityUnavailable` instead
-                        // of the typed reason the run terminal carries.
-                        let completion_detail = e.apply_failure_cause().message().to_owned();
+                        // apply-failure cause message, with the cause's typed
+                        // reason). The completion authority refuses to deliver
+                        // a payload whose digest differs from the staged
+                        // candidate, so a second wording here would resolve the
+                        // caller with `AuthorityUnavailable` instead of the
+                        // typed reason the run terminal carries.
+                        let completion_detail =
+                            RunFailureCompletionDetail::of_apply_failure(&e.apply_failure_cause());
                         if executor_stopped || legacy_machine_terminal {
                             // `Stopped` and the legacy error-shaped terminal
                             // are fail-closed executor exits. Neither carries
@@ -16782,6 +16824,54 @@ mod tests {
             meerkat_core::TurnErrorMetadata::runtime_apply_failure(DETAIL),
             "the delivered payload must digest identically to the staged candidate, or the \
              durable batch answers AuthorityUnavailable instead of this terminal"
+        );
+    }
+
+    /// The same digest contract for an apply failure that keeps a typed
+    /// reason: a scoped tool grant gate the session's build refused.
+    ///
+    /// The failed-run realization stages `runtime_apply_failure` over the
+    /// cause's message with the cause's reason, so the metadata a waiter
+    /// receives must carry that reason too. Without it the caller is told a
+    /// generic runtime apply failure instead of the refusal, and a durable
+    /// batch refuses the payload's digest.
+    #[test]
+    fn failed_run_metadata_carries_the_apply_failure_reason_as_staged() {
+        const DETAIL: &str = "agent error: scoped tool grant gate refused";
+        let (driver, failed_run) = bound_ephemeral_driver();
+        crate::meerkat_machine::driver::machine_recover_runtime_completion_result_correlation(
+            &driver,
+            &failed_run,
+            crate::input_state::RuntimeCompletionTerminalRecovery::MachineFailure {
+                outcome: meerkat_core::TurnTerminalOutcome::Failed,
+                cause: meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure,
+            },
+        )
+        .expect("a durable machine-failure terminal must be recoverable");
+        let failure = CoreApplyFailureCause::runtime_turn(DETAIL).with_reason(
+            meerkat_core::event::AgentErrorReason::ToolGrantGateRefused {
+                refusal: meerkat_core::tool_grant::GrantGateRefusal::UnknownFamily {
+                    family: "shel".to_string(),
+                },
+            },
+        );
+
+        let metadata = machine_terminal_completion_error(
+            &driver,
+            RunFailureCompletionDetail::of_apply_failure(&failure),
+        )
+        .expect("a failed runtime completion must resolve")
+        .expect("a failed runtime completion must carry typed metadata");
+
+        let mut staged = meerkat_core::TurnErrorMetadata::runtime_apply_failure(DETAIL);
+        staged.reason = failure.reason().cloned();
+        assert!(
+            staged.reason.is_some(),
+            "the fixture's cause keeps a reason"
+        );
+        assert_eq!(
+            metadata, staged,
+            "the delivered payload must carry the staged candidate's typed reason"
         );
     }
 

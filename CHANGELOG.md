@@ -308,6 +308,15 @@ them.
   fields default to empty. `AgentBuildPolicyError` gains
   `ToolGrantGateWithoutAdjudication`: an agent with a scoped tool grant gate
   requires a dispatcher whose `adjudicates_tool_grants` answers true.
+  `AgentErrorReason` gains `ToolGrantGateRefused { refusal }`, appended last
+  (the enum is exhaustive, so a `match` on it needs the arm), and
+  `lifecycle::CoreApplyFailureCause` gains the public field `reason` (a
+  struct literal needs it; `CoreApplyFailureCause::new` leaves it `None`).
+  Wire change: a turn whose session's build refused its gate carries the
+  refusal as its turn error's `reason`, `{"reason_type":
+  "tool_grant_gate_refused", "refusal": ...}`, so JSON-RPC answers that turn
+  with the typed invalid-params refusal. The SDKs' event readers keep it as
+  an unknown reason, raw.
 
 - `meerkat`: `AgentBuildConfig` gains `grant_gated_tools`, and
   `BuildAgentError` gains `GrantGate(GrantGateBuildError)`, where

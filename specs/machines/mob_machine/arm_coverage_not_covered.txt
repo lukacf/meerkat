@@ -204,5 +204,3 @@ BeginExplicitResumeCleanup* explicit resume rollback cleanup; the resume run doe
 SettleExplicitResumeCleanup* explicit resume rollback cleanup; the resume run does not cancel
 CancelExplicit* explicit resume cancellation; the resume run does not cancel
 FinishExplicitResumeCancelledStopped explicit resume cancellation; the resume run does not cancel
-CommitMemberRotationLiveKickoff* the rotation terminal of a spec that owes a kickoff, which it records pending; no residency audit drives the kickoff arms that settle it, and member_residency_audit drives the kickoff-free twin, which shares every other guard and update
-CommitMemberRotationRetiredKickoff* the rotation terminal of a spec that owes a kickoff, which it records pending; no residency audit drives the kickoff arms that settle it, and member_residency_audit drives the kickoff-free twin, which shares every other guard and update

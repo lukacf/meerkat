@@ -1173,7 +1173,10 @@ function buildSidebarVirtualRows(args: {
     }
 
     const orderedList = orderRowsBySubgroupOrder(list, bucket, args.subgroupOrder);
-    const listIds = new Set(orderedList.map((row) => row.agent.member_id));
+    // A row's parent is any row of the section, pinned or not: a child left
+    // here when a sibling was pinned (taking the parent to Pinned) is still
+    // sorted as the parent's child, so it keeps the parent's container.
+    const listIds = new Set((args.grouped.get(bucket) || []).map((row) => row.agent.member_id));
     const subgroups = new Set(orderedList.map((row) => row.subgroup).filter((value): value is string => Boolean(value)));
     const showSubgroups = orderSubgroups
       && subgroups.size > (args.grouping?.collapse_single_subgroup === false ? 0 : 1);

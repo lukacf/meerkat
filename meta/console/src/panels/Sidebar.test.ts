@@ -1485,6 +1485,153 @@ test("sidebar agent rows share a container only with their siblings", () => {
   assert.equal(__sidebarTest.agentSubtreeEnd(rows, queueIndex), queueIndex);
 });
 
+test("sidebar keeps a child left in its category under its pinned parent's container", () => {
+  // Pinning c1 pins its parent p too, but not its sibling c2. c2 stays in the
+  // category, still sorted as p's child, so it trades places only with p's
+  // other children there, never with the roots it is shown among.
+  const agents = [
+    teamAgent("p", "Parent"),
+    teamAgent("c1", "Child one", { labels: { spawned_by: "agent:p" } }),
+    teamAgent("c2", "Child two", { labels: { spawned_by: "agent:p" } }),
+    teamAgent("c3", "Child three", { labels: { spawned_by: "agent:p" } }),
+    teamAgent("r1", "Root one"),
+    teamAgent("r2", "Root two"),
+  ];
+  const rows = sortedRows(agents, { pinnedAgentIds: new Set(["agent:c1"]) });
+  const containerOf = (key: string) => {
+    const row = rows.find((candidate) => candidate.kind === "agent" && candidate.key === key);
+    return row?.kind === "agent" ? row.container : null;
+  };
+
+  assert.deepEqual(agentRowIds(rows), ["p", "c1", "c3", "c2", "r1", "r2"]);
+  assert.equal(containerOf("agent:c2"), __sidebarTest.sidebarAgentContainer("Team", null, "p"));
+  assert.equal(containerOf("agent:c3"), containerOf("agent:c2"));
+  assert.equal(containerOf("agent:r1"), __sidebarTest.sidebarAgentContainer("Team", null, null));
+  assert.equal(containerOf("agent:r2"), containerOf("agent:r1"));
+  const roots = rows.flatMap((row) => row.kind === "agent" && row.container === containerOf("agent:r1")
+    ? [__sidebarTest.sidebarAgentOrderKey(row.row.agent)]
+    : []);
+  assert.deepEqual(roots, ["agent:r1", "agent:r2"], "the roots' siblings are the roots alone");
+});
+
+// A small seeded generator, so a failure names a reproducible round.
+function seededRandom(seed: number): () => number {
+  let state = seed;
+  return () => {
+    state = (state * 1103515245 + 12345) & 0x7fffffff;
+    return state / 0x7fffffff;
+  };
+}
+
+function randomOrderRoster(rand: () => number, count: number): ConsoleAgent[] {
+  const pick = <T,>(values: T[]): T => values[Math.floor(rand() * values.length)]!;
+  const agents: ConsoleAgent[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const labels: Record<string, string> = {};
+    if (index > 0 && rand() < 0.4) labels.spawned_by = `agent:m${Math.floor(rand() * index)}`;
+    if (rand() < 0.4) labels.org = pick(["x", "y"]);
+    agents.push({
+      agent_id: `m${index}`,
+      member_id: `m${index}`,
+      identity: `agent:m${index}`,
+      label: `Agent ${Math.floor(rand() * 40)}`,
+      kind: "mob_agent",
+      role: pick(["coordinator", "worker", "router", "lead", "analyst", "helper"]),
+      group: pick(["Team", "Ops", "Rest"]),
+      labels,
+    });
+  }
+  return agents;
+}
+
+function agentKeysByContainer(rows: ReturnType<typeof sortedRows>): Map<string, string[]> {
+  const byContainer = new Map<string, string[]>();
+  for (const row of rows) {
+    if (row.kind !== "agent") continue;
+    if (!byContainer.has(row.container)) byContainer.set(row.container, []);
+    byContainer.get(row.container)!.push(__sidebarTest.sidebarAgentOrderKey(row.row.agent));
+  }
+  return byContainer;
+}
+
+// Moves random siblings in random rosters (pins, subgroups, nesting, both
+// groupings) and checks that every accepted move lands where it was asked to
+// and leaves every other container as it was.
+function checkRandomMoves(seed: number, inputSource: "keyboard" | "pointer"): { moves: number; failures: string[] } {
+  const rand = seededRandom(seed);
+  const pick = <T,>(values: T[]): T => values[Math.floor(rand() * values.length)]!;
+  const failures: string[] = [];
+  let moves = 0;
+  for (let round = 0; round < 300; round += 1) {
+    const agents = randomOrderRoster(rand, 4 + Math.floor(rand() * 14));
+    const grouping: ConsoleAgentListConfig = rand() < 0.5
+      ? { group_by: ["group"] }
+      : { group_by: ["group"], subgroup_by: ["labels.org"], collapse_single_subgroup: false };
+    const pinnedAgentIds = new Set(rand() < 0.5 ? agents.filter(() => rand() < 0.15).map((agent) => agent.identity!) : []);
+    const flat = rand() < 0.3;
+    let stored: string[] = [];
+    for (let step = 0; step < 6; step += 1) {
+      const options = { grouping, pinnedAgentIds, flat };
+      const before = agentKeysByContainer(sortedRows(agents, { ...options, order: stored }));
+      const present = [...before.values()].flat();
+      const movable = [...before.entries()].filter(([, keys]) => keys.length > 1);
+      if (movable.length === 0) break;
+      const [container, siblings] = pick(movable);
+      const index = Math.floor(rand() * siblings.length);
+      const up = rand() < 0.5;
+      const target = inputSource === "keyboard"
+        ? (up ? siblings[index - 1] : siblings[index + 1])
+        : pick(siblings.filter((_, other) => other !== index));
+      if (!target) continue;
+      const dragged = siblings[index]!;
+      const expected = siblings.filter((key) => key !== dragged);
+      expected.splice(expected.indexOf(target) + (up ? 0 : 1), 0, dragged);
+      const next = __sidebarTest.sidebarAgentOrderAfterMove({
+        stored,
+        present,
+        siblings,
+        dragged,
+        target,
+        where: up ? "before" : "after",
+        inputSource,
+      });
+      if (expected.every((key, at) => key === siblings[at])) {
+        if (next) failures.push(`round ${round}: a drop that moves nothing wrote an order`);
+        continue;
+      }
+      if (!next) {
+        failures.push(`round ${round}: refused a sibling move`);
+        break;
+      }
+      moves += 1;
+      const after = agentKeysByContainer(sortedRows(agents, { ...options, order: next }));
+      const landed = after.get(container) || [];
+      if (landed.join() !== expected.join()) {
+        failures.push(`round ${round} step ${step}: ${container} expected ${expected.join()} got ${landed.join()} (pinned ${[...pinnedAgentIds].join()}, flat ${flat})`);
+      }
+      for (const [other, keys] of before) {
+        if (other !== container && (after.get(other) || []).join() !== keys.join()) {
+          failures.push(`round ${round} step ${step}: ${other} changed from ${keys.join()} to ${(after.get(other) || []).join()}`);
+        }
+      }
+      stored = next;
+    }
+  }
+  return { moves, failures };
+}
+
+test("sidebar keyboard moves in random rosters land as announced and leave other containers alone", () => {
+  const { moves, failures } = checkRandomMoves(777, "keyboard");
+  assert.ok(moves > 500, `the rosters gave enough moves to check (${moves})`);
+  assert.deepEqual(failures.slice(0, 5), []);
+});
+
+test("sidebar pointer drops in random rosters land as announced and leave other containers alone", () => {
+  const { moves, failures } = checkRandomMoves(4242, "pointer");
+  assert.ok(moves > 500, `the rosters gave enough drops to check (${moves})`);
+  assert.deepEqual(failures.slice(0, 5), []);
+});
+
 test("sidebar subgroups and pins keep separate containers", () => {
   const agents = [
     opsAgent({ id: "cto-a", label: "CTO A", group: "initiatives", scope: "cto", role: "initiative", identity: "initiative:cto-a" }),

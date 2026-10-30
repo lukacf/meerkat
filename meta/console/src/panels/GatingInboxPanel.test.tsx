@@ -205,7 +205,7 @@ describe("GatingInboxPanel frame and requests without the shared resource", () =
     expect(within(row).getByText("Waiting 18 min")).toBeTruthy();
     fireEvent.click(view.getByTestId("gating-action:pending-7:approve"));
     expect(onDecide).toHaveBeenCalledWith("pending-7", "approve");
-    expect(row.getAttribute("aria-expanded")).toBe("false");
+    expect(row.querySelector(".cc-row__hit")?.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(view.getByTestId("gating-action:pending-7:reject"));
     fireEvent.click(view.getByTestId("gating-action:pending-7:escalate"));
     expect(onDecide.mock.calls.map((call) => call[1])).toEqual(["approve", "reject", "escalate"]);
@@ -213,6 +213,47 @@ describe("GatingInboxPanel frame and requests without the shared resource", () =
     expect(view.queryByTestId("gating-action:pending-7:approve")).toBeNull();
     view.rerender(<GatingInboxPanel pending={[]} audit={[]} onDecide={onDecide} />);
     expect(view.getByText("No pending items.")).toBeTruthy();
+  });
+});
+
+describe("Approvals accessibility", () => {
+  // A control inside another control: a button or link in a button, or in
+  // an element that claims the button role.
+  const NESTED_CONTROLS = [
+    "button button", "button a", "button [role='button']",
+    "[role='button'] button", "[role='button'] a", "[role='button'] [role='button']",
+  ].join(", ");
+
+  it("keeps a request's decisions beside the row's button, never inside it", () => {
+    const pendingEntry = { pending_id: "pending-7", action_id: "deploy-release", actor_id: "release-manager", risk_tier: "r3", waited_ms: 18 * 60 * 1000 };
+    const onDecide = vi.fn();
+    const view = render(<GatingInboxPanel pending={[pendingEntry]} audit={[]} onDecide={onDecide} />);
+    const row = view.getByTestId("gating-pending:pending-7");
+    expect(view.container.querySelectorAll(NESTED_CONTROLS).length).toBe(0);
+    expect(row.getAttribute("role") === null).toBe(true);
+    const open = within(row).getByRole("button", { name: "Deploy release" });
+    expect(open.getAttribute("aria-expanded")).toBe("false");
+    for (const decision of ["approve", "reject", "escalate"]) {
+      expect(open.contains(view.getByTestId(`gating-action:pending-7:${decision}`))).toBe(false);
+    }
+    fireEvent.click(open);
+    expect(open.getAttribute("aria-expanded")).toBe("true");
+    expect(view.getByText("Request ID")).toBeTruthy();
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+
+  it("ties each tab to the panel it shows", () => {
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={snapshot("ready")} />);
+    for (const tab of ["pending", "auto", "audit", "policies"]) {
+      const control = view.getByTestId(`gating-tab:${tab}`);
+      fireEvent.click(control);
+      expect(control.getAttribute("aria-selected")).toBe("true");
+      const panel = document.getElementById(control.getAttribute("aria-controls") ?? "");
+      expect(panel?.getAttribute("role")).toBe("tabpanel");
+      expect(panel?.getAttribute("aria-labelledby")).toBe(control.getAttribute("id"));
+      expect(view.getAllByRole("tabpanel").length).toBe(1);
+    }
+    expect(view.getByRole("tabpanel").textContent?.includes("Policy details are not available in this console.")).toBe(true);
   });
 });
 

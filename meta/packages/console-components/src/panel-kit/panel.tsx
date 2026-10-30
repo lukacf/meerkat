@@ -1,4 +1,4 @@
-import { useRef, type KeyboardEvent, type ReactNode } from "react";
+import { useRef, type ComponentPropsWithRef, type KeyboardEvent, type ReactNode } from "react";
 
 import { Count } from "./chip";
 import { cx } from "./cx";
@@ -29,18 +29,53 @@ export function PanelShell({
   );
 }
 
-/** The scrolling body below the header, tabs and status row. */
+/**
+ * The ids that tie a panel tab to its panel: give PanelTabs (`idBase`) and
+ * the panel (PanelBody's `tabPanel`, or a PanelTabPanel) the same base,
+ * such as one from React's useId().
+ */
+export function panelTabIds(idBase: string, tab: string): { tabId: string; panelId: string } {
+  const key = tab.replace(/\s+/g, "-");
+  return { tabId: `${idBase}-tab-${key}`, panelId: `${idBase}-panel-${key}` };
+}
+
+/** The panel of the active tab, for content that sits inside the panel body
+ * (PanelBody's `tabPanel` makes the body itself the panel). */
+export function PanelTabPanel({
+  idBase,
+  tab,
+  ...rest
+}: ComponentPropsWithRef<"div"> & { idBase: string; tab: string }) {
+  const ids = panelTabIds(idBase, tab);
+  return <div {...rest} role="tabpanel" id={ids.panelId} aria-labelledby={ids.tabId} />;
+}
+
+/**
+ * The scrolling body below the header, tabs and status row. Under tabs,
+ * `tabPanel` makes it the active tab's panel (role="tabpanel", labelled by
+ * the tab that controls it).
+ */
 export function PanelBody({
   className,
   testId,
+  tabPanel,
   children,
 }: {
   className?: string;
   testId?: string;
+  /** The PanelTabs `idBase` and the active tab. */
+  tabPanel?: { idBase: string; tab: string };
   children?: ReactNode;
 }) {
+  const ids = tabPanel ? panelTabIds(tabPanel.idBase, tabPanel.tab) : null;
   return (
-    <div className={cx("cc-panel__body", className)} data-testid={testId}>
+    <div
+      className={cx("cc-panel__body", className)}
+      data-testid={testId}
+      role={ids ? "tabpanel" : undefined}
+      id={ids?.panelId}
+      aria-labelledby={ids?.tabId}
+    >
       {children}
     </div>
   );
@@ -98,13 +133,16 @@ export interface PanelTab<Id extends string = string> {
  * Panel tabs: a tablist of tab buttons with aria-selected and the is-active
  * class, the accent underline on the active tab and an optional count.
  * Arrow keys, Home and End move focus; Enter or Space selects. Tabs never
- * hold actions (refresh lives in the header).
+ * hold actions (refresh lives in the header). With `idBase`, each tab
+ * controls its panel (aria-controls): render the active tab's content in a
+ * PanelBody with `tabPanel`, or in a PanelTabPanel, with the same base.
  */
 export function PanelTabs<Id extends string>({
   tabs,
   active,
   onSelect,
   ariaLabel,
+  idBase,
   className,
   tabClassName,
   testId,
@@ -113,6 +151,8 @@ export function PanelTabs<Id extends string>({
   active: Id;
   onSelect: (id: NoInfer<Id>) => void;
   ariaLabel?: string;
+  /** Ties each tab to its panel; see panelTabIds. */
+  idBase?: string;
   className?: string;
   tabClassName?: string;
   testId?: string;
@@ -143,11 +183,14 @@ export function PanelTabs<Id extends string>({
     >
       {tabs.map((tab) => {
         const selected = tab.id === active;
+        const ids = idBase ? panelTabIds(idBase, tab.id) : null;
         return (
           <button
             key={tab.id}
             type="button"
             role="tab"
+            id={ids?.tabId}
+            aria-controls={ids?.panelId}
             aria-selected={selected}
             aria-label={tab.ariaLabel}
             tabIndex={selected ? 0 : -1}

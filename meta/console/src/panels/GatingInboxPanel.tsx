@@ -15,6 +15,7 @@ import {
   PanelBody,
   PanelHeader,
   PanelShell,
+  PanelTabPanel,
   PanelTabs,
   RelativeTime,
   RowList,
@@ -254,6 +255,7 @@ export function GatingInboxPanel({
   selectedPendingId,
 }: GatingInboxPanelProps): React.JSX.Element {
   const [tab, setTab] = React.useState<Tab>("pending");
+  const tabIds = React.useId();
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [expandedId, setExpandedId] = React.useState<string | null>(null);
   const listRef = React.useRef<HTMLDivElement>(null);
@@ -402,6 +404,7 @@ export function GatingInboxPanel({
       />
       <PanelTabs<Tab>
         ariaLabel="Approval views"
+        idBase={tabIds}
         active={tab}
         onSelect={setTab}
         tabs={[
@@ -413,7 +416,7 @@ export function GatingInboxPanel({
       />
       <StatusRow updatedAt={updatedShown} error={errorShown} errorTestId="gating-audit-error" />
       <PanelBody className="gating-inbox__body">
-        <div className="gating-inbox__content" ref={listRef}>{content}</div>
+        <PanelTabPanel className="gating-inbox__content" ref={listRef} idBase={tabIds} tab={tab}>{content}</PanelTabPanel>
       </PanelBody>
     </PanelShell>
   );

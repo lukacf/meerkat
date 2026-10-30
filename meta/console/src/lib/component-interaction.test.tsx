@@ -516,6 +516,157 @@ test("MemoryPanel reads in names and words; IDs live in tooltips and technical d
   }
 });
 
+test("MemoryPanel pending promotions keep their decision beside the row's button, never inside it", async () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://console.test" });
+  const previousWindow = globalThis.window;
+  const previousDocument = globalThis.document;
+  const previousActEnv = (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  globalThis.window = dom.window as unknown as Window & typeof globalThis;
+  globalThis.document = dom.window.document;
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+  const quarantined: MemoryPanelRecord = {
+    id: "mem-quarantined-1",
+    title: "Router upstream credential",
+    kind: "fact",
+    trust: "agent_verified",
+    status: { status: "quarantined" },
+    scope: { scope: "identity", realm: "default", identity: "coordinator" },
+    updated_at_ms: 1792368000000,
+  };
+  const opened: string[] = [];
+  let gatingOpened = 0;
+  const host = dom.window.document.createElement("div");
+  dom.window.document.body.appendChild(host);
+  const root = createRoot(host);
+  // A control inside another control: a button or link in a button, or in
+  // an element that claims the button role.
+  const nested = [
+    "button button", "button a", "button [role='button']",
+    "[role='button'] button", "[role='button'] a", "[role='button'] [role='button']",
+  ].join(", ");
+
+  try {
+    await React.act(async () => {
+      root.render(
+        <MemoryPanel
+          records={[]}
+          realms={["default"]}
+          quarantineRecords={[quarantined]}
+          pendingPromotions={[{
+            realm: "default",
+            pending_id: "gate-promotion-1",
+            record_id: quarantined.id,
+            scope_kind: "mob",
+            scope_key: "ops-team",
+            rationale: "Shared by every team member",
+            status: "pending",
+            created_at_ms: 1792368000000,
+          }]}
+          dreams={[]}
+          detail={null}
+          canReviewQuarantine
+          onRefresh={() => undefined}
+          onSelectRecord={(_realm, memoryId) => { opened.push(memoryId); }}
+          onClearDetail={() => undefined}
+          onOpenGating={() => { gatingOpened += 1; }}
+        />,
+      );
+    });
+    const pipelineTab = host.querySelector("[data-testid='memory-tab:pipeline']") as HTMLElement | null;
+    assert.equal(pipelineTab === null, false);
+    await React.act(async () => {
+      pipelineTab?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    });
+    const row = host.querySelector("[data-testid='memory-pending:gate-promotion-1']") as HTMLElement | null;
+    assert.equal(row === null, false, "the pending promotion row renders");
+    assert.equal(host.querySelectorAll(nested).length, 0, "no control sits inside another control");
+    assert.equal(row?.getAttribute("role"), null);
+    const open = row?.querySelector(".cc-row__hit") as HTMLButtonElement | null;
+    assert.equal(open?.tagName, "BUTTON");
+    assert.equal(open?.textContent, "Router upstream credential");
+    const decide = host.querySelector("[data-testid='memory-pipeline-decide:gate-promotion-1']") as HTMLElement | null;
+    assert.equal(decide?.tagName, "BUTTON");
+    assert.equal(open?.contains(decide) ?? true, false, "the decision is not inside the row's button");
+    assert.equal(row?.contains(decide) ?? false, true, "the decision stays on its row");
+
+    await React.act(async () => {
+      decide?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    });
+    assert.equal(gatingOpened, 1);
+    assert.deepEqual(opened, [], "deciding does not open the record");
+    await React.act(async () => {
+      open?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    });
+    assert.deepEqual(opened, [quarantined.id]);
+  } finally {
+    await React.act(async () => {
+      root.unmount();
+    });
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = previousActEnv;
+    globalThis.window = previousWindow;
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
+test("MemoryPanel tabs each control the panel they show", async () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://console.test" });
+  const previousWindow = globalThis.window;
+  const previousDocument = globalThis.document;
+  const previousActEnv = (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  globalThis.window = dom.window as unknown as Window & typeof globalThis;
+  globalThis.document = dom.window.document;
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  const host = dom.window.document.createElement("div");
+  dom.window.document.body.appendChild(host);
+  const root = createRoot(host);
+
+  try {
+    await React.act(async () => {
+      root.render(
+        <MemoryPanel
+          records={[]}
+          realms={["default"]}
+          quarantineRecords={[]}
+          pendingPromotions={[]}
+          dreams={[]}
+          detail={null}
+          onRefresh={() => undefined}
+          onSelectRecord={() => undefined}
+          onClearDetail={() => undefined}
+        />,
+      );
+    });
+    for (const tab of ["holdings", "records", "knowledge", "pipeline", "dreams"]) {
+      const control = host.querySelector(`[data-testid='memory-tab:${tab}']`) as HTMLElement | null;
+      assert.equal(control === null, false, `missing the ${tab} tab`);
+      await React.act(async () => {
+        control?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+      });
+      assert.equal(control?.getAttribute("aria-selected"), "true");
+      const panel = dom.window.document.getElementById(control?.getAttribute("aria-controls") ?? "");
+      assert.equal(panel?.getAttribute("role"), "tabpanel", `${tab} controls a tab panel`);
+      assert.equal(panel?.getAttribute("aria-labelledby"), control?.getAttribute("id"), `${tab} labels its panel`);
+      assert.equal(host.querySelectorAll("[role='tabpanel']").length, 1);
+    }
+    const pipeline = host.querySelector("[data-testid='memory-tab:pipeline']");
+    await React.act(async () => {
+      pipeline?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    });
+    const shown = host.querySelector("[role='tabpanel'] [data-testid='memory-pipeline']");
+    assert.equal(shown === null, false, "the Pipeline content sits in the tab panel");
+  } finally {
+    await React.act(async () => {
+      root.unmount();
+    });
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = previousActEnv;
+    globalThis.window = previousWindow;
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
 test("MemoryPanel walks the lattice over its first records page, never over the placeholder before it", async () => {
   const dom = new JSDOM("<!doctype html><html><body></body></html>");
   const previousWindow = globalThis.window;

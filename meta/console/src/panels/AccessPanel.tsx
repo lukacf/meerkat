@@ -329,6 +329,7 @@ export function AccessPanel({
   onPreview,
 }: AccessPanelProps): React.JSX.Element {
   const [tab, setTab] = React.useState<Tab>("overview");
+  const tabIds = React.useId();
   const [ruleDraft, setRuleDraft] = React.useState<RuleDraft | null>(null);
   // The rule an open editor replaces in place; null for a new rule.
   const [editingRuleId, setEditingRuleId] = React.useState<string | null>(null);
@@ -705,6 +706,7 @@ export function AccessPanel({
       </p>
       <PanelTabs<Tab>
         ariaLabel="Console access sections"
+        idBase={tabIds}
         active={tab}
         onSelect={setTab}
         tabs={(["overview", "groups", "rules", "preview"] as Tab[]).map((candidate) => ({
@@ -736,7 +738,7 @@ export function AccessPanel({
           ) : null}
         </div>
       ) : null}
-      <PanelBody>
+      <PanelBody tabPanel={{ idBase: tabIds, tab }}>
         <fieldset className="access-panel__fieldset" disabled={tab === "preview" ? !current : tab === "groups" ? !current || saving : !canEdit}>
           {tab === "overview" ? (
             <>

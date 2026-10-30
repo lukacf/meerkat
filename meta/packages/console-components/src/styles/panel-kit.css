@@ -637,6 +637,34 @@ textarea.cc-input {
   outline: 2px solid var(--_cc-focus-ring);
   outline-offset: -2px;
 }
+/* A row with actions or extra content: its title is the row's button, so
+   the actions and the extra sit beside the button, never inside it. The
+   button reads as the plain title, and the row draws its focus ring. */
+.cc-row__hit {
+  display: block;
+  align-self: stretch;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.cc-row__hit > .cc-row__title { display: block; }
+.cc-row__hit:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+}
+@supports selector(:has(*)) {
+  .cc-row__hit:focus-visible { outline: none; }
+  .cc-row:has(> .cc-row__main > .cc-row__hit:focus-visible) {
+    outline: 2px solid var(--_cc-focus-ring);
+    outline-offset: -2px;
+  }
+}
 .cc-row__lead {
   grid-area: lead;
   display: flex;
@@ -1130,6 +1158,11 @@ button.cc-tile:focus-visible,
 .cc-split__detail {
   border-left: 1px solid var(--_cc-border-soft);
   background: var(--_cc-surface-card);
+}
+/* Focus lands here when a detail without a heading replaces the list. */
+.cc-split__detail:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: -2px;
 }
 .cc-split__back {
   display: none;

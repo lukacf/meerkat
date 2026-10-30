@@ -12,6 +12,7 @@ import {
   pendingTopologyReceipt,
   resolveAmbiguousConsoleTopologyMutation,
   topologyApplyParams,
+  topologyNodeAgent,
   topologyPlanParams,
 } from "./topology";
 
@@ -588,4 +589,17 @@ test("a definitive stale revision conflict is never silently retried or rebased"
   const notRecovered = await resolveAmbiguousConsoleTopologyMutation(conflict.receipt, execute);
   assert.match(notRecovered.error || "", /no ambiguous outcome/i);
   assert.equal(applyCalls, 1, "generic Retry must not mint or apply a rebased request");
+});
+
+test("a topology node selects its roster agent from an endpoint key or a plain id", () => {
+  const agents = [
+    { identity: "incident-commander", member_id: "member-commander", agent_id: "agent-commander", label: "Incident Commander" },
+    { identity: "payments-sre", member_id: "member-sre", agent_id: "agent-sre", label: "Payments SRE" },
+  ];
+  const commanderKey = consoleTopologyEndpointKey({ identity: "incident-commander" }, "incident-command-center");
+  assert.equal(commanderKey, "mk1|incident-command-center|incident-commander");
+  assert.equal(topologyNodeAgent(agents, commanderKey)?.label, "Incident Commander");
+  assert.equal(topologyNodeAgent(agents, "mk1|incident-command-center|payments-sre")?.label, "Payments SRE");
+  assert.equal(topologyNodeAgent(agents, "member-sre")?.label, "Payments SRE");
+  assert.equal(topologyNodeAgent(agents, "mk1|incident-command-center|unknown") === undefined, true);
 });

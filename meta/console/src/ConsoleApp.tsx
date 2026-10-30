@@ -118,6 +118,7 @@ import {
   resolveAmbiguousConsoleTopologyMutation,
   type ConsoleTopologyControlCapabilities,
   type ConsoleTopologyRpcOperation,
+  topologyNodeAgent,
 } from "./lib/topology";
 import { findPaneResizeRoot } from "./lib/pane-resize";
 import { activeRunIdFromFrames, describeRunStopReceipt, parseRunStopResult } from "./lib/run-stop";
@@ -5613,8 +5614,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRequestMutation={(intent) => onTopologyMutation(intent)}
           onRetryOperation={(receipt) => onRetryTopologyOperation(receipt)}
           onSelectAgent={(id) => {
-            const agent = agents.find((candidate) => candidate.identity === id || candidate.member_id === id || candidate.agent_id === id);
-            if (agent) openAgentChat(agent);
+            // Opens beside the Topology pane instead of replacing it.
+            const agent = topologyNodeAgent(agents, id);
+            if (agent) openAgentChat(agent, "split_right");
           }}
         />
       );

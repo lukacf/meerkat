@@ -115,6 +115,18 @@ export function parseConsoleTopologyEndpointKey(
   }
 }
 
+/**
+ * The roster agent a topology node names. Nodes carry a plain identity, or,
+ * from the topology query, a stock endpoint key (`mk1|authority|identity`).
+ */
+export function topologyNodeAgent<A extends { identity?: string; member_id: string; agent_id: string }>(
+  agents: readonly A[],
+  id: string,
+): A | undefined {
+  const identity = parseConsoleTopologyEndpointKey(id)?.identity ?? id;
+  return agents.find((agent) => agent.identity === identity || agent.member_id === identity || agent.agent_id === identity);
+}
+
 function endpointAuthority(
   endpoint: RuntimeTopologyEndpoint,
   fallbackAuthority?: string | null,

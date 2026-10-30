@@ -32,6 +32,22 @@ describe("Today names who sent a turn", () => {
   });
 });
 
+describe("Today names memory events in plain words", () => {
+  const memory = (event: string, data: Record<string, unknown>) => describeTodayFrame({
+    id: event, event, identity: "identity:steward", timestampMs: Date.now(), data,
+  });
+  it("says a record moved, a verdict in words and a session that became untrusted", () => {
+    const moved = memory("memory.record.promoted", { scope_kind: "mob", scope_key: "main" });
+    expect(sentence({ id: "m", event: "memory.record.promoted", identity: "identity:steward", timestampMs: Date.now(), data: {} }))
+      .toBe("identity:steward moved a memory record");
+    expect(moved.tone).toBe("ok");
+    expect(memory("memory.quarantine.verdict", { verdict: "tombstone" }).snippet).toBe("discarded");
+    expect(memory("memory.quarantine.verdict", { verdict: "promote" }).snippet).toBe("moved to team or operator memory");
+    expect(sentence({ id: "t", event: "memory.taint.transition", identity: "identity:steward", timestampMs: Date.now(), data: { kind: "tainted" } }))
+      .toBe("identity:steward's session became untrusted");
+  });
+});
+
 describe("Today rows", () => {
   it("renders a frame that arrives twice without colliding React keys", () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});

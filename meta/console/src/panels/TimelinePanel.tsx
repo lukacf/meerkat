@@ -2,6 +2,7 @@ import React from "react";
 import { describeFailure } from "../lib/failure-summary";
 import { turnSender, turnSenderWords } from "../lib/turn-origin";
 import { stripPeerTransportScaffold } from "../lib/adapters";
+import { quarantineVerdictWords } from "../lib/memory-event-words";
 import type { ConsoleFrame } from "../types";
 import {
   EmptyState,
@@ -103,12 +104,12 @@ function memoryLine(event: string, data: Record<string, unknown>, who: Segment):
     case "memory.dream.completed": return { segments: [who, " finished a memory dream"], tone: "ok", kind };
     case "memory.dream.started": return { segments: [who, " started a memory dream"], tone: "neutral", kind };
     case "memory.dream.skipped": return { segments: [who, " skipped a memory dream"], snippet: reason, tone: "neutral", kind };
-    case "memory.record.promoted": return { segments: [who, " promoted a memory record"], tone: "ok", kind };
+    case "memory.record.promoted": return { segments: [who, " moved a memory record"], tone: "ok", kind };
     case "memory.write.quarantined":
       return { segments: ["A memory write from ", who, " was quarantined"], snippet: reason, tone: "warn", kind };
     case "memory.quarantine.verdict": {
       const verdict = textOf(data.verdict);
-      return { segments: [who, " reviewed a quarantined record"], snippet: verdict ? humanizeEnum(verdict) : undefined, tone: "neutral", kind };
+      return { segments: [who, " reviewed a quarantined record"], snippet: verdict ? quarantineVerdictWords(verdict) : undefined, tone: "neutral", kind };
     }
     case "memory.quarantine.release_blocked":
       return { segments: ["A quarantine release by ", who, " was blocked"], tone: "warn", kind };
@@ -116,7 +117,7 @@ function memoryLine(event: string, data: Record<string, unknown>, who: Segment):
     case "memory.budget.denied": return { segments: [who, " reached the memory budget"], tone: "warn", kind };
     case "memory.taint.transition":
       return data.kind === "tainted"
-        ? { segments: [who, "'s session memory was marked tainted"], tone: "warn", kind }
+        ? { segments: [who, "'s session became untrusted"], tone: "warn", kind }
         : { segments: [who, `'s session memory: ${humanizeEnum(textOf(data.kind) || "changed").toLowerCase()}`], tone: "neutral", kind };
     default:
       return { segments: [who, `: memory ${humanizeEnum(event.slice("memory.".length)).toLowerCase()}`], tone: "neutral", kind };

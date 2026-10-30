@@ -1584,10 +1584,10 @@ function quarantineDecisionSummary(result: MemoryQuarantineDecideResult): Quaran
             ? "Discarded; it will never be recalled."
             : `Discarded; it will never be recalled. ${
                 invalidated.length === 1
-                  ? "The promotion waiting on it was cancelled"
-                  : `The ${invalidated.length} promotions waiting on it were cancelled`
+                  ? "The move to team or operator memory waiting on it was cancelled"
+                  : `The ${invalidated.length} moves to team or operator memory waiting on it were cancelled`
               } and can no longer publish.`,
-        ids: invalidated.map((id) => ({ label: "Cancelled promotion", value: id })),
+        ids: invalidated.map((id) => ({ label: "Cancelled move", value: id })),
       };
     }
     case "already_tombstoned":
@@ -1635,8 +1635,8 @@ function quarantineDecisionErrorText(error: unknown): QuarantineNotice {
             ? `, or wait until it expires on ${formatAbsoluteTime(data.expires_at_ms)}`
             : "";
         return {
-          text: `Refused: a promotion of this record is waiting for approval. Decide it in Approvals${expires}. Discarding the record instead cancels that promotion.`,
-          ids: data.pending_id ? [{ label: "Waiting promotion", value: String(data.pending_id) }] : [],
+          text: `Refused: this record is waiting for approval to move to team or operator memory. Decide it in Approvals${expires}. Discarding the record instead cancels the move.`,
+          ids: data.pending_id ? [{ label: "Waiting move", value: String(data.pending_id) }] : [],
         };
       }
       case "successor_conflict":

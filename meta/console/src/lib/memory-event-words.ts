@@ -65,9 +65,15 @@ const VERDICT_WORDS: Readonly<Record<string, string>> = {
   tombstoned: "discarded",
   keep: "kept in quarantine",
   hold: "kept in quarantine",
-  promote: "promoted",
+  promote: "moved to team or operator memory",
   promote_pending_gate: "sent for approval",
 };
+
+/** A quarantine verdict in words: "discarded", "released", "kept in
+ * quarantine", "moved to team or operator memory". */
+export function quarantineVerdictWords(verdict: string): string {
+  return VERDICT_WORDS[verdict] ?? (verdict ? words(verdict) : "decided");
+}
 
 export function describeMemoryEventForPeople(
   event: string,
@@ -90,17 +96,17 @@ export function describeMemoryEventForPeople(
       return withDetail("Dream skipped", text(data, "reason"));
     case "memory.record.promoted": {
       const scope = memoryScopeWords(data, names);
-      const line = scope ? `A record moved to ${scope}` : "A record was promoted";
+      const line = scope ? `A record moved to ${scope}` : "A record was moved";
       return data.gated === true ? `${line} after approval` : line;
     }
     case "memory.quarantine.verdict": {
-      const verdict = text(data, "verdict");
-      const said = VERDICT_WORDS[verdict] ?? (verdict ? words(verdict) : "decided");
-      return withDetail(`Quarantine verdict: ${said}`, text(data, "rationale"));
+      return withDetail(`Quarantine verdict: ${quarantineVerdictWords(text(data, "verdict"))}`, text(data, "rationale"));
     }
     case "memory.quarantine.release_blocked": {
-      const action = text(data, "verdict") === "promote_pending_gate" ? "Promotion" : "Release";
-      const line = `${action} of ${record(text(data, "record_id"))} blocked`;
+      const subject = record(text(data, "record_id"));
+      const line = text(data, "verdict") === "promote_pending_gate"
+        ? `Moving ${subject} was blocked`
+        : `Release of ${subject} blocked`;
       return text(data, "class") ? `${line} · it looks like a secret` : line;
     }
     case "memory.conflict.signal": {
@@ -131,7 +137,7 @@ export function describeMemoryEventForPeople(
     }
     case "memory.promotion.pending_gate": {
       const scope = memoryScopeWords(data, names);
-      return scope ? `A promotion to ${scope} waits for approval` : "A promotion waits for approval";
+      return scope ? `A record waits for approval to move to ${scope}` : "A record waits for approval to move";
     }
     case "memory.harvest.completed": {
       const kept = count(data, "promoted");

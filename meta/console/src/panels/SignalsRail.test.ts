@@ -375,5 +375,8 @@ test("signals rail memory lines lead with names and plain words, not keys", () =
   const details = buildSignalGroupsForTest(frames, directory).map((group) => group.detail);
   assert.ok(details.includes("A memory write from Research Analyst was quarantined · session tainted by configured untrusted tool"), JSON.stringify(details));
   assert.ok(details.includes("A record moved to team memory after approval"), JSON.stringify(details));
+  const titles = buildSignalGroupsForTest(frames, directory).map((group) => group.title);
+  assert.ok(titles.includes("Memory record moved"), JSON.stringify(titles));
+  assert.ok(!titles.some((title) => /promot/i.test(title)), JSON.stringify(titles));
   assert.ok(!details.some((detail) => /identity:|mob:main/.test(detail)), JSON.stringify(details));
 });

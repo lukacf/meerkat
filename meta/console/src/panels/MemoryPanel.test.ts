@@ -1526,11 +1526,11 @@ test("quarantine decision summaries say what happened and carry the record IDs a
     });
   const one = withPromotion(["gate-1"]);
   summaries.push(one);
-  assert.match(one.text, /The promotion waiting on it was cancelled and can no longer publish/);
-  assert.deepEqual(one.ids, [{ label: "Cancelled promotion", value: "gate-1" }]);
+  assert.match(one.text, /The move to team or operator memory waiting on it was cancelled and can no longer publish/);
+  assert.deepEqual(one.ids, [{ label: "Cancelled move", value: "gate-1" }]);
   const two = withPromotion(["gate-1", "gate-2"]);
   summaries.push(two);
-  assert.match(two.text, /The 2 promotions waiting on it were cancelled/);
+  assert.match(two.text, /The 2 moves to team or operator memory waiting on it were cancelled/);
   assert.deepEqual(two.ids.map((id) => id.value), ["gate-1", "gate-2"]);
   const again = quarantineDecisionSummary({ ...released, outcome: "already_tombstoned", successor: null });
   summaries.push(again);
@@ -1570,16 +1570,16 @@ test("quarantine decision errors render typed refusals without echoing content",
   notices.push(gate);
   assert.equal(
     gate.text,
-    "Refused: a promotion of this record is waiting for approval. Decide it in Approvals. Discarding the record instead cancels that promotion.",
+    "Refused: this record is waiting for approval to move to team or operator memory. Decide it in Approvals. Discarding the record instead cancels the move.",
   );
-  assert.deepEqual(gate.ids, [{ label: "Waiting promotion", value: "gate-1" }]);
+  assert.deepEqual(gate.ids, [{ label: "Waiting move", value: "gate-1" }]);
   const expiring = quarantineDecisionErrorText(
     refused({ reason: "gate_pending", pending_id: "gate-1", expires_at_ms: Date.UTC(2026, 9, 31, 12) }),
   );
   notices.push(expiring);
   assert.match(
     expiring.text,
-    /Decide it in Approvals, or wait until it expires on .*2026.*\. Discarding the record instead cancels that promotion\./,
+    /Decide it in Approvals, or wait until it expires on .*2026.*\. Discarding the record instead cancels the move\./,
   );
   const conflict = quarantineDecisionErrorText(
     refused({ reason: "successor_conflict", successor_id: "mem-q-released" }),

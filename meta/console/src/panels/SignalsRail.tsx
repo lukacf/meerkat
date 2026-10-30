@@ -410,13 +410,13 @@ function memorySignal(
     case "memory.dream.completed":
       return info("Memory dream completed");
     case "memory.record.promoted":
-      return info("Memory record promoted");
+      return info("Memory record moved");
     case "memory.harvest.completed":
       return info("Retired agent's memory summarized");
     case "memory.quarantine.verdict":
       return info("Quarantine verdict");
     case "memory.promotion.pending_gate":
-      return info("Promotion waiting for approval");
+      return info("Memory record waiting to move");
     default:
       // memory.dream.started/skipped, memory.hygiene.proposed/applied/skipped,
       // memory.distill.timed_out, and any other subtype are not shown.

@@ -1,0 +1,590 @@
+//! The aggregator's in-memory last activity ([`super::last_activity`]):
+//! each identity is read from the console log once, with no frame bound, and
+//! then follows the acting frames the aggregator appends, in both console
+//! stores. The store wrapper counts the log reads (walks) and can hold a
+//! walk after its read, or an append after its write, to fix an
+//! interleaving.
+#![allow(clippy::expect_used)]
+
+use std::sync::atomic::AtomicUsize;
+
+use tokio::sync::oneshot;
+
+use super::*;
+
+const RUNTIME: &str = "runtime-a";
+const SESSION: &str = "0193f5d1-0b5a-7c3e-9a1f-1c2d3e4f5a6b";
+
+fn frame(
+    key: &str,
+    identity: &str,
+    timestamp_ms: u64,
+    source: ConsoleFrameSourceKind,
+    kind: &str,
+) -> NewConsoleFrame {
+    NewConsoleFrame {
+        id: None,
+        dedupe_key: key.to_string(),
+        timestamp_ms,
+        runtime_key: RUNTIME.to_string(),
+        identity: identity.to_string(),
+        conversation_id: Some(identity.to_string()),
+        session_id: None,
+        kind: kind.to_string(),
+        status: ConsoleFrameStatus::Delivered,
+        payload: json!({}),
+        source: ConsoleFrameSource {
+            member_provenance: None,
+            kind: source,
+            source_cursor: None,
+        },
+        source_event_id: Some(key.to_string()),
+        interaction_id: None,
+        turn_id: None,
+        run_id: None,
+        parent_frame_id: None,
+        caused_by_frame_id: None,
+    }
+}
+
+/// A live runtime event of the identity acting.
+fn acting(key: &str, identity: &str, timestamp_ms: u64) -> NewConsoleFrame {
+    frame(
+        key,
+        identity,
+        timestamp_ms,
+        ConsoleFrameSourceKind::ConsoleEvent,
+        "text_complete",
+    )
+}
+
+fn send_request(identity: &str, key: &str) -> ConsoleSendRequest {
+    ConsoleSendRequest {
+        identity: identity.to_string(),
+        content: json!("hello"),
+        origin: "console".to_string(),
+        idempotency_key: key.to_string(),
+        handling_mode: Some("queue".to_string()),
+        origin_kind: None,
+        skill_refs: Vec::new(),
+    }
+}
+
+/// Both console stores, each fresh.
+fn stores() -> Vec<(&'static str, Arc<dyn ConsoleLogStore>)> {
+    let in_memory: Arc<dyn ConsoleLogStore> = Arc::new(InMemoryConsoleLogStore::new());
+    let sqlite: Arc<dyn ConsoleLogStore> =
+        Arc::new(SqliteConsoleLogStore::in_memory().expect("sqlite store"));
+    vec![("in-memory", in_memory), ("sqlite", sqlite)]
+}
+
+/// One held step: the store signals `reached` and waits for `resume`.
+struct Hold {
+    reached: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
+}
+
+/// The test's side of a [`Hold`].
+struct HoldHandle {
+    reached: oneshot::Receiver<()>,
+    resume: oneshot::Sender<()>,
+}
+
+fn hold() -> (Hold, HoldHandle) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    (
+        Hold {
+            reached: reached_tx,
+            resume: resume_rx,
+        },
+        HoldHandle {
+            reached: reached_rx,
+            resume: resume_tx,
+        },
+    )
+}
+
+/// A console store that counts its activity walks and can hold the next
+/// walk after it has read the log, or the next append after it has written
+/// the frame.
+struct ObservedStore {
+    inner: Arc<dyn ConsoleLogStore>,
+    walks: AtomicUsize,
+    walk_hold: std::sync::Mutex<Option<Hold>>,
+    append_hold: std::sync::Mutex<Option<Hold>>,
+}
+
+impl ObservedStore {
+    fn new(inner: Arc<dyn ConsoleLogStore>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            walks: AtomicUsize::new(0),
+            walk_hold: std::sync::Mutex::new(None),
+            append_hold: std::sync::Mutex::new(None),
+        })
+    }
+
+    fn walks(&self) -> usize {
+        self.walks.load(Ordering::SeqCst)
+    }
+
+    fn hold_next_walk(&self) -> HoldHandle {
+        let (held, handle) = hold();
+        *self.walk_hold.lock().expect("walk hold") = Some(held);
+        handle
+    }
+
+    fn hold_next_append(&self) -> HoldHandle {
+        let (held, handle) = hold();
+        *self.append_hold.lock().expect("append hold") = Some(held);
+        handle
+    }
+
+    fn take(slot: &std::sync::Mutex<Option<Hold>>) -> Option<Hold> {
+        slot.lock().expect("hold slot").take()
+    }
+
+    async fn pass(slot: &std::sync::Mutex<Option<Hold>>) {
+        if let Some(held) = Self::take(slot) {
+            let _ = held.reached.send(());
+            let _ = held.resume.await;
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ConsoleLogStore for ObservedStore {
+    async fn append_if_absent(&self, frame: NewConsoleFrame) -> ConsoleLogResult<AppendOutcome> {
+        let outcome = self.inner.append_if_absent(frame).await?;
+        Self::pass(&self.append_hold).await;
+        Ok(outcome)
+    }
+
+    async fn update_frame_status(
+        &self,
+        frame_id: &str,
+        status: ConsoleFrameStatus,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        self.inner.update_frame_status(frame_id, status).await
+    }
+
+    async fn query_frames(
+        &self,
+        query: ConsoleTimelineQuery,
+    ) -> ConsoleLogResult<ConsoleTimelinePage> {
+        self.inner.query_frames(query).await
+    }
+
+    async fn query_windowed_frames(
+        &self,
+        query: ConsoleTimelineWindowQuery,
+    ) -> ConsoleLogResult<ConsoleTimelineWindowPage> {
+        self.inner.query_windowed_frames(query).await
+    }
+
+    async fn frame_by_dedupe_key(
+        &self,
+        dedupe_key: &str,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        self.inner.frame_by_dedupe_key(dedupe_key).await
+    }
+
+    async fn unsettled_send_frames(
+        &self,
+        window: usize,
+        limit: usize,
+    ) -> ConsoleLogResult<Vec<ConsoleFrame>> {
+        self.inner.unsettled_send_frames(window, limit).await
+    }
+
+    async fn latest_activity_times(
+        &self,
+        identities: &[String],
+    ) -> ConsoleLogResult<HashMap<String, u64>> {
+        self.walks.fetch_add(1, Ordering::SeqCst);
+        let times = self.inner.latest_activity_times(identities).await?;
+        Self::pass(&self.walk_hold).await;
+        Ok(times)
+    }
+
+    fn send_dedupe_durability(&self) -> ConsoleSendDedupeDurability {
+        self.inner.send_dedupe_durability()
+    }
+
+    async fn latest_cursor(&self) -> ConsoleLogResult<Option<ConsoleCursor>> {
+        self.inner.latest_cursor().await
+    }
+
+    async fn history_prefix_revision(&self) -> ConsoleLogResult<Option<String>> {
+        self.inner.history_prefix_revision().await
+    }
+
+    async fn compact_message_deltas(
+        &self,
+        compaction: &ConsoleDeltaCompaction,
+    ) -> ConsoleLogResult<usize> {
+        self.inner.compact_message_deltas(compaction).await
+    }
+
+    async fn clear_frames(&self) -> ConsoleLogResult<()> {
+        self.inner.clear_frames().await
+    }
+
+    async fn record_source_watermark(
+        &self,
+        runtime_key: &str,
+        source_kind: ConsoleFrameSourceKind,
+        source_cursor: &str,
+    ) -> ConsoleLogResult<()> {
+        self.inner
+            .record_source_watermark(runtime_key, source_kind, source_cursor)
+            .await
+    }
+
+    async fn source_watermark(
+        &self,
+        runtime_key: &str,
+        source_kind: ConsoleFrameSourceKind,
+    ) -> ConsoleLogResult<Option<String>> {
+        self.inner.source_watermark(runtime_key, source_kind).await
+    }
+}
+
+/// A frame the log held before this aggregator started, as from an earlier
+/// process: written to the store directly.
+async fn stored_before(store: &ObservedStore, frame: NewConsoleFrame) {
+    store
+        .inner
+        .append_if_absent(frame)
+        .await
+        .expect("stored frame");
+}
+
+/// A frame the aggregator appends itself, through the projection's append.
+async fn append(aggregator: &MetaConsoleAggregator, frame: NewConsoleFrame) -> AppendOutcome {
+    append_and_emit(&aggregator.inner, frame)
+        .await
+        .expect("aggregator append")
+}
+
+async fn read(aggregator: &MetaConsoleAggregator, identities: &[&str]) -> HashMap<String, u64> {
+    let identities = identities
+        .iter()
+        .map(|identity| (*identity).to_string())
+        .collect::<Vec<_>>();
+    aggregator
+        .last_activity_for_identities(&identities)
+        .await
+        .expect("last activity")
+}
+
+fn times(entries: &[(&str, u64)]) -> HashMap<String, u64> {
+    entries
+        .iter()
+        .map(|(identity, time)| ((*identity).to_string(), *time))
+        .collect()
+}
+
+/// An identity whose one acting frame sits behind 600 newer frames of it not
+/// acting (as after a history backfill) reads that frame's time: the first
+/// read walks the log with no frame bound.
+#[tokio::test]
+async fn an_acting_frame_behind_hundreds_of_newer_frames_reads_its_time() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        stored_before(&observed, acting("archivist-acted", "archivist", 100)).await;
+        for index in 0..600_u64 {
+            stored_before(
+                &observed,
+                frame(
+                    &format!("archivist-history-{index}"),
+                    "archivist",
+                    200 + index,
+                    ConsoleFrameSourceKind::SessionHistory,
+                    "assistant_message",
+                ),
+            )
+            .await;
+        }
+        let aggregator = MetaConsoleAggregator::new(observed);
+        assert_eq!(
+            read(&aggregator, &["archivist"]).await,
+            times(&[("archivist", 100)]),
+            "{name}"
+        );
+    }
+}
+
+/// After its first read, an identity follows the acting frames the
+/// aggregator appends (a projected event, a console send) with no further
+/// store read, and a policy view reads the same times.
+#[tokio::test]
+async fn a_read_identity_follows_acting_appends_and_sends_without_a_store_read() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        stored_before(&observed, acting("worker-earlier", "worker", 100)).await;
+        let aggregator = MetaConsoleAggregator::new(observed.clone());
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            times(&[("worker", 100)]),
+            "{name}"
+        );
+        assert_eq!(observed.walks(), 1, "{name}: the first read walks the log");
+
+        append(&aggregator, acting("worker-later", "worker", 300)).await;
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            times(&[("worker", 300)]),
+            "{name}"
+        );
+
+        let before = current_time_ms();
+        let reservation = aggregator
+            .reserve_identity_first_interaction(send_request("worker", "k1"), Some(SESSION))
+            .await
+            .expect("reservation");
+        assert!(
+            matches!(reservation, IdentityFirstReservation::Fresh(_)),
+            "{name}: {reservation:?}"
+        );
+        let after = current_time_ms();
+        let sent = read(&aggregator, &["worker"]).await["worker"];
+        assert!(
+            (before..=after).contains(&sent),
+            "{name}: a console send is the identity acting ({before} <= {sent} <= {after})"
+        );
+
+        let view = aggregator.policy_view(Arc::new(AllowAllConsoleVisibilityPolicy));
+        assert_eq!(
+            view.last_activity_for_identities(&["worker".to_string()])
+                .await
+                .expect("view last activity"),
+            times(&[("worker", sent)]),
+            "{name}: a policy view shares the times"
+        );
+        assert_eq!(observed.walks(), 1, "{name}: no read after the first walks");
+    }
+}
+
+/// Appends of frames that do not record the identity acting change neither
+/// its time nor the store reads, and do not stand in for an unread
+/// identity's walk.
+#[tokio::test]
+async fn appends_that_do_not_act_change_neither_the_read_nor_the_store_reads() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        stored_before(&observed, acting("worker-acted", "worker", 100)).await;
+        let aggregator = MetaConsoleAggregator::new(observed.clone());
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            times(&[("worker", 100)]),
+            "{name}"
+        );
+
+        for (key, time, source, kind) in [
+            (
+                "history",
+                500,
+                ConsoleFrameSourceKind::SessionHistory,
+                "assistant_message",
+            ),
+            (
+                "synthetic",
+                510,
+                ConsoleFrameSourceKind::Synthetic,
+                "frame_updated",
+            ),
+            (
+                "retired",
+                520,
+                ConsoleFrameSourceKind::ConsoleEvent,
+                "identity_retired",
+            ),
+            (
+                "memory",
+                530,
+                ConsoleFrameSourceKind::ConsoleEvent,
+                "memory.record.promoted",
+            ),
+            (
+                "failed",
+                540,
+                ConsoleFrameSourceKind::ConsoleEvent,
+                "interaction_failed",
+            ),
+        ] {
+            append(&aggregator, frame(key, "worker", time, source, kind)).await;
+        }
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            times(&[("worker", 100)]),
+            "{name}"
+        );
+        assert_eq!(observed.walks(), 1, "{name}");
+
+        // An identity seen only not acting is still walked on its first
+        // read, and has no time.
+        append(
+            &aggregator,
+            frame(
+                "ghost-history",
+                "ghost",
+                600,
+                ConsoleFrameSourceKind::SessionHistory,
+                "assistant_message",
+            ),
+        )
+        .await;
+        assert_eq!(
+            read(&aggregator, &["ghost"]).await,
+            HashMap::new(),
+            "{name}"
+        );
+        assert_eq!(observed.walks(), 2, "{name}");
+    }
+}
+
+/// An identity that acted in this process before its first read is answered
+/// from memory: the frame the aggregator stored is its newest acting frame.
+#[tokio::test]
+async fn an_identity_that_acted_here_is_read_without_a_walk() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        stored_before(&observed, acting("fresh-earlier", "fresh", 100)).await;
+        let aggregator = MetaConsoleAggregator::new(observed.clone());
+        append(&aggregator, acting("fresh-now", "fresh", 400)).await;
+        assert_eq!(
+            read(&aggregator, &["fresh"]).await,
+            times(&[("fresh", 400)]),
+            "{name}"
+        );
+        assert_eq!(observed.walks(), 0, "{name}");
+    }
+}
+
+/// A replayed append (a dedupe key the log already holds) is not merged: an
+/// unread identity is still walked, so its newer acting frame wins.
+#[tokio::test]
+async fn a_replayed_acting_frame_does_not_stand_in_for_the_walk() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        stored_before(&observed, acting("router-first", "router", 100)).await;
+        stored_before(&observed, acting("router-second", "router", 200)).await;
+        let aggregator = MetaConsoleAggregator::new(observed.clone());
+        let replay = append(&aggregator, acting("router-first", "router", 100)).await;
+        assert_eq!(replay.disposition, AppendDisposition::Existing, "{name}");
+        assert_eq!(
+            read(&aggregator, &["router"]).await,
+            times(&[("router", 200)]),
+            "{name}"
+        );
+        assert_eq!(observed.walks(), 1, "{name}");
+    }
+}
+
+/// An acting append that lands while the first read's walk is between its
+/// log read and its merge is kept: the walk found the older time, and the
+/// merge keeps the newer one whichever lands first. The store holds the walk
+/// after its read, so the interleaving is fixed.
+#[tokio::test]
+async fn an_acting_append_racing_the_seed_is_kept() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        stored_before(&observed, acting("worker-earlier", "worker", 100)).await;
+        let aggregator = MetaConsoleAggregator::new(observed.clone());
+        let shared = &aggregator;
+        let HoldHandle { reached, resume } = observed.hold_next_walk();
+        let (first, ()) = tokio::join!(read(shared, &["worker"]), async move {
+            reached.await.expect("the walk read the log");
+            append(shared, acting("worker-racing", "worker", 300)).await;
+            resume.send(()).expect("resume the walk");
+        });
+        assert_eq!(first, times(&[("worker", 300)]), "{name}");
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            times(&[("worker", 300)]),
+            "{name}"
+        );
+        assert_eq!(observed.walks(), 1, "{name}");
+    }
+}
+
+/// Concurrent first reads walk an identity once: the second waits for the
+/// first's walk and reads its result.
+#[tokio::test]
+async fn concurrent_first_reads_walk_an_identity_once() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        stored_before(&observed, acting("worker-acted", "worker", 100)).await;
+        let aggregator = MetaConsoleAggregator::new(observed.clone());
+        let shared = &aggregator;
+        let HoldHandle { reached, resume } = observed.hold_next_walk();
+        let (first, (second, ())) = tokio::join!(read(shared, &["worker"]), async move {
+            reached.await.expect("the first walk read the log");
+            tokio::join!(read(shared, &["worker"]), async move {
+                tokio::task::yield_now().await;
+                resume.send(()).expect("resume the first walk");
+            })
+        });
+        assert_eq!(first, times(&[("worker", 100)]), "{name}");
+        assert_eq!(second, times(&[("worker", 100)]), "{name}");
+        assert_eq!(observed.walks(), 1, "{name}");
+    }
+}
+
+/// A clear waits for an append in flight, then drops every time with the
+/// frames: the next read walks the cleared log, and a later acting append
+/// counts again. The store holds the append after its write, so the clear
+/// would otherwise run between the write and the merge.
+#[tokio::test]
+async fn a_clear_waits_for_appends_in_flight_and_drops_every_time() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        let aggregator = MetaConsoleAggregator::new(observed.clone());
+        append(&aggregator, acting("worker-first", "worker", 100)).await;
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            times(&[("worker", 100)]),
+            "{name}"
+        );
+
+        let shared = &aggregator;
+        let HoldHandle { reached, resume } = observed.hold_next_append();
+        tokio::join!(
+            async move {
+                append(shared, acting("worker-second", "worker", 300)).await;
+            },
+            async move {
+                reached.await.expect("the append wrote its frame");
+                let mut clear = std::pin::pin!(shared.clear_timeline_frames());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), clear.as_mut())
+                        .await
+                        .is_err(),
+                    "{name}: the clear waits for the append in flight"
+                );
+                resume.send(()).expect("resume the append");
+                clear.await.expect("clear");
+            }
+        );
+
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            HashMap::new(),
+            "{name}"
+        );
+        assert_eq!(
+            observed.walks(),
+            1,
+            "{name}: the read after the clear walks"
+        );
+        append(&aggregator, acting("worker-third", "worker", 500)).await;
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            times(&[("worker", 500)]),
+            "{name}"
+        );
+        assert_eq!(observed.walks(), 1, "{name}");
+    }
+}

@@ -38,13 +38,6 @@ impl ConsoleSendDedupeDurability {
     }
 }
 
-/// How many of an identity's newest frames
-/// [`ConsoleLogStore::latest_activity_times`] looks through for one that
-/// records the identity acting. The bound keeps each identity's read to one
-/// short index seek; an identity whose newest acting frame sits behind more
-/// frames than this reads unknown.
-const LATEST_ACTIVITY_SCAN_FRAMES: usize = 512;
-
 /// The frame sources that record an identity acting: live runtime events,
 /// console sends and tool applications.
 const ACTIVITY_SOURCE_KINDS: [ConsoleFrameSourceKind; 3] = [
@@ -72,8 +65,12 @@ fn is_activity_source(kind: &ConsoleFrameSourceKind) -> bool {
 }
 
 /// Whether a frame records its identity acting, told apart by the frame's
-/// source and kind columns alone (no payload is read).
-fn is_activity_frame(frame: &ConsoleFrame) -> bool {
+/// source and kind columns alone (no payload is read). The one rule: the
+/// SQL of [`latest_activity_sql`] is built from the same lists, and the
+/// aggregator's in-memory last activity
+/// ([`super::last_activity::LastActivityCache`]) records an appended frame
+/// only when this says it acts.
+pub(super) fn is_activity_frame(frame: &ConsoleFrame) -> bool {
     is_activity_source(&frame.source.kind)
         && !NON_ACTIVITY_EVENT_KINDS.contains(&frame.kind.as_str())
         && !frame.kind.starts_with(MEMORY_EVENT_KIND_PREFIX)
@@ -88,9 +85,10 @@ fn sql_string_list<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
         .join(", ")
 }
 
-/// One identity's newest activity time: a seek through
-/// `idx_console_frames_identity_cursor` to its newest frames, never a scan
-/// of the log. It applies [`is_activity_frame`] in SQL.
+/// One identity's newest activity time: a walk of
+/// `idx_console_frames_identity_cursor` through the identity's own frames,
+/// newest first, that stops at the first acting frame, never a scan of the
+/// log. It applies [`is_activity_frame`] in SQL.
 fn latest_activity_sql() -> String {
     let sources = sql_string_list(
         ACTIVITY_SOURCE_KINDS
@@ -99,11 +97,9 @@ fn latest_activity_sql() -> String {
     );
     let excluded = sql_string_list(NON_ACTIVITY_EVENT_KINDS);
     format!(
-        "SELECT timestamp_ms FROM (
-             SELECT cursor_seq, timestamp_ms, source_kind, kind FROM console_frames
-             WHERE identity = ?1 ORDER BY cursor_seq DESC LIMIT ?2
-         )
-         WHERE source_kind IN ({sources})
+        "SELECT timestamp_ms FROM console_frames
+         WHERE identity = ?1
+           AND source_kind IN ({sources})
            AND kind NOT IN ({excluded})
            AND kind NOT GLOB '{MEMORY_EVENT_KIND_PREFIX}*'
          ORDER BY cursor_seq DESC LIMIT 1"
@@ -173,15 +169,19 @@ pub trait ConsoleLogStore: Send + Sync {
     /// The newest activity time of each named identity, in milliseconds since
     /// the epoch: the `timestamp_ms` of its newest frame that records the
     /// identity acting (a live runtime event, a console send or a tool
-    /// application), looked for among its newest 512 frames. Frames rebuilt
+    /// application), however many of its frames are newer. Frames rebuilt
     /// from session history or synthesized by the console are stamped when the
     /// console observes them, so they do not count; nor do operator lifecycle
     /// records (respawn, retire, reset, delete), interaction failures and
     /// member memory events, which record something done to the identity. An
-    /// identity without such a frame is absent. Stores that cannot answer keep
-    /// the default and report none, so every identity's activity reads as
-    /// unknown. A store that wraps another must forward this method, or the
-    /// console silently reads every agent's activity as unknown.
+    /// identity without such a frame is absent. The read walks each named
+    /// identity's frames newest first and stops at its first acting frame.
+    /// The console aggregator reads an identity here once, on its first read,
+    /// and then keeps its time in memory from the frames it appends. Stores
+    /// that cannot answer keep the default and report none, so an identity's
+    /// activity reads as unknown until the aggregator appends a frame of it
+    /// acting. A store that wraps another must forward this method, or the
+    /// console silently reads every agent's earlier activity as unknown.
     async fn latest_activity_times(
         &self,
         _identities: &[String],
@@ -545,19 +545,20 @@ impl ConsoleLogStore for InMemoryConsoleLogStore {
         &self,
         identities: &[String],
     ) -> ConsoleLogResult<HashMap<String, u64>> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| boxed_error("console log lock poisoned"))?;
         let mut times = HashMap::new();
         for identity in identities {
+            // The lock is held for one identity's walk at a time, as in
+            // SQLite, so appends interleave with a large roster's read.
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| boxed_error("console log lock poisoned"))?;
             let Some(seqs) = state.identity_to_seqs.get(identity) else {
                 continue;
             };
             let newest = seqs
                 .iter()
                 .rev()
-                .take(LATEST_ACTIVITY_SCAN_FRAMES)
                 .filter_map(|seq| state.frames.get(seq))
                 .find(|frame| is_activity_frame(frame));
             if let Some(frame) = newest {
@@ -1265,7 +1266,6 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
         if identities.is_empty() {
             return Ok(HashMap::new());
         }
-        let scan_limit = i64::try_from(LATEST_ACTIVITY_SCAN_FRAMES).unwrap_or(i64::MAX);
         let sql = latest_activity_sql();
         let _fence = self.operation_fence()?;
         let mut times = HashMap::with_capacity(identities.len());
@@ -1280,7 +1280,7 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
                     .map_err(|_| boxed_error("console log lock poisoned"))?;
                 let mut statement = conn.prepare_cached(&sql).map_err(into_boxed)?;
                 statement
-                    .query_row(params![identity, scan_limit], |row| row.get(0))
+                    .query_row(params![identity], |row| row.get(0))
                     .optional()
                     .map_err(into_boxed)?
             };
@@ -2263,6 +2263,78 @@ mod tests {
                 HashMap::new(),
             );
         }
+    }
+
+    /// The read has no frame bound: an identity whose one acting frame sits
+    /// behind 600 newer frames of it not acting (history and memory events,
+    /// as after a backfill) reads that frame's time, in both stores.
+    #[tokio::test]
+    async fn latest_activity_times_reach_an_acting_frame_behind_any_number_of_newer_frames() {
+        let stores: Vec<Box<dyn ConsoleLogStore>> = vec![
+            Box::new(InMemoryConsoleLogStore::new()),
+            Box::new(SqliteConsoleLogStore::in_memory().expect("sqlite store")),
+        ];
+        for store in stores {
+            store
+                .append_if_absent(activity_frame(
+                    "archivist-acted",
+                    "archivist",
+                    100,
+                    ConsoleFrameSourceKind::ConsoleEvent,
+                ))
+                .await
+                .expect("append");
+            for index in 0..600_u64 {
+                let newer = if index % 2 == 0 {
+                    activity_frame(
+                        &format!("archivist-history-{index}"),
+                        "archivist",
+                        200 + index,
+                        ConsoleFrameSourceKind::SessionHistory,
+                    )
+                } else {
+                    event_frame(
+                        &format!("archivist-memory-{index}"),
+                        "archivist",
+                        200 + index,
+                        "memory.record.promoted",
+                    )
+                };
+                store.append_if_absent(newer).await.expect("append");
+            }
+            assert_eq!(
+                store
+                    .latest_activity_times(&["archivist".to_string()])
+                    .await
+                    .expect("activity"),
+                HashMap::from([("archivist".to_string(), 100)]),
+            );
+        }
+    }
+
+    /// The walk reads one identity's own frames through the identity/cursor
+    /// index, newest first: no sort and no scan of the log.
+    #[test]
+    fn latest_activity_walk_reads_the_identity_cursor_index_in_order() {
+        let store = SqliteConsoleLogStore::in_memory().expect("sqlite store");
+        let conn = store.conn.lock().expect("connection");
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", latest_activity_sql()))
+            .expect("prepare query plan")
+            .query_map(params!["archivist"], |row| row.get::<_, String>(3))
+            .expect("run query plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect query plan")
+            .join("\n")
+            .to_lowercase();
+        assert!(
+            plan.contains("idx_console_frames_identity_cursor"),
+            "the walk must seek the identity/cursor index; plan was: {plan}"
+        );
+        assert!(
+            !plan.contains("temp b-tree"),
+            "the index order must serve the walk without a sort; plan was: {plan}"
+        );
     }
 
     /// M3: the console store — previously opened with zero PRAGMAs — now

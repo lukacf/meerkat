@@ -11288,9 +11288,31 @@ svg[data-svg=fit],
   font-size: 11px;
   font-weight: 600;
 }
+.agent-row {
+  display: grid;
+  grid-template-columns: 22px 1fr auto auto;
+  column-gap: 10px;
+  align-items: center;
+  position: relative;
+}
+.agent-row--child {
+  grid-template-columns: 40px 7px 1fr auto auto;
+}
+.agent-row--child[data-depth="2"] {
+  grid-template-columns: 72px 7px 1fr auto auto;
+}
+.agent-row--child[data-depth="3"] {
+  grid-template-columns: 104px 7px 1fr auto auto;
+}
+.agent-row > .agent__actions {
+  grid-row: 1;
+  grid-column: -3;
+}
 .agent {
   display: grid;
-  grid-template-columns: 10px 1fr auto auto;
+  grid-row: 1;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
@@ -11303,7 +11325,7 @@ svg[data-svg=fit],
   background: transparent;
   color: var(--ink);
 }
-.agent:hover {
+.agent-row:hover > .agent {
   background: var(--bg-elev-1);
 }
 .agent.is-active {
@@ -11311,15 +11333,12 @@ svg[data-svg=fit],
   box-shadow: inset 2px 0 0 var(--accent);
 }
 .agent--child {
-  grid-template-columns: 20px 7px 1fr auto auto;
   padding-left: 20px;
 }
 .agent--child[data-depth="2"] {
-  grid-template-columns: 42px 7px 1fr auto auto;
   padding-left: 30px;
 }
 .agent--child[data-depth="3"] {
-  grid-template-columns: 64px 7px 1fr auto auto;
   padding-left: 40px;
 }
 .agent--child::before {
@@ -11341,12 +11360,6 @@ svg[data-svg=fit],
 }
 .agent--child .agent__body {
   grid-column: 3;
-}
-.agent--child .agent__actions {
-  grid-column: 4;
-}
-.agent--child .agent__meta {
-  grid-column: 5;
 }
 .agent__dot {
   width: 7px;
@@ -11432,7 +11445,7 @@ svg[data-svg=fit],
   background-size: 4px 4px;
   transition: opacity 120ms ease;
 }
-.agent:hover .agent__grip,
+.agent-row:hover .agent__grip,
 .agent:focus-visible .agent__grip {
   opacity: 1;
 }
@@ -11505,6 +11518,7 @@ svg[data-svg=fit],
   border-radius: 0;
 }
 .agent__meta {
+  grid-column: -2;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
@@ -11535,7 +11549,7 @@ svg[data-svg=fit],
     border-color 120ms ease,
     background 120ms ease;
 }
-.agent:hover .agent__pin,
+.agent-row:hover .agent__pin,
 .agent__pin:focus-visible {
   opacity: 1;
 }
@@ -11565,7 +11579,7 @@ svg[data-svg=fit],
   background: var(--bg-elev-1);
 }
 .agent__actions:hover .agent__copy,
-.agent:focus-visible .agent__copy,
+.agent:focus-visible + .agent__actions .agent__copy,
 .agent__copy:focus-within {
   display: inline-flex;
 }
@@ -11729,9 +11743,30 @@ svg[data-svg=fit],
 .signal:hover {
   background: var(--bg-elev-1);
 }
-.signal:focus-visible {
+.signal__hit {
+  display: block;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.signal__hit:focus-visible {
   outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
+  outline-offset: 2px;
+}
+@supports selector(:has(*)) {
+  .signal__hit:focus-visible {
+    outline: none;
+  }
+  .signal:has(> .signal__body > .signal__hit:focus-visible) {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -2px;
+  }
 }
 .signal__bar {
   background: var(--ink-faint);

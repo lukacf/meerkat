@@ -22624,7 +22624,9 @@ function buildConsoleDockViewState(state, options = {}) {
       }) || {};
       return {
         id: tab2.id,
-        title: resolved.title || firstTarget?.title || preset.label,
+        // A tab with nothing open yet is a new tab; its layout's name
+        // ("Single", "Grid") belongs to the layout picker, not the tab.
+        title: resolved.title || firstTarget?.title || "New tab",
         subtitle: resolved.subtitle ?? firstTarget?.subtitle ?? preset.description,
         iconName: resolved.iconName ?? firstTarget?.iconName ?? preset.iconName,
         badgeLabel: resolved.badgeLabel ?? (panelStates.length > 1 ? "x".concat(panelStates.length) : null),
@@ -49884,6 +49886,18 @@ function normalizeModelCapabilities(entry) {
 function normalizeLastActivityMs(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : void 0;
 }
+function responsePhaseWords(phase2) {
+  switch (phase2) {
+    case "generating":
+      return "writing a reply";
+    case "tool-executing":
+      return "running a tool";
+    case "waiting":
+      return "starting a reply";
+    default:
+      return "";
+  }
+}
 function agentDirectoryEntry(agent) {
   return {
     id: agent.identity || agent.agent_id,
@@ -52844,6 +52858,138 @@ function resetIdentityLogCore(log) {
 
 // src/panels/TimelinePanel.tsx
 var import_react37 = __toESM(require("react"));
+
+// src/lib/memory-event-words.ts
+function text10(data, key) {
+  const value = data[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+function count(data, key) {
+  const value = data[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function plural3(n2, one3, many = "".concat(one3, "s")) {
+  return "".concat(n2, " ").concat(n2 === 1 ? one3 : many);
+}
+function words(value) {
+  return value.replace(/[_.\-]+/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+}
+function sentence(value) {
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+}
+function withDetail(line, detail) {
+  return detail ? "".concat(line, " \xB7 ").concat(detail) : line;
+}
+function memoryScopeWords(data, names = {}) {
+  const kind = text10(data, "scope_kind");
+  const key = text10(data, "scope_key");
+  const name2 = (identity) => names.agentName ? names.agentName(identity) : identity;
+  switch (kind) {
+    case "identity":
+      return key ? "".concat(name2(key), "'s memory") : "an agent's memory";
+    case "mob":
+      return "team memory";
+    case "operator":
+      return "operator memory";
+    case "realm":
+      return "shared memory";
+    default:
+      return kind ? "".concat(words(kind), " memory") : "";
+  }
+}
+var VERDICT_WORDS = {
+  release: "released",
+  released: "released",
+  tombstone: "discarded",
+  tombstoned: "discarded",
+  keep: "kept in quarantine",
+  hold: "kept in quarantine",
+  promote: "moved to team or operator memory",
+  promote_pending_gate: "sent for approval"
+};
+function quarantineVerdictWords(verdict) {
+  return VERDICT_WORDS[verdict] ?? (verdict ? words(verdict) : "decided");
+}
+function describeMemoryEventForPeople(event, data, names = {}) {
+  const name2 = (identity) => names.agentName ? names.agentName(identity) : identity;
+  const record10 = (memoryId) => {
+    const title = memoryId ? names.recordTitle?.(memoryId) : void 0;
+    return title ? "\u201C".concat(title, "\u201D") : "a quarantined record";
+  };
+  switch (event) {
+    case "memory.dream.started":
+      return "Dream started";
+    case "memory.dream.completed": {
+      const ops = count(data, "ops_committed");
+      return withDetail(ops === null ? "Dream finished" : "Dream finished \xB7 ".concat(plural3(ops, "change")), text10(data, "detail"));
+    }
+    case "memory.dream.skipped":
+      return withDetail("Dream skipped", text10(data, "reason"));
+    case "memory.record.promoted": {
+      const scope = memoryScopeWords(data, names);
+      const line = scope ? "A record moved to ".concat(scope) : "A record was moved";
+      return data.gated === true ? "".concat(line, " after approval") : line;
+    }
+    case "memory.quarantine.verdict": {
+      return withDetail("Quarantine verdict: ".concat(quarantineVerdictWords(text10(data, "verdict"))), text10(data, "rationale"));
+    }
+    case "memory.quarantine.release_blocked": {
+      const subject = record10(text10(data, "record_id"));
+      const line = text10(data, "verdict") === "promote_pending_gate" ? "Moving ".concat(subject, " was blocked") : "Release of ".concat(subject, " blocked");
+      return text10(data, "class") ? "".concat(line, " \xB7 it looks like a secret") : line;
+    }
+    case "memory.conflict.signal": {
+      const subject = [text10(data, "entity"), text10(data, "topic")].filter(Boolean).join(", ");
+      return withDetail(subject ? "Conflicting memories about ".concat(subject) : "Conflicting memories", text10(data, "reason"));
+    }
+    case "memory.write.quarantined": {
+      const author = text10(data, "author");
+      return withDetail(
+        author ? "A memory write from ".concat(name2(author), " was quarantined") : "A memory write was quarantined",
+        text10(data, "reason")
+      );
+    }
+    case "memory.taint.transition": {
+      const kind = text10(data, "kind");
+      const line = kind === "tainted" ? "A session became untrusted" : kind === "reset_boundary" ? "Session trust was reset" : kind === "rotated_clean" ? "A session started clean" : "Session trust ".concat(kind ? words(kind) : "changed");
+      return withDetail(line, text10(data, "source"));
+    }
+    case "memory.budget.denied": {
+      const stage = text10(data, "stage");
+      return withDetail(stage ? "Memory budget reached during ".concat(words(stage)) : "Memory budget reached", text10(data, "reason"));
+    }
+    case "memory.promotion.pending_gate": {
+      const scope = memoryScopeWords(data, names);
+      return scope ? "A record waits for approval to move to ".concat(scope) : "A record waits for approval to move";
+    }
+    case "memory.harvest.completed": {
+      const kept = count(data, "promoted");
+      const discarded = count(data, "tombstoned");
+      const identity = text10(data, "identity");
+      const parts = [kept !== null ? "".concat(kept, " kept") : "", discarded !== null ? "".concat(discarded, " discarded") : ""].filter(Boolean);
+      const line = identity ? "".concat(name2(identity), "'s memory was summarized") : "A retired agent's memory was summarized";
+      return withDetail(line, parts.join(", "));
+    }
+    case "memory.distill.timed_out":
+      return withDetail("Summarizing a conversation timed out", text10(data, "cause"));
+    case "memory.hygiene.proposed":
+    case "memory.hygiene.applied":
+    case "memory.hygiene.blocked":
+    case "memory.hygiene.skipped": {
+      const phase2 = event.slice("memory.hygiene.".length);
+      const ops = count(data, "ops");
+      const detail = text10(data, "reason") || (ops !== null ? plural3(ops, "change") : "") || text10(data, "cause");
+      return withDetail("Memory tidy-up ".concat(phase2), detail);
+    }
+    default: {
+      const suffix = event.startsWith("memory.") ? event.slice("memory.".length) : event;
+      const detail = text10(data, "reason") || text10(data, "detail") || text10(data, "cause") || text10(data, "verdict");
+      return withDetail(sentence("memory ".concat(words(suffix)).trim()), detail);
+    }
+  }
+}
+
+// src/panels/TimelinePanel.tsx
 var import_jsx_runtime58 = require("react/jsx-runtime");
 var INTERNAL_TIMELINE_EVENTS = /* @__PURE__ */ new Set([
   "keep-alive",
@@ -52899,12 +53045,12 @@ function memoryLine(event, data, who) {
     case "memory.dream.skipped":
       return { segments: [who, " skipped a memory dream"], snippet: reason, tone: "neutral", kind };
     case "memory.record.promoted":
-      return { segments: [who, " promoted a memory record"], tone: "ok", kind };
+      return { segments: [who, " moved a memory record"], tone: "ok", kind };
     case "memory.write.quarantined":
       return { segments: ["A memory write from ", who, " was quarantined"], snippet: reason, tone: "warn", kind };
     case "memory.quarantine.verdict": {
       const verdict = textOf(data.verdict);
-      return { segments: [who, " reviewed a quarantined record"], snippet: verdict ? humanizeEnum(verdict) : void 0, tone: "neutral", kind };
+      return { segments: [who, " reviewed a quarantined record"], snippet: verdict ? quarantineVerdictWords(verdict) : void 0, tone: "neutral", kind };
     }
     case "memory.quarantine.release_blocked":
       return { segments: ["A quarantine release by ", who, " was blocked"], tone: "warn", kind };
@@ -52913,7 +53059,7 @@ function memoryLine(event, data, who) {
     case "memory.budget.denied":
       return { segments: [who, " reached the memory budget"], tone: "warn", kind };
     case "memory.taint.transition":
-      return data.kind === "tainted" ? { segments: [who, "'s session memory was marked tainted"], tone: "warn", kind } : { segments: [who, "'s session memory: ".concat(humanizeEnum(textOf(data.kind) || "changed").toLowerCase())], tone: "neutral", kind };
+      return data.kind === "tainted" ? { segments: [who, "'s session became untrusted"], tone: "warn", kind } : { segments: [who, "'s session memory: ".concat(humanizeEnum(textOf(data.kind) || "changed").toLowerCase())], tone: "neutral", kind };
     default:
       return { segments: [who, ": memory ".concat(humanizeEnum(event.slice("memory.".length)).toLowerCase())], tone: "neutral", kind };
   }
@@ -53827,7 +53973,7 @@ function AccessPanel({
         TextField,
         {
           label: "Members",
-          hint: "Subjects, separated by commas.",
+          hint: "Email addresses or service names, separated by commas.",
           testId: "access-group-members",
           value: groupMembersDraft,
           onChange: (value) => {
@@ -53903,15 +54049,15 @@ function AccessPanel({
       /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(
         TextField,
         {
-          label: "Subjects",
-          hint: "Email addresses, separated by commas.",
+          label: "People and services",
+          hint: "Email addresses or service names, separated by commas.",
           value: ruleDraft.subjects,
           onChange: (value) => setRuleDraft({ ...ruleDraft, subjects: value }),
           placeholder: "alice@example.com"
         }
       )
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("p", { className: "access-panel__form-note", children: "With no groups and no subjects the rule covers everyone." }),
+    /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("p", { className: "access-panel__form-note", children: "With no groups and no people or services, the rule covers everyone." }),
     /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(SectionHeader, { as: "h4", id: actionsLabelId, label: "What", className: "access-panel__form-head" }),
     /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("div", { className: "access-panel__actions", role: "group", "aria-labelledby": actionsLabelId, children: actions.map((action) => {
       const selected = ruleDraft.actions.includes(action);
@@ -54000,7 +54146,7 @@ function AccessPanel({
         divider: false
       }
     ),
-    /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("p", { className: "access-panel__intro", children: "Manage who can see and do what in this console and the runtime behind it. These rules do not grant native tool, source or connected-account permissions." }),
+    /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("p", { className: "access-panel__intro", children: "Manage who can see and do what in this console and the runtime behind it. These rules do not give anyone access to agents' tools, data sources or connected accounts." }),
     /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(
       PanelTabs,
       {
@@ -54239,7 +54385,7 @@ function AccessPanel({
           /* @__PURE__ */ (0, import_jsx_runtime61.jsx)(
             TextField,
             {
-              label: "Subject",
+              label: "Person or service",
               testId: "access-preview-subject",
               inputRef: previewSubjectInput,
               value: previewSubject,
@@ -54309,137 +54455,6 @@ function AccessPanel({
 
 // src/panels/MemoryPanel.tsx
 var import_react40 = __toESM(require("react"));
-
-// src/lib/memory-event-words.ts
-function text10(data, key) {
-  const value = data[key];
-  return typeof value === "string" ? value.trim() : "";
-}
-function count(data, key) {
-  const value = data[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-function plural3(n2, one3, many = "".concat(one3, "s")) {
-  return "".concat(n2, " ").concat(n2 === 1 ? one3 : many);
-}
-function words(value) {
-  return value.replace(/[_.\-]+/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
-}
-function sentence(value) {
-  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
-}
-function withDetail(line, detail) {
-  return detail ? "".concat(line, " \xB7 ").concat(detail) : line;
-}
-function memoryScopeWords(data, names = {}) {
-  const kind = text10(data, "scope_kind");
-  const key = text10(data, "scope_key");
-  const name2 = (identity) => names.agentName ? names.agentName(identity) : identity;
-  switch (kind) {
-    case "identity":
-      return key ? "".concat(name2(key), "'s memory") : "an agent's memory";
-    case "mob":
-      return "team memory";
-    case "operator":
-      return "operator memory";
-    case "realm":
-      return "shared memory";
-    default:
-      return kind ? "".concat(words(kind), " memory") : "";
-  }
-}
-var VERDICT_WORDS = {
-  release: "released",
-  released: "released",
-  tombstone: "discarded",
-  tombstoned: "discarded",
-  keep: "kept in quarantine",
-  hold: "kept in quarantine",
-  promote: "promoted",
-  promote_pending_gate: "sent for approval"
-};
-function describeMemoryEventForPeople(event, data, names = {}) {
-  const name2 = (identity) => names.agentName ? names.agentName(identity) : identity;
-  const record10 = (memoryId) => {
-    const title = memoryId ? names.recordTitle?.(memoryId) : void 0;
-    return title ? "\u201C".concat(title, "\u201D") : "a quarantined record";
-  };
-  switch (event) {
-    case "memory.dream.started":
-      return "Dream started";
-    case "memory.dream.completed": {
-      const ops = count(data, "ops_committed");
-      return withDetail(ops === null ? "Dream finished" : "Dream finished \xB7 ".concat(plural3(ops, "change")), text10(data, "detail"));
-    }
-    case "memory.dream.skipped":
-      return withDetail("Dream skipped", text10(data, "reason"));
-    case "memory.record.promoted": {
-      const scope = memoryScopeWords(data, names);
-      const line = scope ? "A record moved to ".concat(scope) : "A record was promoted";
-      return data.gated === true ? "".concat(line, " after approval") : line;
-    }
-    case "memory.quarantine.verdict": {
-      const verdict = text10(data, "verdict");
-      const said = VERDICT_WORDS[verdict] ?? (verdict ? words(verdict) : "decided");
-      return withDetail("Quarantine verdict: ".concat(said), text10(data, "rationale"));
-    }
-    case "memory.quarantine.release_blocked": {
-      const action = text10(data, "verdict") === "promote_pending_gate" ? "Promotion" : "Release";
-      const line = "".concat(action, " of ").concat(record10(text10(data, "record_id")), " blocked");
-      return text10(data, "class") ? "".concat(line, " \xB7 it looks like a secret") : line;
-    }
-    case "memory.conflict.signal": {
-      const subject = [text10(data, "entity"), text10(data, "topic")].filter(Boolean).join(", ");
-      return withDetail(subject ? "Conflicting memories about ".concat(subject) : "Conflicting memories", text10(data, "reason"));
-    }
-    case "memory.write.quarantined": {
-      const author = text10(data, "author");
-      return withDetail(
-        author ? "A memory write from ".concat(name2(author), " was quarantined") : "A memory write was quarantined",
-        text10(data, "reason")
-      );
-    }
-    case "memory.taint.transition": {
-      const kind = text10(data, "kind");
-      const line = kind === "tainted" ? "A session became untrusted" : kind === "reset_boundary" ? "Session trust was reset" : kind === "rotated_clean" ? "A session started clean" : "Session trust ".concat(kind ? words(kind) : "changed");
-      return withDetail(line, text10(data, "source"));
-    }
-    case "memory.budget.denied": {
-      const stage = text10(data, "stage");
-      return withDetail(stage ? "Memory budget reached during ".concat(words(stage)) : "Memory budget reached", text10(data, "reason"));
-    }
-    case "memory.promotion.pending_gate": {
-      const scope = memoryScopeWords(data, names);
-      return scope ? "A promotion to ".concat(scope, " waits for approval") : "A promotion waits for approval";
-    }
-    case "memory.harvest.completed": {
-      const kept = count(data, "promoted");
-      const discarded = count(data, "tombstoned");
-      const identity = text10(data, "identity");
-      const parts = [kept !== null ? "".concat(kept, " kept") : "", discarded !== null ? "".concat(discarded, " discarded") : ""].filter(Boolean);
-      const line = identity ? "".concat(name2(identity), "'s memory was summarized") : "A retired agent's memory was summarized";
-      return withDetail(line, parts.join(", "));
-    }
-    case "memory.distill.timed_out":
-      return withDetail("Summarizing a conversation timed out", text10(data, "cause"));
-    case "memory.hygiene.proposed":
-    case "memory.hygiene.applied":
-    case "memory.hygiene.blocked":
-    case "memory.hygiene.skipped": {
-      const phase2 = event.slice("memory.hygiene.".length);
-      const ops = count(data, "ops");
-      const detail = text10(data, "reason") || (ops !== null ? plural3(ops, "change") : "") || text10(data, "cause");
-      return withDetail("Memory tidy-up ".concat(phase2), detail);
-    }
-    default: {
-      const suffix = event.startsWith("memory.") ? event.slice("memory.".length) : event;
-      const detail = text10(data, "reason") || text10(data, "detail") || text10(data, "cause") || text10(data, "verdict");
-      return withDetail(sentence("memory ".concat(words(suffix)).trim()), detail);
-    }
-  }
-}
-
-// src/panels/MemoryPanel.tsx
 var import_jsx_runtime62 = require("react/jsx-runtime");
 var MEMORY_TABS = [
   "holdings",
@@ -54789,7 +54804,7 @@ var VERDICT_STATUS_LABEL = {
   degraded: "DEGRADED",
   violated: "VIOLATED",
   unverifiable: "UNVERIFIABLE",
-  "no-grant": "NO GRANT"
+  "no-grant": "NO ACCESS"
 };
 function verdictStatusLabel(status) {
   return VERDICT_STATUS_LABEL[status];
@@ -54821,11 +54836,11 @@ function computeVerdictTiles(inputs) {
   const tiles = [];
   tiles.push({
     id: "echo-safety",
-    label: "Repeated injections",
+    label: "Repeated memory",
     status: "unverifiable",
     summary: "Not checked automatically",
     lines: [
-      "The same memory should not be injected into an agent again and again.",
+      "An agent should not be given the same memory again and again.",
       "This console cannot check it automatically. On the Knowledge tab, the list of memory given to agents marks repeats."
     ],
     targetTab: "knowledge"
@@ -54885,7 +54900,7 @@ function computeVerdictTiles(inputs) {
       evidenceMore: Math.max(0, count2 - VERDICT_EVIDENCE_MAX)
     });
   }
-  const recallScope = "A record injected at least ".concat(DEAD_INJECTION_THRESHOLD, " times without ever being judged useful counts as never useful; it only costs space.");
+  const recallScope = "A record given to agents at least ".concat(DEAD_INJECTION_THRESHOLD, " times without ever being judged useful counts as never useful; it only costs space.");
   if (inputs.recordsDenied) {
     tiles.push({
       id: "recall",
@@ -54903,11 +54918,11 @@ function computeVerdictTiles(inputs) {
       id: "recall",
       label: "Usefulness",
       status: dead.length > 0 ? "degraded" : "holding",
-      summary: dead.length > 0 ? "".concat(dead.length, " of ").concat(plural(loaded, "record"), " never ").concat(dead.length === 1 ? "helps" : "help") : "No record is injected without helping",
+      summary: dead.length > 0 ? "".concat(dead.length, " of ").concat(plural(loaded, "record"), " never ").concat(dead.length === 1 ? "helps" : "help") : "No record is given to agents without helping",
       lines: [
         recallScope,
         "".concat(dead.length, " of ").concat(plural(loaded, "loaded record"), " ").concat(dead.length === 1 ? "is" : "are", " never useful."),
-        ...dead.length > 0 ? ["About ".concat(formatSize(deadBytes), " spent injecting them.")] : []
+        ...dead.length > 0 ? ["About ".concat(formatSize(deadBytes), " spent giving them to agents.")] : []
       ],
       targetTab: "records"
     });
@@ -55233,8 +55248,8 @@ function quarantineDecisionSummary(result) {
     case "tombstoned": {
       const invalidated = result.decision?.review?.invalidated_promotions ?? [];
       return {
-        text: invalidated.length === 0 ? "Discarded; it will never be recalled." : "Discarded; it will never be recalled. ".concat(invalidated.length === 1 ? "The promotion waiting on it was cancelled" : "The ".concat(invalidated.length, " promotions waiting on it were cancelled"), " and can no longer publish."),
-        ids: invalidated.map((id) => ({ label: "Cancelled promotion", value: id }))
+        text: invalidated.length === 0 ? "Discarded; it will never be recalled." : "Discarded; it will never be recalled. ".concat(invalidated.length === 1 ? "The move to team or operator memory waiting on it was cancelled" : "The ".concat(invalidated.length, " moves to team or operator memory waiting on it were cancelled"), " and can no longer publish."),
+        ids: invalidated.map((id) => ({ label: "Cancelled move", value: id }))
       };
     }
     case "already_tombstoned":
@@ -55248,7 +55263,7 @@ function quarantineDecisionErrorText(error48) {
   const rpcError = error48?.rpcError;
   if (rpcError?.code === -32030) {
     return {
-      text: "No grant. To decide, you need permission to review quarantined memory and to view this agent and read its memory. Releasing also needs permission to write its memory, and discarding to delete its memory.",
+      text: "No access. To decide, you need permission to review quarantined memory and to view this agent and read its memory. Releasing also needs permission to write its memory, and discarding to delete its memory.",
       ids: [],
       title: QUARANTINE_DECISION_GRANTS
     };
@@ -55271,8 +55286,8 @@ function quarantineDecisionErrorText(error48) {
       case "gate_pending": {
         const expires = typeof data.expires_at_ms === "number" && data.expires_at_ms > 0 ? ", or wait until it expires on ".concat(formatAbsoluteTime(data.expires_at_ms)) : "";
         return {
-          text: "Refused: a promotion of this record is waiting for approval. Decide it in Approvals".concat(expires, ". Discarding the record instead cancels that promotion."),
-          ids: data.pending_id ? [{ label: "Waiting promotion", value: String(data.pending_id) }] : []
+          text: "Refused: this record is waiting for approval to move to team or operator memory. Decide it in Approvals".concat(expires, ". Discarding the record instead cancels the move."),
+          ids: data.pending_id ? [{ label: "Waiting move", value: String(data.pending_id) }] : []
         };
       }
       case "successor_conflict":
@@ -55482,9 +55497,9 @@ function injectionMoment(surface) {
 }
 function utilityDisplay(record10) {
   const utility = recordUtility(record10);
-  if (utility.injected === 0 && utility.recalled === 0) return "Never injected or recalled";
+  if (utility.injected === 0 && utility.recalled === 0) return "Never given to agents or recalled";
   return joinMeta(
-    "Injected ".concat(plural(utility.injected, "time")),
+    "Given to agents ".concat(plural(utility.injected, "time")),
     "recalled ".concat(plural(utility.recalled, "time")),
     "judged useful ".concat(plural(utility.useful, "time")),
     utility.bytesSpent > 0 ? "about ".concat(formatSize(utility.bytesSpent), " spent") : null
@@ -55508,7 +55523,7 @@ function dreamVerdictChips(verdicts) {
 }
 var OP_KIND_DONE = {
   create: "created",
-  promote: "promoted",
+  promote: "moved",
   merge: "merged",
   quarantine: "quarantined",
   supersede: "replaced",
@@ -55906,14 +55921,14 @@ function BiographyView({
     /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)("section", { className: "memory-detail__section", "data-testid": "memory-detail-life", children: [
       /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(SectionHeader, { as: "h4", label: "Usage" }),
       /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("p", { className: "memory-usage", children: usage ? /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(import_jsx_runtime62.Fragment, { children: [
-        "injected ",
+        "given to agents ",
         usage.injected_count ?? 0,
         " \xB7 recalled ",
         usage.explicit_recall_count ?? 0,
         " \xB7 judged useful ",
         usage.judged_useful_count ?? 0,
         usage.last_injected_at_ms ? /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(import_jsx_runtime62.Fragment, { children: [
-          " \xB7 last injected ",
+          " \xB7 last given ",
           /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(RelativeTime, { value: usage.last_injected_at_ms })
         ] }) : null
       ] }) : "No usage recorded yet." }),
@@ -55930,7 +55945,7 @@ function BiographyView({
           meta: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(RelativeTime, { value: injection.at_ms })
         },
         "inj-".concat(index2)
-      )) }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("p", { className: "memory-caption", children: "No injections recorded for this record." })
+      )) }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("p", { className: "memory-caption", children: "This record has not been given to an agent yet." })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)("section", { className: "memory-detail__section", "data-testid": "memory-detail-dreams", children: [
       /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(SectionHeader, { as: "h4", label: "Dreams" }),
@@ -56162,7 +56177,7 @@ function DeniedScopeRow({ kind }) {
       lead: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(KitGlyph, { name: "shield", className: "memory-scope-lock" }),
       title: kind === "mob" ? "Team memory" : "Operator memory",
       subtitle: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { title: grantTitle(grant), children: needsGrantText(grant) }),
-      meta: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Chip, { tone: "locked", children: "No grant" })
+      meta: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Chip, { tone: "locked", children: "No access" })
     }
   );
 }
@@ -56648,7 +56663,7 @@ function MemoryPanel({
           label: "Scopes",
           count: scopesReady && rows.length > 0 ? rows.length : null,
           action: scopesReady && rows.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-section-meta", children: "".concat(formatSize(totalBytes), " in total") }) : void 0,
-          children: recordsDenied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { tone: "locked", testId: "memory-holdings-denied", children: "Records: no grant. Your access does not include reading memory records." }) : !loaded ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(LoadingState, { label: "Loading memory", rows: 3 }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(import_jsx_runtime62.Fragment, { children: [
+          children: recordsDenied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { tone: "locked", testId: "memory-holdings-denied", children: "Records: no access. Your access does not include reading memory records." }) : !loaded ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(LoadingState, { label: "Loading memory", rows: 3 }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(import_jsx_runtime62.Fragment, { children: [
             !overviewScopes ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("p", { className: "memory-caption", children: "Counts cover the ".concat(plural(records.length, "loaded record"), ", not the whole store.") }) : null,
             rows.length === 0 && !operatorScopeDenied && !mobScopeDenied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, title: "No memory records yet." }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(RowList, { children: [
               rows.map((row) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
@@ -56683,7 +56698,7 @@ function MemoryPanel({
                     typeof lastDream.ops === "number" ? plural(lastDream.ops, "change") : null
                   ]
                 }
-              ) : dreamsDenied ? "No grant" : "No dream has run yet"
+              ) : dreamsDenied ? "No access" : "No dream has run yet"
             },
             {
               key: "quarantine",
@@ -56696,7 +56711,7 @@ function MemoryPanel({
             {
               key: "proposals",
               label: "Proposals",
-              value: proposalsDenied ? "No grant" : "".concat(proposals.length, " waiting").concat(tainted > 0 ? ", ".concat(tainted, " held because ").concat(tainted === 1 ? "its source was" : "their sources were", " untrusted") : "")
+              value: proposalsDenied ? "No access" : "".concat(proposals.length, " waiting").concat(tainted > 0 ? ", ".concat(tainted, " held because ").concat(tainted === 1 ? "its source was" : "their sources were", " untrusted") : "")
             }
           ]
         }
@@ -56707,7 +56722,7 @@ function MemoryPanel({
           label: "Retired agents awaiting their summary",
           count: !harvestsDenied && harvests.length > 0 ? harvests.length : null,
           testId: "memory-harvests",
-          children: harvestsDenied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, kind: "no-access", title: "Retired agents: no grant." }) : harvests.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, title: "No retired agent is waiting." }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(RowList, { children: harvests.map((harvest, index2) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(HarvestRow, { harvest }, "".concat(harvest.realm, ":").concat(harvest.identity, ":").concat(index2))) })
+          children: harvestsDenied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, kind: "no-access", title: "Retired agents: no access." }) : harvests.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, title: "No retired agent is waiting." }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(RowList, { children: harvests.map((harvest, index2) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(HarvestRow, { harvest }, "".concat(harvest.realm, ":").concat(harvest.identity, ":").concat(index2))) })
         }
       )
     ] });
@@ -56780,7 +56795,7 @@ function MemoryPanel({
         ),
         filtered ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Button, { variant: "ghost", "data-testid": "memory-filter-clear", onClick: () => applyFilter({}), children: "Clear filters" }) : null
       ] }) : null,
-      sortMode === "utility" ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { testId: "memory-utility-note", children: "Least useful first: records injected at least ".concat(DEAD_INJECTION_THRESHOLD, " times and never judged useful lead, marked Never useful. Space spent is estimated from the injections and the record's size.") }) : null,
+      sortMode === "utility" ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { testId: "memory-utility-note", children: "Least useful first: records given to agents at least ".concat(DEAD_INJECTION_THRESHOLD, " times and never judged useful lead, marked Never useful. Space spent is estimated from how often each was given and its size.") }) : null,
       multiRealm && !filter.realm?.trim() ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { testId: "memory-multi-realm-note", children: "This page combines records from several spaces. Pick a space to page through its records." }) : null,
       !loaded || pageLoading ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(LoadingState, { label: "Loading records", rows: 4 }) : null,
       loaded && !pageLoading && listView.records.length === 0 ? recordsDenied || listView.denied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
@@ -56788,7 +56803,7 @@ function MemoryPanel({
         {
           kind: "no-access",
           testId: "memory-records-empty",
-          title: "Records: no grant.",
+          title: "Records: no access.",
           body: "Your access does not include reading these memory records."
         }
       ) : filtered ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
@@ -56807,7 +56822,7 @@ function MemoryPanel({
           body: "Records appear here once agents, dreams or operators write memory."
         }
       ) : null,
-      loaded && !pageLoading && listView.denied && listView.records.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { tone: "locked", testId: "memory-records-denied-note", children: "Further pages: no grant. Loading more of this list was denied for your access." }) : null,
+      loaded && !pageLoading && listView.denied && listView.records.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { tone: "locked", testId: "memory-records-denied-note", children: "Further pages: no access. Loading more of this list was denied for your access." }) : null,
       loaded && !pageLoading && listView.records.length > 0 ? listView.mode === "flat" ? /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)("section", { className: "cc-section memory-record-group", children: [
         /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
           SectionHeader,
@@ -56866,7 +56881,7 @@ function MemoryPanel({
         {
           inline: true,
           kind: recordsDenied ? "no-access" : "empty",
-          title: recordsDenied ? "Records: no grant." : "No agent memory is loaded yet."
+          title: recordsDenied ? "Records: no access." : "No agent memory is loaded yet."
         }
       ) : /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(import_jsx_runtime62.Fragment, { children: [
         /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Toolbar, { className: "memory-toolbar", children: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
@@ -56916,7 +56931,7 @@ function MemoryPanel({
           label: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { title: "Injection history", children: "Memory given to agents" }),
           count: !injectionsDenied && annotatedInjections.length > 0 ? annotatedInjections.length : null,
           testId: "memory-knowledge-history",
-          children: injectionsDenied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, kind: "no-access", title: "Memory given to agents: no grant." }) : annotatedInjections.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, title: "No memory has been given to an agent yet." }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(RowList, { children: annotatedInjections.map(({ entry, dup }, index2) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
+          children: injectionsDenied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, kind: "no-access", title: "Memory given to agents: no access." }) : annotatedInjections.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, title: "No memory has been given to an agent yet." }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(RowList, { children: annotatedInjections.map(({ entry, dup }, index2) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
             ListRow,
             {
               className: "memory-injection-row",
@@ -56975,27 +56990,27 @@ function MemoryPanel({
         /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)("li", { className: "memory-stepper__step", children: [
           /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-stepper__label", children: "Proposed" }),
           " ",
-          /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-stepper__count", children: proposalsDenied ? "no grant" : proposals.length })
+          /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-stepper__count", children: proposalsDenied ? "no access" : proposals.length })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)("li", { className: "memory-stepper__step", children: [
           /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-stepper__label", children: "Waiting for approval" }),
           " ",
-          /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-stepper__count", children: canReviewQuarantine ? pendingPromotions.length : "no grant" })
+          /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-stepper__count", children: canReviewQuarantine ? pendingPromotions.length : "no access" })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)("li", { className: "memory-stepper__step", children: [
           /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-stepper__label", children: "Quarantined" }),
           " ",
-          /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-stepper__count", children: canReviewQuarantine ? quarantineRecords.length : "no grant" })
+          /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { className: "memory-stepper__count", children: canReviewQuarantine ? quarantineRecords.length : "no access" })
         ] })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { testId: "memory-quarantine-note", children: onDecideQuarantine ? "Open a quarantined record to release or discard it. Promotions waiting for approval are decided in Approvals; the memory steward's dream decides the rest." : "Read only. Decisions come from the memory steward's dream, from Approvals, and from reviewers who can review quarantine and write memory." }),
+      /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { testId: "memory-quarantine-note", children: onDecideQuarantine ? "Open a quarantined record to release or discard it. Records waiting to move to team or operator memory are decided in Approvals; the memory steward's dream decides the rest." : "Read only. Decisions come from the memory steward's dream, from Approvals, and from reviewers who can review quarantine and write memory." }),
       /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
         PanelSection,
         {
           label: "Proposed",
           count: !proposalsDenied && proposals.length > 0 ? proposals.length : null,
           testId: "memory-pipeline-proposals",
-          children: proposalsDenied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, kind: "no-access", title: "Proposals: no grant." }) : proposals.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, title: "No proposal is waiting for a dream." }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(RowList, { children: proposals.map((proposal) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
+          children: proposalsDenied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, kind: "no-access", title: "Proposals: no access." }) : proposals.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, title: "No proposal is waiting for a dream." }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(RowList, { children: proposals.map((proposal) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
             ListRow,
             {
               className: "memory-proposal-row",
@@ -57034,7 +57049,7 @@ function MemoryPanel({
           {
             label: "Waiting for approval",
             count: pendingPromotions.length > 0 ? pendingPromotions.length : null,
-            children: pendingPromotions.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, title: "No promotion is waiting for approval." }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(RowList, { children: pendingPromotions.map((pending) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
+            children: pendingPromotions.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, title: "No record is waiting to move." }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(RowList, { children: pendingPromotions.map((pending) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
               ListRow,
               {
                 className: "memory-pending-row",
@@ -57089,14 +57104,14 @@ function MemoryPanel({
             }) })
           }
         )
-      ] }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { tone: "locked", testId: "memory-pipeline-no-grant", children: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { title: grantTitle("memory.quarantine.review"), children: "Quarantine: no grant. ".concat(needsGrantText("memory.quarantine.review"), " to see the queue.") }) }),
+      ] }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(Notice, { tone: "locked", testId: "memory-pipeline-no-grant", children: /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("span", { title: grantTitle("memory.quarantine.review"), children: "Quarantine: no access. ".concat(needsGrantText("memory.quarantine.review"), " to see the queue.") }) }),
       /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
         PanelSection,
         {
           label: "Worth a look",
           count: !auditVerdictsDenied && auditVerdicts.length > 0 ? auditVerdicts.length : null,
           testId: "memory-review-queue",
-          children: auditVerdictsDenied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, kind: "no-access", title: "Review queue: no grant." }) : auditVerdicts.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, title: "Nothing is flagged for a closer look." }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(import_jsx_runtime62.Fragment, { children: [
+          children: auditVerdictsDenied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, kind: "no-access", title: "Review queue: no access." }) : auditVerdicts.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, title: "Nothing is flagged for a closer look." }) : /* @__PURE__ */ (0, import_jsx_runtime62.jsxs)(import_jsx_runtime62.Fragment, { children: [
             /* @__PURE__ */ (0, import_jsx_runtime62.jsx)("p", { className: "memory-caption", children: "Records a dream flagged for a closer look." }),
             /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(RowList, { children: auditVerdicts.map((verdict) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
               ListRow,
@@ -57152,7 +57167,7 @@ function MemoryPanel({
           label: "Dream runs",
           count: !dreamRunsDenied && dreamSheets.length > 0 ? dreamSheets.length : null,
           testId: "memory-dream-runs",
-          children: dreamRunsDenied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, kind: "no-access", title: "Dream runs: no grant." }) : dreamSheets.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
+          children: dreamRunsDenied ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(EmptyState, { inline: true, kind: "no-access", title: "Dream runs: no access." }) : dreamSheets.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
             EmptyState,
             {
               inline: true,
@@ -57180,7 +57195,7 @@ function MemoryPanel({
             {
               inline: true,
               kind: dreamsDenied ? "no-access" : "empty",
-              title: dreamsDenied ? "Dream audit: no grant." : "No dream runs recorded yet."
+              title: dreamsDenied ? "Dream audit: no access." : "No dream runs recorded yet."
             }
           ) : /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(RowList, { children: dreams.map((run) => /* @__PURE__ */ (0, import_jsx_runtime62.jsx)(
             AuditRunRow,
@@ -58373,80 +58388,93 @@ function renderAgentRow({
   return /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)(
     "div",
     {
-      className: "agent ".concat(childOfHost ? "agent--child" : "", " ").concat(agent.member_id === selectedMemberId ? "is-active" : ""),
-      "data-state": stateAttr,
-      "data-child-of-host": childOfHost ? "true" : void 0,
-      "data-side-chat": agent.side_chat_of ? "true" : void 0,
+      className: "agent-row ".concat(childOfHost ? "agent-row--child" : ""),
       "data-depth": childOfHost ? String(Math.min(depth, 3)) : void 0,
-      "data-testid": "sidebar-agent:".concat(agent.member_id),
-      "data-sidebar-order-kind": movable ? "agent" : void 0,
-      "data-sidebar-order-id": movable ? sidebarAgentOrderKey(agent) : void 0,
-      "data-sidebar-order-container": movable ? reorder?.container : void 0,
-      "data-drag-over": reorder?.dragOver,
-      "data-dragging": reorder?.dragging ? "true" : void 0,
-      "aria-keyshortcuts": movable ? "Alt+ArrowUp Alt+ArrowDown" : void 0,
-      title: "Identity: ".concat(identity),
-      onClick: () => onSelect(agent),
-      onKeyDown: (event) => {
-        if (event.target !== event.currentTarget) return;
-        if (reorder?.onKeyDown(event)) return;
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onSelect(agent);
-        }
-      },
-      role: "button",
-      tabIndex: 0,
       children: [
-        movable ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)(
-          "span",
+        /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)(
+          "div",
           {
-            className: "agent__grip",
-            "aria-hidden": "true",
-            title: "Drag to reorder. Alt+Up and Alt+Down move the focused agent.",
-            "data-testid": "sidebar-agent-grip:".concat(agent.member_id),
-            onPointerDown: reorder?.onGripPointerDown,
-            onClick: (event) => event.stopPropagation()
-          }
-        ) : null,
-        reorder?.dragOver ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__drop-line", "data-where": reorder.dragOver, "aria-hidden": "true" }) : null,
-        /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__dot" }),
-        /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)("span", { className: "agent__body", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__name", children: title }),
-          detail.kind || detail.status ? (
-            // The kind gives way first, so the status always shows in a narrow roster.
-            /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)("span", { className: "agent__detail", "data-testid": "sidebar-agent-detail:".concat(agent.member_id), children: [
-              detail.kind ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__detail-kind", title: detail.kind, children: detail.kind }) : null,
-              detail.kind && detail.status ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__detail-separator", children: " \xB7 " }) : null,
-              detail.status ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__detail-status", children: detail.status }) : null
-            ] })
-          ) : null,
-          badges.length > 0 || agent.side_chat_of ? /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)("span", { className: "agent__badges", children: [
-            agent.side_chat_of ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)(
-              "span",
-              {
-                className: "agent__badge",
-                "data-tone": "neutral",
-                "data-testid": "sidebar-side-chat:".concat(agent.member_id),
-                title: "Side chat of ".concat(agent.side_chat_of),
-                children: /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { children: "Side chat" })
+            className: "agent ".concat(childOfHost ? "agent--child" : "", " ").concat(agent.member_id === selectedMemberId ? "is-active" : ""),
+            "data-state": stateAttr,
+            "data-child-of-host": childOfHost ? "true" : void 0,
+            "data-side-chat": agent.side_chat_of ? "true" : void 0,
+            "data-depth": childOfHost ? String(Math.min(depth, 3)) : void 0,
+            "data-testid": "sidebar-agent:".concat(agent.member_id),
+            "data-sidebar-order-kind": movable ? "agent" : void 0,
+            "data-sidebar-order-id": movable ? sidebarAgentOrderKey(agent) : void 0,
+            "data-sidebar-order-container": movable ? reorder?.container : void 0,
+            "data-drag-over": reorder?.dragOver,
+            "data-dragging": reorder?.dragging ? "true" : void 0,
+            "aria-keyshortcuts": movable ? "Alt+ArrowUp Alt+ArrowDown" : void 0,
+            title: "Identity: ".concat(identity),
+            onClick: () => onSelect(agent),
+            onKeyDown: (event) => {
+              if (event.target !== event.currentTarget) return;
+              if (reorder?.onKeyDown(event)) return;
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onSelect(agent);
               }
-            ) : null,
-            badges.map((badge) => /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)(
-              "span",
-              {
-                className: "agent__badge",
-                "data-tone": badge.tone || "neutral",
-                title: "".concat(badge.label, ": ").concat(badge.value),
-                children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { children: badge.label }),
-                  /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("strong", { children: badge.value })
-                ]
-              },
-              badge.id
-            ))
-          ] }) : null
-        ] }),
+            },
+            role: "button",
+            tabIndex: 0,
+            children: [
+              movable ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)(
+                "span",
+                {
+                  className: "agent__grip",
+                  "aria-hidden": "true",
+                  title: "Drag to reorder. Alt+Up and Alt+Down move the focused agent.",
+                  "data-testid": "sidebar-agent-grip:".concat(agent.member_id),
+                  onPointerDown: reorder?.onGripPointerDown,
+                  onClick: (event) => event.stopPropagation()
+                }
+              ) : null,
+              reorder?.dragOver ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__drop-line", "data-where": reorder.dragOver, "aria-hidden": "true" }) : null,
+              /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__dot" }),
+              /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)("span", { className: "agent__body", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__name", children: title }),
+                detail.kind || detail.status ? (
+                  // The kind gives way first, so the status always shows in a narrow roster.
+                  /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)("span", { className: "agent__detail", "data-testid": "sidebar-agent-detail:".concat(agent.member_id), children: [
+                    detail.kind ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__detail-kind", title: detail.kind, children: detail.kind }) : null,
+                    detail.kind && detail.status ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__detail-separator", children: " \xB7 " }) : null,
+                    detail.status ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__detail-status", children: detail.status }) : null
+                  ] })
+                ) : null,
+                badges.length > 0 || agent.side_chat_of ? /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)("span", { className: "agent__badges", children: [
+                  agent.side_chat_of ? /* @__PURE__ */ (0, import_jsx_runtime63.jsx)(
+                    "span",
+                    {
+                      className: "agent__badge",
+                      "data-tone": "neutral",
+                      "data-testid": "sidebar-side-chat:".concat(agent.member_id),
+                      title: "Side chat of ".concat(agent.side_chat_of),
+                      children: /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { children: "Side chat" })
+                    }
+                  ) : null,
+                  badges.map((badge) => /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)(
+                    "span",
+                    {
+                      className: "agent__badge",
+                      "data-tone": badge.tone || "neutral",
+                      title: "".concat(badge.label, ": ").concat(badge.value),
+                      children: [
+                        /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { children: badge.label }),
+                        /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("strong", { children: badge.value })
+                      ]
+                    },
+                    badge.id
+                  ))
+                ] }) : null
+              ] }),
+              /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)("span", { className: "agent__meta", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__pulse", children: pulse.map((v, i2) => /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { style: { height: "".concat(Math.max(1, Math.min(12, v * 2 + 1)), "px") } }, i2)) }),
+                inbox > 0 && /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__inbox", children: inbox })
+              ] })
+            ]
+          }
+        ),
         /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)("span", { className: "agent__actions", children: [
           /* @__PURE__ */ (0, import_jsx_runtime63.jsx)(
             "span",
@@ -58482,10 +58510,6 @@ function renderAgentRow({
               children: /* @__PURE__ */ (0, import_jsx_runtime63.jsx)(Icon, { name: "i-pin", className: "agent__pin-icon" })
             }
           ) : null
-        ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime63.jsxs)("span", { className: "agent__meta", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__pulse", children: pulse.map((v, i2) => /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { style: { height: "".concat(Math.max(1, Math.min(12, v * 2 + 1)), "px") } }, i2)) }),
-          inbox > 0 && /* @__PURE__ */ (0, import_jsx_runtime63.jsx)("span", { className: "agent__inbox", children: inbox })
         ] })
       ]
     }
@@ -58798,7 +58822,8 @@ var Sidebar = import_react41.default.memo(function Sidebar2({
   const updatePointerOrderTarget = import_react41.default.useCallback((clientX, clientY) => {
     const drag = pointerDragRef.current;
     if (!drag) return;
-    const target = document.elementFromPoint(clientX, clientY)?.closest("[data-sidebar-order-kind]");
+    const hit = document.elementFromPoint(clientX, clientY);
+    const target = hit?.closest("[data-sidebar-order-kind]") ?? hit?.closest(".agent-row")?.querySelector("[data-sidebar-order-kind]");
     const kind = target?.dataset.sidebarOrderKind;
     const id = target?.dataset.sidebarOrderId;
     const bucket = target?.dataset.sidebarOrderBucket;
@@ -59334,16 +59359,8 @@ function rosterActivity(agent) {
   if (isRetired(agent)) return "retired";
   if (state === "broken") return "needs attention";
   if (agent.progress?.health === "wedged") return "stalled";
-  switch (agent.response_phase) {
-    case "generating":
-      return "writing a reply";
-    case "tool-executing":
-      return "running a tool";
-    case "waiting":
-      return "starting a reply";
-    default:
-      break;
-  }
+  const phase2 = responsePhaseWords(agent.response_phase);
+  if (phase2) return phase2;
   const progress = agent.progress;
   if (progress?.run_state === "run_open") {
     return progress.in_flight_work > 1 ? "working on ".concat(progress.in_flight_work, " tasks") : "working";
@@ -60224,7 +60241,7 @@ var WORKGRAPH_GRAPH_NODE_HEIGHT = 44;
 var WORKGRAPH_GRAPH_NODE_CAP = 200;
 var PAD = 24;
 function workGraphItemOwnerLabel(item) {
-  return item.owner?.display_name || item.owner?.key?.id || item.claim?.owner?.display_name || item.claim?.owner?.key?.id || "";
+  return workGraphItemOwner(item)?.name ?? "";
 }
 function workGraphItemOwner(item, directory) {
   for (const owner of [item.owner, item.claim?.owner]) {
@@ -60233,7 +60250,7 @@ function workGraphItemOwner(item, directory) {
     const kind = owner.key?.kind?.trim() || "";
     const key = id && kind ? "".concat(kind, ":").concat(id) : id;
     const known = key ? directory?.lookup(key) ?? (kind === "session" ? directory?.lookup(id) : void 0) : void 0;
-    const name2 = known?.label.trim() || owner.display_name?.trim() || (kind === "session" && id ? "Agent session" : stripAgentKeyPrefix(id));
+    const name2 = known?.label.trim() || owner.display_name?.trim() || (kind === "session" && id ? "Agent session" : agentDisplayName(id));
     if (name2) return { name: name2, key };
   }
   return null;
@@ -60833,7 +60850,7 @@ function WorkGraphGraphView({
       event.currentTarget.ownerSVGElement?.querySelectorAll('[data-testid="workgraph-graph-node"]') ?? []
     ).find((element3) => element3.getAttribute("data-item-id") === targetId);
     setFocusedId(targetId);
-    target?.focus();
+    target?.focus({ preventScroll: true });
   };
   return /* @__PURE__ */ (0, import_jsx_runtime68.jsxs)("div", { className: "workgraph-graph", "data-testid": "workgraph-graph-frame", children: [
     /* @__PURE__ */ (0, import_jsx_runtime68.jsxs)("div", { className: "workgraph-graph__toolbar", children: [
@@ -61141,7 +61158,7 @@ function workGraphBindingTarget(binding, directory) {
   if (!id) return null;
   const kind = target.owner_key?.kind?.trim() || "";
   const key = kind ? "".concat(kind, ":").concat(id) : id;
-  return { name: directory?.lookup(key)?.label.trim() || stripAgentKeyPrefix(id), key };
+  return { name: directory?.lookup(key)?.label.trim() || agentDisplayName(id), key };
 }
 function bindingAgentName(binding, directory) {
   if (!binding) return null;
@@ -62503,14 +62520,11 @@ function truncate2(value, max = 110) {
   if (normalized.length <= max) return normalized;
   return "".concat(normalized.slice(0, Math.max(0, max - 1)).trimEnd(), "...");
 }
-function prettifyKey(value) {
-  return value.split(/[-_\s]+/).filter(Boolean).map((part) => "".concat(part.slice(0, 1).toUpperCase()).concat(part.slice(1))).join(" ");
-}
 function signalNameResolver(directory = EMPTY_AGENT_DIRECTORY) {
   return (value) => {
     if (!value || value === "_system") return "System";
     const label = directory.lookup(value)?.label?.trim();
-    return label || prettifyKey(stripAgentKeyPrefix(value));
+    return label || agentDisplayName(value, directory);
   };
 }
 function isMeaningfulReply(value) {
@@ -62725,13 +62739,13 @@ function memorySignal(frame, data, base, displayName) {
     case "memory.dream.completed":
       return info("Memory dream completed");
     case "memory.record.promoted":
-      return info("Memory record promoted");
+      return info("Memory record moved");
     case "memory.harvest.completed":
       return info("Retired agent's memory summarized");
     case "memory.quarantine.verdict":
       return info("Quarantine verdict");
     case "memory.promotion.pending_gate":
-      return info("Promotion waiting for approval");
+      return info("Memory record waiting to move");
     default:
       return null;
   }
@@ -62856,6 +62870,7 @@ var SignalsRail = import_react50.default.memo(function SignalsRail2({
   }, [filterPresets]);
   const [filter, setFilter] = import_react50.default.useState(activePresetId || presets[0]?.id || "all");
   const [expandedGroups, setExpandedGroups] = import_react50.default.useState(() => /* @__PURE__ */ new Set());
+  const detailIdPrefix = import_react50.default.useId();
   import_react50.default.useEffect(() => {
     if (activePresetId && presets.some((preset) => preset.id === activePresetId)) {
       setFilter(activePresetId);
@@ -62937,8 +62952,9 @@ var SignalsRail = import_react50.default.memo(function SignalsRail2({
     )) }),
     /* @__PURE__ */ (0, import_jsx_runtime73.jsxs)("div", { className: "rail__list", children: [
       shown.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime73.jsx)("div", { className: "rail__empty", children: emptyText || "No meaningful signals yet." }),
-      shown.map((s) => {
+      shown.map((s, index2) => {
         const expanded = expandedGroups.has(s.id);
+        const detailId = "".concat(detailIdPrefix, "detail-").concat(index2);
         const grouped = s.items.length > 1;
         const agentKey = s.agent && s.agent !== "_system" ? s.agent : "";
         return /* @__PURE__ */ (0, import_jsx_runtime73.jsxs)(
@@ -62948,26 +62964,30 @@ var SignalsRail = import_react50.default.memo(function SignalsRail2({
             "data-sev": s.severity,
             "data-testid": "signal:".concat(s.id),
             "data-expanded": expanded ? "true" : "false",
-            onClick: () => toggleGroup(s),
-            onKeyDown: (event) => {
-              if (event.target !== event.currentTarget) return;
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                toggleGroup(s);
-              }
+            onClick: (event) => {
+              const target = event.target;
+              if (target?.closest?.("a, button, input, select, textarea, summary")) return;
+              toggleGroup(s);
             },
-            role: "button",
-            tabIndex: 0,
-            "aria-expanded": grouped ? expanded : void 0,
             children: [
               /* @__PURE__ */ (0, import_jsx_runtime73.jsx)("span", { className: "signal__bar" }),
               /* @__PURE__ */ (0, import_jsx_runtime73.jsxs)("span", { className: "signal__body", children: [
-                /* @__PURE__ */ (0, import_jsx_runtime73.jsxs)("span", { className: "signal__label", children: [
-                  grouped && /* @__PURE__ */ (0, import_jsx_runtime73.jsx)("span", { className: "signal__chevron", "aria-hidden": "true" }),
-                  s.title,
-                  grouped && /* @__PURE__ */ (0, import_jsx_runtime73.jsx)("span", { className: "signal__count", children: s.items.length })
-                ] }),
-                /* @__PURE__ */ (0, import_jsx_runtime73.jsx)("span", { className: "signal__detail", children: s.detail }),
+                /* @__PURE__ */ (0, import_jsx_runtime73.jsx)(
+                  "button",
+                  {
+                    type: "button",
+                    className: "signal__hit",
+                    "aria-expanded": grouped ? expanded : void 0,
+                    "aria-describedby": detailId,
+                    onClick: () => toggleGroup(s),
+                    children: /* @__PURE__ */ (0, import_jsx_runtime73.jsxs)("span", { className: "signal__label", children: [
+                      grouped && /* @__PURE__ */ (0, import_jsx_runtime73.jsx)("span", { className: "signal__chevron", "aria-hidden": "true" }),
+                      s.title,
+                      grouped && /* @__PURE__ */ (0, import_jsx_runtime73.jsx)("span", { className: "signal__count", children: s.items.length })
+                    ] })
+                  }
+                ),
+                /* @__PURE__ */ (0, import_jsx_runtime73.jsx)("span", { className: "signal__detail", id: detailId, children: s.detail }),
                 /* @__PURE__ */ (0, import_jsx_runtime73.jsx)("span", { className: "signal__agent cc-agent", title: agentKey || void 0, children: /* @__PURE__ */ (0, import_jsx_runtime73.jsx)("span", { className: "cc-agent__name", children: nameOf(s.agent) }) }),
                 s.items.length === 1 && s.items[0].raw.event.startsWith("memory.") && onSelect ? /* @__PURE__ */ (0, import_jsx_runtime73.jsx)(
                   "button",
@@ -65638,7 +65658,7 @@ function ChatPane({
             /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: state }),
             phase2 && /* @__PURE__ */ (0, import_jsx_runtime75.jsxs)(import_jsx_runtime75.Fragment, { children: [
               /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: "\xB7" }),
-              /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { style: { color: "var(--accent)" }, children: phase2 })
+              /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: responsePhaseWords(phase2) })
             ] }),
             readOnly && /* @__PURE__ */ (0, import_jsx_runtime75.jsxs)(import_jsx_runtime75.Fragment, { children: [
               /* @__PURE__ */ (0, import_jsx_runtime75.jsx)("span", { children: "\xB7" }),
@@ -72252,8 +72272,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onSelectAgent: (id) => {
             const agent = topologyNodeAgent(agents, id);
             if (agent) openAgentBesideTopology(agent, panel.id);
-          },
-          teamName: experience?.console_config?.title || experience?.agent_sidebar?.title || void 0
+          }
         }
       );
     if (target.kind === "health")

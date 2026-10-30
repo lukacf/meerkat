@@ -118,7 +118,8 @@ fn apply_tool_grant_open_set_refuses_names_outside_the_gate() {
         Err(MeerkatMachineTransitionError::RecoveredStateInvariantRejected {
             invariant, ..
         }) => assert_eq!(invariant, "tool_grant_open_names_are_gated"),
-        other => panic!("open names outside the gate must not recover: {other:?}"),
+        Err(other) => panic!("open names outside the gate must not recover: {other:?}"),
+        Ok(_) => panic!("open names outside the gate must not recover, but the state recovered"),
     }
 }
 

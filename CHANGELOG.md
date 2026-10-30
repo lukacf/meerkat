@@ -319,7 +319,10 @@ them.
   lock, and take the step again. The synchronous steps still answer at
   once, now as a refusal to rebuild for both, and the governed helper
   fence, which runs inside a synchronous WorkGraph store callback, never
-  waits. Core's existing owner-change waits (dispatch preparation, entry
+  waits. The synchronous helper child issuance
+  (`GovernedHelperChildIssuance::issue_or_recover`) keeps answering
+  `Unavailable` at once for such a hold until a host switches to
+  `issue_or_recover_after_owner_change`. Core's existing owner-change waits (dispatch preparation, entry
   staging, the review's post-verdict check, model requests, compaction
   summaries, the delegated web search) also wait out an unpublished hold
   they meet after a refusal to rebuild. This is shell synchronization only:

@@ -210,7 +210,15 @@ impl GovernedHelperChildIssuance {
         &self.intent
     }
 
-    /// Issue or recover the intended child now.
+    /// Issue or recover the intended child now, without waiting. On every
+    /// path, another actor's hold of the work owners' exclusion, or an owner
+    /// change in progress, answers [`HelperChildIssuanceRefusal::Unavailable`]
+    /// at once, with nothing appended. A caller that can await, or that runs
+    /// on a blocking thread and can block on its async runtime, uses
+    /// [`Self::issue_or_recover_after_owner_change`] instead, which waits
+    /// such a hold out on the dispatch and entered paths. This form never
+    /// waits, so it suits a caller holding its own custody or running inside
+    /// a synchronous callback, where a wait would block.
     ///
     /// # Errors
     /// See [`HelperChildIssuanceRefusal`].

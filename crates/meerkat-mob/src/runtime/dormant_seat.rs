@@ -422,10 +422,11 @@ pub(in crate::runtime) struct DormantSeatCandidate {
     /// the entry's member was retired, its session archived, and this seat
     /// brings the entry back on it, Dormant, history kept.
     pub(in crate::runtime) revives_archived_session: bool,
-    /// Whether the seat binds an archived session: a revival whose session
-    /// the preparation found archived and revivable. MobMachine admits only
-    /// the entry's own archived session, and the member's first wake revives
-    /// it. Set by [`prepare_dormant_seat`].
+    /// Whether the seat's session is archived and revivable, as the
+    /// preparation observed it: the raw observation MobMachine's dormant seat
+    /// decides by. It admits only the identity entry's own archived session
+    /// record (a revival, whose member's first wake revives the session) and
+    /// refuses any other. Set by [`prepare_dormant_seat`].
     pub(in crate::runtime) session_archived: bool,
     /// The notice a fresh seat carries when the identity's archived session
     /// is gone from the store: its row records it.
@@ -560,12 +561,15 @@ pub(in crate::runtime) async fn prepare_dormant_seat(
         .map_err(|error| refused(MobError::from(error)))?
         .lifecycle();
     candidate.session_unborn = match lifecycle {
-        // The identity entry's own archived session, revivable: the seat
-        // binds it as it is (MobMachine admits this session alone), and the
-        // member's first wake revives it, history kept.
+        // An archived session, revivable: the observation goes to MobMachine
+        // with the seat, whatever the seat. Its guard
+        // (session_not_archived_or_revived) admits only the identity entry's
+        // own archived session record, which the seat binds as it is and the
+        // member's first wake revives, history kept; any other archived
+        // session is refused there, and answered SessionArchived.
         super::session_service::SessionResumeLifecycle::Archived {
             revivable: true, ..
-        } if candidate.revives_archived_session => {
+        } => {
             candidate.session_archived = true;
             false
         }
@@ -590,6 +594,7 @@ pub(in crate::runtime) async fn prepare_dormant_seat(
                 ),
             }));
         }
+        // An archived session that cannot be revived is never bound.
         super::session_service::SessionResumeLifecycle::Archived { .. } => {
             return Err(Box::new(DormantSeatOutcome::SessionArchived {
                 agent_identity: agent_identity.clone(),

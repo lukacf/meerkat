@@ -1554,6 +1554,15 @@ pub(super) enum MobCommand {
         desired: std::collections::BTreeSet<crate::ids::AgentIdentity>,
         reply_tx: oneshot::Sender<Result<super::declared_apply::SealAnswer, crate::MobError>>,
     },
+    /// Open a declared apply (`MobHandle::apply_declared_roster`): one apply
+    /// of the mob at a time, MobMachine's verdict.
+    OpenDeclaredApply {
+        reply_tx: oneshot::Sender<Result<mob_dsl::DeclaredApplyOpenVerdict, crate::MobError>>,
+    },
+    /// Close the open declared apply, whatever its outcome.
+    CloseDeclaredApply {
+        reply_tx: oneshot::Sender<Result<(), crate::MobError>>,
+    },
     /// An off-actor member-status observation returning to the actor, with
     /// every caller that joined it.
     ProjectMemberStatusObserved {
@@ -2321,6 +2330,9 @@ impl MobCommand {
             Self::CommitDormantSeats { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdoptLegacyIdentityEntry { .. } => ShutdownAnswerClass::CallerRequest,
             Self::DeclareIdentityEntries { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::OpenDeclaredApply { .. } | Self::CloseDeclaredApply { .. } => {
+                ShutdownAnswerClass::CallerRequest
+            }
             Self::SealDeclaredRoster { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityIntent { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityConvergenceStatus { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2556,6 +2568,8 @@ impl MobCommand {
             Self::CommitDormantSeats { .. } => "CommitDormantSeats",
             Self::AdoptLegacyIdentityEntry { .. } => "AdoptLegacyIdentityEntry",
             Self::DeclareIdentityEntries { .. } => "DeclareIdentityEntries",
+            Self::OpenDeclaredApply { .. } => "OpenDeclaredApply",
+            Self::CloseDeclaredApply { .. } => "CloseDeclaredApply",
             Self::SealDeclaredRoster { .. } => "SealDeclaredRoster",
             Self::ProjectMemberStatusObserved { .. } => "ProjectMemberStatusObserved",
             Self::GetIdentityIntent { .. } => "GetIdentityIntent",

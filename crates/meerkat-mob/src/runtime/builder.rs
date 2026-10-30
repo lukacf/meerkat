@@ -4076,9 +4076,10 @@ fn unlisted_retirement_starts(events: &[crate::event::MobEvent]) -> BTreeSet<(St
 
 /// Mark again, at replay, the Declared entry whose member's retirement the
 /// declared apply's seal started (`RecoverIdentityEntryRetiring`): the end of
-/// the retirement then ends the entry, as it did live. Only the identity's
-/// seated incarnation of a Declared entry is marked; a row of another one (a
-/// retirement whose member a later row already replaced) marks nothing.
+/// the retirement then ends the entry, as it did live. Every unlisted start
+/// row is passed; MobMachine marks only the identity's seated incarnation of
+/// a Declared entry, and a row of another one (a retirement whose member a
+/// later row already replaced, or whose entry it ended) takes its no-op arm.
 fn recover_unlisted_retirement_mark(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     agent_identity: &AgentIdentity,
@@ -4086,20 +4087,11 @@ fn recover_unlisted_retirement_mark(
 ) -> Result<(), MobError> {
     use crate::machines::mob_machine as mob_dsl;
 
-    let identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
-    let runtime = mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id);
-    let state = authority.state();
-    if state.identity_to_runtime.get(&identity) != Some(&runtime)
-        || state.identity_entry_origins.get(&identity)
-            != Some(&mob_dsl::IdentityEntryOrigin::Declared)
-    {
-        return Ok(());
-    }
     apply_seeded_mob_signal(
         authority,
         mob_dsl::MobMachineSignal::RecoverIdentityEntryRetiring {
-            agent_identity: identity,
-            agent_runtime_id: runtime,
+            agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
         },
         "recover_identity_entry_retiring",
     )

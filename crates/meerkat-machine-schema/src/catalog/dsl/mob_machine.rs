@@ -689,6 +689,14 @@ macro_rules! mob_catalog_machine_dsl {
             // for a fresh life), the destroy and the mob's reset
             // (archived_session_record_is_unseated).
             identity_entry_archived_sessions: Map<AgentIdentity, SessionId>,
+            // Whether a declared apply of this mob is open: an apply opens it
+            // before its first step (OpenDeclaredApply) and closes it after
+            // its last (CloseDeclaredApply), and a concurrent apply is refused,
+            // typed and retryable, so two applies never interleave (a partial
+            // one could otherwise answer an identity Seated that a complete
+            // one's seal removes). Never journaled: a restart has no apply
+            // open.
+            declared_apply_open: bool,
         }
 
         init(Running) {
@@ -999,6 +1007,7 @@ macro_rules! mob_catalog_machine_dsl {
             identity_entry_unseated = EmptyMap,
             identity_entry_retiring = EmptySet,
             identity_entry_archived_sessions = EmptyMap,
+            declared_apply_open = false,
         }
 
         terminal [Destroyed]
@@ -1980,8 +1989,12 @@ macro_rules! mob_catalog_machine_dsl {
             // identity's seat would resume was last built under: its archived
             // session, or its first-boot request's session; None for a fresh
             // seat, a session no build created, or one that records no role)
-            // are the shell's raw observations.
-            DeclareIdentityEntry { agent_identity: AgentIdentity, profile_name: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, placement: Enum<EntryPlacementKind>, held_creation: bool, declared_migration_from: Option<String>, intent_managed: bool, session_memory_only: bool, resume_session_role: Option<String> },
+            // are the shell's raw observations. first_boot is the kind of the
+            // host's first-boot request for the identity, if the roster carries
+            // one: the step ends the first-boot preparation the request carries
+            // out (a seated member's Resume, a hosted or held identity's
+            // request), so no window opens before the role check.
+            DeclareIdentityEntry { agent_identity: AgentIdentity, profile_name: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, placement: Enum<EntryPlacementKind>, held_creation: bool, declared_migration_from: Option<String>, intent_managed: bool, session_memory_only: bool, resume_session_role: Option<String>, first_boot: Enum<FirstBootRequestKind> },
             // The seal of a complete declared roster: `desired` is every
             // identity the roster lists.
             SealDeclaredRoster { desired: Set<AgentIdentity> },
@@ -1990,6 +2003,11 @@ macro_rules! mob_catalog_machine_dsl {
             // asked for a fresh life (a first-boot Fresh request). The seat
             // that follows takes a fresh session.
             ForgetArchivedSession { agent_identity: AgentIdentity, session_id: SessionId, reason: Enum<ArchivedSessionForgetReason> },
+            // A declared apply opens (MobHandle::apply_declared_roster): one
+            // apply of the mob at a time.
+            OpenDeclaredApply,
+            // The open declared apply closes, whatever its outcome.
+            CloseDeclaredApply,
         }
 
         surface_only [
@@ -2568,6 +2586,8 @@ macro_rules! mob_catalog_machine_dsl {
             // the resume does not rebuild it, and answers it held with the
             // cause.
             ExplicitResumeMemberHeld { agent_identity: AgentIdentity, cause: Enum<HostPreparationCause> },
+            // The verdict of a declared apply's opening (OpenDeclaredApply).
+            DeclaredApplyOpenResolved { verdict: Enum<DeclaredApplyOpenVerdict> },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -3592,6 +3612,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition DeclaredRosterSealed => local seam SurfaceResultAlignment,
         disposition ArchivedSessionForgotten => local seam SurfaceResultAlignment,
         disposition ExplicitResumeMemberHeld => local seam SurfaceResultAlignment,
+        disposition DeclaredApplyOpenResolved => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -26190,9 +26211,13 @@ macro_rules! mob_catalog_machine_dsl {
                 } else {
                     self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
                 }
-                // The host's carry-out of this identity is this seat: an
-                // unseated identity owes at most its first-boot preparation.
-                self.member_host_preparation_causes.remove(agent_identity);
+                // The host's carry-out of this identity is this seat: it ends
+                // the identity's first-boot preparation, and no other cause (a
+                // role hold stays on the seated member, whose wakes it refuses
+                // until an apply ends it).
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 // A seat clears kickoff residue, as the fresh spawn commit does,
                 // and owes no kickoff: a spec that owes one is spawned embodied
                 // through the ordinary spawn path, never seated.
@@ -28819,7 +28844,7 @@ macro_rules! mob_catalog_machine_dsl {
         // instructions) is no lifecycle fact, so nothing is written but the
         // end of a role hold the host ended by restoring the role.
         transition DeclareIdentityEntryKept {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on Declared entries only, by this
             // explicit check: an identity another origin holds is never
@@ -28850,6 +28875,15 @@ macro_rules! mob_catalog_machine_dsl {
                 ) == IdentityEntryVerdict::Kept
             }
             update {
+                // A seated member carries out its first-boot Resume request: the
+                // identity is seated, so its first-boot preparation ends here,
+                // in the declaration's own step.
+                if first_boot == FirstBootRequestKind::Resume && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+                // Listed again before its unlisted retirement started: the mark
+                // goes, so a later retirement keeps the entry.
+                self.identity_entry_retiring.remove(agent_identity);
                 if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
                     self.member_host_preparation_causes.remove(agent_identity);
                 }
@@ -28863,7 +28897,7 @@ macro_rules! mob_catalog_machine_dsl {
         // session when the identity has one (the entry comes back with its
         // history), on a fresh one otherwise.
         transition DeclareIdentityEntrySeatOwed {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on Declared entries only, by this
             // explicit check: an identity another origin holds is never
@@ -28921,7 +28955,7 @@ macro_rules! mob_catalog_machine_dsl {
         // member (a spawn holding the entry's custody), never the dormant
         // seat.
         transition DeclareIdentityEntryHostedOnFirstUse {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on Declared entries only, by this
             // explicit check: an identity another origin holds is never
@@ -28952,6 +28986,11 @@ macro_rules! mob_catalog_machine_dsl {
                 ) == IdentityEntryVerdict::HostedOnFirstUse
             }
             update {
+                // The identity's host creates its member: a first-boot request
+                // for it is settled here, and carried out by that creation.
+                if first_boot != FirstBootRequestKind::None && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
                 self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
                 self.members_to_spawn.remove(agent_identity);
@@ -28965,7 +29004,7 @@ macro_rules! mob_catalog_machine_dsl {
         // its held creation: the entry is recorded, and only a spawn holding
         // its custody (the host's held protocol) creates it.
         transition DeclareIdentityEntryAwaitHeldCreation {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on Declared entries only, by this
             // explicit check: an identity another origin holds is never
@@ -28996,6 +29035,11 @@ macro_rules! mob_catalog_machine_dsl {
                 ) == IdentityEntryVerdict::AwaitHeldCreation
             }
             update {
+                // The identity's host creates its member: a first-boot request
+                // for it is settled here, and carried out by that creation.
+                if first_boot != FirstBootRequestKind::None && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
                 self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HeldCreation);
                 self.members_to_spawn.remove(agent_identity);
@@ -29009,7 +29053,7 @@ macro_rules! mob_catalog_machine_dsl {
         // its own session (a same-session rotation, when the member is
         // idle); a role hold ends.
         transition DeclareIdentityEntryRuntimeModeRestamp {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on Declared entries only, by this
             // explicit check: an identity another origin holds is never
@@ -29040,6 +29084,15 @@ macro_rules! mob_catalog_machine_dsl {
                 ) == IdentityEntryVerdict::RuntimeModeRestamp
             }
             update {
+                // A seated member carries out its first-boot Resume request: the
+                // identity is seated, so its first-boot preparation ends here,
+                // in the declaration's own step.
+                if first_boot == FirstBootRequestKind::Resume && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+                // Listed again before its unlisted retirement started: the mark
+                // goes, so a later retirement keeps the entry.
+                self.identity_entry_retiring.remove(agent_identity);
                 if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
                     self.member_host_preparation_causes.remove(agent_identity);
                 }
@@ -29055,7 +29108,7 @@ macro_rules! mob_catalog_machine_dsl {
         // terminal commits the new role: a deferred or refused restamp keeps
         // the member held.
         transition DeclareIdentityEntryRoleMigrate {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on Declared entries only, by this
             // explicit check: an identity another origin holds is never
@@ -29085,7 +29138,17 @@ macro_rules! mob_catalog_machine_dsl {
                     declared_migration_from != None && declared_migration_from == resume_session_role
                 ) == IdentityEntryVerdict::RoleMigrate
             }
-            update {}
+            update {
+                // A seated member carries out its first-boot Resume request: the
+                // identity is seated, so its first-boot preparation ends here,
+                // in the declaration's own step.
+                if first_boot == FirstBootRequestKind::Resume && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+                // Listed again before its unlisted retirement started: the mark
+                // goes, so a later retirement keeps the entry.
+                self.identity_entry_retiring.remove(agent_identity);
+            }
             to Running
             emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RoleMigrate, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
         }
@@ -29097,7 +29160,7 @@ macro_rules! mob_catalog_machine_dsl {
         // runtime mode moves); a role move keeps it until the rotation's
         // terminal commits the new role.
         transition DeclareIdentityEntryRoleRotate {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on Declared entries only, by this
             // explicit check: an identity another origin holds is never
@@ -29128,6 +29191,15 @@ macro_rules! mob_catalog_machine_dsl {
                 ) == IdentityEntryVerdict::RoleRotate
             }
             update {
+                // A seated member carries out its first-boot Resume request: the
+                // identity is seated, so its first-boot preparation ends here,
+                // in the declaration's own step.
+                if first_boot == FirstBootRequestKind::Resume && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+                // Listed again before its unlisted retirement started: the mark
+                // goes, so a later retirement keeps the entry.
+                self.identity_entry_retiring.remove(agent_identity);
                 if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) && self.member_profile_names.get_cloned(agent_identity) == Some(profile_name) {
                     self.member_host_preparation_causes.remove(agent_identity);
                 }
@@ -29147,7 +29219,7 @@ macro_rules! mob_catalog_machine_dsl {
         // way: it is recorded an entry owed its seat, and no apply seats it
         // until one declares the migration or restores the role.
         transition DeclareIdentityEntryRoleMigrationHeld {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on Declared entries only, by this
             // explicit check: an identity another origin holds is never
@@ -29178,6 +29250,17 @@ macro_rules! mob_catalog_machine_dsl {
                 ) == IdentityEntryVerdict::RoleMigrationHeld
             }
             update {
+                // A seated member carries out its first-boot Resume request
+                // first, so the role hold that request's preparation masked is
+                // written in this same step.
+                if first_boot == FirstBootRequestKind::Resume && self.identity_to_runtime.contains_key(agent_identity) == true && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+                if self.identity_to_runtime.contains_key(agent_identity) == true {
+                    // Listed again before its unlisted retirement started: the mark
+                    // goes, so a later retirement keeps the entry.
+                    self.identity_entry_retiring.remove(agent_identity);
+                }
                 if self.identity_entry_origins.contains_key(agent_identity) == false {
                     self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
                     self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
@@ -29195,7 +29278,7 @@ macro_rules! mob_catalog_machine_dsl {
         // A member whose spawn, wake or retirement is in flight is left to
         // the next apply: nothing is written.
         transition DeclareIdentityEntryLifecycleInFlight {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on Declared entries only, by this
             // explicit check: an identity another origin holds is never
@@ -29233,7 +29316,7 @@ macro_rules! mob_catalog_machine_dsl {
         // A worker member holds the name: refused for this identity alone,
         // and nothing is written.
         transition DeclareIdentityEntryRefusedNameHeldByWorker {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on Declared entries only, by this
             // explicit check: an identity another origin holds is never
@@ -29271,7 +29354,7 @@ macro_rules! mob_catalog_machine_dsl {
         // The identity store manages the identity (an intent row): refused,
         // and nothing is written.
         transition DeclareIdentityEntryRefusedHostAdopted {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on Declared entries only, by this
             // explicit check: an identity another origin holds is never
@@ -29309,7 +29392,7 @@ macro_rules! mob_catalog_machine_dsl {
         // A candidate composition declares nothing: refused, and nothing is
         // written.
         transition DeclareIdentityEntryRefusedNonAuthoritative {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
             guard { self.lifecycle_phase == Phase::Running }
             // The declared apply acts on Declared entries only, by this
             // explicit check: an identity another origin holds is never
@@ -29347,7 +29430,7 @@ macro_rules! mob_catalog_machine_dsl {
         // A mob that is not running declares nothing.
         transition DeclareIdentityEntryMobNotRunning {
             per_phase [Stopped, Completed, Destroyed]
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
             update {}
             to Running
             emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::MobNotRunning, archived_session: None }
@@ -29429,6 +29512,22 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
         }
 
+        // The replay of an unlisted retirement's start row whose incarnation
+        // is no longer the identity's seated Declared entry (a later row
+        // replaced the member, or ended the entry): it marks nothing. The
+        // shell passes every such row, and the machine decides.
+        transition RecoverIdentityEntryRetiringStale {
+            per_phase [Running]
+            on signal RecoverIdentityEntryRetiring { agent_identity, agent_runtime_id }
+            guard "replay_not_sealed" { self.boot_plan_sealed == false }
+            guard "not_the_seated_declared_entry" {
+                self.identity_to_runtime.get_cloned(agent_identity) != Some(agent_runtime_id)
+                || self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared)
+            }
+            update {}
+            to Running
+        }
+
         // An unseated identity's archived session record is let go: the shell
         // observed the session absent from the store, or the host asked for a
         // fresh life. The seat that follows takes a fresh session
@@ -29445,6 +29544,48 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit ArchivedSessionForgotten { agent_identity: agent_identity, session_id: session_id, reason: reason }
+        }
+
+        // A declared apply opens: one apply of the mob at a time. A second
+        // apply while one is open is refused (Busy), typed and retryable,
+        // and changes nothing.
+        transition OpenDeclaredApplyOpened {
+            on input OpenDeclaredApply
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "no_apply_open" { self.declared_apply_open == false }
+            update {
+                self.declared_apply_open = true;
+            }
+            to Running
+            emit DeclaredApplyOpenResolved { verdict: DeclaredApplyOpenVerdict::Opened }
+        }
+
+        transition OpenDeclaredApplyBusy {
+            on input OpenDeclaredApply
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "apply_open" { self.declared_apply_open == true }
+            update {}
+            to Running
+            emit DeclaredApplyOpenResolved { verdict: DeclaredApplyOpenVerdict::Busy }
+        }
+
+        transition OpenDeclaredApplyMobNotRunning {
+            per_phase [Stopped, Completed, Destroyed]
+            on input OpenDeclaredApply
+            update {}
+            to Running
+            emit DeclaredApplyOpenResolved { verdict: DeclaredApplyOpenVerdict::MobNotRunning }
+        }
+
+        // The open declared apply closes, whatever its outcome and the mob's
+        // lifecycle phase. Total: closing when none is open is a no-op.
+        transition CloseDeclaredApply {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input CloseDeclaredApply
+            update {
+                self.declared_apply_open = false;
+            }
+            to Running
         }
     }
         }
@@ -32591,6 +32732,33 @@ pub enum AgentLaneMemberAdmissionKind {
     Admitted,
     /// The member is an identity entry: the agent lane does not act on it.
     IdentityMember,
+}
+
+/// The kind of a host's first-boot request for one declared identity
+/// ([`MobMachineInput::DeclareIdentityEntry`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum FirstBootRequestKind {
+    /// The roster carries no first-boot request for the identity.
+    #[default]
+    None,
+    /// Seat the identity on the request's session (a seated member carries
+    /// it out at once).
+    Resume,
+    /// Start the identity's fresh life on a new session.
+    Fresh,
+}
+
+/// The verdict of a declared apply's opening
+/// ([`MobMachineInput::OpenDeclaredApply`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DeclaredApplyOpenVerdict {
+    /// The apply is open.
+    #[default]
+    Opened,
+    /// Another apply of the mob is open: refused, retryable.
+    Busy,
+    /// The mob is not running.
+    MobNotRunning,
 }
 
 /// Why an identity entry is unseated (`identity_entry_unseated`).

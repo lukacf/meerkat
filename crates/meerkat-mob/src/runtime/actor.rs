@@ -31622,6 +31622,14 @@ impl MobActor {
                     let result = self.seal_declared_roster(desired);
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::OpenDeclaredApply { reply_tx } => {
+                    let result = self.open_declared_apply();
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::CloseDeclaredApply { reply_tx } => {
+                    let result = self.close_declared_apply();
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::ProjectMemberStatusObserved {
                     agent_identity,
                     expected_target,

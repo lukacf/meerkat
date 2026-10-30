@@ -685,6 +685,8 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::DeclareIdentityEntry { .. }
             | mob_dsl::MobMachineInput::SealDeclaredRoster { .. }
             | mob_dsl::MobMachineInput::ForgetArchivedSession { .. }
+            | mob_dsl::MobMachineInput::OpenDeclaredApply
+            | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
             | mob_dsl::MobMachineInput::Complete
             | mob_dsl::MobMachineInput::Reset
@@ -1978,6 +1980,8 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::DeclareIdentityEntry { .. }
             | mob_dsl::MobMachineInput::SealDeclaredRoster { .. }
             | mob_dsl::MobMachineInput::ForgetArchivedSession { .. }
+            | mob_dsl::MobMachineInput::OpenDeclaredApply
+            | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
             | mob_dsl::MobMachineInput::Complete
             | mob_dsl::MobMachineInput::Reset

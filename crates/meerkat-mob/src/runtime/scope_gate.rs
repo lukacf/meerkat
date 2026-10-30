@@ -171,7 +171,9 @@ impl MobCommand {
             // The declared apply decides identity entries' standing and its
             // seal retires the members of unlisted ones.
             | Self::DeclareIdentityEntries { .. }
-            | Self::SealDeclaredRoster { .. } => Some(ControlScope::Retire),
+            | Self::SealDeclaredRoster { .. }
+            | Self::OpenDeclaredApply { .. }
+            | Self::CloseDeclaredApply { .. } => Some(ControlScope::Retire),
 
             // ── WireTopology: trust/topology configuration ──
             Self::Wire { .. }
@@ -462,7 +464,9 @@ impl MobCommand {
             },
             Self::AdoptLegacyIdentityEntry { .. }
             | Self::DeclareIdentityEntries { .. }
-            | Self::SealDeclaredRoster { .. } => AgentLaneAdmission::HostOnly,
+            | Self::SealDeclaredRoster { .. }
+            | Self::OpenDeclaredApply { .. }
+            | Self::CloseDeclaredApply { .. } => AgentLaneAdmission::HostOnly,
 
             // Spawns, seats, work, flows, objectives and forked participants.
             Self::Spawn { .. }
@@ -743,6 +747,12 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::SealDeclaredRoster { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::OpenDeclaredApply { reply_tx } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::CloseDeclaredApply { reply_tx } => {
                 let _ = reply_tx.send(Err(error));
             }
             // Settling closes the waiter set; the actor's in-flight map prunes

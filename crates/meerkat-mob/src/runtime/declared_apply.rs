@@ -53,9 +53,13 @@ pub struct DeclaredRoster {
     /// ignored.
     pub role_migrations: BTreeMap<AgentIdentity, ProfileName>,
     /// The host's one-shot first-boot requests, by identity: the declared
-    /// apply carries each out (a seat on the request's session, or a fresh
-    /// life) and answers it, and the host consumes the request when the
-    /// identity's answer is not deferred or refused.
+    /// apply carries each out when it can (a seat on the request's session,
+    /// a seated member that holds the identity already, or a fresh life) and
+    /// names it in [`DeclaredRosterOutcome::first_boot_requests_carried_out`].
+    /// The host consumes exactly those requests; any other stays the host's
+    /// (a deferred, refused or failed answer keeps its request for the next
+    /// apply, and the host's own creation carries out the request of an
+    /// identity hosted on its first use or awaiting its held creation).
     pub first_boot_requests: BTreeMap<AgentIdentity, FirstBootRequest>,
 }
 
@@ -264,6 +268,10 @@ pub struct DeclaredRosterOutcome {
     /// What a complete roster's seal did with each Declared entry it does
     /// not list.
     pub unlisted: BTreeMap<AgentIdentity, UnlistedEntryOutcome>,
+    /// The identities whose first-boot request this apply carried out: the
+    /// host consumes exactly these requests
+    /// ([`DeclaredRoster::first_boot_requests`]).
+    pub first_boot_requests_carried_out: BTreeSet<AgentIdentity>,
 }
 
 /// One declaration MobMachine decides (`DeclareIdentityEntry`), with the
@@ -285,6 +293,10 @@ pub(in crate::runtime) struct IdentityDeclaration {
     /// identity, a fresh seat, a session no build created, or one that
     /// records no role.
     pub(in crate::runtime) resume_session_role: Option<ProfileName>,
+    /// The kind of the host's first-boot request for the identity, if the
+    /// roster carries one: the declaration's step ends the first-boot
+    /// preparation the request carries out.
+    pub(in crate::runtime) first_boot: mob_dsl::FirstBootRequestKind,
 }
 
 impl IdentityDeclaration {
@@ -309,6 +321,7 @@ impl IdentityDeclaration {
                 .resume_session_role
                 .as_ref()
                 .map(|profile| profile.as_str().to_string()),
+            first_boot: self.first_boot,
         }
     }
 }
@@ -365,6 +378,66 @@ fn failure_outcome(error: MobError) -> DeclaredEntryOutcome {
     }
 }
 
+/// The open declared apply of one [`super::MobHandle::apply_declared_roster`]
+/// call: closed when the call ends, and, when the call is dropped before it
+/// ends, by a task the drop spawns, so the mob's next apply is never refused
+/// for a call that is gone.
+struct DeclaredApplyOpen {
+    handle: Option<super::MobHandle>,
+}
+
+impl DeclaredApplyOpen {
+    fn arm(handle: super::MobHandle) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    async fn close(mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        if let Err(error) = handle.close_declared_apply().await {
+            tracing::warn!(
+                mob_id = %handle.mob_id(),
+                %error,
+                "closing the declared apply failed; the mob's next apply is refused until it closes"
+            );
+        }
+    }
+}
+
+impl Drop for DeclaredApplyOpen {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let close = async move {
+            if let Err(error) = handle.close_declared_apply().await {
+                tracing::warn!(
+                    mob_id = %handle.mob_id(),
+                    %error,
+                    "closing a dropped declared apply failed"
+                );
+            }
+        };
+        // The browser runtime has one local executor and no runtime handle.
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::tokio::spawn(close);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        match crate::tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(close);
+            }
+            Err(_) => {
+                tracing::warn!("a dropped declared apply could not close: no async runtime at drop")
+            }
+        }
+    }
+}
+
 /// One seat the apply owes, as the seat step takes it.
 struct OwedSeat {
     spec: SpawnMemberSpec,
@@ -372,6 +445,9 @@ struct OwedSeat {
     revives: Option<SessionId>,
     /// The seat carries out a first-boot `Fresh` request.
     fresh_life: bool,
+    /// The seat carries out the identity's first-boot request (`Resume` or
+    /// `Fresh`).
+    first_boot_request: bool,
 }
 
 impl super::MobHandle {
@@ -451,6 +527,40 @@ impl super::MobHandle {
             ScopeAdmissionSubject::DeclaredApply,
         )
         .await?;
+        // One apply of the mob at a time (MobMachine's open fact): a second
+        // one while this one runs is refused, typed and retryable. The open
+        // fact is closed whatever the outcome, and when this call is dropped.
+        let verdict = self
+            .send_actor_command(|reply_tx| MobCommand::OpenDeclaredApply { reply_tx })
+            .await??;
+        match verdict {
+            mob_dsl::DeclaredApplyOpenVerdict::Opened => {}
+            mob_dsl::DeclaredApplyOpenVerdict::Busy => {
+                return Err(MobError::LifecycleOperationPending {
+                    intent: "apply a declared roster while another apply of this mob runs"
+                        .to_string(),
+                });
+            }
+            // The actor answers a mob that is not running with its own
+            // invalid transition.
+            mob_dsl::DeclaredApplyOpenVerdict::MobNotRunning => {
+                return Err(MobError::Internal(
+                    "the opening of a declared apply answered a mob that is not running"
+                        .to_string(),
+                ));
+            }
+        }
+        let open = DeclaredApplyOpen::arm(self.clone());
+        let outcome = self.apply_open_declared_roster(roster).await;
+        open.close().await;
+        outcome
+    }
+
+    /// The body of [`Self::apply_declared_roster`], under its open fact.
+    async fn apply_open_declared_roster(
+        &self,
+        roster: DeclaredRoster,
+    ) -> Result<DeclaredRosterOutcome, MobError> {
         let DeclaredRoster {
             entries,
             complete,
@@ -557,13 +667,17 @@ impl super::MobHandle {
             intent_managed: intent_managed.contains(&entry.spec.identity),
             session_memory_only,
             resume_session_role: resume_session_roles.get(&entry.spec.identity).cloned(),
+            first_boot: match first_boot_requests.get(&entry.spec.identity) {
+                None => mob_dsl::FirstBootRequestKind::None,
+                Some(FirstBootRequest::Resume { .. }) => mob_dsl::FirstBootRequestKind::Resume,
+                Some(FirstBootRequest::Fresh) => mob_dsl::FirstBootRequestKind::Fresh,
+            },
         };
         let declarations: Vec<IdentityDeclaration> = declared.values().map(declare).collect();
         let verdicts = self.declare_identity_entries(declarations).await?;
 
         // Realize each verdict.
         let mut seats: Vec<OwedSeat> = Vec::new();
-        let mut redeclare: Vec<AgentIdentity> = Vec::new();
         for DeclarationVerdict {
             agent_identity,
             verdict,
@@ -617,52 +731,36 @@ impl super::MobHandle {
                     | mob_dsl::IdentityEntryVerdict::RoleRotate
                     | mob_dsl::IdentityEntryVerdict::RoleMigrationHeld,
                     Some(FirstBootRequest::Fresh),
-                ) => {
+                ) if self.seated_now(&agent_identity) => {
                     let answer = self.fresh_life_of_seated(entry).await;
-                    outcome.entries.insert(agent_identity, answer);
-                }
-                // A seated member with a first-boot Resume request: the
-                // member holds the identity, so the request is settled (its
-                // host preparation ends), and the identity is declared again
-                // on what the settlement left.
-                (
-                    mob_dsl::IdentityEntryVerdict::Kept
-                    | mob_dsl::IdentityEntryVerdict::RuntimeModeRestamp
-                    | mob_dsl::IdentityEntryVerdict::RoleMigrate
-                    | mob_dsl::IdentityEntryVerdict::RoleRotate
-                    | mob_dsl::IdentityEntryVerdict::RoleMigrationHeld,
-                    Some(FirstBootRequest::Resume { .. }),
-                ) => match self.settle_first_boot_request(&agent_identity).await {
-                    Ok(()) => redeclare.push(agent_identity),
-                    Err(error) => {
+                    if matches!(answer, DeclaredEntryOutcome::FreshLife { .. }) {
                         outcome
-                            .entries
-                            .insert(agent_identity, failure_outcome(error));
+                            .first_boot_requests_carried_out
+                            .insert(agent_identity.clone());
                     }
-                },
-                // A hosted or held identity's first-boot request cannot be
-                // carried out here (its host creates the member): it is
-                // settled, and the identity answered as decided.
-                (
-                    mob_dsl::IdentityEntryVerdict::HostedOnFirstUse
-                    | mob_dsl::IdentityEntryVerdict::AwaitHeldCreation,
-                    Some(_),
-                ) => {
-                    let answer = match self.settle_first_boot_request(&agent_identity).await {
-                        Ok(()) => {
-                            self.realize_verdict(
-                                entry,
-                                verdict,
-                                runtime_mode,
-                                resume_session_roles.get(&agent_identity),
-                            )
-                            .await
-                        }
-                        Err(error) => failure_outcome(error),
-                    };
                     outcome.entries.insert(agent_identity, answer);
                 }
-                (verdict, _) => {
+                (verdict, request) => {
+                    // A seated member carries out its first-boot Resume
+                    // request: the declaration's own step ended its first-boot
+                    // preparation, so no wake meets a window without a role
+                    // hold. A hosted or held identity's request is its host's
+                    // creation to carry out.
+                    if matches!(request, Some(FirstBootRequest::Resume { .. }))
+                        && matches!(
+                            verdict,
+                            mob_dsl::IdentityEntryVerdict::Kept
+                                | mob_dsl::IdentityEntryVerdict::RuntimeModeRestamp
+                                | mob_dsl::IdentityEntryVerdict::RoleMigrate
+                                | mob_dsl::IdentityEntryVerdict::RoleRotate
+                                | mob_dsl::IdentityEntryVerdict::RoleMigrationHeld
+                        )
+                        && self.seated_now(&agent_identity)
+                    {
+                        outcome
+                            .first_boot_requests_carried_out
+                            .insert(agent_identity.clone());
+                    }
                     let answer = self
                         .realize_verdict(
                             entry,
@@ -673,49 +771,6 @@ impl super::MobHandle {
                         .await;
                     outcome.entries.insert(agent_identity, answer);
                 }
-            }
-        }
-
-        // The identities whose first-boot request a member settled, declared
-        // again: a role hold the request's own cause masked is recorded now.
-        if !redeclare.is_empty() {
-            let declarations: Vec<IdentityDeclaration> = redeclare
-                .iter()
-                .filter_map(|identity| declared.get(identity))
-                .map(declare)
-                .collect();
-            for DeclarationVerdict {
-                agent_identity,
-                verdict,
-            } in self.declare_identity_entries(declarations).await?
-            {
-                let Some(entry) = declared.get(&agent_identity) else {
-                    continue;
-                };
-                let answer = match verdict {
-                    Ok(DecidedDeclaration {
-                        verdict: mob_dsl::IdentityEntryVerdict::SeatOwed,
-                        ..
-                    }) => DeclaredEntryOutcome::Deferred {
-                        reason: MobError::LifecycleOperationPending {
-                            intent: format!(
-                                "seat '{agent_identity}', whose member left while its \
-                                 first-boot request was settled"
-                            ),
-                        },
-                    },
-                    Ok(decided) => {
-                        self.realize_verdict(
-                            entry,
-                            decided.verdict,
-                            decided.runtime_mode,
-                            resume_session_roles.get(&agent_identity),
-                        )
-                        .await
-                    }
-                    Err(error) => failure_outcome(error),
-                };
-                outcome.entries.insert(agent_identity, answer);
             }
         }
 
@@ -897,6 +952,7 @@ impl super::MobHandle {
                     spec: resume(spec, session_id.clone()),
                     revives: archived_session,
                     fresh_life: false,
+                    first_boot_request: true,
                 })
             }
             Some(FirstBootRequest::Fresh) => {
@@ -913,6 +969,7 @@ impl super::MobHandle {
                     spec,
                     revives: None,
                     fresh_life: true,
+                    first_boot_request: true,
                 })
             }
             None => match archived_session {
@@ -920,6 +977,7 @@ impl super::MobHandle {
                     spec: resume(spec, archived.clone()),
                     revives: Some(archived),
                     fresh_life: false,
+                    first_boot_request: false,
                 }),
                 _ => {
                     spec.launch_mode = crate::launch::MemberLaunchMode::Fresh;
@@ -927,6 +985,7 @@ impl super::MobHandle {
                         spec,
                         revives: None,
                         fresh_life: false,
+                        first_boot_request: false,
                     })
                 }
             },
@@ -972,6 +1031,18 @@ impl super::MobHandle {
             for (seat, answer) in chunk.into_iter().zip(answers) {
                 let identity = seat.spec.identity.clone();
                 let history_unavailable = seat.spec.history_unavailable.clone();
+                if seat.first_boot_request
+                    && matches!(
+                        answer,
+                        super::DormantSeatOutcome::Seated { .. }
+                            | super::DormantSeatOutcome::AlreadySeated { .. }
+                            | super::DormantSeatOutcome::Embodied { .. }
+                    )
+                {
+                    outcome
+                        .first_boot_requests_carried_out
+                        .insert(identity.clone());
+                }
                 let answer = match answer {
                     super::DormantSeatOutcome::Seated { session_id, .. }
                     | super::DormantSeatOutcome::AlreadySeated { session_id, .. }
@@ -1021,10 +1092,13 @@ impl super::MobHandle {
                                 spec.launch_mode = crate::launch::MemberLaunchMode::Fresh;
                                 spec.history_unavailable =
                                     Some(HistoryUnavailable::new(session_id));
+                                // The request (if any) named the lost
+                                // session: the fresh seat carries out none.
                                 fresh_after_loss.push(OwedSeat {
                                     spec,
                                     revives: None,
                                     fresh_life: false,
+                                    first_boot_request: false,
                                 });
                                 continue;
                             }
@@ -1056,14 +1130,15 @@ impl super::MobHandle {
         .map(|_| ())
     }
 
-    /// End a first-boot preparation a seated member settles
-    /// (`ResolveMemberHostPreparation`, which ends a first-boot cause only).
-    async fn settle_first_boot_request(&self, identity: &AgentIdentity) -> Result<(), MobError> {
-        self.apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveMemberHostPreparation {
-            agent_identity: mob_dsl::AgentIdentity::from_domain(identity),
-        })
-        .await
-        .map(|_| ())
+    /// Whether a member holds `identity` in the published machine state.
+    fn seated_now(&self, identity: &AgentIdentity) -> bool {
+        super::identity_entry::machine_seats(&self.machine_state_watch_rx.borrow(), identity)
+    }
+
+    /// Close the open declared apply (`CloseDeclaredApply`).
+    async fn close_declared_apply(&self) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::CloseDeclaredApply { reply_tx })
+            .await?
     }
 
     /// A seated member's first-boot `Fresh` request: its rotation onto a

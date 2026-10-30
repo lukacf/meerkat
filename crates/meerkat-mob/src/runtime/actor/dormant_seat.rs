@@ -2155,6 +2155,17 @@ impl SettledSeatChunk {
             StagedSeatEntry::Seat(seat) => {
                 let transitions = match applied {
                     Ok(transitions) => transitions,
+                    // MobMachine refused a seat on an archived session that is
+                    // not the identity's own record: answered as such.
+                    Err(_)
+                        if seat.candidate.session_archived
+                            && !seat.candidate.revives_archived_session =>
+                    {
+                        return Ok(Some(DormantSeatOutcome::SessionArchived {
+                            agent_identity: seat.candidate.agent_identity.clone(),
+                            session_id: seat.candidate.session_id.clone(),
+                        }));
+                    }
                     Err(error) => {
                         return Ok(Some(DormantSeatOutcome::Refused {
                             agent_identity: seat.candidate.agent_identity.clone(),

@@ -1437,6 +1437,14 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         input: MobMachineCatalogInput::ForgetArchivedSession,
         reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
     },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::OpenDeclaredApply,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::CloseDeclaredApply,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
 ];
 
 #[doc(hidden)]

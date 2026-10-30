@@ -125,6 +125,40 @@ impl MobActor {
         Ok(verdicts)
     }
 
+    /// Open a declared apply (`OpenDeclaredApply`): MobMachine's verdict,
+    /// `Opened` or `Busy` (another apply of the mob is open). A mob that is
+    /// not running answers an invalid transition.
+    pub(super) fn open_declared_apply(
+        &mut self,
+    ) -> Result<mob_dsl::DeclaredApplyOpenVerdict, MobError> {
+        let effects = self.apply_dsl_input_collect_effects(
+            mob_dsl::MobMachineInput::OpenDeclaredApply,
+            "open_declared_apply",
+        )?;
+        let verdict = effects
+            .iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::DeclaredApplyOpenResolved { verdict } => Some(*verdict),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal("MobMachine answered no declared apply opening".to_string())
+            })?;
+        if verdict == mob_dsl::DeclaredApplyOpenVerdict::MobNotRunning {
+            return Err(self.invalid_transition_to(MobState::Running));
+        }
+        Ok(verdict)
+    }
+
+    /// Close the open declared apply (`CloseDeclaredApply`), in every
+    /// lifecycle phase.
+    pub(super) fn close_declared_apply(&mut self) -> Result<(), MobError> {
+        self.apply_dsl_input(
+            mob_dsl::MobMachineInput::CloseDeclaredApply,
+            "close_declared_apply",
+        )
+    }
+
     /// Seal a complete declared roster (`SealDeclaredRoster`) in one
     /// MobMachine step, and answer the Declared entries it marked (whose
     /// members the handle retires) and the ones it removed at once. A mob

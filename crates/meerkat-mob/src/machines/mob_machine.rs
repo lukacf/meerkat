@@ -13342,6 +13342,8 @@ mod tests {
         /// The role the session an unseated identity's seat would resume
         /// was last built under, as the shell observed it.
         resume_role: Option<&'a str>,
+        /// The kind of the host's first-boot request for the identity.
+        first_boot: FirstBootRequestKind,
     }
 
     impl Default for Declaration<'_> {
@@ -13355,6 +13357,7 @@ mod tests {
                 intent_managed: false,
                 session_memory_only: false,
                 resume_role: None,
+                first_boot: FirstBootRequestKind::None,
             }
         }
     }
@@ -13370,6 +13373,7 @@ mod tests {
             intent_managed: declaration.intent_managed,
             session_memory_only: declaration.session_memory_only,
             resume_session_role: declaration.resume_role.map(str::to_string),
+            first_boot: declaration.first_boot,
         }
     }
 
@@ -14259,6 +14263,198 @@ mod tests {
         );
     }
 
+    /// One declared apply of a mob is open at a time: a second opening while
+    /// one is open is answered Busy and changes nothing, a close (in any
+    /// lifecycle phase, total) lets the next apply open, and a mob that is
+    /// not running opens none.
+    #[test]
+    fn one_declared_apply_of_a_mob_is_open_at_a_time() {
+        fn open(authority: &mut MobMachineAuthority) -> DeclaredApplyOpenVerdict {
+            MobMachineMutator::apply(authority, MobMachineInput::OpenDeclaredApply)
+                .expect("the opening answers")
+                .effects()
+                .iter()
+                .find_map(|effect| match effect {
+                    MobMachineEffect::DeclaredApplyOpenResolved { verdict } => Some(*verdict),
+                    _ => None,
+                })
+                .expect("the opening emits its verdict")
+        }
+        let mut authority = MobMachineAuthority::new();
+        assert_eq!(open(&mut authority), DeclaredApplyOpenVerdict::Opened);
+        assert!(authority.state().declared_apply_open);
+        let open_state = authority.state().clone();
+        assert_eq!(open(&mut authority), DeclaredApplyOpenVerdict::Busy);
+        assert_eq!(
+            authority.state(),
+            &open_state,
+            "a busy opening changes nothing"
+        );
+        MobMachineMutator::apply(&mut authority, MobMachineInput::CloseDeclaredApply)
+            .expect("the open apply closes");
+        assert!(!authority.state().declared_apply_open);
+        MobMachineMutator::apply(&mut authority, MobMachineInput::CloseDeclaredApply)
+            .expect("a close with no apply open is a no-op");
+        assert_eq!(open(&mut authority), DeclaredApplyOpenVerdict::Opened);
+
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Stop,
+        );
+        MobMachineMutator::apply(&mut authority, MobMachineInput::Stop).expect("stop");
+        MobMachineMutator::apply(&mut authority, MobMachineInput::CloseDeclaredApply)
+            .expect("a stopped mob's open apply closes");
+        assert_eq!(
+            open(&mut authority),
+            DeclaredApplyOpenVerdict::MobNotRunning
+        );
+        assert!(!authority.state().declared_apply_open);
+    }
+
+    /// A seated member's first-boot Resume request is carried out in the
+    /// declaration's own step: its first-boot preparation ends there, so the
+    /// role hold that preparation masked is written in the same step and no
+    /// wake meets a window without a cause. Without the request the
+    /// first-boot preparation stays, and masks the role hold.
+    #[test]
+    fn a_seated_members_first_boot_resume_is_carried_out_in_its_declaration_step() {
+        let (mut authority, member) = dormant_member_authority("first-boot-held");
+        authority
+            .apply_signal(recover_entry_signal(&member.identity, &member.runtime_id))
+            .expect("the replay records the entry");
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SeedMemberResidency {
+                policy: MemberRestorePolicyKind::OnDemand,
+                composition_authority: CompositionAuthorityKind::Authoritative,
+                host_pending: std::collections::BTreeSet::from([member.identity.clone()]),
+            },
+        )
+        .expect("the host marks the identity's first-boot preparation pending");
+        let moved = |first_boot| Declaration {
+            profile: "lead",
+            first_boot,
+            ..Declaration::default()
+        };
+
+        let mut masked = authority.fork();
+        assert_eq!(
+            declare(
+                &mut masked,
+                &member.identity,
+                moved(FirstBootRequestKind::None)
+            ),
+            IdentityEntryVerdict::RoleMigrationHeld
+        );
+        assert_eq!(
+            masked
+                .state()
+                .member_host_preparation_causes
+                .get(&member.identity),
+            Some(&HostPreparationCause::FirstBootRow),
+            "without the request the first-boot preparation stays"
+        );
+
+        assert_eq!(
+            declare(
+                &mut authority,
+                &member.identity,
+                moved(FirstBootRequestKind::Resume)
+            ),
+            IdentityEntryVerdict::RoleMigrationHeld
+        );
+        assert_eq!(
+            authority
+                .state()
+                .member_host_preparation_causes
+                .get(&member.identity),
+            Some(&HostPreparationCause::RoleMigrationUndeclared),
+            "the request is carried out and the role hold written in one step"
+        );
+    }
+
+    /// A declaration that lists an identity the seal unlisted, before the
+    /// member's retirement started, drops the mark: a later retirement keeps
+    /// the entry the host has just declared again.
+    #[test]
+    fn a_listing_drops_the_unlisted_mark_before_the_retirement_starts() {
+        let (mut authority, member) = dormant_member_authority("listed-again");
+        authority
+            .apply_signal(recover_entry_signal(&member.identity, &member.runtime_id))
+            .expect("the replay records the entry");
+        assert_eq!(
+            seal(&mut authority, std::collections::BTreeSet::new()),
+            DeclaredRosterSealVerdict::Sealed
+        );
+        assert!(
+            authority
+                .state()
+                .identity_entry_retiring
+                .contains(&member.identity)
+        );
+        assert_eq!(
+            declare(&mut authority, &member.identity, Declaration::default()),
+            IdentityEntryVerdict::Kept
+        );
+        assert!(
+            !authority
+                .state()
+                .identity_entry_retiring
+                .contains(&member.identity),
+            "the listing drops the mark"
+        );
+        retire_and_archive(&mut authority, &member);
+        assert_eq!(
+            authority
+                .state()
+                .identity_entry_origins
+                .get(&member.identity),
+            Some(&IdentityEntryOrigin::Declared),
+            "a later retirement keeps the entry"
+        );
+    }
+
+    /// The dormant seat ends an identity's first-boot preparation and no
+    /// other cause: an unseated identity held for its role move stays held
+    /// once seated, its wakes refused until an apply ends the hold.
+    #[test]
+    fn a_dormant_seat_ends_a_first_boot_preparation_only() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("seated-held");
+        assert_eq!(
+            declare(
+                &mut authority,
+                &identity,
+                Declaration {
+                    profile: "lead",
+                    resume_role: Some("test"),
+                    ..Declaration::default()
+                }
+            ),
+            IdentityEntryVerdict::RoleMigrationHeld
+        );
+        let member = SeatedMember {
+            identity: identity.clone(),
+            runtime_id: AgentRuntimeId::from("seated-held:0"),
+            session_id: SessionId::from("seated-held-session"),
+            fence_token: FenceToken(8),
+        };
+        open_custody_seat_ladder(&mut authority, &member, Generation(0));
+        MobMachineMutator::apply(
+            &mut authority,
+            seat_on(&member, Generation(0), &member.session_id, false, true),
+        )
+        .expect("the host's own seat takes the held entry");
+        assert_eq!(
+            authority
+                .state()
+                .member_host_preparation_causes
+                .get(&identity),
+            Some(&HostPreparationCause::RoleMigrationUndeclared),
+            "the seat keeps the role hold"
+        );
+    }
+
     /// The replay of an unlisted retirement's start row marks the Declared
     /// entry on its seated incarnation only, before the boot plan is sealed.
     #[test]
@@ -14270,22 +14466,24 @@ mod tests {
                 agent_runtime_id: runtime_id.clone(),
             }
         };
-        assert!(
-            authority
-                .apply_signal(mark(&member.identity, &member.runtime_id))
-                .is_err(),
-            "a worker's row marks nothing"
-        );
+        let before = authority.state().clone();
+        authority
+            .apply_signal(mark(&member.identity, &member.runtime_id))
+            .expect("a worker's row is replayed");
+        assert_eq!(authority.state(), &before, "a worker's row marks nothing");
         authority
             .apply_signal(recover_entry_signal(&member.identity, &member.runtime_id))
             .expect("the replay records the entry");
-        assert!(
-            authority
-                .apply_signal(mark(
-                    &member.identity,
-                    &AgentRuntimeId::from("replayed-unlisted:9")
-                ))
-                .is_err(),
+        let before = authority.state().clone();
+        authority
+            .apply_signal(mark(
+                &member.identity,
+                &AgentRuntimeId::from("replayed-unlisted:9"),
+            ))
+            .expect("another incarnation's row is replayed");
+        assert_eq!(
+            authority.state(),
+            &before,
             "another incarnation's row marks nothing"
         );
         authority

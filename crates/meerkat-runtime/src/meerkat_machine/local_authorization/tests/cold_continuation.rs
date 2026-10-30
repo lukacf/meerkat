@@ -4222,8 +4222,13 @@ async fn keep_admitted_resume(
 /// A machine on `store`, with no executor serving the session, admits an
 /// ordinary governed prompt of `template` (authenticated fresh, under its own
 /// association) bound to its destination, so it stays queued, and is dropped,
-/// as a host stops. The store keeps the prompt queued without its controller
-/// client. Returns the prompt's destination and id.
+/// as a host stops. The prompt is admitted to the session
+/// (`MeerkatMachine::accept_input_with_completion`, the admission
+/// `accept_retained_resume` makes for [`keep_admitted_resume`]'s resume), not
+/// through the runtime's direct `ingest`: an ordinary prompt's admission wakes
+/// the runtime loop, and `ingest` refuses such an admission while no loop is
+/// attached (`InvalidState { Destroyed }`). The store keeps the prompt queued
+/// without its controller client. Returns the prompt's destination and id.
 async fn keep_admitted_prompt(
     store: &InMemoryRuntimeStore,
     blobs: &Arc<MemoryBlobStore>,
@@ -4263,8 +4268,8 @@ async fn keep_admitted_prompt(
         .clone();
     bind_when_settled(&machine, session, &destination).await;
     let prompt_id = prompt.id().clone();
-    let outcome = machine
-        .ingest(&runtime, prompt)
+    let (outcome, _) = machine
+        .accept_input_with_completion(session, prompt)
         .await
         .expect("the governed prompt is admitted");
     assert!(
@@ -4997,6 +5002,21 @@ async fn a_kept_governed_prompt_ends_refused_before_the_attachment_serves() {
 
     let machine = open(&store, &blobs, &owners).await;
     let (effects, mut applied) = attach(&machine, &session, "never runs").await;
+    // The attachment's own settlement ends it: the attach returns only once
+    // that settlement committed, before the attachment serves and before the
+    // destination is bound again.
+    let ended = machine
+        .input_state(&session, &prompt_id)
+        .await
+        .expect("row read")
+        .expect("the kept prompt's row");
+    assert_eq!(
+        ended.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::ResumeRefused,
+        }),
+        "the attachment ends the kept governed prompt before it serves"
+    );
     bind_when_settled(&machine, &session, &destination).await;
     machine
         .wake_runtime_if_active_inputs(&session)

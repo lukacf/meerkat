@@ -2992,6 +2992,12 @@ fn refusal_data_carries_the_kind_its_field_and_its_payload() {
             IdentityRefusal::new(IdentityRefusalKind::BatchTooLarge { max: 256 }),
             json!({"kind": "batch_too_large", "max": 256}),
         ),
+        (
+            IdentityRefusal::new(IdentityRefusalKind::Unsupported {
+                feature: "an authority field schema".to_owned(),
+            }),
+            json!({"kind": "unsupported", "feature": "an authority field schema"}),
+        ),
     ];
     for (refusal, data) in cases {
         assert_eq!(refusal.to_data(), data, "{refusal}");

@@ -259,6 +259,8 @@ pub enum IdentityRefusalKind {
     ValidationRefused { reason: String },
     /// An approval rule denies this change.
     CreationDenied { change: ChangeClass },
+    /// The request needs a form this release does not support.
+    Unsupported { feature: String },
     // Custody and operations.
     /// No created identity has this name.
     IdentityUnknown,
@@ -371,6 +373,7 @@ impl IdentityRefusalKind {
             Self::BatchTooLarge { .. } => "batch_too_large",
             Self::ValidationRefused { .. } => "validation_refused",
             Self::CreationDenied { .. } => "creation_denied",
+            Self::Unsupported { .. } => "unsupported",
             Self::IdentityUnknown => "identity_unknown",
             Self::NotCreatorCustody => "not_creator_custody",
             Self::SelfChangeRefused => "self_change_refused",
@@ -444,6 +447,7 @@ impl IdentityRefusalKind {
             Self::BatchTooLarge { max } => json!({ "max": max }),
             Self::ValidationRefused { reason } => json!({ "reason": reason }),
             Self::CreationDenied { change } => json!({ "change": change.token() }),
+            Self::Unsupported { feature } => json!({ "feature": feature }),
             Self::StaleRevision { current } => json!({ "current": current }),
             Self::AdmissionUnsettled { correlation } => json!({ "correlation": correlation }),
             Self::DecisionOpen { decision_id } => json!({ "decision_id": decision_id }),

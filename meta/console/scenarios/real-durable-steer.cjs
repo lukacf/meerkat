@@ -542,10 +542,8 @@ async function durableSteer(host, persistedBackgroundJob = false) {
     if (host === "stock") assert.equal(await composer().inputValue(), draft, "reload restores the unsent operator draft");
     await viewport().locator(`[data-conversation-row-id=${JSON.stringify(result.noticeRowId)}]`).scrollIntoViewIfNeeded();
     await capture("reloaded");
-    // The visible name follows the console's agent naming; the peer's identity
-    // is the label's title, so select by it.
-    const peerLabel = viewport().locator('.cc-tool-call--incoming .cc-tool-call__name[title="domain:delivery"]')
-      .filter({ hasText: /^Received from / }).first();
+    const peerLabel = viewport().locator(".cc-tool-call--incoming .cc-tool-call__name")
+      .filter({ hasText: "Received from domain:delivery" }).first();
     // The peer delivery is in an early turn, mounted only near the start.
     await geometry.mountEarlyRow(viewport(), peerLabel);
     await peerLabel.scrollIntoViewIfNeeded();

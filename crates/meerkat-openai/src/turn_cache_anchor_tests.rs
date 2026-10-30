@@ -19,6 +19,11 @@
 //!   (entries only at breakpoints, at most four writes per request, lookups
 //!   walk back through up to 20 eligible boundaries) for a cold-start and a
 //!   warm-start forker turn, and assert the child reads the shared prefix.
+//!
+//! The activation rows at the end hold the same cache argument for an
+//! operator instruction appended after history, with a plain System row as
+//! the stand-in entry: turn k's input items stay byte-equal in turn k+1's
+//! request, and the cache model serves turn k+1 all of turn k's input.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::collections::HashSet;
@@ -426,5 +431,171 @@ fn implicit_anchor_mode_authors_no_cache_evidence() {
             .unwrap()
             .is_empty(),
         "control: explicit mode does author evidence"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Operator instruction activation: a System row appended after history
+// ---------------------------------------------------------------------------
+
+/// The stand-in for an operator instruction entry.
+const ACTIVATION_ENTRY: &str = "Operator instruction: give every time in 24-hour form.";
+
+/// Lowered `input` items of turn k's request: system, user, answer, user.
+const TURN_K_ITEMS: usize = 4;
+
+/// Lowered `input` index of the entry in turn k+1's request: its transcript
+/// position, after turn k's answer and before turn k+1's prompt.
+const ACTIVATION_ITEM: usize = 5;
+
+/// The input implicit mode marks in turn k's request: the last input at or
+/// before turn k-1's answer, turn k-1's prompt.
+const TURN_K_ANCHOR_INPUT: usize = 1;
+
+/// The input implicit mode marks in turn k+1's request: turn k's prompt.
+const NEXT_TURN_ANCHOR_INPUT: usize = 3;
+
+/// Turn k's request and turn k+1's request around an activation. Turns k-1
+/// and k end without tools. Between turns k and k+1 the host appended a
+/// System row, which the transcript records before the User row it governs.
+fn activation_requests() -> (Vec<Message>, Vec<Message>) {
+    let answer = |run: &RunId, text: &str| {
+        stamped(
+            run,
+            vec![AssistantBlock::Text {
+                text: text.to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        )
+    };
+    let turn_k = vec![
+        Message::System(SystemMessage::new("You are the calendar domain agent.")),
+        Message::User(UserMessage::text("note tomorrow's agenda")),
+        answer(&RunId::new(), "Tomorrow: standup at 9, dentist at 14."),
+        Message::User(UserMessage::text("move the dentist to 15")),
+    ];
+    let mut next_turn = turn_k.clone();
+    next_turn.extend([
+        answer(&RunId::new(), "Moved: dentist at 15."),
+        Message::System(SystemMessage::new(ACTIVATION_ENTRY)),
+        Message::User(UserMessage::text("what is left for tomorrow?")),
+    ]);
+    (turn_k, next_turn)
+}
+
+/// Each lowered input item as exact bytes.
+fn item_bytes(input: &Value) -> Vec<String> {
+    input
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(Value::to_string)
+        .collect()
+}
+
+/// The text of a lowered input content: a bare string or text parts.
+fn input_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect(),
+        other => panic!("unexpected content: {other}"),
+    }
+}
+
+/// The activation leaves everything around the input byte-equal (model,
+/// tools, `prompt_cache_key`, `instructions`, which this wire leaves out,
+/// and the cache options), and the entry lowers as a System input item at
+/// its transcript position.
+fn assert_entry_appended_after_history(prior: &Value, next: &Value) {
+    assert_eq!(
+        top_level_without_input(next).to_string(),
+        top_level_without_input(prior).to_string(),
+        "model, tools, instructions and cache knobs are byte-equal"
+    );
+    assert!(prior["prompt_cache_key"].is_string(), "{prior}");
+    assert!(prior["tools"].is_array(), "{prior}");
+    assert_eq!(prior["input"].as_array().unwrap().len(), TURN_K_ITEMS);
+    let input = next["input"].as_array().unwrap();
+    assert_eq!(input.len(), TURN_K_ITEMS + 3, "{next}");
+    let entry = &input[ACTIVATION_ITEM];
+    assert_eq!(entry["type"], "message", "{entry}");
+    assert_eq!(entry["role"], "system", "{entry}");
+    assert_eq!(input_text(&entry["content"]), ACTIVATION_ENTRY, "{entry}");
+    assert_eq!(input[ACTIVATION_ITEM + 1]["role"], "user", "{next}");
+}
+
+#[test]
+fn openai_responses_activation_is_append_monotone_explicit() {
+    let (turn_k, next_turn) = activation_requests();
+    let prior = lower(&turn_k, Some(OpenAiPromptCacheMode::Explicit));
+    let next = lower(&next_turn, Some(OpenAiPromptCacheMode::Explicit));
+    assert_entry_appended_after_history(&prior, &next);
+
+    assert_eq!(
+        item_bytes(&next["input"])[..TURN_K_ITEMS],
+        item_bytes(&prior["input"])[..],
+        "every turn-k input item, with its marker, is byte-equal in turn k+1"
+    );
+    let prior_marks = marked_items(&prior);
+    let next_marks = marked_items(&next);
+    assert!(!prior_marks.is_empty(), "{prior}");
+    assert_eq!(
+        next_marks[..prior_marks.len()],
+        prior_marks[..],
+        "turn k's markers stay where turn k put them"
+    );
+    assert!(
+        next_marks[prior_marks.len()..]
+            .iter()
+            .all(|&index| index >= TURN_K_ITEMS),
+        "turn k+1 adds markers only after turn k's input: {next_marks:?}"
+    );
+
+    let mut cache = ProviderCache::default();
+    cache.serve(&prior);
+    assert_eq!(
+        cache.serve(&next),
+        TURN_K_ITEMS,
+        "turn k+1 reads all of turn k's input from cache"
+    );
+}
+
+/// Implicit mode keeps one explicit marker on the turn anchor
+/// (`ResponsesCacheBreakpoints::ImplicitWithTurnAnchor`), and the anchor
+/// moves forward with each run: turn k's anchor input loses its marker in
+/// turn k+1 and turn k+1's anchor input gains one. Every turn-k item keeps
+/// its content bytes, and every other turn-k item keeps its marker bytes.
+#[test]
+fn openai_responses_activation_is_append_monotone_implicit() {
+    let (turn_k, next_turn) = activation_requests();
+    let prior = lower(&turn_k, Some(OpenAiPromptCacheMode::Implicit));
+    let next = lower(&next_turn, Some(OpenAiPromptCacheMode::Implicit));
+    assert_entry_appended_after_history(&prior, &next);
+
+    assert_eq!(marked_items(&prior), vec![TURN_K_ANCHOR_INPUT], "{prior}");
+    assert_eq!(marked_items(&next), vec![NEXT_TURN_ANCHOR_INPUT], "{next}");
+    let stripped = |body: &Value| item_bytes(&strip_breakpoints(&body["input"]));
+    assert_eq!(
+        stripped(&next)[..TURN_K_ITEMS],
+        stripped(&prior)[..],
+        "every turn-k input item keeps its content bytes in turn k+1"
+    );
+    let next_items = item_bytes(&next["input"]);
+    for (index, item) in item_bytes(&prior["input"]).iter().enumerate() {
+        if index != TURN_K_ANCHOR_INPUT && index != NEXT_TURN_ANCHOR_INPUT {
+            assert_eq!(&next_items[index], item, "turn-k input item {index}");
+        }
+    }
+
+    let mut cache = ProviderCache::default();
+    cache.serve(&prior);
+    assert_eq!(
+        cache.serve(&next),
+        TURN_K_ITEMS,
+        "turn k+1 reads all of turn k's input from cache"
     );
 }

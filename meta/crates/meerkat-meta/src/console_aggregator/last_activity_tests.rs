@@ -396,10 +396,16 @@ async fn appends_that_do_not_act_change_neither_the_read_nor_the_store_reads() {
                 "frame_updated",
             ),
             (
-                "retired",
+                "reset",
                 520,
                 ConsoleFrameSourceKind::ConsoleEvent,
-                "identity_retired",
+                "identity_reset",
+            ),
+            (
+                "respawned",
+                525,
+                ConsoleFrameSourceKind::ConsoleEvent,
+                "identity_respawned",
             ),
             (
                 "memory",

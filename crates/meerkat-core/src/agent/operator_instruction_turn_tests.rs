@@ -1,4 +1,4 @@
-//! S4 rows: operator instructions at the agent's run start, through the real
+//! Rows for operator instructions at the agent's run start, through the real
 //! agent loop. The session task calls
 //! `Agent::apply_run_start_operator_instructions` after it resolves a turn's
 //! start disposition and before it appends any input of the run; these rows

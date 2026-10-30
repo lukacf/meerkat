@@ -1,6 +1,6 @@
 #![cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
-//! S4 row (ruling A2): a dormant member on a host-store realm records its
-//! operator-instruction target without waking.
+//! A dormant member on a host-store realm records its operator-instruction
+//! target without waking.
 //!
 //! The runtime store is the host store adapter over the reference in-memory
 //! host store, as a host-store realm keeps WholeBlob session documents. One

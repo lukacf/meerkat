@@ -1,4 +1,4 @@
-//! S5 rows: the compaction fold of operator-instruction entry rows, through
+//! Rows for the compaction fold of operator-instruction entry rows, through
 //! the real agent loop. A compaction takes every entry row out of the live
 //! transcript and puts one snapshot of the folded set right after the
 //! leading System prefix, before the summary (none for an empty set). The

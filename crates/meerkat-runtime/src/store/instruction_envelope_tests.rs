@@ -1,8 +1,8 @@
-//! S2 row (lead ruling A2): a session document without operator-instruction
-//! facts stays byte-identical at envelope 4 on every store kind a realm
-//! uses: SQLite realms (the HeadCanonical head and rows), JSONL realms (the
-//! SQLite WholeBlob runtime store) and host store realms (the host store
-//! adapter over the in-memory test host). A document that carries an
+//! A session document without operator-instruction facts stays
+//! byte-identical at envelope 4 on every store kind a realm uses: SQLite
+//! realms (the HeadCanonical head and rows), JSONL realms (the SQLite
+//! WholeBlob runtime store) and host store realms (the host store adapter
+//! over the in-memory test host). A document that carries an
 //! operator-instruction entry row is written at envelope 5 on each of them
 //! and reads back unchanged.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]

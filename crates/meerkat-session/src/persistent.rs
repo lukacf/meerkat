@@ -56899,7 +56899,7 @@ mod tests {
         }
     }
 
-    /// S4 rows: operator instructions through the persistent session service.
+    /// Rows for operator instructions through the persistent session service.
     /// A write or a record of a live session goes through its actor and the
     /// actor boundary commit; a dormant session's is a store-only write under
     /// the session's hosting claim, which wakes nothing and registers nothing.

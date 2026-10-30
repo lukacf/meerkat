@@ -1,4 +1,4 @@
-//! S2 rows: the per-document session envelope. A document that carries an
+//! Rows for the per-document session envelope. A document that carries an
 //! operator-instruction fact (an entry row, or the recorded target state) is
 //! written at envelope 5; every other document stays at envelope 4,
 //! byte-identical to what the released binaries write and read.

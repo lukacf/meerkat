@@ -1,4 +1,4 @@
-//! S4 rows for operator instructions at the session task: a write that
+//! Rows for operator instructions at the session task: a write that
 //! arrives while a turn runs waits for the turn (it never lands inside it),
 //! and the next fresh run start appends the one entry before the run's own
 //! input. An ephemeral service keeps no durable session document, so its

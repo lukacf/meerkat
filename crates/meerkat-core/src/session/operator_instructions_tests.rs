@@ -1,4 +1,4 @@
-//! S1 rows for operator-instruction entries: vocabulary, the byte-stable
+//! Rows for operator-instruction entries: vocabulary, the byte-stable
 //! entry render, re-render validation, identity exclusivity and the
 //! inherited (fork child) projection.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -532,7 +532,7 @@ fn entry_chronology_refuses_a_broken_supersedes_chain() {
     );
 }
 
-/// S5: only a run start and a compaction fold write entry rows. A generic
+/// Only a run start and a compaction fold write entry rows. A generic
 /// rewrite (and a restore, which commits through the same guard) cannot
 /// erase one, move one, or mint one, even a row that would continue the
 /// entry chronology.

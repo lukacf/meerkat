@@ -714,6 +714,7 @@ fn member_lifecycle_event(kind: &MobEventKind) -> Option<MemberLifecycleEvent> {
             agent_identity,
             generation,
             role,
+            ..
         } => Some(MemberLifecycleEvent::Retired {
             agent_identity: agent_identity.clone(),
             generation: *generation,
@@ -1137,6 +1138,7 @@ mod tests {
                     agent_identity: identity.clone(),
                     generation: Generation::new(0),
                     role: ProfileName::from("worker"),
+                    session_archived: false,
                 },
             ),
         ];

@@ -4074,11 +4074,43 @@ fn unlisted_retirement_starts(events: &[crate::event::MobEvent]) -> BTreeSet<(St
         .collect()
 }
 
+/// The incarnations, by identity and generation, whose member was hosted
+/// elsewhere, as their `MemberSpawned` rows record: a placed spawn's member
+/// (on its member host) or an externally bound member. The generic replay of
+/// a retired incarnation restores no placement, so the replay of its
+/// retirement passes this record (`hosted_incarnation`): MobMachine keeps its
+/// identity entry hosted on its first use with no archived session, as the
+/// live end of the retirement did.
+fn hosted_incarnations(events: &[crate::event::MobEvent]) -> BTreeSet<(String, u64)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            MobEventKind::MemberSpawned(spawned)
+                if spawned.placed_spawn_id().is_some()
+                    || matches!(
+                        spawned.bridge_member_ref(),
+                        Some(crate::event::MemberRef::BackendPeer {
+                            session_id: None,
+                            ..
+                        })
+                    ) =>
+            {
+                Some((
+                    spawned.agent_identity.as_str().to_string(),
+                    spawned.generation.get(),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Mark again, at replay, the Declared entry whose member's retirement the
 /// declared apply's seal started (`RecoverIdentityEntryRetiring`): the end of
-/// the retirement then ends the entry, as it did live. Only the identity's
-/// seated incarnation of a Declared entry is marked; a row of another one (a
-/// retirement whose member a later row already replaced) marks nothing.
+/// the retirement then ends the entry, as it did live. Every unlisted start
+/// row is passed; MobMachine marks only the identity's seated incarnation of
+/// a Declared entry, and a row of another one (a retirement whose member a
+/// later row already replaced, or whose entry it ended) takes its no-op arm.
 fn recover_unlisted_retirement_mark(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     agent_identity: &AgentIdentity,
@@ -4086,20 +4118,11 @@ fn recover_unlisted_retirement_mark(
 ) -> Result<(), MobError> {
     use crate::machines::mob_machine as mob_dsl;
 
-    let identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
-    let runtime = mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id);
-    let state = authority.state();
-    if state.identity_to_runtime.get(&identity) != Some(&runtime)
-        || state.identity_entry_origins.get(&identity)
-            != Some(&mob_dsl::IdentityEntryOrigin::Declared)
-    {
-        return Ok(());
-    }
     apply_seeded_mob_signal(
         authority,
         mob_dsl::MobMachineSignal::RecoverIdentityEntryRetiring {
-            agent_identity: identity,
-            agent_runtime_id: runtime,
+            agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
         },
         "recover_identity_entry_retiring",
     )
@@ -4116,6 +4139,7 @@ fn seed_mob_authority_sync_from_events(
 
     let respawn_topology_ledger = respawn_topology_ledger(events)?;
     let unlisted_starts = unlisted_retirement_starts(events);
+    let hosted_incarnations = hosted_incarnations(events);
 
     for event in events {
         match &event.kind {
@@ -4505,6 +4529,7 @@ fn seed_mob_authority_sync_from_events(
             MobEventKind::MemberRetired {
                 agent_identity,
                 generation,
+                session_archived,
                 ..
             } => {
                 let agent_runtime_id = AgentRuntimeId::new(agent_identity.clone(), *generation);
@@ -4531,6 +4556,8 @@ fn seed_mob_authority_sync_from_events(
                         generation: mob_dsl::Generation::from_domain(*generation),
                         preserve_machine_topology,
                         preservation_started,
+                        session_archived: *session_archived,
+                        hosted_incarnation: hosted_incarnations.contains(&key),
                     },
                     "recover_member_retired",
                 )?;
@@ -11372,6 +11399,8 @@ impl MobBuilder {
                 #[cfg(feature = "runtime-adapter")]
                 startup_member_recoveries: BTreeMap::new(),
                 member_wakes,
+                #[cfg(feature = "runtime-adapter")]
+                host_preparation_holds: BTreeMap::new(),
                 identity_reconcile_parked: BTreeMap::new(),
                 spawn_panic_log_ledger: Arc::new(
                     super::panic_capture::SpawnPanicLogLedger::default(),
@@ -14411,6 +14440,7 @@ mod tests {
                     agent_identity: identity.clone(),
                     generation: Generation::new(0),
                     role: ProfileName::from("worker"),
+                    session_archived: false,
                 },
             ),
             event(3, spawned(Generation::new(1), durable.clone())),
@@ -15892,6 +15922,7 @@ mod tests {
                 agent_identity: identity.clone(),
                 generation,
                 role: ProfileName::from("worker"),
+                session_archived: false,
             },
         }
     }
@@ -17235,6 +17266,7 @@ mod tests {
                     agent_identity: identity.clone(),
                     generation: generation_zero,
                     role: ProfileName::from("worker"),
+                    session_archived: false,
                 },
             },
             placed_spawned_event(
@@ -17355,6 +17387,7 @@ mod tests {
                     agent_identity: identity.clone(),
                     generation: generation_zero,
                     role: ProfileName::from("worker"),
+                    session_archived: false,
                 },
             },
             placed_spawned_event(
@@ -18399,6 +18432,7 @@ mod tests {
                     agent_identity: retiring,
                     generation,
                     role: ProfileName::from("worker"),
+                    session_archived: false,
                 },
             ),
         ]
@@ -19016,6 +19050,7 @@ mod tests {
                         agent_identity: retiring.clone(),
                         generation: generation_zero,
                         role: ProfileName::from("worker"),
+                        session_archived: false,
                     },
                 ),
             ];

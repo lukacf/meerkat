@@ -164,27 +164,38 @@ them.
   `State` replace the public field `member_host_preparation_pending` (a set
   of identities) with `member_host_preparation_causes` (each identity's
   `HostPreparationCause`), and gain the public fields
-  `identity_entry_unseated`, `identity_entry_retiring` and
-  `identity_entry_archived_sessions`, so code that builds or reads either
-  struct literally must follow. `MobMachineInput` (meerkat-machine-schema and
-  meerkat-mob), its variant enum `MobMachineInputVariant`
-  (meerkat-machine-schema), `MobMachineCatalogInput` (meerkat-mob) and the
-  kernel `Input` and `InputKind` gain `DeclareIdentityEntry { agent_identity,
-  profile_name, runtime_mode, placement, held_creation,
-  declared_migration_from, intent_managed, session_memory_only }`,
-  `SealDeclaredRoster { desired }` and `ForgetArchivedSession {
-  agent_identity, session_id, reason }`; `MobMachineSignal` and its variant
-  enum and the kernel `Signal` and `SignalKind` gain
-  `RecoverIdentityEntryRetiring { agent_identity, agent_runtime_id }`;
-  `MobMachineEffect` and its variant enum and the kernel `Effect` and
-  `EffectKind` gain `IdentityEntryDeclared { agent_identity, verdict,
-  archived_session }`, `DeclaredRosterSealed { verdict }` and
-  `ArchivedSessionForgotten { agent_identity, session_id, reason }`; each
-  appended last. The machine enums `HostPreparationCause` (`FirstBootRow`,
-  `RoleMigrationUndeclared`, `BuildPreparationRetry`), `UnseatedEntryCause`
-  (`SeatOwed`, `HostedOnFirstUse`, `HeldCreation`), `EntryPlacementKind`,
-  `IdentityEntryVerdict`, `DeclaredRosterSealVerdict` and
-  `ArchivedSessionForgetReason` are new (the reads answer with
+  `identity_entry_unseated`, `identity_entry_retiring`,
+  `identity_entry_archived_sessions` and `declared_apply_open`, so code that
+  builds or reads either struct literally must follow. `MobMachineInput`
+  (meerkat-machine-schema and meerkat-mob), its variant enum
+  `MobMachineInputVariant` (meerkat-machine-schema), `MobMachineCatalogInput`
+  (meerkat-mob) and the kernel `Input` and `InputKind` gain
+  `DeclareIdentityEntry { agent_identity, profile_name, runtime_mode,
+  placement, held_creation, declared_migration_from, intent_managed,
+  session_memory_only, resume_session_role, first_boot }`,
+  `SealDeclaredRoster { desired }`, `ForgetArchivedSession { agent_identity,
+  session_id, reason }`, `OpenDeclaredApply` and `CloseDeclaredApply`;
+  `MobMachineSignal` and its variant enum and the kernel `Signal` and
+  `SignalKind` gain `RecoverIdentityEntryRetiring { agent_identity,
+  agent_runtime_id }`; `MobMachineEffect` and its variant enum and the kernel
+  `Effect` and `EffectKind` gain `IdentityEntryDeclared { agent_identity,
+  verdict, archived_session }`, `DeclaredRosterSealed { verdict }`,
+  `ArchivedSessionForgotten { agent_identity, session_id, reason }`,
+  `ExplicitResumeMemberHeld { agent_identity, cause }` and
+  `DeclaredApplyOpenResolved { verdict }`; each appended last. The signal
+  `RecoverRosterMemberRetired` (`MobMachineSignal` and the kernel
+  `signals::RecoverRosterMemberRetired`) gains the public fields
+  `session_archived` (the retirement archived the member's session) and
+  `hosted_incarnation` (the retired incarnation was placed or externally
+  bound), so code that builds it literally must set them (`false` keeps the
+  previous behaviour for a local member). The machine enums
+  `HostPreparationCause` (`FirstBootRow`, `RoleMigrationUndeclared`,
+  `BuildPreparationRetry`), `UnseatedEntryCause` (`SeatOwed`,
+  `HostedOnFirstUse`, `HeldCreation`), `EntryPlacementKind`,
+  `IdentityEntryVerdict`, `DeclaredRosterSealVerdict`,
+  `ArchivedSessionForgetReason`, `FirstBootRequestKind` (`None`, `Resume`,
+  `Fresh`) and `DeclaredApplyOpenVerdict` (`Opened`, `Busy`,
+  `MobNotRunning`) are new (the reads answer with
   `meerkat_mob::HostPreparationCause` and `meerkat_mob::UnseatedEntryCause`,
   their public projections). The kernel `generated::mob::TransitionId` gains,
   appended last, `DeclareIdentityEntryKept`, `DeclareIdentityEntrySeatOwed`,
@@ -203,11 +214,28 @@ them.
   `SealDeclaredRosterMobNotRunningStopped`,
   `SealDeclaredRosterMobNotRunningCompleted`,
   `SealDeclaredRosterMobNotRunningDestroyed`,
-  `RecoverIdentityEntryRetiringMarkedRunning` and `ForgetArchivedSession`, so
-  no existing variant's discriminant moves. Exhaustive matches must add the
-  new variants. `meerkat_mob::MobEventKind::MemberRetirementStarted` gains
-  the public field `cause` (why the retirement started, which serde skips),
-  so code that builds the variant literally must set it (`None`).
+  `RecoverIdentityEntryRetiringMarkedRunning`, `ForgetArchivedSession`,
+  `AuthorizeExplicitResumeMemberHeldRunning`,
+  `RecoverIdentityEntryRetiringStaleRunning`, `OpenDeclaredApplyOpened`,
+  `OpenDeclaredApplyBusy`, `OpenDeclaredApplyMobNotRunningStopped`,
+  `OpenDeclaredApplyMobNotRunningCompleted`,
+  `OpenDeclaredApplyMobNotRunningDestroyed`, `CloseDeclaredApplyRunning`,
+  `CloseDeclaredApplyStopped`, `CloseDeclaredApplyCompleted` and
+  `CloseDeclaredApplyDestroyed`, so no existing variant's discriminant moves.
+  Exhaustive matches must add the new variants.
+  `meerkat_mob::MobEventKind::MemberRetirementStarted` gains the public field
+  `cause` (why the retirement started) and `MemberRetired` the public field
+  `session_archived` (whether the retirement archived the member's session),
+  both of which serde skips, so code that builds either variant literally
+  must set them (`None` and `false`).
+- `meerkat-machine-kernels`, `meerkat-machine-schema`: `MeerkatMachine`'s
+  `RunStartHoldReason` (meerkat-machine-schema
+  `catalog::dsl::meerkat_machine` and the kernel `generated::meerkat`) gains
+  `HostPreparation`, appended last: a mob member whose role move its mob
+  holds starts no run (see the declared apply in Added). Exhaustive matches
+  must add it. The runtime's `meerkat_runtime::RunStartHoldReason` and the
+  mob's `meerkat_mob::HostRunStartHoldReason` gain it too; both are
+  `#[non_exhaustive]`.
 
 - `meerkat-core`: the Copilot auth methods gain an operator-supplied GitHub
   token: `OpenAiAuthMethod::GitHubCopilotToken`,
@@ -401,29 +429,44 @@ them.
   current role, restamps the member on its own session at its next
   generation, and a member whose session lives in memory only moves to a
   fresh session instead. A role change with no migration declared holds the
-  member: it is released when idle, every wake of it is refused
-  `HostPreparationPending`, and the entry reads name the hold
+  member: every wake of it is refused `HostPreparationPending`; a Live
+  member's run starts are held (`HostRunStartHoldReason::HostPreparation`),
+  so its run in flight finishes, never preempted, and no new run starts
+  under its previous role; it is released when idle; the explicit resume
+  leaves it alone; and the entry reads name the hold
   (`IdentityEntryView::host_preparation`,
-  `HostPreparationCause::RoleMigrationUndeclared`), until an apply declares
-  the move or restores the role. A placed or externally bound identity is
-  hosted on its first use (its host's placed spawn with entry custody
-  creates it), and an identity whose creation the host holds
-  (`DeclaredEntry::with_held_creation`) and that was never created awaits its
-  held creation; neither is seated by the apply or by a dormant seat. A
-  complete roster is sealed: every Declared entry it does not list is
-  unlisted, its member retired (its retirement's start row records the cause,
+  `HostPreparationCause::RoleMigrationUndeclared`). An apply that restores
+  the role ends the hold, and one that declares the move ends it in the step
+  that commits the new role, so a deferred or refused restamp keeps it. A
+  placed or externally bound identity is hosted on its first use (its host's
+  placed spawn with entry custody creates it), and an identity whose
+  creation the host holds (`DeclaredEntry::with_held_creation`) and that was
+  never created awaits its held creation; neither is seated by the apply or
+  by a dormant seat. A complete roster is sealed: every Declared entry it
+  does not list is unlisted, its member retired (its retirement's start row
+  records the cause,
   `MemberLifecycleEvent::RetirementStarted::cause`,
   `MemberRetirementCause::Unlisted`) and the entry ended
   (`DeclaredRosterOutcome::unlisted`); a worker is never unlisted. An
   unlisted identity listed again comes back as the same identity on the
   session its retirement archived, Dormant at its next generation with no
-  wake, and its first wake revives the session with its history. When that
-  session is gone from the store, the identity is seated on a fresh session
-  with the typed notice `HistoryUnavailable` (on its answer and on its
-  seat's `MemberLifecycleEvent::Spawned::history_unavailable`); a store that
-  cannot read it now defers the identity (`DeclaredEntryOutcome::Deferred`),
-  never a fresh session. A first-boot `Resume` request seats the identity on
-  its session, and a `Fresh` request starts its fresh life. A name a worker
+  wake, and its first wake revives the session with its history; listed
+  under another role, it is seated there only with a migration declared from
+  the role that session was built under (its next build moves the session),
+  and held otherwise. When that session is gone from the store, the identity
+  is seated on a fresh session with the typed notice `HistoryUnavailable` (on
+  its answer, `Seated` or, for an identity that owes a kickoff, `Embodied`,
+  and on its seat's `MemberLifecycleEvent::Spawned::history_unavailable`); a
+  store that cannot read it now defers the identity
+  (`DeclaredEntryOutcome::Deferred`), never a fresh session. An archived
+  session the store holds intact whose runtime refuses revival is answered
+  `Failed` on every apply, until the host's `Fresh` first-boot request starts
+  the identity's fresh life. A first-boot `Resume` request seats the identity
+  on its session, and a `Fresh` request starts its fresh life; the answer
+  names the requests the apply carried out
+  (`DeclaredRosterOutcome::first_boot_requests_carried_out`), which the host
+  consumes. Applies of one mob run one at a time: an apply while another runs
+  is refused `MobError::LifecycleOperationPending`, retryable. A name a worker
   holds, a host-adopted identity, an identity declared twice and a
   first-boot request for an undeclared identity are refused for that
   identity alone (`DeclaredEntryRefusal`), and a candidate composition

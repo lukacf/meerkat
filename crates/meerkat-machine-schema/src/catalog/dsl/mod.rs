@@ -1915,7 +1915,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum("InputLane", &["Queue", "Steer"]),
-            NamedTypeBinding::string_enum("RunStartHoldReason", &["MobStop", "ToolsNotPublished"]),
+            NamedTypeBinding::string_enum(
+                "RunStartHoldReason",
+                &["MobStop", "ToolsNotPublished", "HostPreparation"],
+            ),
             NamedTypeBinding::string_enum("SessionResidencyOwner", &["Session", "Composition"]),
             NamedTypeBinding::string_enum(
                 "EmptyResumeRetirementVerdict",
@@ -4240,6 +4243,11 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "ArchivedSessionForgetReason",
                 &["SessionAbsent", "FreshLifeRequested"],
             ),
+            NamedTypeBinding::string_enum("FirstBootRequestKind", &["None", "Resume", "Fresh"]),
+            NamedTypeBinding::string_enum(
+                "DeclaredApplyOpenVerdict",
+                &["Opened", "Busy", "MobNotRunning"],
+            ),
             NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("ResumeAttemptId"),
             NamedTypeBinding::u64("MobDefinitionEpoch"),
@@ -4888,6 +4896,10 @@ runtime_internal_inputs!(
         DeclareIdentityEntry,
         SealDeclaredRoster,
         ForgetArchivedSession,
+        // The declared apply's open fact, opened and closed around each
+        // apply by the handle. Neither is a surface command.
+        OpenDeclaredApply,
+        CloseDeclaredApply,
     ]
 );
 

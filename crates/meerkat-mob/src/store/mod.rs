@@ -8281,6 +8281,7 @@ mod identity_member_target_generation_tests {
             agent_identity: identity.clone(),
             generation: Generation::new(generation),
             role: ProfileName::from("worker"),
+            session_archived: false,
         }
     }
 

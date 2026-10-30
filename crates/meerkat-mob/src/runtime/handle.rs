@@ -9284,7 +9284,10 @@ impl MobHandle {
     /// keeps holding it until Resume). Releasing before the member's runtime
     /// has registered cancels the hold its registration would apply. A member
     /// that does not hold `reason` is an Ok no-op; a non-member is
-    /// [`MobError::MemberNotFound`].
+    /// [`MobError::MemberNotFound`]. The mob's own hold of a role move
+    /// ([`crate::HostRunStartHoldReason::HostPreparation`]) is never a
+    /// host's to release: it is refused with [`MobError::WiringError`], and
+    /// an apply that ends the role hold releases it.
     ///
     /// A kickoff a Shutdown kept in flight for the member waits for this
     /// release while the host holds the member: the release re-attaches it,
@@ -10199,8 +10202,10 @@ impl MobHandle {
     /// The members whose run starts this mob's host holds for `reason`, in
     /// identity order: the members whose session registration still
     /// stages that hold, as [`Self::release_member_run_starts`] would release
-    /// it. Read from the published machine state and the runtime's hold
-    /// registry, with no actor command and no wake; the
+    /// it. For [`crate::HostRunStartHoldReason::HostPreparation`], the
+    /// members whose role move the declared apply holds, whose run starts the
+    /// mob holds itself. Read from the published machine state and the
+    /// runtime's hold registry, with no actor command and no wake; the
     /// [`crate::ControlScope::List`] scope. A mob without the runtime adapter
     /// holds no member's run starts.
     pub fn members_holding_run_starts(

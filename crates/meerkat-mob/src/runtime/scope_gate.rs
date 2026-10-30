@@ -171,7 +171,9 @@ impl MobCommand {
             // The declared apply decides identity entries' standing and its
             // seal retires the members of unlisted ones.
             | Self::DeclareIdentityEntries { .. }
-            | Self::SealDeclaredRoster { .. } => Some(ControlScope::Retire),
+            | Self::SealDeclaredRoster { .. }
+            | Self::OpenDeclaredApply { .. }
+            | Self::CloseDeclaredApply { .. } => Some(ControlScope::Retire),
 
             // ── WireTopology: trust/topology configuration ──
             Self::Wire { .. }
@@ -238,6 +240,8 @@ impl MobCommand {
             | Self::RetryOwedMemberWake { .. }
             // An owed edge repair is the actor's own timer.
             | Self::RepairOwedEdge { .. }
+            // The release of a held member is the actor's own self-send.
+            | Self::ReleaseHeldMember { .. }
             | Self::StartupMemberRecovered { .. }
             | Self::ResumeLifecycleReadinessResolved { .. }
             | Self::ResumeLifecyclePreparationResolved { .. }
@@ -460,7 +464,9 @@ impl MobCommand {
             },
             Self::AdoptLegacyIdentityEntry { .. }
             | Self::DeclareIdentityEntries { .. }
-            | Self::SealDeclaredRoster { .. } => AgentLaneAdmission::HostOnly,
+            | Self::SealDeclaredRoster { .. }
+            | Self::OpenDeclaredApply { .. }
+            | Self::CloseDeclaredApply { .. } => AgentLaneAdmission::HostOnly,
 
             // Spawns, seats, work, flows, objectives and forked participants.
             Self::Spawn { .. }
@@ -528,6 +534,7 @@ impl MobCommand {
             | Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
             | Self::RepairOwedEdge { .. }
+            | Self::ReleaseHeldMember { .. }
             | Self::StartupMemberRecovered { .. }
             | Self::ResumeLifecycleReadinessResolved { .. }
             | Self::ResumeLifecyclePreparationResolved { .. }
@@ -667,7 +674,8 @@ impl MobCommand {
             }
             Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
-            | Self::RepairOwedEdge { .. } => {}
+            | Self::RepairOwedEdge { .. }
+            | Self::ReleaseHeldMember { .. } => {}
             Self::ReloadMemberRegistration { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
@@ -739,6 +747,12 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::SealDeclaredRoster { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::OpenDeclaredApply { reply_tx } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::CloseDeclaredApply { reply_tx } => {
                 let _ = reply_tx.send(Err(error));
             }
             // Settling closes the waiter set; the actor's in-flight map prunes

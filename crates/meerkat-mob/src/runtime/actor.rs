@@ -17,6 +17,8 @@ mod dormant_kickoff;
 mod dormant_seat;
 mod dormant_wiring;
 pub(super) mod explicit_resume;
+#[cfg(feature = "runtime-adapter")]
+mod host_preparation_hold;
 mod identity_entry_admission;
 #[cfg(feature = "openai-live")]
 pub(super) mod live_durable_source_loads;
@@ -6999,6 +7001,9 @@ pub(super) struct PendingSpawn {
     /// Whether the spawn acts for the identity entry of its name
     /// (`SpawnMemberSpec::entry_custody`), carried to its ladder's open.
     pub(super) entry_custody: bool,
+    /// The notice a fresh seat embodied after the loss of the identity's
+    /// archived session carries, for the spawn's row.
+    pub(super) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
     /// Objective causality inherited from the spawning turn.
     pub(super) objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Per-spawn external-tool overlay carried to the finalize commit so the
@@ -7919,6 +7924,9 @@ struct SpawnFinalizeCtx {
     /// ladder's open carries it, and its membership commit records the
     /// member an entry (MobMachine's `spawn_exec_entry_custody`).
     entry_custody: bool,
+    /// The notice a fresh seat embodied after the loss of the identity's
+    /// archived session carries: the spawn's row records it.
+    history_unavailable: Option<crate::runtime::HistoryUnavailable>,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     authorized_profile_material: AuthorizedSpawnProfileMaterial,
@@ -8033,6 +8041,8 @@ impl SpawnActivateState {
             fork_overlay,
             definition_wiring,
             entry_custody: _,
+            // Recorded on the spawn's row at its admission.
+            history_unavailable: _,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material: _,
@@ -9364,6 +9374,12 @@ pub(super) struct MobActor {
     /// racing a second materialization), and the materializations MobMachine
     /// handed off. MobMachine owns every residency fact; this holds none.
     pub(super) member_wakes: member_wake::MemberWakes,
+    /// The sessions whose run starts the actor holds for a member's role
+    /// hold (`HostPreparation`), by identity: realized from MobMachine's
+    /// host preparation causes at every loop boundary (see
+    /// `host_preparation_hold`). Holds none of the facts; volatile.
+    #[cfg(feature = "runtime-adapter")]
+    pub(super) host_preparation_holds: BTreeMap<AgentIdentity, SessionId>,
     pub(super) next_retirement_ticket: u64,
     pub(super) retirement_batch: Option<retirement_io::RetirementBatch>,
     pub(super) wiring_io_tasks: tokio::task::JoinSet<wiring_io::WiringIoCompletion>,
@@ -15892,6 +15908,14 @@ impl MobActor {
         agent_identity: &AgentIdentity,
         reason: super::stop_report::HostRunStartHoldReason,
     ) -> Result<(), MobError> {
+        // The role hold's run-start hold is the mob's: MobMachine ends it.
+        if reason == super::stop_report::HostRunStartHoldReason::HostPreparation {
+            return Err(MobError::WiringError(format!(
+                "the run starts of '{agent_identity}' are held for its host preparation (a role \
+                 move the declared apply holds): an apply that declares the move or restores the \
+                 role releases them, never a host's release"
+            )));
+        }
         let member_ref = self
             .roster
             .read()
@@ -22435,6 +22459,14 @@ impl MobActor {
                     if machine.member_placement.contains_key(&identity) {
                         return None;
                     }
+                    // A member whose host preparation is owed is left as it
+                    // is: MobMachine's member authorization answers it held
+                    // (`AuthorizeExplicitResumeMemberHeldRunning`), so
+                    // nothing of the resume takes its session over, retires
+                    // its materialization or rebuilds it.
+                    if machine.member_host_preparation_causes.contains_key(&identity) {
+                        return None;
+                    }
                     let dormant = super::boot_plan::member_is_dormant(machine, &identity);
                     let binding = machine.member_session_bindings.get(&identity)?;
                     Some(
@@ -22690,7 +22722,7 @@ impl MobActor {
                 session_id: mob_dsl::SessionId::from_domain(&bridge_session_id),
                 definition_epoch: self.dsl_authority.state().definition_epoch,
             };
-            if let Err(error) = self.apply_dsl_input(
+            match self.apply_dsl_input_collect_effects(
                 mob_dsl::MobMachineInput::AuthorizeExplicitResumeMember {
                     attempt: attempt.clone(),
                     agent_identity: dsl_identity.clone(),
@@ -22698,8 +22730,22 @@ impl MobActor {
                 },
                 "authorize_explicit_resume_member",
             ) {
-                failed.push((entry.agent_identity.clone(), error));
-                continue;
+                Err(error) => {
+                    failed.push((entry.agent_identity.clone(), error));
+                    continue;
+                }
+                // A member whose host preparation is owed is not rebuilt.
+                Ok(effects)
+                    if effects.iter().any(|effect| {
+                        matches!(
+                            effect,
+                            mob_dsl::MobMachineEffect::ExplicitResumeMemberHeld { .. }
+                        )
+                    }) =>
+                {
+                    continue;
+                }
+                Ok(_) => {}
             }
             // The reservation left the member Waking under one wake attempt
             // (its own, or the in-flight wake it joined): a peer or host wake
@@ -29442,6 +29488,16 @@ impl MobActor {
                     self.inline_step_watchdog.set_step("repair_owed_edge");
                     boxed_arm_future(|| self.repair_owed_edge(edge)).await;
                 }
+                MobCommand::ReleaseHeldMember {
+                    agent_identity,
+                    session_id,
+                } => {
+                    self.inline_step_watchdog.set_step("release_held_member");
+                    #[cfg(feature = "runtime-adapter")]
+                    Box::pin(self.release_held_member(agent_identity, session_id)).await;
+                    #[cfg(not(feature = "runtime-adapter"))]
+                    let _ = (agent_identity, session_id);
+                }
                 MobCommand::ReleaseMember {
                     agent_identity,
                     scope,
@@ -31566,6 +31622,14 @@ impl MobActor {
                     let result = self.seal_declared_roster(desired);
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::OpenDeclaredApply { reply_tx } => {
+                    let result = self.open_declared_apply();
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::CloseDeclaredApply { reply_tx } => {
+                    let result = self.close_declared_apply();
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::ProjectMemberStatusObserved {
                     agent_identity,
                     expected_target,
@@ -32654,6 +32718,8 @@ impl MobActor {
             boxed_arm_future(|| self.answer_closed_member_wakes()).await;
             boxed_arm_future(|| self.realize_member_peer_ingress_changes()).await;
             boxed_arm_future(|| self.start_pending_member_materializations()).await;
+            #[cfg(feature = "runtime-adapter")]
+            boxed_arm_future(|| self.realize_host_preparation_run_start_holds()).await;
         }
         if self.durable_uncertainty_fail_stop.is_set() {
             return ActorLoopWakeSelection::Continue;
@@ -33354,6 +33420,8 @@ impl MobActor {
             boxed_arm_future(|| self.answer_closed_member_wakes()).await;
             boxed_arm_future(|| self.realize_member_peer_ingress_changes()).await;
             boxed_arm_future(|| self.start_pending_member_materializations()).await;
+            #[cfg(feature = "runtime-adapter")]
+            boxed_arm_future(|| self.realize_host_preparation_run_start_holds()).await;
             loop {
                 let result = boxed_arm_future(|| self.flush_routed_effects()).await;
                 #[cfg(test)]
@@ -35517,6 +35585,7 @@ impl MobActor {
             fork_overlay: entry.fork_overlay,
             definition_wiring: entry.definition_wiring,
             entry_custody: false,
+            history_unavailable: None,
             objective_id: None,
             per_spawn_external_tools: None,
             authorized_profile_material,
@@ -35905,9 +35974,10 @@ impl MobActor {
             // Folded into the ceiling above.
             inherited_operator_authority_bound: _,
             fresh_session_id,
-            // Only a dormant seat's row records it; an embodied seat's spawn
-            // does not.
-            history_unavailable: _,
+            // A fresh seat embodied after the loss of the identity's archived
+            // session: its spawn row records the notice, as a dormant seat's
+            // row does.
+            history_unavailable,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         self.inline_step_watchdog
@@ -36129,6 +36199,7 @@ impl MobActor {
             fork_overlay,
             definition_wiring,
             entry_custody,
+            history_unavailable,
             owner_bridge_session_id: owner_bridge_session_id.clone(),
             ops_registry: ops_registry.clone(),
             held,
@@ -36758,6 +36829,7 @@ impl MobActor {
             fork_overlay,
             definition_wiring,
             entry_custody,
+            history_unavailable,
             owner_bridge_session_id,
             ops_registry,
             held,
@@ -36969,6 +37041,7 @@ impl MobActor {
                 fork_overlay,
                 definition_wiring,
                 entry_custody,
+                history_unavailable,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -37172,6 +37245,7 @@ impl MobActor {
             fork_overlay,
             definition_wiring,
             entry_custody,
+            history_unavailable,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material,
@@ -39104,6 +39178,7 @@ impl MobActor {
             definition_wiring: crate::DefinitionWiring::Applies,
             // Refused above: a placed spawn never acts for an identity entry.
             entry_custody: false,
+            history_unavailable: None,
             objective_id,
             authorized_profile_material,
             continuity_intent,
@@ -39399,6 +39474,7 @@ impl MobActor {
                 fork_overlay,
                 definition_wiring,
                 entry_custody,
+                history_unavailable,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -39603,6 +39679,7 @@ impl MobActor {
                                 fork_overlay,
                                 definition_wiring,
                                 entry_custody,
+                                history_unavailable,
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -39687,6 +39764,7 @@ impl MobActor {
                                 fork_overlay,
                                 definition_wiring,
                                 entry_custody,
+                                history_unavailable,
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -40052,6 +40130,7 @@ impl MobActor {
             // Built from the definition: its wiring rules apply.
             definition_wiring: crate::DefinitionWiring::Applies,
             entry_custody: false,
+            history_unavailable: None,
             objective_id: None,
             per_spawn_external_tools: per_spawn_external_tools.clone(),
             authorized_profile_material: authorized_profile_material.clone(),
@@ -41099,6 +41178,9 @@ impl MobActor {
             &identity,
         );
         spawned_event = spawned_event.with_identity_entry(identity_entry);
+        // A fresh seat embodied after the loss of the identity's archived
+        // session records the notice, as a dormant seat's row does.
+        spawned_event = spawned_event.with_history_unavailable(ctx.history_unavailable.clone());
         spawned_event = spawned_event.with_placed_spawn_id(None);
         if let Err(append_error) = boxed_arm_future(|| {
             self.append_member_spawned_with_identity_fence(
@@ -41162,6 +41244,7 @@ impl MobActor {
                             agent_identity: identity.clone(),
                             generation,
                             role: profile_name.clone(),
+                            session_archived: false,
                         },
                     })
                     .await
@@ -53166,7 +53249,11 @@ impl MobActor {
                 if is_peer_only { None } else { session_id },
                 "dispose_member_archive_completed",
             )?;
-            self.append_retire_event_for_entry(&ctx.entry).await?;
+            self.append_retire_event_for_entry(
+                &ctx.entry,
+                !is_peer_only && disposal == mob_dsl::MemberSessionDisposal::Archived,
+            )
+            .await?;
         }
         if let Err(error) = self.commit_prepared_dsl_transition(prepared) {
             // MemberRetired may already be durable while the live admission
@@ -53829,7 +53916,12 @@ impl MobActor {
             .retire_event_exists(&ctx.entry.agent_identity, ctx.entry.generation)
             .await?
         {
-            self.append_retire_event_for_entry(&ctx.entry).await?;
+            let peer_only = Self::runtime_binding_for_entry(&ctx.entry).is_some() && !is_placed;
+            self.append_retire_event_for_entry(
+                &ctx.entry,
+                !peer_only && disposal == mob_dsl::MemberSessionDisposal::Archived,
+            )
+            .await?;
         }
         if let Err(error) = self.commit_prepared_dsl_transition(prepared) {
             return Err(self.durable_uncertainty_fail_stop.record(MobError::Internal(format!(
@@ -63939,11 +64031,20 @@ impl MobActor {
         Ok(index.contains(&key))
     }
 
-    async fn append_retire_event_for_entry(&mut self, entry: &RosterEntry) -> Result<(), MobError> {
+    /// Append the terminal `MemberRetired` row of `entry`'s retirement.
+    /// `session_archived` records that the retirement archived the member's
+    /// session (its disposal was Archived): replay records an identity
+    /// entry's archived session from it, as the live terminal does.
+    async fn append_retire_event_for_entry(
+        &mut self,
+        entry: &RosterEntry,
+        session_archived: bool,
+    ) -> Result<(), MobError> {
         let desired = MobEventKind::MemberRetired {
             agent_identity: entry.agent_identity.clone(),
             generation: entry.generation,
             role: entry.role.clone(),
+            session_archived,
         };
         let append = self
             .events

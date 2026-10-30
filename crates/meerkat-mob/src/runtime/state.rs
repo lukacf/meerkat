@@ -993,6 +993,13 @@ pub(super) enum MobCommand {
     RepairOwedEdge {
         edge: super::actor::member_wake::MemberWiringEdge,
     },
+    /// Internal: the run a member whose role move MobMachine holds had when
+    /// its run starts were held on `session_id` settled (or it had none):
+    /// release the member while the hold still stands there.
+    ReleaseHeldMember {
+        agent_identity: AgentIdentity,
+        session_id: SessionId,
+    },
     /// Release a live member's materialization, keeping it seated
     /// ([`super::handle::MobHandle::release_member`]). With a scope
     /// ([`super::handle::MobHandle::release_member_at_scope`]) only the
@@ -1546,6 +1553,15 @@ pub(super) enum MobCommand {
     SealDeclaredRoster {
         desired: std::collections::BTreeSet<crate::ids::AgentIdentity>,
         reply_tx: oneshot::Sender<Result<super::declared_apply::SealAnswer, crate::MobError>>,
+    },
+    /// Open a declared apply (`MobHandle::apply_declared_roster`): one apply
+    /// of the mob at a time, MobMachine's verdict.
+    OpenDeclaredApply {
+        reply_tx: oneshot::Sender<Result<mob_dsl::DeclaredApplyOpenVerdict, crate::MobError>>,
+    },
+    /// Close the open declared apply, whatever its outcome.
+    CloseDeclaredApply {
+        reply_tx: oneshot::Sender<Result<(), crate::MobError>>,
     },
     /// An off-actor member-status observation returning to the actor, with
     /// every caller that joined it.
@@ -2229,7 +2245,8 @@ impl MobCommand {
             Self::ReleaseMember { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
-            | Self::RepairOwedEdge { .. } => ShutdownAnswerClass::ActorCompletion,
+            | Self::RepairOwedEdge { .. }
+            | Self::ReleaseHeldMember { .. } => ShutdownAnswerClass::ActorCompletion,
             Self::ReloadMemberRegistration { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(feature = "openai-live")]
             Self::StartLiveBridgeOperation { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2313,6 +2330,9 @@ impl MobCommand {
             Self::CommitDormantSeats { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdoptLegacyIdentityEntry { .. } => ShutdownAnswerClass::CallerRequest,
             Self::DeclareIdentityEntries { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::OpenDeclaredApply { .. } | Self::CloseDeclaredApply { .. } => {
+                ShutdownAnswerClass::CallerRequest
+            }
             Self::SealDeclaredRoster { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityIntent { .. } => ShutdownAnswerClass::CallerRequest,
             Self::GetIdentityConvergenceStatus { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2425,6 +2445,7 @@ impl MobCommand {
             Self::MemberWakeTimedOut { .. } => "MemberWakeTimedOut",
             Self::RetryOwedMemberWake { .. } => "RetryOwedMemberWake",
             Self::RepairOwedEdge { .. } => "RepairOwedEdge",
+            Self::ReleaseHeldMember { .. } => "ReleaseHeldMember",
             Self::ReleaseMember { .. } => "ReleaseMember",
             Self::StartupMemberRecovered { .. } => "StartupMemberRecovered",
             Self::ReloadMemberRegistration { .. } => "ReloadMemberRegistration",
@@ -2547,6 +2568,8 @@ impl MobCommand {
             Self::CommitDormantSeats { .. } => "CommitDormantSeats",
             Self::AdoptLegacyIdentityEntry { .. } => "AdoptLegacyIdentityEntry",
             Self::DeclareIdentityEntries { .. } => "DeclareIdentityEntries",
+            Self::OpenDeclaredApply { .. } => "OpenDeclaredApply",
+            Self::CloseDeclaredApply { .. } => "CloseDeclaredApply",
             Self::SealDeclaredRoster { .. } => "SealDeclaredRoster",
             Self::ProjectMemberStatusObserved { .. } => "ProjectMemberStatusObserved",
             Self::GetIdentityIntent { .. } => "GetIdentityIntent",

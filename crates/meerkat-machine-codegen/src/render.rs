@@ -630,6 +630,21 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "SealDeclaredRosterMobNotRunningDestroyed",
             "RecoverIdentityEntryRetiringMarkedRunning",
             "ForgetArchivedSession",
+            // The explicit resume's refusal to rebuild a member whose host
+            // preparation is owed (0.9.9).
+            "AuthorizeExplicitResumeMemberHeldRunning",
+            // The total replay of an unlisted retirement's start row, and the
+            // declared apply's open fact (0.9.9).
+            "RecoverIdentityEntryRetiringStaleRunning",
+            "OpenDeclaredApplyOpened",
+            "OpenDeclaredApplyBusy",
+            "OpenDeclaredApplyMobNotRunningStopped",
+            "OpenDeclaredApplyMobNotRunningCompleted",
+            "OpenDeclaredApplyMobNotRunningDestroyed",
+            "CloseDeclaredApplyRunning",
+            "CloseDeclaredApplyStopped",
+            "CloseDeclaredApplyCompleted",
+            "CloseDeclaredApplyDestroyed",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

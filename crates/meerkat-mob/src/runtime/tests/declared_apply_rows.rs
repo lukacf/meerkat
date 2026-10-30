@@ -109,6 +109,12 @@ struct ApplyMob {
 
 impl ApplyMob {
     async fn new(label: &str) -> Self {
+        Self::host_pending(label, &[]).await
+    }
+
+    /// A new mob whose host owes the first-boot preparation of every
+    /// identity of `pending` ([`MobBuilder::with_host_pending_members`]).
+    async fn host_pending(label: &str, pending: &[&str]) -> Self {
         let keys = tempfile::tempdir().expect("a comms identity root");
         let service = Arc::new(MockSessionService::new());
         let _adapter = service.enable_runtime_adapter();
@@ -119,6 +125,7 @@ impl ApplyMob {
         )
         .with_session_service(service.clone())
         .with_member_comms_identity_root(keys.path())
+        .with_host_pending_members(pending.iter().copied().map(id))
         .create()
         .await
         .expect("create the mob");
@@ -133,6 +140,26 @@ impl ApplyMob {
     /// Crash the mob, restart its session service and resume `storage` as
     /// the composition `authority`.
     async fn restart_into(&mut self, storage: MobStorage, authority: MobCompositionAuthority) {
+        self.resume_into(storage, authority, &[]).await;
+    }
+
+    /// Crash the mob and resume its storage, authoritative, with the host
+    /// owing the first-boot preparation of every identity of `pending`.
+    async fn restart_host_pending(&mut self, pending: &[&str]) {
+        let storage = self.storage.clone();
+        self.resume_into(storage, MobCompositionAuthority::Authoritative, pending)
+            .await;
+    }
+
+    /// Crash the mob, restart its session service and resume `storage` as
+    /// the composition `authority`, with the host owing the first-boot
+    /// preparation of every identity of `pending`.
+    async fn resume_into(
+        &mut self,
+        storage: MobStorage,
+        authority: MobCompositionAuthority,
+        pending: &[&str],
+    ) {
         let restarted = Arc::new(self.service.cold_restart_preserving_durable_state().await);
         let _ = restarted.enable_runtime_adapter();
         crash_stop_and_release_routes(self.handle.clone()).await;
@@ -144,6 +171,7 @@ impl ApplyMob {
                     .with_session_service(self.service.clone())
                     .with_member_comms_identity_root(self.keys.path())
                     .with_composition_authority(authority)
+                    .with_host_pending_members(pending.iter().copied().map(id))
                     .notify_orchestrator_on_resume(false)
                     .resume(),
             ),
@@ -288,6 +316,40 @@ impl ApplyMob {
         }
     }
 
+    /// The host preparation MobMachine records `name` owing, whether or not
+    /// it is an entry yet.
+    fn preparation_owed(&self, name: &str) -> Option<dsl::HostPreparationCause> {
+        self.handle
+            .machine_state_watch_rx
+            .borrow()
+            .member_host_preparation_causes
+            .get(&dsl_id(name))
+            .copied()
+    }
+
+    /// A host's wake of `name`, refused `HostPreparationPending`, building
+    /// nothing.
+    async fn wake_refused_for_host_preparation(&self, name: &str) {
+        let refused = tokio::time::timeout(STEP, self.handle.ensure_member_live(&id(name)))
+            .await
+            .expect("the wake answers");
+        assert!(
+            matches!(
+                refused,
+                Err(MobError::MemberWakeRefused {
+                    refusal: crate::MemberWakeRefusal::HostPreparationPending,
+                    ..
+                })
+            ),
+            "{name}: {refused:?}"
+        );
+        assert_eq!(
+            self.materialization(name),
+            Some(dsl::MemberMaterializationPhase::Dormant),
+            "a refused wake builds nothing"
+        );
+    }
+
     fn materialization(&self, name: &str) -> Option<dsl::MemberMaterializationPhase> {
         self.handle.member_materialization_for_test(&id(name))
     }
@@ -341,9 +403,10 @@ impl ApplyMob {
 /// seat.
 ///
 /// RED: let `SealDeclaredRosterSealed` mark every seated member the roster
-/// does not list (drop its Declared-origin filter): the worker is retired as
-/// well. Drop the seal from the apply: the unlisted entry stays seated and
-/// is answered nowhere.
+/// does not list (iterate it over the seated members instead of the identity
+/// entries, as the TLC mutant `seal_marks_worker` does): the worker is
+/// retired as well. Drop the seal from the apply: the unlisted entry stays
+/// seated and is answered nowhere.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unlisted_declared_member_is_retired_and_an_unlisted_worker_is_not() {
     let mob = ApplyMob::new("apply-unlisted").await;
@@ -418,7 +481,8 @@ async fn unlisted_declared_member_is_retired_and_an_unlisted_worker_is_not() {
 /// (`DuplicateDeclaration`) and a first-boot request for an identity the
 /// roster does not declare (`UndeclaredFirstBootRequest`). The other listed
 /// identity is seated, the worker keeps its seat, its session and its
-/// generation, and the seal unlists none of them.
+/// generation, and the seal unlists none of them: an entry declared twice
+/// is left as it was, and stays listed.
 ///
 /// RED: let the actor fail the chunk when MobMachine takes no arm for one
 /// declaration (return the error from `declare_identity_entries`), with the
@@ -433,6 +497,10 @@ async fn a_worker_holding_one_listed_name_refuses_that_identity_alone() {
         .await
         .expect("spawn a worker");
     let session = mob.session("worker").await;
+    let seated = mob
+        .apply(DeclaredRoster::partial([declared("twice")]))
+        .await;
+    let (twice_session, _) = seated_on(&seated, "twice").expect("the entry is seated");
 
     let outcome = mob
         .apply(
@@ -465,15 +533,19 @@ async fn a_worker_holding_one_listed_name_refuses_that_identity_alone() {
         matches!(seated_on(&outcome, "declared"), Some((_, None))),
         "the pass goes on: {outcome:?}"
     );
-    assert!(outcome.unlisted.is_empty(), "{outcome:?}");
+    assert!(
+        outcome.unlisted.is_empty(),
+        "an entry declared twice stays listed: {outcome:?}"
+    );
     assert_eq!(mob.standing("worker"), None, "the worker is no entry");
     assert_eq!(mob.session("worker").await, session);
     assert_eq!(mob.generation("worker").await, Some(Generation::new(0)));
-    assert_eq!(
-        mob.standing("twice"),
-        None,
-        "an identity declared twice is not declared"
+    assert!(
+        matches!(mob.standing("twice"), Some(EntryStanding::Seated(_))),
+        "an entry declared twice is left as it was"
     );
+    assert_eq!(mob.session("twice").await, twice_session);
+    assert_eq!(mob.generation("twice").await, Some(Generation::new(0)));
     assert!(!mob.is_member("undeclared").await);
 }
 
@@ -858,10 +930,10 @@ async fn a_placed_identity_is_hosted_on_its_first_use_and_never_seated_dormant()
 /// roster and the entries are as they were.
 ///
 /// RED: drop the composition authority from the verdict helper (decide a
-/// candidate's declarations as an authoritative composition's): the new
-/// identity is decided `SeatOwed` and the candidate's dormant seat refuses
-/// it untyped, and the seal unlists the entry the roster leaves out, whose
-/// retirement writes rows.
+/// candidate's declarations as an authoritative composition's): the listed
+/// identity is answered `Kept`, and the new one is decided `SeatOwed`, which
+/// the candidate's dormant seat refuses untyped. (The seal keeps its own
+/// composition guard, so it unlists nothing either way.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn candidate_apply_writes_nothing_and_answers_every_identity_typed() {
     let mut mob = ApplyMob::new("apply-candidate").await;
@@ -1019,13 +1091,22 @@ async fn unchanged_roster_of_10000_dormant_identities_appends_no_row_and_wakes_n
 /// A first-boot `Resume` request seats its identity Dormant on the
 /// request's session (the identity's committed session from before the
 /// upgrade) and wakes nothing: no session is created, loaded or built. The
-/// next apply, without the request (the host consumed it), keeps the seat.
+/// seat carries the request out: the identity's first-boot preparation,
+/// owed from the start, ends, and the answer names the request carried out.
+/// The next apply, without the request (the host consumed it), keeps the
+/// seat and carries nothing out.
 ///
-/// Guard: the apply carries the request out through the dormant
-/// seat, which never wakes.
+/// RED: let the dormant seat keep the first-boot preparation (drop its
+/// removal from `CommitDormantSeatRunning`): the seated entry still owes
+/// `FirstBootRow`, and every wake of it is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn first_boot_resume_request_seats_on_its_session_and_never_wakes() {
-    let mob = ApplyMob::new("apply-first-boot").await;
+    let mob = ApplyMob::host_pending("apply-first-boot", &["imported"]).await;
+    assert_eq!(
+        mob.preparation_owed("imported"),
+        Some(dsl::HostPreparationCause::FirstBootRow),
+        "the host owes the identity's first-boot preparation"
+    );
     let committed = SessionId::new();
     mob.service
         .replace_persisted_session(Session::with_id(committed.clone()))
@@ -1045,6 +1126,11 @@ async fn first_boot_resume_request_seats_on_its_session_and_never_wakes() {
         Some((committed.clone(), None)),
         "{outcome:?}"
     );
+    assert_eq!(
+        outcome.first_boot_requests_carried_out,
+        BTreeSet::from([id("imported")]),
+        "the seat carries the request out"
+    );
     assert_eq!(mob.session("imported").await, committed);
     assert_eq!(
         mob.materialization("imported"),
@@ -1061,7 +1147,12 @@ async fn first_boot_resume_request_seats_on_its_session_and_never_wakes() {
         0,
         "the session was not loaded"
     );
-    assert_eq!(mob.host_preparation("imported"), None);
+    assert_eq!(
+        mob.host_preparation("imported"),
+        None,
+        "the seat ends the first-boot preparation"
+    );
+    assert_eq!(mob.preparation_owed("imported"), None);
 
     let kept = mob
         .apply(DeclaredRoster::complete([declared("imported")]))
@@ -1070,6 +1161,7 @@ async fn first_boot_resume_request_seats_on_its_session_and_never_wakes() {
         matches!(answer(&kept, "imported"), DeclaredEntryOutcome::Kept),
         "{kept:?}"
     );
+    assert!(kept.first_boot_requests_carried_out.is_empty(), "{kept:?}");
     assert_eq!(
         mob.materialization("imported"),
         Some(dsl::MemberMaterializationPhase::Dormant)
@@ -1079,13 +1171,17 @@ async fn first_boot_resume_request_seats_on_its_session_and_never_wakes() {
 /// A first-boot `Fresh` request starts its identity's fresh life on a new
 /// session, answered `FreshLife`: an unseated identity lets its archived
 /// session record go and is seated fresh, and a seated member is rotated
-/// onto a fresh session.
+/// onto a fresh session. Until then the first-boot preparation the host owes
+/// both refuses the seated member's wakes; the fresh life carries the
+/// request out and ends it.
 ///
-/// Guard: a fresh life is the host's explicit request (an offline identity
-/// reset), never inferred from the identity's own state.
+/// RED: let the rotation's commit keep the first-boot preparation (drop the
+/// `FirstBootRow` removal from the `CommitMemberRotation` arms): the rotated
+/// member still owes `FirstBootRow` after the apply that carried its request
+/// out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fresh_first_boot_request_starts_a_fresh_life() {
-    let mob = ApplyMob::new("apply-fresh-life").await;
+    let mut mob = ApplyMob::new("apply-fresh-life").await;
     let seated = mob
         .apply(DeclaredRoster::complete([
             declared("reset-unseated"),
@@ -1101,6 +1197,16 @@ async fn a_fresh_first_boot_request_starts_a_fresh_life() {
         mob.archived_record("reset-unseated"),
         Some(dsl::SessionId::from_domain(&unseated_session))
     );
+    mob.restart_host_pending(&["reset-unseated", "reset-seated"])
+        .await;
+    for name in ["reset-unseated", "reset-seated"] {
+        assert_eq!(
+            mob.preparation_owed(name),
+            Some(dsl::HostPreparationCause::FirstBootRow),
+            "{name}"
+        );
+    }
+    mob.wake_refused_for_host_preparation("reset-seated").await;
 
     let reset = mob
         .apply(
@@ -1119,12 +1225,83 @@ async fn a_fresh_first_boot_request_starts_a_fresh_life() {
         };
         assert_ne!(&fresh, previous, "{name}");
         assert_eq!(mob.session(name).await, fresh, "{name}");
+        assert_eq!(
+            mob.preparation_owed(name),
+            None,
+            "{name}: the fresh life ends the first-boot preparation"
+        );
     }
+    assert_eq!(
+        reset.first_boot_requests_carried_out,
+        BTreeSet::from([id("reset-unseated"), id("reset-seated")]),
+        "{reset:?}"
+    );
     assert_eq!(
         mob.archived_record("reset-unseated"),
         None,
         "the record is let go"
     );
+}
+
+/// A seated member's first-boot `Resume` request, carried with a role move
+/// the roster does not declare, is carried out in the declaration's own
+/// step: the member is answered `RoleMigrationHeld`, the answer names the
+/// request carried out, and the role hold takes the place of the first-boot
+/// preparation in that step, so no wake finds the member owing neither.
+/// Before the apply its first-boot preparation refuses its wakes; after it,
+/// its role hold does.
+///
+/// RED: declare the identity without its request's kind (pass
+/// `FirstBootRequestKind::None` with every declaration): the step keeps the
+/// first-boot preparation, which masks the role hold, and the entry owes
+/// `FirstBootRow` after an apply whose request the host consumes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seated_members_first_boot_resume_with_a_role_move_holds_it_in_one_step() {
+    let mut mob = ApplyMob::new("apply-first-boot-held").await;
+    let seated = mob.apply(DeclaredRoster::partial([declared("held")])).await;
+    let (session, _) = seated_on(&seated, "held").expect("the identity is seated");
+    mob.restart_host_pending(&["held"]).await;
+    assert_eq!(
+        mob.host_preparation("held"),
+        Some(HostPreparationCause::FirstBootRow)
+    );
+    mob.wake_refused_for_host_preparation("held").await;
+
+    let moved = mob
+        .apply(
+            DeclaredRoster::partial([declared_as(
+                "held",
+                "lead",
+                crate::MobRuntimeMode::TurnDriven,
+            )])
+            .with_first_boot_request(
+                "held",
+                FirstBootRequest::Resume {
+                    session_id: session.clone(),
+                },
+            ),
+        )
+        .await;
+    assert!(
+        matches!(
+            answer(&moved, "held"),
+            DeclaredEntryOutcome::RoleMigrationHeld { from, to }
+                if from.as_str() == "worker" && to.as_str() == "lead"
+        ),
+        "{moved:?}"
+    );
+    assert_eq!(
+        moved.first_boot_requests_carried_out,
+        BTreeSet::from([id("held")]),
+        "the seated member carries the request out"
+    );
+    assert_eq!(
+        mob.host_preparation("held"),
+        Some(HostPreparationCause::RoleMigrationUndeclared),
+        "the role hold takes the first-boot preparation's place"
+    );
+    mob.wake_refused_for_host_preparation("held").await;
+    assert_eq!(mob.session("held").await, session);
 }
 
 /// An unlisted identity listed again comes back as the same identity on its
@@ -1168,9 +1345,14 @@ async fn an_unlisted_identity_listed_again_revives_on_its_archived_session() {
 
     mob.restart().await;
     assert_eq!(
+        mob.standing("revived"),
+        None,
+        "the replay of the retirement's end ends the entry again"
+    );
+    assert_eq!(
         mob.archived_record("revived"),
         Some(dsl::SessionId::from_domain(&session)),
-        "the replay of the retirement's end records the session again"
+        "and records the session again"
     );
 
     let listed = mob
@@ -1208,6 +1390,142 @@ async fn an_unlisted_identity_listed_again_revives_on_its_archived_session() {
         mob.standing("revived"),
         Some(EntryStanding::Seated(facts)) if facts.session_id.as_ref() == Some(&session)
     ));
+}
+
+/// An unlisted retirement a crash interrupted after its start row is
+/// finished by the restart as it would have finished live: the replay marks
+/// the entry again from the start row's cause (`Unlisted`), the start
+/// re-drives the retirement, and its end ends the entry and records the
+/// session it archived.
+///
+/// RED: let the replay of a pending retirement's start row leave its mark
+/// out (drop its `recover_unlisted_retirement_mark`): the re-driven
+/// retirement ends as a plain one, which keeps the entry, unseated and owed
+/// its seat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_interrupted_unlisted_retirement_ends_its_entry_after_a_restart() {
+    let mut mob = ApplyMob::new("apply-unlisted-restart").await;
+    let seated = mob
+        .apply(DeclaredRoster::complete([
+            declared("listed"),
+            declared("unlisted"),
+        ]))
+        .await;
+    let (session, _) = seated_on(&seated, "unlisted").expect("the identity is seated");
+    let hold = crate::runtime::actor::retirement_stage_hold::install(
+        &id("unlisted"),
+        "retire-runtime-quiesce",
+    );
+    let sealing = {
+        let handle = mob.handle.clone();
+        tokio::spawn(async move {
+            handle
+                .apply_declared_roster(DeclaredRoster::complete([declared("listed")]))
+                .await
+        })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the unlisted retirement starts");
+    assert_eq!(
+        retirement_causes(&mob.journal().await),
+        vec![(id("unlisted"), Some(MemberRetirementCause::Unlisted))],
+        "the start row records the cause"
+    );
+
+    mob.restart().await;
+    hold.release();
+    let _ = tokio::time::timeout(STEP, sealing).await;
+
+    mob.left("unlisted").await;
+    assert_eq!(
+        mob.standing("unlisted"),
+        None,
+        "the re-driven retirement's end ends the entry"
+    );
+    assert_eq!(
+        mob.archived_record("unlisted"),
+        Some(dsl::SessionId::from_domain(&session)),
+        "and records the session it archived"
+    );
+    assert!(matches!(
+        mob.standing("listed"),
+        Some(EntryStanding::Seated(_))
+    ));
+}
+
+/// One declared apply of a mob runs at a time: an apply called while
+/// another one runs is refused, typed and retryable
+/// (`LifecycleOperationPending`), and declares and writes nothing. Once the
+/// running apply ends, the next one runs.
+///
+/// RED: let `OpenDeclaredApply` open an apply while one is open (drop the
+/// `OpenDeclaredApplyBusy` arm and `OpenDeclaredApplyOpened`'s
+/// `no_apply_open` guard): the second apply runs inside the first one's
+/// pass and seats its identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_apply_while_another_runs_is_refused_retryable() {
+    let mob = ApplyMob::new("apply-serialized").await;
+    mob.apply(DeclaredRoster::complete([
+        declared("listed"),
+        declared("unlisted"),
+    ]))
+    .await;
+    let hold = crate::runtime::actor::retirement_stage_hold::install(
+        &id("unlisted"),
+        "retire-runtime-quiesce",
+    );
+    let sealing = {
+        let handle = mob.handle.clone();
+        tokio::spawn(async move {
+            handle
+                .apply_declared_roster(DeclaredRoster::complete([declared("listed")]))
+                .await
+        })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the running apply's seal retires the unlisted entry's member");
+    let journal = mob.journal().await.len();
+
+    let refused = tokio::time::timeout(
+        STEP,
+        mob.handle
+            .apply_declared_roster(DeclaredRoster::partial([declared("other")])),
+    )
+    .await
+    .expect("the second apply answers");
+    assert!(
+        matches!(refused, Err(MobError::LifecycleOperationPending { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(
+        mob.standing("other"),
+        None,
+        "the refused apply declares nothing"
+    );
+    assert_eq!(mob.journal().await.len(), journal, "and writes nothing");
+
+    hold.release();
+    let sealed = tokio::time::timeout(STEP, sealing)
+        .await
+        .expect("the running apply answers")
+        .expect("the running apply's task")
+        .expect("the running apply runs");
+    assert!(
+        matches!(
+            sealed.unlisted.get(&id("unlisted")),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{sealed:?}"
+    );
+    let next = mob
+        .apply(DeclaredRoster::partial([declared("other")]))
+        .await;
+    assert!(
+        matches!(seated_on(&next, "other"), Some((_, None))),
+        "the next apply runs: {next:?}"
+    );
 }
 
 /// An unlisted identity whose archived session is gone from the store (its
@@ -1276,6 +1594,94 @@ async fn an_identity_whose_archived_session_is_gone_is_seated_fresh_with_a_notic
     assert!(
         matches!(seated_on(&listed, "never-woken"), Some((_, None))),
         "{listed:?}"
+    );
+}
+
+/// Q1 (a) for an identity that owes a kickoff: an autonomous identity whose
+/// archived session is gone from the store is embodied on a fresh session
+/// (its kickoff runs once there), and the notice rides both its answer and
+/// its spawn's journal row.
+///
+/// RED: let the spawn path drop the spec's notice and the apply answer
+/// `Embodied` without one (the embodied seat before this fix): neither the
+/// answer nor the row carries it, and the host is never told that the
+/// identity's history was lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_autonomous_identity_whose_archived_session_is_gone_is_embodied_fresh_with_a_notice() {
+    let mob = ApplyMob::new("apply-history-lost-autonomous").await;
+    let roster = || {
+        DeclaredRoster::complete([declared_as(
+            "autonomous",
+            "worker",
+            crate::MobRuntimeMode::AutonomousHost,
+        )])
+    };
+    let embodied = mob.apply(roster()).await;
+    let purged = match answer(&embodied, "autonomous") {
+        DeclaredEntryOutcome::Embodied {
+            session_id,
+            history_unavailable: None,
+        } => session_id.clone(),
+        other => panic!("the autonomous identity is embodied: {other:?}"),
+    };
+    let unlisted = mob.apply(empty_roster()).await;
+    assert!(
+        matches!(
+            unlisted.unlisted.get(&id("autonomous")),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{unlisted:?}"
+    );
+    assert_eq!(
+        mob.archived_record("autonomous"),
+        Some(dsl::SessionId::from_domain(&purged))
+    );
+    // The store's retention purges the archived session.
+    mob.service.delete_persisted_session(&purged).await;
+
+    let listed = mob.apply(roster()).await;
+    let fresh = fresh_seat_session_id(
+        mob.handle.mob_id(),
+        mob.handle.incarnation(),
+        &id("autonomous"),
+        Generation::new(1),
+    );
+    assert!(
+        matches!(
+            answer(&listed, "autonomous"),
+            DeclaredEntryOutcome::Embodied {
+                session_id,
+                history_unavailable: Some(notice),
+            } if session_id == &fresh && notice == &HistoryUnavailable::new(purged.clone())
+        ),
+        "the identity is embodied fresh with the notice: {listed:?}"
+    );
+    assert_eq!(
+        mob.archived_record("autonomous"),
+        None,
+        "the record is let go"
+    );
+    let seats: Vec<(Generation, Option<HistoryUnavailable>)> = mob
+        .lifecycle()
+        .await
+        .into_iter()
+        .filter_map(|event| match event {
+            MemberLifecycleEvent::Spawned {
+                agent_identity,
+                generation,
+                history_unavailable,
+                ..
+            } if agent_identity == id("autonomous") => Some((generation, history_unavailable)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        seats,
+        vec![
+            (Generation::new(0), None),
+            (Generation::new(1), Some(HistoryUnavailable::new(purged))),
+        ],
+        "the spawn's row carries the notice"
     );
 }
 
@@ -1403,6 +1809,68 @@ async fn a_retired_identity_that_stays_listed_is_seated_again_on_its_session() {
 /// restamp and no new life. The host keeps the facets it declares, and its
 /// next build of the member applies them.
 ///
+/// A retirement that only released a host-owned session archives nothing,
+/// live or replayed: the identity's next seat is the same after a restart
+/// as without one, a fresh session, never the other host's live session.
+/// The live end records an archived session only for an Archived disposal,
+/// and the terminal row's replay-only `session_archived` lets the replay
+/// apply the same condition.
+///
+/// RED: let the replay record the session whatever the disposal (the replay
+/// before this fix, which the row did not tell): after the restart the
+/// identity holds an archived record of the host's session, and the apply
+/// seats it there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_owned_retirement_records_no_archived_session_live_or_replayed() {
+    let mut mob = ApplyMob::new("apply-host-owned-retirement").await;
+    let roster = || DeclaredRoster::complete([declared("hosted-session")]);
+    let seated = mob.apply(roster()).await;
+    let (session, _) = seated_on(&seated, "hosted-session").expect("the identity is seated");
+    mob.wake("hosted-session").await;
+    // The member's durable session belongs to another host: its retirement
+    // releases the runtime only.
+    mob.service.set_archive_authority_unknown(&session).await;
+    mob.service.set_archive_not_found(&session).await;
+    tokio::time::timeout(STEP, mob.handle.retire(id("hosted-session")))
+        .await
+        .expect("the retire answers")
+        .expect("the retire succeeds");
+    assert_eq!(
+        mob.standing("hosted-session"),
+        Some(EntryStanding::Unseated(UnseatedEntryCause::SeatOwed)),
+        "the listed entry outlives the retirement"
+    );
+    assert_eq!(
+        mob.archived_record("hosted-session"),
+        None,
+        "a host-owned session is not archived here"
+    );
+
+    mob.restart().await;
+    assert_eq!(
+        mob.standing("hosted-session"),
+        Some(EntryStanding::Unseated(UnseatedEntryCause::SeatOwed)),
+        "the replay restores the entry unseated"
+    );
+    assert_eq!(
+        mob.archived_record("hosted-session"),
+        None,
+        "the replay records no archived session either"
+    );
+    let listed = mob.apply(roster()).await;
+    let fresh = fresh_seat_session_id(
+        mob.handle.mob_id(),
+        mob.handle.incarnation(),
+        &id("hosted-session"),
+        Generation::new(1),
+    );
+    assert_eq!(
+        seated_on(&listed, "hosted-session"),
+        Some((fresh, None)),
+        "seated as without the restart, on a fresh session: {listed:?}"
+    );
+}
+
 /// Guard: `DeclareIdentityEntry` takes no facet, so no verdict reads one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_descriptive_facet_change_is_never_a_new_life() {
@@ -1555,9 +2023,9 @@ async fn an_unlisted_retirement_start_row_is_read_by_097() {
     let _ = tokio::time::timeout(STEP, sealing).await;
 }
 
-/// R-RB5, in-process leg: the declared apply's rows are plain member rows.
-/// It writes no new event kind and no identity intent row: its seats are
-/// `MemberSpawned` rows and its unlisted retirement a
+/// Rollback of the declared apply's rows, in-process leg: they are plain
+/// member rows. The apply writes no new event kind and no identity intent
+/// row: its seats are `MemberSpawned` rows and its unlisted retirement a
 /// `MemberRetirementStarted` and a `MemberRetired` row, whose internal
 /// fields (the entry, the cause, the history notice) a predating reader
 /// ignores. Read so, the members are served as ordinary members: listed
@@ -1646,8 +2114,8 @@ async fn declared_apply_rows_are_plain_members_to_096() {
     mob.wake("plain-b").await;
 }
 
-/// R-RB5, lane-run leg: needs the published Core 0.9.7 (`meerkat-mob`
-/// 0.9.7).
+/// Rollback of the declared apply's rows, lane-run leg: needs the
+/// published Core 0.9.7 (`meerkat-mob` 0.9.7).
 ///
 /// This build writes the fixture: a persistent mob store (SQLite) at
 /// `$MEERKAT_ROLLBACK_FIXTURE_DIR/declared-apply/mob.sqlite` holding three

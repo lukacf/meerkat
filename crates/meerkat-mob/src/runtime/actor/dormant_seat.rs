@@ -308,7 +308,7 @@ impl MobActor {
         // A dormant seat never takes an identity entry its host creates: one
         // hosted on its first use (placed or externally bound) or one
         // awaiting its held creation (MobMachine's dormant seat refuses both
-        // too, entry_neither_hosted_nor_held).
+        // too, unseated_entry_owed_its_seat).
         if mode == SeatPlanMode::Seat
             && let Some(cause) = state.identity_entry_unseated.get(&dsl_identity)
         {
@@ -531,6 +531,7 @@ impl MobActor {
             // Decided by the preparation: a revival's archived session.
             session_archived: false,
             history_unavailable: spec.history_unavailable.clone(),
+            resume_from_role: spec.launch_mode.resume_from_role().cloned(),
             runtime_mode,
             labels: spec.labels.clone().unwrap_or_default(),
             continuity_intent,
@@ -1833,6 +1834,7 @@ impl MobActor {
                     agent_identity: identity.clone(),
                     generation: entry.generation,
                     role: entry.role.clone(),
+                    session_archived: disposal == mob_dsl::MemberSessionDisposal::Archived,
                 },
             },
             NewMobEvent {
@@ -2153,6 +2155,17 @@ impl SettledSeatChunk {
             StagedSeatEntry::Seat(seat) => {
                 let transitions = match applied {
                     Ok(transitions) => transitions,
+                    // MobMachine refused a seat on an archived session that is
+                    // not the identity's own record: answered as such.
+                    Err(_)
+                        if seat.candidate.session_archived
+                            && !seat.candidate.revives_archived_session =>
+                    {
+                        return Ok(Some(DormantSeatOutcome::SessionArchived {
+                            agent_identity: seat.candidate.agent_identity.clone(),
+                            session_id: seat.candidate.session_id.clone(),
+                        }));
+                    }
                     Err(error) => {
                         return Ok(Some(DormantSeatOutcome::Refused {
                             agent_identity: seat.candidate.agent_identity.clone(),
@@ -2174,7 +2187,11 @@ impl SettledSeatChunk {
                     ))
                     // A fresh seat of an identity whose archived session is
                     // gone from the store records the notice.
-                    .with_history_unavailable(seat.candidate.history_unavailable.clone());
+                    .with_history_unavailable(seat.candidate.history_unavailable.clone())
+                    // A resume seat that takes another role than its session
+                    // was last built under records the declared migration,
+                    // which the session's next build declares.
+                    .with_resume_from_role(seat.candidate.resume_from_role.clone());
                 for transition in transitions {
                     self.effects.extend(transition.into_effects());
                 }

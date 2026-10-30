@@ -55,6 +55,22 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.8
+
+This section is for systems running 0.9.7. The full list of changes is in
+the CHANGELOG under `## [0.9.8]`.
+
+### Wrappers and decorators
+
+Implement the new required method; it has no default, so a wrapper without
+it no longer compiles:
+
+- a `SessionAgentBuilder` or `MobSessionService` wrapper:
+  `session_comms_identity_root` (required, no default). Forward it to the
+  builder or service you wrap: a mob seats its dormant members under the
+  root it reports. A builder or service that builds no comms of its own
+  answers `SessionCommsIdentityRoot::NotKept`.
+
 ## Upgrading to 0.9.7
 
 This section is for systems running 0.9.6. The full list of changes is in

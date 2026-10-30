@@ -3397,6 +3397,68 @@ pub trait SessionAgentBuilder: Send + Sync {
         Ok(None)
     }
 
+    /// Where this builder's agents keep the durable comms identity (the key
+    /// pair) of each session they build with session-scoped comms
+    /// ([`meerkat_core::SessionCommsIdentityRoot`]): a session service over
+    /// this builder reports it, so a host that records a session's comms
+    /// endpoint before its first build reads the key that build loads.
+    ///
+    /// REQUIRED, deliberately without a default: a builder that wraps
+    /// another forwards it, and one that builds no comms of its own says so
+    /// ([`meerkat_core::SessionCommsIdentityRoot::NotKept`]). A default would
+    /// let a wrapper drop the root its inner builder uses, and a host would
+    /// then record an endpoint from a key the session's first build never
+    /// loads. A wrapper that does not answer does not compile:
+    ///
+    /// ```compile_fail
+    /// use meerkat_core::AgentEvent;
+    /// use meerkat_core::service::{CreateSessionRequest, SessionError};
+    /// use meerkat_session::SessionAgentBuilder;
+    ///
+    /// struct Wrapper<B>(B);
+    ///
+    /// #[async_trait::async_trait]
+    /// impl<B: SessionAgentBuilder> SessionAgentBuilder for Wrapper<B> {
+    ///     type Agent = B::Agent;
+    ///
+    ///     async fn build_agent(
+    ///         &self,
+    ///         req: &CreateSessionRequest,
+    ///         event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ///     ) -> Result<B::Agent, SessionError> {
+    ///         self.0.build_agent(req, event_tx).await
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// and the same wrapper that forwards it does:
+    ///
+    /// ```no_run
+    /// use meerkat_core::AgentEvent;
+    /// use meerkat_core::service::{CreateSessionRequest, SessionError};
+    /// use meerkat_session::SessionAgentBuilder;
+    ///
+    /// struct Wrapper<B>(B);
+    ///
+    /// #[async_trait::async_trait]
+    /// impl<B: SessionAgentBuilder> SessionAgentBuilder for Wrapper<B> {
+    ///     type Agent = B::Agent;
+    ///
+    ///     fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+    ///         self.0.session_comms_identity_root()
+    ///     }
+    ///
+    ///     async fn build_agent(
+    ///         &self,
+    ///         req: &CreateSessionRequest,
+    ///         event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ///     ) -> Result<B::Agent, SessionError> {
+    ///         self.0.build_agent(req, event_tx).await
+    ///     }
+    /// }
+    /// ```
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot;
+
     /// Build an agent for a new session.
     async fn build_agent(
         &self,
@@ -4579,6 +4641,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         auth_binding: &meerkat_core::AuthBindingRef,
     ) -> Result<Option<meerkat_core::AuthBindingRef>, SessionError> {
         self.builder.recorded_auth_binding(auth_binding).await
+    }
+
+    /// Where this service's builds keep the durable comms identity of each
+    /// session they build with session-scoped comms: its builder's answer
+    /// ([`SessionAgentBuilder::session_comms_identity_root`]).
+    pub fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.builder.session_comms_identity_root()
     }
 
     /// The host's MCP attempt guards this service's builder carries, if any.
@@ -12829,6 +12898,10 @@ mod runtime_turn_metadata_tests {
     impl SessionAgentBuilder for MetadataProbeBuilder {
         type Agent = MetadataProbeAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -13269,6 +13342,10 @@ mod runtime_turn_metadata_tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl SessionAgentBuilder for BoundaryPhaseProbeBuilder {
         type Agent = BoundaryPhaseProbeAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -13746,6 +13823,10 @@ mod injected_context_turn_tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl SessionAgentBuilder for InjectedContextProbeBuilder {
         type Agent = InjectedContextProbeAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -14543,6 +14624,10 @@ mod admission_window_tests {
     impl SessionAgentBuilder for AdmissionProbeBuilder {
         type Agent = AdmissionProbeAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -15198,6 +15283,10 @@ mod archive_shutdown_drain_tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl SessionAgentBuilder for DrainProbeBuilder {
         type Agent = DrainProbeAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -16166,6 +16255,10 @@ mod inline_video_admission_tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl SessionAgentBuilder for BuilderIdentityProbe {
         type Agent = BuilderIdentityAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn model_supports_inline_video(&self, identity: &SessionLlmIdentity) -> Option<bool> {
             self.validated_identities

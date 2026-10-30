@@ -5533,6 +5533,10 @@ mod tests {
 
     #[async_trait]
     impl meerkat_mob::MobSessionService for RealCommsSessionSvc {
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn subscribe_session_activity(
             &self,
             _session_id: &meerkat_core::SessionId,

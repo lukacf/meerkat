@@ -118,6 +118,10 @@ impl SessionServiceHistoryExt for NeverStartsActorRunService {
 
 #[async_trait::async_trait]
 impl MobSessionService for NeverStartsActorRunService {
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        MobSessionService::session_comms_identity_root(self.inner.as_ref())
+    }
+
     async fn subscribe_session_activity(
         &self,
         session_id: &meerkat_core::SessionId,

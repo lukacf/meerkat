@@ -236,6 +236,18 @@ them.
   `ApplyToolGrantOpenSetUnchangedRunning`,
   `ApplyToolGrantOpenSetUnchangedRetired` and
   `ApplyToolGrantOpenSetUnchangedStopped`.
+- `meerkat-session`, `meerkat-mob`: a session service reports where its agent
+  builds keep the members' comms identities, and every wrapper forwards it.
+  `SessionAgentBuilder` and `MobSessionService` each gain the required method
+  `session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot`,
+  without a default: an implementation answers it (`NotKept` for one that
+  builds no comms of its own), and a wrapper forwards the one it wraps, or it
+  does not compile. A default would let a wrapper drop the root, and a dormant
+  seat would then record an endpoint from a key the member's first build never
+  loads. `FactoryAgentBuilder`, `EphemeralSessionService`,
+  `PersistentSessionService`, the mob session wrappers of `rkat` and
+  `meerkat-rpc`, and the session service of `MobMcpState::new_in_memory`
+  answer it.
 
 ### Added
 
@@ -483,6 +495,44 @@ them.
   `revokeToolGrant`, `listToolGrants`, `toolGrantAudit` and
   `SessionOptions.grantGatedTools`) wrap them; both refuse to send a gate to a
   server older than contract 0.9.8, which would build the session ungated.
+- `meerkat-core`: `SessionCommsIdentityRoot` says where a session service's
+  agent builds keep each session's durable comms identity (its key pair) on
+  in-process comms: `Durable(root)` (the key pair in `<root>/<session id>`),
+  `NotKept` (the builds keep none, or keep it in memory, as a browser runtime
+  does) or `Unresolved(reason)`. `AgentFactory::session_comms_identity_root`
+  reports a factory's: the root `canonical_session_comms_identity_root`
+  resolves from its `user_config_root`.
+  `EphemeralSessionService::session_comms_identity_root` and
+  `PersistentSessionService::session_comms_identity_root` report their
+  builder's. `meerkat::session_comms_identity_root_in` gives the root under
+  an explicit user-global root, infallibly.
+
+### Changed
+
+- `meerkat-core`: a `policy_denied` tool error's model-facing message now
+  reads `Tool call denied (<code>): <message>` from the denial itself, for an
+  application consequence policy and a scoped tool grant gate alike, instead
+  of naming the application policy over a debug rendering of the denial.
+- `meerkat-mob`: a dormant seat (`MobHandle::seat_dormant_members`,
+  `MobHandle::rotate_member`) on in-process comms takes the members' comms
+  identity root from the mob's session service when the host declares none:
+  it reads or mints each member's key pair under the root the service
+  reports, where its agent factory keeps them, so the member's first wake
+  builds it with the key the seat recorded. A host that composes its own
+  session service over a factory with its own `user_config_root` no longer
+  passes that root to `MobBuilder::with_member_comms_identity_root`. Before,
+  a mob that declared no root refused every seat, and one that declared
+  another root than its factory's had each member's first wake refused (its
+  endpoint disagreed with the seat's). A declared root, and
+  `MobBuilder::with_network_member_comms`, still win over the report. A
+  service that reports `NotKept`, or a root it cannot resolve, has every
+  seat refused typed (`MobError::WiringError`, naming the report) unless the
+  host declares a root: no other root stands in for the one its builds use.
+  The reported root covers in-process (session-scoped) comms keys only: a
+  host whose members run on Tcp or Uds must still declare
+  `MobBuilder::with_network_member_comms`. Without it, the seat records an
+  in-process endpoint, the member's first wake refuses it with the endpoint
+  mismatch, and the member needs a rotation (`MobHandle::rotate_member`).
 
 ### Fixed
 
@@ -641,13 +691,6 @@ them.
   model's defaults, and a compaction summary request used the provider params
   the client was built with. The strip now applies to every model attempt and
   to the summary request.
-
-### Changed
-
-- `meerkat-core`: a `policy_denied` tool error's model-facing message now
-  reads `Tool call denied (<code>): <message>` from the denial itself, for an
-  application consequence policy and a scoped tool grant gate alike, instead
-  of naming the application policy over a debug rendering of the denial.
 
 ### Upgrade notes
 

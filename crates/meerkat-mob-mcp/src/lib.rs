@@ -8892,6 +8892,11 @@ impl SessionServiceHistoryExt for LocalSessionService {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobSessionService for LocalSessionService {
+    // Its sessions' comms runtimes are in-memory: no durable key pair.
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
+
     async fn predecessor_tool_restrictions(
         &self,
         session_id: &SessionId,
@@ -12570,6 +12575,10 @@ mod tests {
 
     #[async_trait]
     impl MobSessionService for MockSessionSvc {
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn predecessor_tool_restrictions(
             &self,
             session_id: &SessionId,

@@ -1327,8 +1327,10 @@ async fn a_seat_chunk_answers_each_entry_as_seating_its_spec_alone_does() {
     );
 }
 
-/// A seat needs the members' comms transport: without it every spec is
-/// refused typed and nothing is written.
+/// A seat needs the members' comms transport: with none declared and no
+/// durable root the session service reports (this mock reports `NotKept`
+/// while no root is bound to it), every spec is refused typed, naming the
+/// report, and nothing is written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_seat_without_a_comms_identity_source_is_refused_and_writes_nothing() {
     let (handle, service, events) = seat_mob("seat-no-identity-source", |builder| builder).await;
@@ -1350,9 +1352,9 @@ async fn a_seat_without_a_comms_identity_source_is_refused_and_writes_nothing() 
         matches!(
             &outcomes[0],
             DormantSeatOutcome::Refused {
-                error: MobError::WiringError(_),
+                error: MobError::WiringError(reason),
                 ..
-            }
+            } if reason.contains("keeps no durable session comms identity")
         ),
         "{outcomes:?}"
     );

@@ -990,6 +990,10 @@ impl meerkat_core::service::SessionServiceHistoryExt for FailingOnceSessionServi
 
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for FailingOnceSessionService {
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_mob::MobSessionService::session_comms_identity_root(self.inner.as_ref())
+    }
+
     async fn fork_source_tools(
         &self,
         session_id: &meerkat_core::SessionId,
@@ -4117,6 +4121,12 @@ impl RecordingAgentBuilder {
 #[async_trait::async_trait]
 impl meerkat_session::SessionAgentBuilder for RecordingAgentBuilder {
     type Agent = <meerkat::FactoryAgentBuilder as meerkat_session::SessionAgentBuilder>::Agent;
+
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        <meerkat::FactoryAgentBuilder as meerkat_session::SessionAgentBuilder>::session_comms_identity_root(
+            &self.inner,
+        )
+    }
 
     async fn model_supports_inline_video(
         &self,

@@ -2103,6 +2103,10 @@ struct MockSessionService {
     /// from its key pair there, as the agent factory keys it, unless a seed
     /// above overrides it.
     member_comms_identity_root: std::sync::Mutex<Option<PathBuf>>,
+    /// A root this service reports in place of the one it keys sessions
+    /// from ([`Self::report_comms_identity_root`]): a service whose report is
+    /// not where its builds keep the keys.
+    reported_comms_identity_root: std::sync::Mutex<Option<meerkat_core::SessionCommsIdentityRoot>>,
     runtime_adapter: Mutex<Option<Arc<meerkat_runtime::MeerkatMachine>>>,
     session_counter: AtomicU64,
     /// Records (session_id, prompt) for each create_session call.
@@ -2432,6 +2436,7 @@ impl MockSessionService {
             session_comms_names: RwLock::new(HashMap::new()),
             comms_identity_seeds: RwLock::new(HashMap::new()),
             member_comms_identity_root: std::sync::Mutex::new(None),
+            reported_comms_identity_root: std::sync::Mutex::new(None),
             runtime_adapter: Mutex::new(None),
             session_counter: AtomicU64::new(0),
             prompts: RwLock::new(Vec::new()),
@@ -2725,6 +2730,17 @@ impl MockSessionService {
             .member_comms_identity_root
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = member_comms_identity_root;
+        // The restarted service is composed as this one was: it reports the
+        // same root.
+        let reported_comms_identity_root = self
+            .reported_comms_identity_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        *restarted
+            .reported_comms_identity_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = reported_comms_identity_root;
         let _authority_guard = self.resume_authority_gate.lock().await;
         let persisted_sessions = self.persisted_sessions.read().await.clone();
         let persisted_ids = persisted_sessions.keys().cloned().collect::<HashSet<_>>();
@@ -5484,6 +5500,25 @@ impl MockSessionService {
                 )))
             })
     }
+
+    /// Key this service's member sessions from their key pairs under
+    /// `root`, as an agent factory whose comms identity root is `root` does,
+    /// with no mob declaring the root: the service reports it.
+    fn keep_member_comms_identities_under(&self, root: &std::path::Path) {
+        *self
+            .member_comms_identity_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(root.to_path_buf());
+    }
+
+    /// Report `root` as the root this service's builds keep the members'
+    /// comms identities under, whatever root it keys its sessions from.
+    fn report_comms_identity_root(&self, root: meerkat_core::SessionCommsIdentityRoot) {
+        *self
+            .reported_comms_identity_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(root);
+    }
 }
 
 #[async_trait]
@@ -5493,6 +5528,28 @@ impl MobSessionService for MockSessionService {
             .member_comms_identity_root
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(identity_root.to_path_buf());
+    }
+
+    /// The root it keys its sessions' comms runtimes from, as the agent
+    /// factory reports its own, unless a test set another report. Without a
+    /// root it keys them from their comms names: no durable key pair.
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        if let Some(reported) = self
+            .reported_comms_identity_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return reported;
+        }
+        self.member_comms_identity_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .map_or(
+                meerkat_core::SessionCommsIdentityRoot::NotKept,
+                meerkat_core::SessionCommsIdentityRoot::Durable,
+            )
     }
 
     async fn recorded_auth_binding(
@@ -14778,6 +14835,10 @@ struct PersistentMockBuilder;
 impl SessionAgentBuilder for PersistentMockBuilder {
     type Agent = PersistentMockAgent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
+
     async fn build_agent(
         &self,
         req: &CreateSessionRequest,
@@ -14962,6 +15023,10 @@ impl SessionServiceControlExt for PersistedListingSessionService {
 
 #[async_trait]
 impl MobSessionService for PersistedListingSessionService {
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        MobSessionService::session_comms_identity_root(self.inner.as_ref())
+    }
+
     async fn predecessor_tool_restrictions(
         &self,
         session_id: &SessionId,
@@ -15420,6 +15485,10 @@ impl SessionServiceControlExt for InactiveReadSessionService {
 
 #[async_trait]
 impl MobSessionService for InactiveReadSessionService {
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        MobSessionService::session_comms_identity_root(self.inner.as_ref())
+    }
+
     async fn predecessor_tool_restrictions(
         &self,
         session_id: &SessionId,
@@ -16244,6 +16313,10 @@ struct OverlayProbeSessionAgentBuilder {
 impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
     type Agent = OverlayProbeSessionAgent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
+
     async fn build_agent(
         &self,
         req: &CreateSessionRequest,
@@ -16278,6 +16351,10 @@ struct GatedOverlayProbeSessionAgentBuilder {
 #[async_trait]
 impl SessionAgentBuilder for GatedOverlayProbeSessionAgentBuilder {
     type Agent = OverlayProbeSessionAgent;
+
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.inner.session_comms_identity_root()
+    }
 
     async fn build_agent(
         &self,
@@ -17839,6 +17916,10 @@ struct ToolRecordingBuilder {
 #[async_trait]
 impl SessionAgentBuilder for ToolRecordingBuilder {
     type Agent = PersistentMockAgent;
+
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
 
     async fn build_agent(
         &self,
@@ -69816,6 +69897,10 @@ impl SessionServiceControlExt for RealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RealCommsSessionService {
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
+
     async fn predecessor_tool_restrictions(
         &self,
         session_id: &SessionId,
@@ -71266,6 +71351,10 @@ impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RuntimeBackedRealCommsSessionService {
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
+
     async fn predecessor_tool_restrictions(
         &self,
         session_id: &SessionId,
@@ -97628,6 +97717,10 @@ struct StopBoundaryProbeAgent {
 #[async_trait]
 impl SessionAgentBuilder for StopBoundaryProbeBuilder {
     type Agent = StopBoundaryProbeAgent;
+
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.inner.session_comms_identity_root()
+    }
 
     async fn build_agent(
         &self,

@@ -3260,6 +3260,11 @@ impl meerkat_core::service::SessionServiceHistoryExt for NonForwardingDecorator 
 
 #[async_trait]
 impl MobSessionService for NonForwardingDecorator {
+    // Required, so forwarded: the trait has no default to keep.
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        MobSessionService::session_comms_identity_root(self.inner.as_ref())
+    }
+
     async fn append_system_notice_under_runtime_turn_boundary(
         &self,
         session_id: &SessionId,

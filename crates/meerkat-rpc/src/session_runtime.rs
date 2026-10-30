@@ -1489,6 +1489,11 @@ impl SessionServiceHistoryExt for RpcMobSessionService {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for RpcMobSessionService {
+    // Forwarded: the wrapped service's builds keep the members' comms identities.
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_mob::MobSessionService::session_comms_identity_root(self.service.as_ref())
+    }
+
     async fn recorded_auth_binding(
         &self,
         auth_binding: &meerkat_core::AuthBindingRef,

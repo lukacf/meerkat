@@ -9027,6 +9027,10 @@ mod tests {
     impl meerkat_session::SessionAgentBuilder for ExactProjectionTestAgentBuilder {
         type Agent = ExactProjectionTestAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &meerkat_core::service::CreateSessionRequest,

@@ -1958,6 +1958,11 @@ comms = true
 
     #[async_trait::async_trait]
     impl meerkat_mob::MobSessionService for AdmissionStoreProbe {
+        // This double builds no comms of its own.
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn subscribe_session_activity(
             &self,
             _session_id: &meerkat_core::SessionId,
@@ -2255,6 +2260,11 @@ comms = true
 
     #[async_trait::async_trait]
     impl meerkat_mob::MobSessionService for SwitchableStore {
+        // This double builds no comms of its own.
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn subscribe_session_activity(
             &self,
             _session_id: &meerkat_core::SessionId,

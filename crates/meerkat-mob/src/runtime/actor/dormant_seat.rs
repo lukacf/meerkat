@@ -16,8 +16,9 @@
 
 use super::super::dormant_seat::{
     DormantSeatCandidate, DormantSeatCommitEntry, DormantSeatLaunch, DormantSeatOutcome,
-    DormantSeatPlan, DormantSeatPlanEntry, MemberRotationPlan, SeatBuild, SeatLocalBuildInputs,
-    fresh_seat_session_id,
+    DormantSeatPlan, DormantSeatPlanEntry, MemberRotationPlan, MemberSeatEndpointSource,
+    MemberSeatEndpointsUnavailable, SeatBuild, SeatLocalBuildInputs, fresh_seat_session_id,
+    member_seat_endpoint_source,
 };
 use super::*;
 
@@ -89,8 +90,19 @@ impl MobActor {
         }
         DormantSeatPlan {
             entries,
-            endpoint_source: self.member_residency.seat_endpoints.clone(),
+            endpoint_source: self.seat_endpoint_source(),
         }
+    }
+
+    /// Where this mob's seats take their members' endpoints from: the
+    /// source the host declared, else the root the session service reports
+    /// ([`member_seat_endpoint_source`]).
+    fn seat_endpoint_source(
+        &self,
+    ) -> Result<MemberSeatEndpointSource, MemberSeatEndpointsUnavailable> {
+        member_seat_endpoint_source(self.member_residency.seat_endpoints.as_ref(), || {
+            self.session_service.session_comms_identity_root()
+        })
     }
 
     /// Plan a rotation (`rotate_member`): the next incarnation's seat, and
@@ -119,7 +131,7 @@ impl MobActor {
             DormantSeatPlanEntry::Seat(candidate) => Ok(MemberRotationPlan::Seat {
                 candidate,
                 seated,
-                endpoint_source: self.member_residency.seat_endpoints.clone(),
+                endpoint_source: self.seat_endpoint_source(),
             }),
             DormantSeatPlanEntry::Embody(spec) if !seated => Ok(MemberRotationPlan::Embody(spec)),
             _ => Err(MobError::Internal(format!(

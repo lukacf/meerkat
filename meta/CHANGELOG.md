@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- A host's own `MobSessionService` wrapper (around the session service it
+  passes to `MobBootstrapSpec::new`) or `SessionAgentBuilder` wrapper must
+  implement `session_comms_identity_root`, which Meerkat 0.9.8 makes a
+  required method with no default: forward it to the service or builder it
+  wraps, since the mob seats dormant members under the root it reports (see
+  Changed). A wrapper without it no longer compiles.
+
 ### Added
 
 - The Console offers side chats. **Fork to side chat** in a conversation's
@@ -79,6 +88,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   deny on an ancestor past the bound would not be seen. This holds for every
   agent check and for the timeline frames the member wrote. Before, the walk
   stopped at the bound and decided by the links it reached.
+- A host that composes its own session service (`MobBootstrapSpec::new`)
+  no longer declares the root its agent factory keeps the members' session
+  comms identities under: the mob seats dormant in-process members under the
+  root the session service reports for its agent builds (Meerkat 0.9.8's
+  `MobSessionService::session_comms_identity_root`, which a service over
+  `FactoryAgentBuilder` answers from its factory's `user_config_root`), so a
+  member's first materialization uses the endpoint identity the factory
+  loads. Before, an undeclared root meant the ambient platform root, and a
+  factory with a root of its own had each member's first materialization
+  refused ("disagrees with its durable generation endpoint").
+  `MobBootstrapSpec::with_session_identity_config_root` stays as an
+  override and wins over the report; a declared root that differs from the
+  reported one is logged as a warning at bootstrap, and a member seated under
+  a root its factory does not load from is still refused at its first
+  materialization. A session service that reports no durable root (one that
+  builds no comms of its own) has every dormant seat refused typed unless a
+  root is declared. A host's own `MobSessionService` or `SessionAgentBuilder`
+  wrapper forwards the new required method (see Breaking). The refusal of
+  `UnifiedRuntimeBuilder::session_identity_config_root` with `mob_spec()` now
+  says that the supplied spec's session service reports the root its agent
+  builds use.
 
 ### Fixed
 

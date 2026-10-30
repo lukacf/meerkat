@@ -4408,6 +4408,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner.recorded_auth_binding(auth_binding).await
     }
 
+    /// Where this service's builds keep the durable comms identity of each
+    /// session they build with session-scoped comms: its builder's answer
+    /// ([`SessionAgentBuilder::session_comms_identity_root`]).
+    pub fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.inner.session_comms_identity_root()
+    }
+
     /// Commit one typed instruction activation while the caller holds this
     /// session's runtime-turn finalization boundary.
     ///
@@ -27105,6 +27112,10 @@ mod tests {
     impl SessionAgentBuilder for CapabilityBuilder {
         type Agent = CapabilityAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -27214,6 +27225,10 @@ mod tests {
     impl SessionAgentBuilder for DummyBuilder {
         type Agent = DummyAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -27278,6 +27293,10 @@ mod tests {
     impl<B: SessionAgentBuilder> SessionAgentBuilder for CheckpointerHoldingBuilder<B> {
         type Agent = B::Agent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            self.inner.session_comms_identity_root()
+        }
+
         async fn model_supports_inline_video(
             &self,
             identity: &meerkat_core::SessionLlmIdentity,
@@ -27333,6 +27352,10 @@ mod tests {
     impl SessionAgentBuilder for FailingInstructionActivationExportBuilder {
         type Agent = DummyAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -27362,6 +27385,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for FailOnceCompactionAbortBuilder {
         type Agent = DummyAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -27397,6 +27424,10 @@ mod tests {
     impl SessionAgentBuilder for CountingBuilder {
         type Agent = DummyAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -27428,6 +27459,10 @@ mod tests {
     impl SessionAgentBuilder for CallbackPendingBuilder {
         type Agent = DummyAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -27457,6 +27492,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for FailingOverlayBuilder {
         type Agent = DummyAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -27546,6 +27585,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for BlockingBuildBuilder {
         type Agent = DummyAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -27644,6 +27687,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for BlockingRunBuilder {
         type Agent = BlockingRunAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -27822,6 +27869,10 @@ mod tests {
     impl SessionAgentBuilder for EventfulBuilder {
         type Agent = EventfulDummyAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -27857,6 +27908,10 @@ mod tests {
     impl SessionAgentBuilder for FloodingEventBuilder {
         type Agent = EventfulDummyAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -27889,6 +27944,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for FailingRunBuilder {
         type Agent = DummyAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -27950,6 +28009,10 @@ mod tests {
     impl SessionAgentBuilder for MachineTerminalRunBuilder {
         type Agent = DummyAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,
@@ -27977,6 +28040,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for StaleTerminalRunBuilder {
         type Agent = EventfulDummyAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -28020,6 +28087,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for CapturingBuildBuilder {
         type Agent = DummyAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -28232,6 +28303,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for ImagePreservingBuilder {
         type Agent = ImagePreservingAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -28453,6 +28528,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for ToolDispatchBuilder {
         type Agent = ToolDispatchAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,
@@ -55838,6 +55917,10 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionAgentBuilder for DurableBoundaryProbeBuilder {
         type Agent = DurableBoundaryProbeAgent;
+
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
 
         async fn build_agent(
             &self,

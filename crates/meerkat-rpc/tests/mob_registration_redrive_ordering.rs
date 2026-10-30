@@ -106,6 +106,10 @@ impl OrderingProbeBuilder {
 impl SessionAgentBuilder for OrderingProbeBuilder {
     type Agent = meerkat::FactoryAgent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.inner.session_comms_identity_root()
+    }
+
     async fn model_supports_inline_video(
         &self,
         identity: &meerkat_core::SessionLlmIdentity,

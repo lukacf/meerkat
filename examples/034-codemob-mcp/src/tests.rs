@@ -419,6 +419,11 @@ struct BlockingBuilder {
 #[async_trait]
 impl SessionAgentBuilder for BlockingBuilder {
     type Agent = <FactoryAgentBuilder as SessionAgentBuilder>::Agent;
+
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.inner.session_comms_identity_root()
+    }
+
     async fn build_agent(
         &self,
         req: &CreateSessionRequest,

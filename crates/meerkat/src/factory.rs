@@ -726,6 +726,29 @@ fn resolve_session_comms_runtime_override(
     }
 }
 
+/// The root a factory whose user-global convention root is
+/// `user_config_root` keeps its sessions' comms identities under: the one
+/// its session-scoped comms construction resolves
+/// (`build_session_scoped_comms_runtime_from_config_scoped_with_silent_intents_typed`).
+#[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+fn session_comms_identity_root_under(
+    user_config_root: Option<&std::path::Path>,
+) -> meerkat_core::SessionCommsIdentityRoot {
+    match crate::sdk::canonical_session_comms_identity_root(user_config_root) {
+        Ok(root) => meerkat_core::SessionCommsIdentityRoot::Durable(root),
+        Err(reason) => meerkat_core::SessionCommsIdentityRoot::Unresolved(reason),
+    }
+}
+
+/// Without the `comms` feature a build has no comms, and a browser runtime
+/// keeps a session's comms identity in memory: neither keeps a durable one.
+#[cfg(not(all(feature = "comms", not(target_arch = "wasm32"))))]
+fn session_comms_identity_root_under(
+    _user_config_root: Option<&std::path::Path>,
+) -> meerkat_core::SessionCommsIdentityRoot {
+    meerkat_core::SessionCommsIdentityRoot::NotKept
+}
+
 /// A1/ADJ-17 predicate: the factory-appended skill-inventory prompt section
 /// applies to `Full` builds only. `SpecPinned` (set ONLY by the member-host
 /// spec decompiler, and by revival re-running it) keeps spec-built session
@@ -4967,6 +4990,17 @@ impl AgentFactory {
     pub fn user_config_root(mut self, path: impl Into<PathBuf>) -> Self {
         self.user_config_root = Some(path.into());
         self
+    }
+
+    /// Where this factory's agents keep the durable comms identity (the key
+    /// pair) of each session they build with session-scoped comms
+    /// (in-process comms): `<root>/<session id>`, under the root
+    /// `canonical_session_comms_identity_root` resolves from the factory's
+    /// `user_config_root` (the platform's per-user default when it is
+    /// unset). A build keeps no durable one without the `comms` feature, or
+    /// in a browser runtime.
+    pub fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        session_comms_identity_root_under(self.user_config_root.as_deref())
     }
 
     /// Set runtime root used for realm-scoped runtime artifacts.

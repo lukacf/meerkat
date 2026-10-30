@@ -1355,6 +1355,26 @@ pub trait MobSessionService:
     #[cfg(test)]
     fn bind_member_comms_identity_root_for_test(&self, _identity_root: &std::path::Path) {}
 
+    /// Where this service's agent builds keep the durable comms identity
+    /// (the key pair) of each member session they build with session-scoped
+    /// comms ([`meerkat_core::SessionCommsIdentityRoot`]). A dormant seat
+    /// ([`crate::MobHandle::seat_dormant_members`],
+    /// [`crate::MobHandle::rotate_member`]) records a member's endpoint from
+    /// the key there, before the member's first build, unless the host
+    /// declared the members' comms source itself
+    /// ([`super::MobBuilder::with_member_comms_identity_root`],
+    /// [`super::MobBuilder::with_network_member_comms`]). A service that
+    /// reports no durable root seats no inproc member unless the host
+    /// declares one: the seat is refused typed, never taken from another
+    /// root.
+    ///
+    /// REQUIRED, deliberately without a default: a wrapper forwards the
+    /// service it wraps, so the report is the root the builds actually use.
+    /// A default would let a wrapper drop it, and a seat would then record an
+    /// endpoint from a key the member's first build never loads, which that
+    /// build's wake refuses.
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot;
+
     /// Wait until every actor removed for `session_id` has exited. An
     /// ordinary removed-actor exit joins the release of what its agent owned
     /// (its MCP router's own surface lineages); an aborted or panicked one
@@ -2712,6 +2732,10 @@ impl<B> MobSessionService for meerkat_session::EphemeralSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_session::EphemeralSessionService::<B>::session_comms_identity_root(self)
+    }
+
     async fn await_removed_actor_exit(&self, session_id: &SessionId) {
         #[cfg(not(target_arch = "wasm32"))]
         meerkat_session::EphemeralSessionService::<B>::await_removed_actor_exit(self, session_id)
@@ -3502,6 +3526,10 @@ impl<B> MobSessionService for meerkat_session::PersistentSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_session::PersistentSessionService::<B>::session_comms_identity_root(self)
+    }
+
     async fn await_removed_actor_exit(&self, session_id: &SessionId) {
         #[cfg(not(target_arch = "wasm32"))]
         meerkat_session::PersistentSessionService::<B>::await_removed_actor_exit(self, session_id)

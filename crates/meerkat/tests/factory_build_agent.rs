@@ -2707,6 +2707,62 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
     );
 }
 
+/// The comms identity root a factory reports
+/// (`AgentFactory::session_comms_identity_root`, which a session service over
+/// it reports for a mob's dormant seats) is the root its builds keep each
+/// session's key pair under: a build with a comms name keys its session-scoped
+/// in-process runtime from `<root>/<session id>`.
+#[cfg(feature = "comms")]
+#[tokio::test]
+async fn the_reported_session_comms_identity_root_is_where_a_build_keeps_the_key() {
+    let identity_home = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp)
+        .runtime_root(temp.path())
+        .user_config_root(identity_home.path());
+    let mut config = Config::default();
+    config.comms.mode = meerkat_core::CommsRuntimeMode::Inproc;
+
+    let meerkat_core::SessionCommsIdentityRoot::Durable(root) =
+        factory.session_comms_identity_root()
+    else {
+        panic!("a factory with a user config root reports a durable root")
+    };
+    assert_eq!(
+        root,
+        identity_home
+            .path()
+            .join(".rkat")
+            .join("session_comms_identity")
+    );
+
+    let agent = factory
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                comms_name: Some("reported-root-peer".to_string()),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &config,
+        )
+        .await
+        .unwrap();
+    let public_key = agent
+        .comms_arc()
+        .and_then(|runtime| runtime.public_key_bytes())
+        .expect("a build with a comms name has a session-scoped comms identity");
+    let keys = root.join(agent.session().id().to_string());
+    assert!(
+        keys.join("identity.key").is_file(),
+        "the build keeps the session's key pair under the reported root"
+    );
+    assert_eq!(
+        std::fs::read(keys.join("identity.pub")).unwrap(),
+        public_key.to_vec(),
+        "the key under the reported root is the one the built runtime uses"
+    );
+}
+
 /// 8. `build_agent` applies system_prompt override.
 #[tokio::test]
 async fn build_agent_applies_system_prompt_override() {

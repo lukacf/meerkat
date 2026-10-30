@@ -324,6 +324,10 @@ mod runtime_backed_llm_reconfigure_tests {
     impl SessionAgentBuilder for DummyBuilder {
         type Agent = DummyAgent;
 
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn build_agent(
             &self,
             req: &CreateSessionRequest,

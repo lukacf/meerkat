@@ -1685,6 +1685,10 @@ struct ReportBundleSurfaceProbe(Arc<Mutex<Option<PreparedToolSurface>>>);
 impl meerkat_session::SessionAgentBuilder for ReportBundleSurfaceProbe {
     type Agent = meerkat::FactoryAgent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
+
     async fn build_agent(
         &self,
         request: &meerkat_core::service::CreateSessionRequest,

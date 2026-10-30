@@ -8,7 +8,9 @@ import {
   Button,
   Chip,
   EmptyState,
+  KeyValueList,
   ListRow,
+  LoadingState,
   Meter,
   Notice,
   PanelBody,
@@ -308,6 +310,47 @@ describe("RelativeTime", () => {
     expect(view.getByTestId("as-of").getAttribute("title")).toBe("as of 2026-07-08 18:15:30");
     expect(view.getByTestId("host").querySelectorAll("time").length).toBe(1);
   });
+
+  it("shares one timer among every relative time, and stops it when the last one goes", () => {
+    // Later than any clock reading an earlier test left behind.
+    const base = Date.now() + MINUTE;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(base);
+      const view = render(
+        <div>
+          {Array.from({ length: 50 }, (_, index) => (
+            <RelativeTime key={index} value={base} testId={`time:${index}`} />
+          ))}
+        </div>,
+      );
+      const texts = () => Array.from(new Set(Array.from({ length: 50 }, (_, index) => view.getByTestId(`time:${index}`).textContent)));
+      expect(vi.getTimerCount()).toBe(1);
+      expect(texts()).toEqual(["just now"]);
+      act(() => {
+        vi.advanceTimersByTime(15 * SECOND);
+      });
+      expect(texts()).toEqual(["15s ago"]);
+      act(() => {
+        vi.advanceTimersByTime(45 * SECOND);
+      });
+      expect(texts()).toEqual(["1m ago"]);
+      expect(vi.getTimerCount()).toBe(1);
+      view.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+
+      // After a quiet spell the next one reads a fresh clock and starts the
+      // timer again.
+      vi.setSystemTime(base + 10 * MINUTE);
+      const again = render(<RelativeTime value={base + 9 * MINUTE} testId="again" />);
+      expect(again.getByTestId("again").textContent).toBe("1m ago");
+      expect(vi.getTimerCount()).toBe(1);
+      again.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("panel frame", () => {
@@ -463,6 +506,61 @@ describe("StatTile", () => {
     const tile = view.getByTestId("tile");
     expect(tile.getAttribute("role") === null).toBe(true);
     expect(tile.classList.contains("is-interactive")).toBe(false);
+  });
+
+  it("leaves keys on a link inside to the link, and takes only Enter and Space itself", () => {
+    const open = vi.fn();
+    const view = render(
+      <StatTile label="Trust rules" summary="1 record breaks the trust rules" tone="crit" onActivate={open} testId="tile">
+        <button type="button">Release train cutoff</button>
+      </StatTile>,
+    );
+    const tile = view.getByTestId("tile");
+    const link = view.getByRole("button", { name: "Release train cutoff" });
+    expect(link.parentElement?.classList.contains("cc-tile__links")).toBe(true);
+    fireEvent.keyDown(link, { key: "Enter" });
+    fireEvent.keyDown(link, { key: " " });
+    fireEvent.keyDown(tile, { key: "a" });
+    expect(open.mock.calls.length).toBe(0);
+    // The tile keeps Enter and Space from scrolling or submitting.
+    expect(fireEvent.keyDown(tile, { key: " " })).toBe(false);
+    expect(open.mock.calls.length).toBe(1);
+  });
+
+  it("is a real button without links, with its tone, help and data attributes", () => {
+    const open = vi.fn();
+    const view = render(
+      <StatTile
+        label="Lattice"
+        status={<Chip tone="ok">Holding</Chip>}
+        summary="No record breaks a rule"
+        tone="ok"
+        help="Every record keeps its trust rules"
+        onActivate={open}
+        testId="tile"
+        dataAttributes={{ "data-status": "holding" }}
+      />,
+    );
+    const tile = view.getByTestId("tile");
+    expect(tile.tagName).toBe("BUTTON");
+    expect(tile.getAttribute("type")).toBe("button");
+    expect(tile.getAttribute("data-tone")).toBe("ok");
+    expect(tile.getAttribute("title")).toBe("Every record keeps its trust rules");
+    expect(tile.getAttribute("data-status")).toBe("holding");
+    expect(tile.querySelector(".cc-tile__label")?.textContent).toBe("Lattice");
+    expect(tile.querySelector(".cc-tile__status")?.textContent).toBe("Holding");
+    expect(tile.querySelector(".cc-tile__summary")?.textContent).toBe("No record breaks a rule");
+    expect(tile.querySelector(".cc-tile__links") === null).toBe(true);
+    fireEvent.click(tile);
+    expect(open.mock.calls.length).toBe(1);
+  });
+
+  it("draws the quiet muted form for a check that cannot run", () => {
+    const view = render(<StatTile label="Usefulness" summary="Not measured yet" muted testId="tile" />);
+    const tile = view.getByTestId("tile");
+    expect(tile.classList.contains("cc-tile--muted")).toBe(true);
+    expect(tile.getAttribute("data-tone")).toBe("neutral");
+    expect(tile.querySelector(".cc-tile__status") === null).toBe(true);
   });
 });
 
@@ -750,5 +848,123 @@ describe("SplitDetail", () => {
     fireEvent.click(outside);
     expect(narrow.getByTestId("split").classList.contains("has-detail")).toBe(true);
     expect(activeTestId()).toBe("outside");
+  });
+});
+
+
+describe("Meter", () => {
+  it("draws each segment as its share of the total and names the bar in words", () => {
+    const view = render(
+      <Meter
+        label="3 active, 1 quarantined"
+        total={8}
+        testId="meter"
+        segments={[
+          { value: 3, tone: "ok", label: "3 active" },
+          { value: 1, tone: "warn", label: "1 quarantined" },
+          { value: 0, tone: "neutral", label: "0 superseded" },
+        ]}
+      />,
+    );
+    const meter = view.getByTestId("meter");
+    const segments = Array.from(meter.querySelectorAll<HTMLElement>(".cc-meter__seg"));
+    expect(segments.map((segment) => segment.style.width)).toEqual(["37.5%", "12.5%"]);
+    expect(segments.map((segment) => segment.getAttribute("data-tone"))).toEqual(["ok", "warn"]);
+    expect(segments.map((segment) => segment.getAttribute("title"))).toEqual(["3 active", "1 quarantined"]);
+    expect(view.getByRole("img", { name: "3 active, 1 quarantined" }).classList.contains("cc-meter__track")).toBe(true);
+    expect(meter.querySelector(".cc-meter__label")?.textContent).toBe("3 active, 1 quarantined");
+  });
+
+  it("fills to the sum without a total, never past the whole, and skips empty and negative segments", () => {
+    const view = render(
+      <div>
+        <Meter label="sum" testId="sum" segments={[{ value: 1 }, { value: 3 }]} />
+        <Meter label="over" testId="over" total={2} segments={[{ value: 3 }, { value: 1 }]} />
+        <Meter label="negative" testId="negative" segments={[{ value: -2 }, { value: 2 }]} />
+        <Meter label="empty" testId="empty" showLabel={false} segments={[{ value: 0 }]} />
+      </div>,
+    );
+    const widths = (testId: string) => Array.from(view.getByTestId(testId).querySelectorAll<HTMLElement>(".cc-meter__seg")).map((segment) => segment.style.width);
+    expect(widths("sum")).toEqual(["25%", "75%"]);
+    expect(widths("over")).toEqual(["75%", "25%"]);
+    expect(widths("negative")).toEqual(["100%"]);
+    expect(view.getByTestId("negative").querySelector(".cc-meter__seg")?.getAttribute("data-tone")).toBe("neutral");
+    expect(widths("empty")).toEqual([]);
+    expect(view.getByTestId("empty").querySelector(".cc-meter__label") === null).toBe(true);
+    expect(view.getByRole("img", { name: "empty" }).getAttribute("aria-label")).toBe("empty");
+  });
+});
+
+describe("KeyValueList", () => {
+  it("lists labelled values in a description list and skips empty ones", () => {
+    const view = render(
+      <KeyValueList
+        testId="facts"
+        className="facts"
+        items={[
+          { label: "Owner", value: "Coordinator", testId: "fact:owner" },
+          { label: "Priority", value: null },
+          { label: "Due", value: undefined },
+          { label: "Labels", value: "" },
+          { label: "Pinned", value: false },
+          { label: "Attempts", value: 0 },
+          null,
+          false,
+          { label: "Updated", value: <time>12m ago</time> },
+        ]}
+      />,
+    );
+    const list = view.getByTestId("facts");
+    expect(list.tagName).toBe("DL");
+    expect(list.classList.contains("cc-kv")).toBe(true);
+    expect(list.classList.contains("facts")).toBe(true);
+    expect(Array.from(list.querySelectorAll("dt")).map((term) => term.textContent)).toEqual(["Owner", "Attempts", "Updated"]);
+    expect(Array.from(list.querySelectorAll("dd")).map((value) => value.textContent)).toEqual(["Coordinator", "0", "12m ago"]);
+    expect(view.getByTestId("fact:owner").classList.contains("cc-kv__row")).toBe(true);
+  });
+
+  it("keeps rows that share a label and renders nothing when every value is empty", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const view = render(
+      <div data-testid="host">
+        <KeyValueList testId="facts" items={[{ label: "Parent", value: "Release" }, { label: "Parent", value: "Docs" }]} />
+        <KeyValueList testId="nothing" items={[{ label: "Owner", value: null }, null]} />
+      </div>,
+    );
+    const duplicateKeyWarnings = errors.mock.calls.filter((call) => /same key/.test(String(call[0])));
+    errors.mockRestore();
+    expect(duplicateKeyWarnings.length).toBe(0);
+    expect(view.getByTestId("facts").querySelectorAll("dd").length).toBe(2);
+    expect(view.queryByTestId("nothing") === null).toBe(true);
+    expect(view.getByTestId("host").childElementCount).toBe(1);
+  });
+});
+
+describe("LoadingState", () => {
+  it("announces its label politely and holds the layout with hidden skeleton rows", () => {
+    const view = render(<LoadingState label="Loading records" rows={3} testId="loading" />);
+    const loading = view.getByTestId("loading");
+    expect(loading.getAttribute("role")).toBe("status");
+    expect(view.getByRole("status").textContent).toBe("Loading records");
+    expect(loading.querySelector(".cc-visually-hidden")?.textContent).toBe("Loading records");
+    const rows = Array.from(loading.querySelectorAll(".cc-skeleton__row"));
+    expect(rows.length).toBe(3);
+    expect(rows.every((row) => row.getAttribute("aria-hidden") === "true")).toBe(true);
+    expect(loading.classList.contains("cc-skeleton--rows")).toBe(true);
+  });
+
+  it("says Loading by default, draws cards, and keeps between one and eight rows", () => {
+    const view = render(
+      <div>
+        <LoadingState testId="default" />
+        <LoadingState variant="cards" rows={0} testId="cards" />
+        <LoadingState rows={20} testId="many" />
+      </div>,
+    );
+    expect(view.getByTestId("default").textContent).toBe("Loading");
+    expect(view.getByTestId("default").querySelectorAll(".cc-skeleton__row").length).toBe(4);
+    expect(view.getByTestId("cards").classList.contains("cc-skeleton--cards")).toBe(true);
+    expect(view.getByTestId("cards").querySelectorAll(".cc-skeleton__row").length).toBe(1);
+    expect(view.getByTestId("many").querySelectorAll(".cc-skeleton__row").length).toBe(8);
   });
 });

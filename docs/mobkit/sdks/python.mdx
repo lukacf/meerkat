@@ -4,7 +4,7 @@ description: "Meta Python SDK — typed builder API, async runtime, and streamin
 icon: "python"
 ---
 
-*Mirrored from MobKit main at [aa3c9b3c0434](https://github.com/lukacf/meerkat-meta/commit/aa3c9b3c0434ee9be45b4e3f6593fe2a1d1ee6e3) on 2026-10-29; MobKit workspace version 0.9.6 at that commit.*
+*Mirrored from MobKit main at [7400dc9b1349](https://github.com/lukacf/meerkat-meta/commit/7400dc9b1349713f18258d66c72789f525f3cc09) on 2026-10-30; MobKit workspace version 0.9.6 at that commit.*
 
 The Meta Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -626,6 +626,7 @@ rt = await (
 | `.fork_instruction_policy(policy)` | What a fork of a member with activated instructions does with them, forwarded as `runtime_options.fork_instruction_policy`: `"require_explicit_activation"` (the default when unset), `"reactivate_inherited"` or `"refuse"`. Another value raises `ValueError`. See [Fork instruction policy](/mobkit/reference/configuration#fork-instruction-policy) |
 | `.mob_announcements(config=True)` | Enable [mob announcements](#mob-announcements): sends `runtime_options.mob_announcements`, `{"enabled": true}` for `True` and a mapping unchanged (batch, retention and limit options; see [Configuration](/mobkit/reference/configuration#mob-announcements)). Needs `.persistent_state(...)` and `.roster(...)` |
 | `.gateway(bin_path)` | Path to rpc_gateway binary |
+| `.gateway_transport(transport)` | Run the gateway through a host transport instead of spawning `.gateway(...)`: an `AdoptedGatewayTransport` over a gateway child the host started and keeps, or a factory taking no arguments that every connect calls once. The SDK then never spawns, even with `.gateway(...)` set. A transport serves one connect; one already started or stopped raises `GatewayTransportConflictError`. See [Adopting a gateway child the host started](#adopting-a-gateway-child-the-host-started). TypeScript twin `gatewayTransport(factory)`, which also requires `gateway()` |
 | `.modules(specs)` | Module specifications |
 | `.build()` | Build and connect the runtime |
 
@@ -851,6 +852,123 @@ runtime. Ordinary dispatch starts only after init settles, and the
 gateway refuses an earlier request at once with `InitInProgressError`
 (`-32018`, exported as `INIT_IN_PROGRESS_CODE`).
 
+## Adopting a gateway child the host started
+
+By default `connect()` spawns `rpc_gateway --persistent` and owns that
+process. A host that supervises the gateway itself (it spawns the process and
+owns its lifetime, credentials and cleanup) can hand the SDK that exact child
+instead. The SDK then speaks the same stdio protocol over the child's pipes:
+init with its accepted-then-settled readiness, host callbacks, RPC with its
+timeouts and the shutdown handshake. It never spawns, signals, reconnects to
+or replays a gateway.
+
+```python
+import os
+from meerkat_meta import AdoptedGatewayChild, AdoptedGatewayTransport, Meta
+
+child = AdoptedGatewayChild(
+    input=os.fdopen(stdin_write_fd, "wb", buffering=0),   # writes the child's stdin
+    output=os.fdopen(stdout_read_fd, "rb", buffering=0),  # reads the child's stdout
+    request_retirement=owner.request_retirement,
+    wait_process=owner.wait_process,
+)
+transport = AdoptedGatewayTransport(child)
+runtime = await Meta.builder().mob("mob.toml").gateway_transport(transport).build()
+```
+
+The host hands over exactly four members:
+
+| Member | Contract |
+|--------|----------|
+| `input` | A binary stream that writes the child's stdin: a raw one, such as `os.fdopen(fd, "wb", buffering=0)` over the write end of the child's stdin pipe, or a buffered one, such as `Popen.stdin` |
+| `output` | A binary stream that reads the child's stdout: a raw one, such as `os.fdopen(fd, "rb", buffering=0)` over the read end of the child's stdout pipe, or a buffered one, such as `Popen.stdout` |
+| `request_retirement()` | Schedules the host's retirement of the child on the host's own event loop and returns at once. It is thread-safe, repeat calls refer to the same retirement, and it never calls back into the SDK |
+| `wait_process(timeout)` | Waits at most `timeout` seconds (finite, 0 to 60) for the direct child to exit and returns its exit code (a negative code names a signal, as `Popen.returncode` does). It raises `TimeoutError` while the exit is still pending, which is not a failure. The SDK calls it only on its own worker threads, never on an event-loop thread, and never from two threads at once. It never waits for the SDK's reader, the child's descendants or the host's own cleanup |
+
+Ownership and lifecycle:
+
+- `AdoptedGatewayChild(...)` and `AdoptedGatewayTransport(child)` only
+  validate: they read, write and close nothing. `connect()` (or the
+  transport's `start()`) hands the child over, and from then on the transport
+  writes `input` and reads `output`. Only `start()` hands it over: a request
+  before it is refused, so the first line the child reads is `meta/init`. A
+  refusal before the hand-off leaves both pipes with the host, untouched.
+- A raw stream is buffered by the transport itself, at the hand-off: a raw
+  write can take fewer bytes than it was offered and a raw `readline()` reads
+  one byte per call, so the transport writes every byte of each line before
+  it flushes, reads lines in blocks, and retries interrupted and partial
+  reads and writes. The wrapper sits over the host's own stream object, and
+  closing it closes that stream once; the transport opens no second file
+  object over the same descriptor and closes nothing else of the host. Do
+  not `os.close()` a descriptor you handed over inside such an object: the
+  transport closes it through that object, and by then its number could
+  belong to another file.
+- From the hand-off, one exit watcher thread is the only caller of
+  `wait_process`, in waits of at most 60 seconds, until the child exits or a
+  stop returns; it never calls it from two threads at once. Once the child
+  exited, a request still waiting on a stdout that a process the child
+  started holds open fails about a second later with `GatewayChildEndedError`,
+  as with a spawned gateway, and so does an init still settling. If
+  `wait_process` raises something other than a timeout, the watcher logs it
+  and ends: the next stop observes the child itself, and until then an exit
+  fails no waiter early.
+- `shutdown()` stops the transport on a runtime-owned worker thread. The stop
+  makes the stock protocol shutdown (the one `meta/shutdown` request when the
+  gateway negotiated it, then the end of `input`) on a helper thread that it
+  waits for only until the gateway's shutdown horizon ends, so a writer stuck
+  on a full pipe cannot hold it. If that phase times out, the helper and the
+  stuck writer stay blocked until the child's stdin closes, normally through
+  the retirement. Then, whatever that phase did, it calls
+  `request_retirement()`, once per child however often it runs, and waits
+  for the direct child's exit as the watcher observes it, for the shutdown
+  horizon plus 10 seconds from when the first stop began (10 seconds more on
+  each later stop, which calls `wait_process` itself). It never runs or
+  awaits the host's own cleanup, and the SDK's reader never calls the host.
+  The reader closes `output` when it ends.
+- A child whose exit is still pending at the end of that bound raises
+  `GatewayChildPendingError`. The runtime keeps the transport, and the next
+  `shutdown()` observes the same child again without requesting its
+  retirement twice.
+- A start that fails after the hand-off (init refused or failed, an init
+  outcome that is unknown, a cancelled caller) is stopped the same way. Its
+  failure is recorded before that stop is scheduled, so cancelling the caller
+  drops neither the retirement request nor the child's observation; as with
+  a spawned gateway, the exception of a cancelled caller carries
+  `gateway_cleanup` while the stop has not succeeded.
+- The transport's own `stop()` is synchronous: run it with
+  `await asyncio.to_thread(transport.stop)`. On an event-loop thread it
+  raises `TransportError` at once and does nothing. Always stop it (through
+  `shutdown()`): a transport dropped without a stop ends the child's input and
+  calls `request_retirement()` from its finalizer, which may run on any
+  thread, the SDK's reader included, or in the collection at interpreter
+  exit.
+- One transport serves one connect. To connect again after `shutdown()`, pass
+  `gateway_transport()` a factory taking no arguments that returns a transport
+  over a child the host started for that connect. `.gateway(...)` may be set
+  as well; the SDK still never spawns it.
+- The SDK's own SSE, multipart and console calls use the `http_base_url` the
+  gateway reports. A spawned gateway shares this process's network
+  namespace; for an adopted child, keeping that address reachable from this
+  process is the host's job.
+
+The transport reports three outcomes apart, and none of them stands for the
+host's own cleanup:
+
+| Outcome | Where |
+|---------|-------|
+| The native terminal failure | `transport.start_failure`: for a start that failed after the hand-off, a `GatewayStartFailure` with the startup `error` and what is known of `meta/init` (`init_outcome`: `"not_sent"`, `"refused"`, `"failed"`, `"unknown"` or `"ready"`). The gateway's answer to the shutdown request is `last_termination.native_shutdown` |
+| The direct child's exit | `transport.child_exit`: `GatewayChildExit("exited", code)` once the watcher or a stop observed it through `wait_process`, or `GatewayChildExit("pending", None)` after a stop's bound ended first. `runtime.last_gateway_termination` records it as well, with `escalation` always `"none"` |
+| The SDK reader's completion | `transport.reader_completed`: the reader reached the end of `output`, or failed, and closed it |
+
+`GatewayTransportConflictError` (a `ValueError`) refuses, before anything is
+handed over, a transport that was already started or stopped, and a
+transport given both to `MetaRuntime(config, transport)` and to
+`gateway_transport()`. The TypeScript SDK's factory takes precedence over a
+constructor transport instead; Python refuses the pair. A transport given to
+`MetaRuntime(config, transport)` alone is used in place of a spawn whenever
+the configuration names a gateway, and an `AdoptedGatewayTransport` given
+there is used even when it does not.
+
 ## Gateway logging (stderr)
 
 The persistent gateway reports tracing lines, panic hooks, and storage
@@ -974,7 +1092,10 @@ adopted instead of respawned, a respawn. `customize_build` runs:
   life, and when a declared role migration moves it to its new role, with
   the runtime's real context (every registered identity as `active_peers`,
   the roster's managed edges). That call publishes the tools and records
-  the customized spawn spec, nothing more: nothing is built, and
+  the customized spawn spec. It builds nothing, except where the seat
+  builds the member from it: a seat that revives the session of a member
+  that was retired after it was built (a respawn, for example), and a
+  declared role migration's move of the member onto its session.
   `resolved_tools`, which reports the tools a build actually resolved,
   answers `no_build_recorded` until the member's first build. Your
   `after_create(identity,
@@ -984,6 +1105,19 @@ adopted instead of respawned, a respawn. `customize_build` runs:
   that is not materialized (a send, a dispatch, a peer message, a kickoff),
   and at start for the members that must be live then. No `after_create`
   follows a build.
+
+A respawn of a built member calls `customize_build` once and `after_create`
+once, with the session the respawn keeps, and the member is built once, with
+that call's tools: the mob keeps the retired member's session archived, so
+the respawn's seat revives the member on it, and that revival is the build.
+The same holds for a materialization, a warm or a delivery whose seat builds
+the member: the member stays live for it. The roster pass asks the mob to
+release a member its seat built, so that identity is then like a lazily
+seated one. A lazily
+seated identity (one seated with nothing built yet) gets two
+`customize_build` calls before its first run: its seat's, then its first
+build's. A respawn of a member that was never built does the same: its seat
+calls `customize_build`, and its build calls it again.
 
 A member is never built without its tools, so its first run sees them. A
 restart over idle members the mob already holds calls `customize_build` for

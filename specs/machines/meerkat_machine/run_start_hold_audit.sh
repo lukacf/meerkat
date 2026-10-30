@@ -9,11 +9,16 @@
 # them over the whole bounded space. It then reruns the same space once per
 # reachability witness, with that witness's negation as an extra invariant,
 # and requires TLC to report exactly that violation, so the invariants are
-# not vacuous. With --mutants it then seeds three defects into a copy of the
-# generated model (a registration that ignores its holds, run-start gates that
-# test only MobStop, a release that clears every reason) and requires TLC to
-# refuse each with the property it breaks. An anchor this script expects but
-# cannot find fails the run.
+# not vacuous. The main run explores the MobStop and ToolsNotPublished
+# reasons; a reasons run then registers, holds and releases every reason (a
+# mob member's HostPreparation among them) with no input and no run, and
+# reaches its own witness. With --mutants it then seeds five defects into a
+# copy of the generated model (a registration that ignores its holds,
+# run-start gates that test only MobStop, a release that clears every
+# reason, a registration that ignores the HostPreparation hold, and a host's
+# release of its tools that ends that hold too) and requires TLC to refuse
+# each with the property it breaks. An anchor this script expects but cannot
+# find fails the run.
 set -euo pipefail
 
 usage="usage: run_start_hold_audit.sh <max-steps> [--mutants] [extra tlc args...]"
@@ -47,22 +52,30 @@ replace_exact_line() {
   mv "${file}.next" "${file}"
 }
 
-# usage: write_cfg <file> <extra invariant lines>
+# usage: write_cfg <file> <extra invariant lines> [reasons]: the main run's
+# config, or with `reasons` the reasons run's.
 write_cfg() {
-  local cfg="$1" extra="$2"
+  local cfg="$1" extra="$2" run="${3:-main}"
+  local spec="AuditSpec" properties="
+  AuditNoNewRunWhileHeld
+  AuditHoldReleaseLeaveQueueAndRun
+  AuditHoldAndReleaseOwnReasonOnly
+  AuditRegistrationAppliesHolds"
+  if [[ "${run}" == "reasons" ]]; then
+    spec="ReasonsSpec"
+    properties="
+  AuditHoldAndReleaseOwnReasonOnlyEvery
+  AuditRegistrationAppliesHoldsEvery"
+  fi
   cp "${ci_cfg}" "${cfg}"
-  replace_exact_line "SPECIFICATION Spec" "SPECIFICATION AuditSpec" "${cfg}"
+  replace_exact_line "SPECIFICATION Spec" "SPECIFICATION ${spec}" "${cfg}"
   replace_exact_line "  InputIdValues = {}" '  InputIdValues = {"input_1"}' "${cfg}"
   replace_exact_line "  RunIdValues = {}" '  RunIdValues = {"runid_1", "runid_2"}' "${cfg}"
   replace_exact_line "  SessionIdValues = {}" '  SessionIdValues = {"sessionid_1"}' "${cfg}"
   replace_exact_line "  StringValues = {}" '  StringValues = {"input_1"}' "${cfg}"
   replace_exact_line "CONSTANTS" "CONSTANTS
   AuditMaxSteps = ${max_steps}" "${cfg}"
-  replace_exact_line "INVARIANTS" "PROPERTIES
-  AuditNoNewRunWhileHeld
-  AuditHoldReleaseLeaveQueueAndRun
-  AuditHoldAndReleaseOwnReasonOnly
-  AuditRegistrationAppliesHolds
+  replace_exact_line "INVARIANTS" "PROPERTIES${properties}
 INVARIANTS${extra}" "${cfg}"
   replace_exact_line "  CiStateConstraint" "  AuditStateConstraint" "${cfg}"
   printf 'CHECK_DEADLOCK FALSE\n' >> "${cfg}"
@@ -124,18 +137,48 @@ for witness in Refused ReleasedRuns RunFinishesThenRefused RetiredDrainRefused \
   echo "witness ${witness} reached in ${depth} states"
 done
 
+# The reasons run: every reason registered, held and released.
+reasons_cfg="${work_dir}/reasons.cfg"
+write_cfg "${reasons_cfg}" "" reasons
+reasons_status=0
+run_tlc reasons "${reasons_cfg}" "$@" || reasons_status=$?
+cat "${work_dir}/reasons.log"
+if [[ "${reasons_status}" != "0" ]] \
+  || ! grep -q "Model checking completed. No error has been found." "${work_dir}/reasons.log"; then
+  echo "error: run-start hold audit's reasons run failed (tlc exit ${reasons_status}, bound ${max_steps})" >&2
+  exit 1
+fi
+cfg="${work_dir}/witness-HostPreparationHeld.cfg"
+write_cfg "${cfg}" "
+  NotAuditWitnessHostPreparationHeld" reasons
+status=0
+run_tlc witness-HostPreparationHeld "${cfg}" "$@" || status=$?
+log="${work_dir}/witness-HostPreparationHeld.log"
+if ! grep -q "Error: Invariant NotAuditWitnessHostPreparationHeld is violated" "${log}"; then
+  cat "${log}"
+  echo "error: witness HostPreparationHeld is not reachable at bound ${max_steps} (tlc exit ${status})" >&2
+  exit 1
+fi
+depth="$(grep -cE '^State [0-9]+:' "${log}" || true)"
+echo "witness HostPreparationHeld reached in ${depth} states"
+
 if [[ "${run_mutants}" == "true" ]]; then
-  # usage: mutate <name> <expected property>; reads a python edit on stdin
-  # that rewrites model.tla in place and must find each anchor it names.
+  # usage: mutate <name> <expected property> [main|reasons]; reads a python
+  # edit on stdin that rewrites model.tla in place and must find each anchor
+  # it names.
   mutate() {
-    local name="$1" property="$2"
+    local name="$1" property="$2" run="main"
     shift 2
+    if [[ "${1:-}" == "main" || "${1:-}" == "reasons" ]]; then
+      run="$1"
+      shift
+    fi
     local dir="${work_dir}/mutant-${name}"
     mkdir -p "${dir}"
     cp "${spec_dir}"/*.tla "${dir}/"
     MODEL="${dir}/model.tla" python3 -
     local cfg="${work_dir}/mutant-${name}.cfg"
-    write_cfg "${cfg}" ""
+    write_cfg "${cfg}" "" "${run}"
     local status=0
     (cd "${dir}" && run_tlc "mutant-${name}" "${cfg}" "$@") || status=$?
     local log="${work_dir}/mutant-${name}.log"
@@ -183,6 +226,31 @@ old = "run_start_holds' = (run_start_holds \\ {reason})"
 count = text.count(old)
 assert count == 14, f"expected 14 release updates, found {count}"
 text = text.replace(old, "run_start_holds' = {}")
+open(path, "w").write(text)
+PY
+
+  # Every registration arm stages the holds its binding starts with but the
+  # HostPreparation one.
+  mutate registration_ignores_host_preparation AuditRegistrationAppliesHoldsEvery reasons "$@" <<'PY'
+import os
+path = os.environ["MODEL"]
+text = open(path).read()
+old = '\\cup {"HostPreparation"}'
+count = text.count(old)
+assert count >= 10, f"expected the registration arms to stage HostPreparation, found {count}"
+text = text.replace(old, "\\cup {}")
+open(path, "w").write(text)
+PY
+
+  # The host's release of its tools ends the HostPreparation hold too.
+  mutate host_release_ends_host_preparation AuditHoldAndReleaseOwnReasonOnlyEvery reasons "$@" <<'PY'
+import os
+path = os.environ["MODEL"]
+text = open(path).read()
+old = "run_start_holds' = (run_start_holds \\ {reason})"
+count = text.count(old)
+assert count == 14, f"expected 14 release updates, found {count}"
+text = text.replace(old, "run_start_holds' = (run_start_holds \\ (IF reason = \"ToolsNotPublished\" THEN {reason, \"HostPreparation\"} ELSE {reason}))")
 open(path, "w").write(text)
 PY
 fi

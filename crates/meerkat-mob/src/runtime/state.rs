@@ -1555,9 +1555,14 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<super::declared_apply::SealAnswer, crate::MobError>>,
     },
     /// Open a declared apply (`MobHandle::apply_declared_roster`): one apply
-    /// of the mob at a time, MobMachine's verdict.
+    /// of the mob at a time, MobMachine's verdict. An opened apply is
+    /// answered with the lease of its open fact, whose close is sent under
+    /// `close_authority`, the opening call's own.
     OpenDeclaredApply {
-        reply_tx: oneshot::Sender<Result<mob_dsl::DeclaredApplyOpenVerdict, crate::MobError>>,
+        close_authority: crate::control_policy::CommandAuthority,
+        reply_tx: oneshot::Sender<
+            Result<super::declared_apply::DeclaredApplyOpening, crate::MobError>,
+        >,
     },
     /// Close the open declared apply, whatever its outcome.
     CloseDeclaredApply {

@@ -1806,13 +1806,6 @@ async fn a_retired_identity_that_stays_listed_is_seated_again_on_its_session() {
     assert_eq!(mob.generation("retired").await, Some(Generation::new(1)));
 }
 
-/// A descriptive facet change is no lifecycle fact: an apply that changes
-/// only the declared display name, labels, context or instructions of a
-/// seated identity answers `Kept` and writes nothing. The member keeps its
-/// session, its generation and its live materialization: no rotation, no
-/// restamp and no new life. The host keeps the facets it declares, and its
-/// next build of the member applies them.
-///
 /// A retirement that only released a host-owned session archives nothing,
 /// live or replayed: the identity's next seat is the same after a restart
 /// as without one, a fresh session, never the other host's live session.
@@ -1875,6 +1868,107 @@ async fn a_host_owned_retirement_records_no_archived_session_live_or_replayed() 
     );
 }
 
+/// Where `name`'s identity entry stands on `handle`, when it is one.
+fn entry_standing(handle: &MobHandle, name: &str) -> Option<EntryStanding> {
+    match handle
+        .identity_entry(&id(name))
+        .expect("the entry read answers")
+    {
+        IdentityEntryRead::Entry(view) => Some(view.standing),
+        IdentityEntryRead::NotAnEntry { .. }
+        | IdentityEntryRead::Unreadable { .. }
+        | IdentityEntryRead::Removed => None,
+    }
+}
+
+/// An externally bound identity entry's retirement replays as its live end
+/// did. Declared hosted on its first use, created by its host's spawn with
+/// entry custody (bound to its external peer, with no session of its own),
+/// retired, then restarted, it stays hosted on its first use, never owed a
+/// local seat: the replay reads the incarnation's spawn row (a peer-only
+/// member reference) as hosted elsewhere.
+///
+/// RED: let the replay read a hosted incarnation from a placed spawn id
+/// alone (no peer-only member reference): after the restart the entry reads
+/// `SeatOwed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declared_external_identity_is_hosted_on_its_first_use_across_restarts() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "apply-external-entry",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let (handle, _service) =
+        create_test_mob_with_real_comms_and_storage(definition, storage.clone()).await;
+    let external =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "external-entry")).await;
+    let mut spec = SpawnMemberSpec::host_root("worker", id("external-entry"));
+    spec.binding = Some(external.binding());
+    let declared_outcome = tokio::time::timeout(
+        STEP,
+        handle.apply_declared_roster(DeclaredRoster::complete([DeclaredEntry::new(spec.clone())])),
+    )
+    .await
+    .expect("the apply answers")
+    .expect("the apply runs");
+    assert!(
+        matches!(
+            declared_outcome.entries.get(&id("external-entry")),
+            Some(DeclaredEntryOutcome::HostedOnFirstUse)
+        ),
+        "{declared_outcome:?}"
+    );
+
+    // The host creates the member: its spawn holds the entry's custody.
+    let owner_context = handle
+        .create_generated_ops_owner_context_for_test()
+        .await
+        .expect("an owner context");
+    handle
+        .spawn_spec_receipt_with_owner_context(spec.with_entry_custody(true), owner_context)
+        .await
+        .expect("the host's spawn creates the external member");
+    assert!(
+        matches!(
+            entry_standing(&handle, "external-entry"),
+            Some(EntryStanding::Seated(_))
+        ),
+        "the external member is the entry's"
+    );
+
+    tokio::time::timeout(STEP, handle.retire(id("external-entry")))
+        .await
+        .expect("the retire answers")
+        .expect("the retire succeeds");
+    assert_eq!(
+        entry_standing(&handle, "external-entry"),
+        Some(EntryStanding::Unseated(
+            UnseatedEntryCause::HostedOnFirstUse
+        )),
+        "the live end keeps the entry hosted on its first use"
+    );
+
+    crash_stop_and_release_routes(handle).await;
+    let (handle, _service) = resume_test_mob_with_real_comms(storage).await;
+    assert_eq!(
+        entry_standing(&handle, "external-entry"),
+        Some(EntryStanding::Unseated(
+            UnseatedEntryCause::HostedOnFirstUse
+        )),
+        "the replay keeps the entry hosted on its first use"
+    );
+    drop(external);
+}
+
+/// A descriptive facet change is no lifecycle fact: an apply that changes
+/// only the declared display name, labels, context or instructions of a
+/// seated identity answers `Kept` and writes nothing. The member keeps its
+/// session, its generation and its live materialization: no rotation, no
+/// restamp and no new life. The host keeps the facets it declares, and its
+/// next build of the member applies them.
+///
 /// Guard: `DeclareIdentityEntry` takes no facet, so no verdict reads one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_descriptive_facet_change_is_never_a_new_life() {
@@ -1978,6 +2072,101 @@ async fn an_unlisted_retirement_start_row_replays_as_a_plain_retirement_without_
         .expect("the listed member is served");
     assert_eq!(member.status, MobMemberStatus::Active);
     mob.wake("listed").await;
+}
+
+/// A dropped apply never leaves the mob's applies refused. An opening whose
+/// call is gone before the actor answers it is closed by the actor at once;
+/// an apply dropped in its body is closed by the lease of its open fact. The
+/// next apply opens either way.
+///
+/// RED: answer the opening with a bare verdict and arm the close guard in
+/// the call once the answer arrives (the shape before this fix): the
+/// opening whose call is gone leaves the open fact set, and the next apply
+/// is refused `LifecycleOperationPending` for the life of the process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_apply_never_refuses_the_next_one() {
+    let mob = ApplyMob::new("apply-dropped").await;
+
+    // An opening whose call is gone before the parked actor answers it.
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let parked = mob
+        .handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::ParkActorForObservationTest {
+            entered_tx,
+            release_rx,
+            reply_tx,
+        })
+        .await
+        .expect("enqueue the parking command");
+    entered_rx.await.expect("the actor parks");
+    let opening = mob
+        .handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::OpenDeclaredApply {
+            close_authority: mob.handle.command_authority.clone(),
+            reply_tx,
+        })
+        .await
+        .expect("enqueue an opening behind the parked actor");
+    drop(opening);
+    let _ = release_tx.send(());
+    let _ = parked.await;
+    let opened = mob
+        .apply(DeclaredRoster::partial([declared("after-dropped-opening")]))
+        .await;
+    assert!(
+        matches!(
+            answer(&opened, "after-dropped-opening"),
+            DeclaredEntryOutcome::Seated { .. }
+        ),
+        "{opened:?}"
+    );
+
+    // An apply dropped in its body: it waits on the role read of an unseated
+    // identity's archived session.
+    mob.apply(DeclaredRoster::partial([declared("revived")]))
+        .await;
+    mob.wake("revived").await;
+    tokio::time::timeout(STEP, mob.handle.retire(id("revived")))
+        .await
+        .expect("the retire answers")
+        .expect("the retire succeeds");
+    assert!(
+        mob.archived_record("revived").is_some(),
+        "the retirement archived the session"
+    );
+    let reads = mob.service.persisted_session_metadata_load_call_count();
+    mob.service
+        .set_persisted_session_metadata_delay_ms(3_600_000);
+    let reading = tokio::spawn({
+        let handle = mob.handle.clone();
+        async move {
+            handle
+                .apply_declared_roster(DeclaredRoster::partial([declared("revived")]))
+                .await
+        }
+    });
+    let deadline = tokio::time::Instant::now() + STEP;
+    while mob.service.persisted_session_metadata_load_call_count() == reads {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the apply never reached its role read"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    reading.abort();
+    let _ = reading.await;
+    mob.service.set_persisted_session_metadata_delay_ms(0);
+    let opened = mob
+        .apply(DeclaredRoster::partial([declared("after-dropped-body")]))
+        .await;
+    assert!(
+        matches!(
+            answer(&opened, "after-dropped-body"),
+            DeclaredEntryOutcome::Seated { .. }
+        ),
+        "{opened:?}"
+    );
 }
 
 /// Rollback of an unlisted retirement, lane-run leg: needs the published

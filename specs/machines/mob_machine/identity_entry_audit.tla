@@ -93,8 +93,8 @@ R1Bind == RecoverMemberSessionBindingFreshRunning(Id1, Rid1, Sess1, None)
 
 \* The replay of a retirement row: the identity is unseated.
 RetiredReplay(id, rid) ==
-    \/ RecoverRosterMemberRetiredRunning(id, rid, 0, FALSE, FALSE)
-    \/ RecoverRosterMemberRetiredCurrentAlreadyAbsent(id, rid, 0, FALSE, FALSE)
+    \/ RecoverRosterMemberRetiredRunning(id, rid, 0, FALSE, FALSE, TRUE, FALSE)
+    \/ RecoverRosterMemberRetiredCurrentAlreadyAbsent(id, rid, 0, FALSE, FALSE, TRUE, FALSE)
 
 \* Identity 2's spawn ladder, opened with or without entry custody.
 L2Authorize ==

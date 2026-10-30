@@ -22468,14 +22468,6 @@ impl MobActor {
                     if machine.member_placement.contains_key(&identity) {
                         return None;
                     }
-                    // A member whose host preparation is owed is left as it
-                    // is: MobMachine's member authorization answers it held
-                    // (`AuthorizeExplicitResumeMemberHeldRunning`), so
-                    // nothing of the resume takes its session over, retires
-                    // its materialization or rebuilds it.
-                    if machine.member_host_preparation_causes.contains_key(&identity) {
-                        return None;
-                    }
                     let dormant = super::boot_plan::member_is_dormant(machine, &identity);
                     let binding = machine.member_session_bindings.get(&identity)?;
                     Some(
@@ -22523,6 +22515,39 @@ impl MobActor {
             candidates.push((entry, member_ref, session_id, preparation));
         }
         Ok(candidates)
+    }
+
+    /// Whether MobMachine's member authorization of the explicit resume
+    /// answers `entry` held (`ExplicitResumeMemberHeld`: its host preparation
+    /// is owed), on `session_id`. A pure probe on a fork of the authority,
+    /// never committed: the member's own authorization runs on its rebuild.
+    fn explicit_resume_answers_held(&self, entry: &RosterEntry, session_id: &SessionId) -> bool {
+        let state = self.dsl_authority.state();
+        let Some(attempt) = state.explicit_resume_attempt.clone() else {
+            return false;
+        };
+        let mut probe = self.dsl_authority.fork();
+        mob_dsl::MobMachineMutator::apply(
+            &mut probe,
+            mob_dsl::MobMachineInput::AuthorizeExplicitResumeMember {
+                attempt,
+                agent_identity: mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
+                binding: mob_dsl::ResumeMemberBinding {
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                    fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
+                    session_id: mob_dsl::SessionId::from_domain(session_id),
+                    definition_epoch: state.definition_epoch,
+                },
+            },
+        )
+        .is_ok_and(|transition| {
+            transition.effects().iter().any(|effect| {
+                matches!(
+                    effect,
+                    mob_dsl::MobMachineEffect::ExplicitResumeMemberHeld { .. }
+                )
+            })
+        })
     }
 
     /// Whether `session_id` still has a materialization of this process: an
@@ -22594,6 +22619,12 @@ impl MobActor {
                 .member_restore_failures
                 .contains_key(&dsl_identity)
             {
+                continue;
+            }
+            // A member MobMachine's member authorization answers held (its
+            // host preparation is owed: `ExplicitResumeMemberHeld`) is left as
+            // the preparation left it: not repointed, recustomized or rebuilt.
+            if self.explicit_resume_answers_held(&entry, &bridge_session_id) {
                 continue;
             }
             if let Some(superseded_session_id) = superseded_session_id.as_ref() {
@@ -31631,9 +31662,36 @@ impl MobActor {
                     let result = self.seal_declared_roster(desired);
                     let _ = reply_tx.send(result);
                 }
-                MobCommand::OpenDeclaredApply { reply_tx } => {
-                    let result = self.open_declared_apply();
-                    let _ = reply_tx.send(result);
+                MobCommand::OpenDeclaredApply {
+                    close_authority,
+                    reply_tx,
+                } => {
+                    let result = self.open_declared_apply().map(|verdict| {
+                        if verdict == mob_dsl::DeclaredApplyOpenVerdict::Opened {
+                            super::declared_apply::DeclaredApplyOpening::Opened(
+                                super::declared_apply::DeclaredApplyLease::new(
+                                    self.command_tx.clone(),
+                                    close_authority,
+                                ),
+                            )
+                        } else {
+                            super::declared_apply::DeclaredApplyOpening::Busy
+                        }
+                    });
+                    // A call gone before its opening is answered: the fact it
+                    // opened closes at once, so the mob's next apply opens.
+                    if let Err(Ok(super::declared_apply::DeclaredApplyOpening::Opened(mut lease))) =
+                        reply_tx.send(result)
+                    {
+                        lease.disarm();
+                        if let Err(error) = self.close_declared_apply() {
+                            tracing::warn!(
+                                mob_id = %self.definition.id,
+                                %error,
+                                "closing a declared apply whose call is gone failed"
+                            );
+                        }
+                    }
                 }
                 MobCommand::CloseDeclaredApply { reply_tx } => {
                     let result = self.close_declared_apply();
@@ -31956,8 +32014,11 @@ impl MobActor {
                             Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Reset),
                         )
                         .await?;
+                        // The reset's own guards but the empty roster: the
+                        // retirement batch below empties it, and only then
+                        // does ResetToRunning commit.
                         self.probe_command_admission(
-                            mob_dsl::MobMachineInput::Reset,
+                            mob_dsl::MobMachineInput::AdmitReset,
                             MobState::Running,
                             "reset_command_admission",
                         )?;

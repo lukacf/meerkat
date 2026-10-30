@@ -46,12 +46,14 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
 // schema's own types, one definition for both instantiations of the machine.
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{RespawnRefusalReason, RotationTarget};
 // The declared apply: unseated causes, host preparation causes, declared
-// placements, verdicts, the seal's verdict and why an archived session record
-// is let go. The schema's own types, one definition for both instantiations
-// of the machine.
+// placements, verdicts, the seal's verdict, why an archived session record
+// is let go, the kind of a host's first-boot request and the verdict of an
+// apply's opening. The schema's own types, one definition for both
+// instantiations of the machine.
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
-    ArchivedSessionForgetReason, DeclaredRosterSealVerdict, EntryPlacementKind,
-    HostPreparationCause, IdentityEntryVerdict, UnseatedEntryCause,
+    ArchivedSessionForgetReason, DeclaredApplyOpenVerdict, DeclaredRosterSealVerdict,
+    EntryPlacementKind, FirstBootRequestKind, HostPreparationCause, IdentityEntryVerdict,
+    UnseatedEntryCause,
 };
 
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
@@ -9469,8 +9471,8 @@ mod tests {
             PlacedCompletionLifecycleIntentKind::Reset,
         );
         assert!(
-            MobMachineMutator::apply(&mut authority, MobMachineInput::Reset).is_err(),
-            "reset must wait for placed kickoff custody to drain"
+            MobMachineMutator::apply(&mut authority, MobMachineInput::AdmitReset).is_err(),
+            "the reset's admission must wait for placed kickoff custody to drain"
         );
         MobMachineMutator::apply(
             &mut authority,
@@ -9508,8 +9510,12 @@ mod tests {
             },
         )
         .expect("cancelled no-effect replay is idempotent");
-        MobMachineMutator::apply(&mut authority, MobMachineInput::Reset)
-            .expect("reset is admitted after certified no-effect custody closure");
+        MobMachineMutator::apply(&mut authority, MobMachineInput::AdmitReset)
+            .expect("the reset is admitted after certified no-effect custody closure");
+        assert!(
+            MobMachineMutator::apply(&mut authority, MobMachineInput::Reset).is_err(),
+            "the reset itself commits only once the placed member's retirement emptied the roster"
+        );
     }
 
     #[test]
@@ -10182,6 +10188,46 @@ mod tests {
             disposal: MemberSessionDisposal::Archived,
             preserve_machine_topology: false,
         }
+    }
+
+    /// The reset commits only on an empty roster, and its preflight admits a
+    /// mob with members: `AdmitReset` answers the reset's other guards and
+    /// changes nothing, `ResetToRunning` is refused while a member holds an
+    /// identity, and it commits once the member's retirement ended, as the
+    /// reset's retirement batch ends every member's.
+    #[test]
+    fn the_reset_preflight_admits_a_mob_with_members_and_the_reset_needs_an_empty_roster() {
+        let (mut authority, member) = dormant_member_authority("reset-member");
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Reset,
+        );
+        let before = authority.state().clone();
+        MobMachineMutator::apply(&mut authority, MobMachineInput::AdmitReset)
+            .expect("the preflight admits a reset of a mob with members");
+        assert_eq!(authority.state(), &before, "the preflight changes nothing");
+        assert!(
+            MobMachineMutator::apply(&mut authority, MobMachineInput::Reset).is_err(),
+            "the reset waits for its retirement batch to empty the roster"
+        );
+        assert_eq!(
+            authority.state(),
+            &before,
+            "a refused reset changes nothing"
+        );
+
+        MobMachineMutator::apply(
+            &mut authority,
+            retire_input(&member, Some(member.session_id.clone())),
+        )
+        .expect("the member's retirement is admitted");
+        authority
+            .apply_signal(archived_signal(&member))
+            .expect("the member's retirement ends");
+        assert!(authority.state().identity_to_runtime.is_empty());
+        MobMachineMutator::apply(&mut authority, MobMachineInput::Reset)
+            .expect("the reset commits on the empty roster");
+        assert_eq!(authority.state().lifecycle_phase, MobPhase::Running);
     }
 
     fn wake_input(identity: &AgentIdentity) -> MobMachineInput {
@@ -13541,6 +13587,73 @@ mod tests {
                 _ => None,
             })
             .expect("the declaration emits its verdict")
+    }
+
+    /// A role hold belongs to its entry: the seal that removes an unseated
+    /// entry ends its role hold with it, and so does the mob's reset, so a
+    /// member seated later under the name inherits no hold
+    /// (`role_hold_belongs_to_an_entry`).
+    #[test]
+    fn a_role_hold_ends_with_its_entry_at_the_seal_and_the_reset() {
+        let held = |authority: &mut MobMachineAuthority, identity: &AgentIdentity| {
+            assert_eq!(
+                declare(
+                    authority,
+                    identity,
+                    Declaration {
+                        profile: "lead",
+                        resume_role: Some("test"),
+                        ..Declaration::default()
+                    }
+                ),
+                IdentityEntryVerdict::RoleMigrationHeld,
+                "no migration is declared from the role the session was built under"
+            );
+            assert_eq!(
+                authority
+                    .state()
+                    .member_host_preparation_causes
+                    .get(identity),
+                Some(&HostPreparationCause::RoleMigrationUndeclared)
+            );
+        };
+        let mut authority = MobMachineAuthority::new();
+        let unlisted = AgentIdentity::from("unlisted-held-entry");
+        held(&mut authority, &unlisted);
+        assert_eq!(
+            seal(&mut authority, std::collections::BTreeSet::new()),
+            DeclaredRosterSealVerdict::Sealed
+        );
+        assert!(
+            !authority
+                .state()
+                .identity_entry_origins
+                .contains_key(&unlisted)
+        );
+        assert!(
+            !authority
+                .state()
+                .member_host_preparation_causes
+                .contains_key(&unlisted),
+            "the seal ends the role hold with the entry"
+        );
+
+        let reset = AgentIdentity::from("reset-held-entry");
+        held(&mut authority, &reset);
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Reset,
+        );
+        MobMachineMutator::apply(&mut authority, MobMachineInput::Reset)
+            .expect("the reset of a mob with no member");
+        assert!(authority.state().identity_entry_origins.is_empty());
+        assert!(
+            !authority
+                .state()
+                .member_host_preparation_causes
+                .contains_key(&reset),
+            "the reset ends the role hold with every entry"
+        );
     }
 
     /// The seal of a complete roster listing `desired`.

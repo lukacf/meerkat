@@ -8,8 +8,8 @@
 //! session when it has one), a same-session restamp
 //! ([`super::MobHandle::respawn_member`]), a rotation
 //! ([`super::MobHandle::rotate_member`]) or the hold of an undeclared role
-//! move (its wakes refused, a Live member's run starts held until it is
-//! released when idle). A complete roster is then sealed
+//! move (its wakes refused, a Live local member's run starts held until it
+//! is released when idle). A complete roster is then sealed
 //! (`SealDeclaredRoster`): every Declared entry it does not list is unlisted,
 //! and its member is retired, the end of the retirement ending the entry.
 //!
@@ -232,9 +232,12 @@ pub enum DeclaredEntryOutcome {
     /// The roster moves the member from role `from` to role `to` without a
     /// declared migration: the member is held until an apply declares the
     /// move or restores the role. Every wake of it is refused, and a Live
-    /// member starts no new run (its run starts are held,
+    /// local member starts no new run (its run starts are held,
     /// [`crate::HostRunStartHoldReason::HostPreparation`]): its run in
-    /// flight finishes, and it is released when idle. The hold ends in the
+    /// flight finishes, and it is released when idle. A placed member's runs
+    /// start on its member host, which this mob's run-start holds do not
+    /// reach: a Live placed member keeps serving under its previous role
+    /// until an apply ends the hold. The hold ends in the
     /// step that commits the declared role (the restamp or rotation of a
     /// later apply), not at that apply's verdict. An identity no member holds
     /// whose seat would resume a session last built under `from` is not
@@ -392,28 +395,78 @@ fn failure_outcome(error: MobError) -> DeclaredEntryOutcome {
     }
 }
 
-/// The open declared apply of one [`super::MobHandle::apply_declared_roster`]
-/// call: closed when the call ends, and, when the call is dropped before it
-/// ends, by a task the drop spawns, so the mob's next apply is never refused
-/// for a call that is gone.
-struct DeclaredApplyOpen {
-    handle: Option<super::MobHandle>,
+/// MobMachine's answer to the opening of a declared apply
+/// (`OpenDeclaredApply`).
+pub(in crate::runtime) enum DeclaredApplyOpening {
+    /// The apply is open, under the lease of its open fact.
+    Opened(DeclaredApplyLease),
+    /// Another apply of the mob is open: refused, retryable.
+    Busy,
 }
 
-impl DeclaredApplyOpen {
-    fn arm(handle: super::MobHandle) -> Self {
+/// The lease of an open declared apply's fact (MobMachine's
+/// `declared_apply_open`), made by the actor in the step that opened it and
+/// owned by the one call that opened it. Closing it, or dropping it anywhere
+/// before (an opening answer that never reached its call, a call dropped in
+/// its body or while it closes), closes the fact, so the mob's next apply is
+/// never refused for a call that is gone. It stays armed until its close
+/// command is on the actor's channel, never shorter.
+pub(in crate::runtime) struct DeclaredApplyLease {
+    close: Option<(
+        crate::tokio::sync::mpsc::Sender<super::scope_gate::RoutedMobCommand>,
+        crate::control_policy::CommandAuthority,
+    )>,
+}
+
+impl DeclaredApplyLease {
+    /// The lease of the fact the actor just opened: its close is sent on
+    /// `command_tx` under `authority`, the opening call's own.
+    pub(in crate::runtime) fn new(
+        command_tx: crate::tokio::sync::mpsc::Sender<super::scope_gate::RoutedMobCommand>,
+        authority: crate::control_policy::CommandAuthority,
+    ) -> Self {
         Self {
-            handle: Some(handle),
+            close: Some((command_tx, authority)),
         }
     }
 
+    /// Give the close up: the actor closed the fact itself.
+    pub(in crate::runtime) fn disarm(&mut self) {
+        self.close = None;
+    }
+
+    fn close_command(
+        authority: crate::control_policy::CommandAuthority,
+    ) -> (
+        super::scope_gate::RoutedMobCommand,
+        crate::tokio::sync::oneshot::Receiver<Result<(), MobError>>,
+    ) {
+        let (reply_tx, reply_rx) = crate::tokio::sync::oneshot::channel();
+        (
+            super::scope_gate::RoutedMobCommand {
+                authority,
+                cmd: MobCommand::CloseDeclaredApply { reply_tx },
+            },
+            reply_rx,
+        )
+    }
+
+    /// Close the open fact, and wait for the actor's answer. The lease is
+    /// disarmed only once the close command is on the actor's channel, so a
+    /// call dropped while it waits for room still closes.
     async fn close(mut self) {
-        let Some(handle) = self.handle.take() else {
+        let Some((command_tx, authority)) = self.close.clone() else {
             return;
         };
-        if let Err(error) = handle.close_declared_apply().await {
+        let (command, reply_rx) = Self::close_command(authority);
+        let sent = command_tx.send(command).await;
+        self.close = None;
+        // An actor that is gone took its open fact with it.
+        if sent.is_err() {
+            return;
+        }
+        if let Ok(Err(error)) = reply_rx.await {
             tracing::warn!(
-                mob_id = %handle.mob_id(),
                 %error,
                 "closing the declared apply failed; the mob's next apply is refused until it closes"
             );
@@ -421,19 +474,19 @@ impl DeclaredApplyOpen {
     }
 }
 
-impl Drop for DeclaredApplyOpen {
+impl Drop for DeclaredApplyLease {
     fn drop(&mut self) {
-        let Some(handle) = self.handle.take() else {
+        let Some((command_tx, authority)) = self.close.take() else {
             return;
         };
+        let (command, _reply_rx) = Self::close_command(authority);
+        let command = match command_tx.try_send(command) {
+            Ok(()) | Err(crate::tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+            Err(crate::tokio::sync::mpsc::error::TrySendError::Full(command)) => command,
+        };
+        // A full channel: a task sends the close once there is room.
         let close = async move {
-            if let Err(error) = handle.close_declared_apply().await {
-                tracing::warn!(
-                    mob_id = %handle.mob_id(),
-                    %error,
-                    "closing a dropped declared apply failed"
-                );
-            }
+            let _ = command_tx.send(command).await;
         };
         // The browser runtime has one local executor and no runtime handle.
         #[cfg(target_arch = "wasm32")]
@@ -519,10 +572,17 @@ impl super::MobHandle {
     ///   for the member to be idle: a busy member is deferred.
     /// - A role change with no migration declared is held
     ///   ([`crate::HostPreparationCause::RoleMigrationUndeclared`]): every
-    ///   wake of the member is refused, and a Live member's run starts are
-    ///   held ([`crate::HostRunStartHoldReason::HostPreparation`]), so its
-    ///   run in flight finishes, never preempted, no new run starts under its
-    ///   previous role, and the mob releases it when idle. The explicit
+    ///   wake of the member is refused, and a Live local member's run starts
+    ///   are held ([`crate::HostRunStartHoldReason::HostPreparation`]), so
+    ///   its run in flight finishes, never preempted, no new run starts under
+    ///   its previous role, and the mob releases it when idle. A placed
+    ///   member's runs start on its member host, which these holds do not
+    ///   reach: a Live placed member keeps serving under its previous role
+    ///   until an apply ends the hold. On a session service without the
+    ///   retained metadata seam, an archived session's role cannot be read,
+    ///   so a revival on it is refused typed (`SessionError::Unsupported`);
+    ///   the host's `Fresh` first-boot request starts the identity's fresh
+    ///   life instead. The explicit
     ///   resume leaves it alone. An apply that restores the role ends the
     ///   hold at its verdict; one that declares the move ends it in the step
     ///   that commits the new role, so a deferred or refused restamp keeps it.
@@ -569,30 +629,25 @@ impl super::MobHandle {
         .await?;
         // One apply of the mob at a time (MobMachine's open fact): a second
         // one while this one runs is refused, typed and retryable. The open
-        // fact is closed whatever the outcome, and when this call is dropped.
-        let verdict = self
-            .send_actor_command(|reply_tx| MobCommand::OpenDeclaredApply { reply_tx })
+        // fact is closed whatever the outcome, and when this call is dropped
+        // at any point (the lease the actor answers with).
+        let opening = self
+            .send_actor_command(|reply_tx| MobCommand::OpenDeclaredApply {
+                close_authority: self.command_authority.clone(),
+                reply_tx,
+            })
             .await??;
-        match verdict {
-            mob_dsl::DeclaredApplyOpenVerdict::Opened => {}
-            mob_dsl::DeclaredApplyOpenVerdict::Busy => {
+        let lease = match opening {
+            DeclaredApplyOpening::Opened(lease) => lease,
+            DeclaredApplyOpening::Busy => {
                 return Err(MobError::LifecycleOperationPending {
                     intent: "apply a declared roster while another apply of this mob runs"
                         .to_string(),
                 });
             }
-            // The actor answers a mob that is not running with its own
-            // invalid transition.
-            mob_dsl::DeclaredApplyOpenVerdict::MobNotRunning => {
-                return Err(MobError::Internal(
-                    "the opening of a declared apply answered a mob that is not running"
-                        .to_string(),
-                ));
-            }
-        }
-        let open = DeclaredApplyOpen::arm(self.clone());
+        };
         let outcome = self.apply_open_declared_roster(roster).await;
-        open.close().await;
+        lease.close().await;
         outcome
     }
 
@@ -880,8 +935,10 @@ impl super::MobHandle {
     /// The role `session_id` was last built under, as its owner records it
     /// (archived sessions included). `None` for a session no build created,
     /// or one that records no role. A service without the retained metadata
-    /// seam answers through the ordinary metadata read, which sees no
-    /// archived session.
+    /// seam is read through its ordinary metadata read, which sees only a
+    /// session that is not archived: a session it does not see is refused
+    /// typed (`SessionError::Unsupported`), never read as one with no role,
+    /// unless MobMachine records that no build created it.
     async fn resume_session_role(
         &self,
         session_id: &SessionId,
@@ -892,11 +949,26 @@ impl super::MobHandle {
             .await
         {
             Ok(metadata) => metadata,
-            Err(meerkat_core::service::SessionError::Unsupported(_)) => self
-                .session_service
-                .load_persisted_session_metadata(session_id)
-                .await
-                .map_err(MobError::SessionError)?,
+            Err(meerkat_core::service::SessionError::Unsupported(reason)) => {
+                let metadata = self
+                    .session_service
+                    .load_persisted_session_metadata(session_id)
+                    .await
+                    .map_err(MobError::SessionError)?;
+                let never_built = super::boot_plan::domain_seat_session_never_born(
+                    &self.machine_state_watch_rx.borrow(),
+                    session_id,
+                );
+                if metadata.is_none() && !never_built {
+                    return Err(MobError::SessionError(
+                        meerkat_core::service::SessionError::Unsupported(format!(
+                            "the role session {session_id} was last built under cannot be \
+                             read without the retained metadata seam: {reason}"
+                        )),
+                    ));
+                }
+                metadata
+            }
             Err(error) => return Err(MobError::SessionError(error)),
         };
         Ok(metadata
@@ -1181,11 +1253,6 @@ impl super::MobHandle {
     }
 
     /// Close the open declared apply (`CloseDeclaredApply`).
-    async fn close_declared_apply(&self) -> Result<(), MobError> {
-        self.send_actor_command(|reply_tx| MobCommand::CloseDeclaredApply { reply_tx })
-            .await?
-    }
-
     /// A seated member's first-boot `Fresh` request: its rotation onto a
     /// fresh session under the declared spec, once it is idle.
     async fn fresh_life_of_seated(&self, entry: &DeclaredEntry) -> DeclaredEntryOutcome {

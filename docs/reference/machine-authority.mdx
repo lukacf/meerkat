@@ -164,12 +164,13 @@ when it carries the request out. Its facts are the unseated entries with
 their typed cause (`identity_entry_unseated`: `SeatOwed`,
 `HostedOnFirstUse`, `HeldCreation`), the role hold
 (`member_host_preparation_causes`, cause `RoleMigrationUndeclared`, which
-refuses every wake as a first-boot preparation does, holds a Live member's
-run starts through `MeerkatMachine`'s `HostPreparation` hold reason and
-refuses the explicit resume of the member, and which ends at a verdict that
-restores the role or in the step that commits the declared one, never at
-the verdict that declares the move) and the archived session of an entry's
-retired member (`identity_entry_archived_sessions`). None of them has a
+refuses every wake as a first-boot preparation does, holds a Live local
+member's run starts through `MeerkatMachine`'s `HostPreparation` hold reason
+and refuses the explicit resume of the member, and which ends at a verdict
+that restores the role or in the step that commits the declared one, never
+at the verdict that declares the move, and with its entry wherever the
+entry ends, `role_hold_belongs_to_an_entry`) and the archived session of an
+entry's retired member (`identity_entry_archived_sessions`). None of them has a
 journal row of its own: the replay derives an entry's unseated standing and
 its archived session from its member's retirement rows (the terminal row
 records whether the retirement archived the session, `session_archived`, and
@@ -196,12 +197,17 @@ entry hosted on its first use
 (`placed_entry_custody_is_hosted_on_first_use`). Applies are serialized by
 the apply-open fact (`declared_apply_open`): `OpenDeclaredApply` answers
 `Opened`, or `Busy` while an apply is open, and `CloseDeclaredApply` closes
-it in every phase. The audit's apply runs (`apply`, `legacy`, `roles`,
-`held` and `placed`) drive the declare arms, the seal, the legacy adoption
-before an unlisted retirement, the dormant seat with and without an
-archived record, the retirement to its terminals, the role hold against the
-wakes of every cause, held creation, and a placed identity's custody,
-remote commit, retirement and replay, with witnesses and mutants.
+it in every phase. A mob reset ends every identity entry, and it commits
+only on an empty roster (`ResetToRunning`'s `roster_empty` guard): its
+preflight, `AdmitReset`, answers the reset's other guards, changing nothing,
+before the retirement batch that empties the roster. The audit's apply runs
+(`apply`, `legacy`, `resume`, `roles`, `hold`, `held` and `placed`) drive
+the declare arms, the seal, the legacy adoption before an unlisted
+retirement, the dormant seat with and without an archived record, the
+retirement to its terminals, the reset over an emptied roster, the role
+hold against the wakes of every cause and the explicit resume, held
+creation, and a placed identity's custody, remote commit, retirement and
+replay, with witnesses and mutants.
 
 Member rotations are `MobMachine` facts. A pending rotation records its
 identity's next session (`member_rotation_session_ids`), the endpoint it

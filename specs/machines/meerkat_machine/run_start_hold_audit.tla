@@ -3,7 +3,9 @@
 \*
 \* A runtime's run starts are held while ANY reason holds them
 \* (`run_start_holds`, a set of RunStartHoldReason: a mob Stop's MobStop, a
-\* host's ToolsNotPublished), and each holder releases only its own reason.
+\* host's ToolsNotPublished, and the HostPreparation of a mob member whose
+\* host preparation is owed, which its registration stages and only its mob
+\* releases), and each holder releases only its own reason.
 \* While held, an input admitted earlier stays queued and runs after the last
 \* release, instead of starting a run. The holds must stop every arm that
 \* establishes a new run (Prepare*, DrainQueued* and the direct
@@ -38,10 +40,16 @@
 \*     the reasons already held.
 \*
 \* AuditWitness* operators are reachability goals the runner checks as
-\* expected violations, so the properties are not vacuous. The runner's
-\* --mutants mode also checks that three seeded model defects are refused
+\* expected violations, so the properties are not vacuous. A second run
+\* (ReasonsSpec) registers, holds and releases every reason with no input and
+\* no run, under AuditRegistrationAppliesHoldsEvery and
+\* AuditHoldAndReleaseOwnReasonOnlyEvery; the main run explores MobStop and
+\* ToolsNotPublished only, the reasons being alike in every other arm. The
+\* runner's
+\* --mutants mode also checks that five seeded model defects are refused
 \* (a registration that ignores its holds, gates that test only MobStop, a
-\* release that clears every reason).
+\* release that clears every reason, a registration that ignores the
+\* HostPreparation hold, and a host's release that ends it).
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* run_start_hold_audit.sh. Run a deeper bound by hand with:
@@ -79,7 +87,13 @@ auditVars == <<audit_registered, audit_hold_taken, audit_refused,
 AuditSession == "sessionid_1"
 AuditInput == "input_1"
 AuditRuns == {"runid_1", "runid_2"}
-AuditReasons == RunStartHoldReasonValues
+\* The main run explores two reasons: every gated arm and every hold and
+\* release arm treats the reasons alike (a hold set, a reason parameter), and
+\* only the registration stages each reason with code of its own, which the
+\* reasons run checks for every reason. Exploring the third reason here
+\* would multiply the space about threefold for no arm of its own.
+AuditReasons == {"MobStop", "ToolsNotPublished"}
+AllReasons == RunStartHoldReasonValues
 AuditPrefixLength == 4
 
 FreshRegister(init) == RegisterSessionIdle(AuditSession, None, init)
@@ -273,6 +287,33 @@ AuditSpec == AuditInit /\ [][AuditNext]_<<vars, auditVars>>
 
 AuditStateConstraint == model_step_count <= AuditMaxSteps
 
+\* The reasons run: one session initialized, then registered with every
+\* subset of every reason (fresh, again, or resuming once its executor
+\* exited), and every reason held and released, with no input and no run.
+ReasonsNext ==
+    \/ model_step_count = 0 /\ Initialize /\ UNCHANGED auditVars
+    \/ model_step_count >= 1
+       /\ \/ \E init \in SUBSET AllReasons : FreshRegister(init) \/ UnionRegister(init)
+          \/ \E r \in AllReasons : HoldFor(r) \/ ReleaseFor(r)
+          \/ RuntimeExecutorExitedFromIdle
+       /\ UNCHANGED auditVars
+
+ReasonsSpec == AuditInit /\ [][ReasonsNext]_<<vars, auditVars>>
+
+\* The two holds properties over every reason: a registration stages
+\* exactly the reasons it carries (the HostPreparation of a mob member
+\* whose host preparation is owed among them), and each holder, the host
+\* with its ToolsNotPublished among them, releases only its own reason.
+AuditHoldAndReleaseOwnReasonOnlyEvery ==
+    [][\A r \in AllReasons :
+         /\ HoldFor(r) => run_start_holds' = run_start_holds \cup {r}
+         /\ ReleaseFor(r) => run_start_holds' = run_start_holds \ {r}]_<<vars, auditVars>>
+
+AuditRegistrationAppliesHoldsEvery ==
+    [][\A init \in SUBSET AllReasons :
+         /\ FreshRegister(init) => run_start_holds' = init
+         /\ UnionRegister(init) => run_start_holds' = run_start_holds \cup init]_<<vars, auditVars>>
+
 AuditNoNewRunWhileHeld ==
     [][~(run_start_holds # {} /\ current_run_id' # None /\ current_run_id' # current_run_id)]_<<vars, auditVars>>
 
@@ -305,8 +346,12 @@ AuditWitnessRegisteredHeldRefused == audit_refused /\ ~audit_hold_taken /\ audit
 AuditWitnessStillHeldRefused == audit_refused_after_partial /\ QueuedInput
 \* A hold recorded while Stopped survives the resume: a start is refused.
 AuditWitnessStoppedHoldSurvivesResume == audit_refused_after_resume
+\* The reasons run: a mob member's HostPreparation, staged by its
+\* registration, holds beside the host's ToolsNotPublished.
+AuditWitnessHostPreparationHeld == run_start_holds = {"ToolsNotPublished", "HostPreparation"}
 
 NotAuditWitnessRefused == ~AuditWitnessRefused
+NotAuditWitnessHostPreparationHeld == ~AuditWitnessHostPreparationHeld
 NotAuditWitnessReleasedRuns == ~AuditWitnessReleasedRuns
 NotAuditWitnessRunFinishesThenRefused == ~AuditWitnessRunFinishesThenRefused
 NotAuditWitnessRetiredDrainRefused == ~AuditWitnessRetiredDrainRefused

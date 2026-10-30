@@ -1251,11 +1251,12 @@ add_guard("AuthorizeExplicitResumeMemberLiveRunning", "(explicit_resume_readines
   mutate rotate-same redrive_releases_kept_session \
     "Error: (Invariant same_session_rotation_keeps_its_binding|Action property AuditSameSessionNeverUnseats) is violated" \
     'drop_guard("RetireRunningReleasingArchiveOnly", "\"SameSession\"")' "$@"
-  # A same-session terminal that ends a host's preparation mark: the
+  # A same-session terminal that ends a host's preparation mark (the
+  # terminal ends only a role hold, when it commits another role): the
   # successor could wake before the host's seat step.
   mutate rotate-same same_session_commit_ends_host_mark \
     "Error: Action property AuditSameSessionTerminalKeepsHostMark is violated" \
-    'rewrite_frame("CommitMemberRotationSameSessionRunning", {"member_host_preparation_causes": "MapRemove(member_host_preparation_causes, agent_identity)"})' "$@"
+    'replace_in_update("CommitMemberRotationSameSessionRunning", "member_host_preparation_causes", "ELSE member_host_preparation_causes", "ELSE MapRemove(member_host_preparation_causes, agent_identity)")' "$@"
   # The same releasing re-drive in a stopped mob (the guard's Stopped copy).
   mutate rotate-same stopped_redrive_releases_kept_session \
     "Error: (Invariant same_session_rotation_keeps_its_binding|Action property AuditSameSessionNeverUnseats) is violated" \

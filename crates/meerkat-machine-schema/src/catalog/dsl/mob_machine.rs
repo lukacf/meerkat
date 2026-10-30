@@ -2042,6 +2042,9 @@ macro_rules! mob_catalog_machine_dsl {
             OpenDeclaredApply,
             // The open declared apply closes, whatever its outcome.
             CloseDeclaredApply,
+            // The reset's preflight (MobHandle::reset probes it before its
+            // retirement batch empties the roster): a pure verdict.
+            AdmitReset,
         }
 
         surface_only [
@@ -4696,6 +4699,17 @@ macro_rules! mob_catalog_machine_dsl {
         invariant archived_session_record_is_unseated {
             for_all(id in self.identity_entry_archived_sessions.keys(),
                 self.identity_to_runtime.contains_key(id) == false)
+        }
+
+        // A role hold (RoleMigrationUndeclared) belongs to an identity entry:
+        // every step that ends an entry ends its role hold (the end of its
+        // member's retirement, live, replayed or in the destroy's ladder, the
+        // seal that removes an unseated entry, the reset and the destroy), so
+        // no later member of the name inherits it.
+        invariant role_hold_belongs_to_an_entry {
+            for_all(id in self.member_host_preparation_causes.keys(),
+                self.member_host_preparation_causes.get_cloned(id) != Some(HostPreparationCause::RoleMigrationUndeclared)
+                || self.identity_entry_origins.contains_key(id) == true)
         }
 
         // A placed spawn ladder acts for an identity entry only when the host
@@ -9991,6 +10005,10 @@ macro_rules! mob_catalog_machine_dsl {
                     if self.identity_entry_retiring.contains(agent_identity) == true {
                         self.identity_entry_origins.remove(agent_identity);
                         self.identity_entry_retiring.remove(agent_identity);
+                        // The entry's role hold ends with it, as at the live end.
+                        if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                            self.member_host_preparation_causes.remove(agent_identity);
+                        }
                     } else {
                         if self.member_placement.contains_key(agent_identity) == true || hosted_incarnation == true {
                             self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
@@ -10135,6 +10153,10 @@ macro_rules! mob_catalog_machine_dsl {
                     if self.identity_entry_retiring.contains(agent_identity) == true {
                         self.identity_entry_origins.remove(agent_identity);
                         self.identity_entry_retiring.remove(agent_identity);
+                        // The entry's role hold ends with it, as at the live end.
+                        if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                            self.member_host_preparation_causes.remove(agent_identity);
+                        }
                     } else {
                         if self.member_placement.contains_key(agent_identity) == true || hosted_incarnation == true {
                             self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
@@ -14338,6 +14360,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
                 self.identity_entry_retiring.remove(agent_identity);
+                // The entry's role hold ends with it.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -14422,6 +14448,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
                 self.identity_entry_retiring.remove(agent_identity);
+                // The entry's role hold ends with it.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -14500,6 +14530,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
                 self.identity_entry_retiring.remove(agent_identity);
+                // The entry's role hold ends with it.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -14577,6 +14611,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
                 self.identity_entry_retiring.remove(agent_identity);
+                // The entry's role hold ends with it.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -14670,6 +14708,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
                 self.identity_entry_retiring.remove(agent_identity);
+                // The entry's role hold ends with it.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -14767,6 +14809,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
                 self.identity_entry_retiring.remove(agent_identity);
+                // The entry's role hold ends with it.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 // The member leaves: its owed edge repairs go (the kept
@@ -15735,6 +15781,10 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.lifecycle_phase == Phase::Stopped
                 || self.lifecycle_phase == Phase::Completed
             }
+            // No member before the reset is a member after it: the reset
+            // commits only once its retirement batch emptied the roster. Its
+            // preflight (AdmitReset) admits a mob with members.
+            guard "roster_empty" { self.identity_to_runtime == EmptyMap }
             guard "remote_turn_pending_drained" { self.pending_remote_turn_outcomes == EmptySet }
             guard "remote_turn_committed_drained" { self.committed_remote_turn_outcomes == EmptySet }
             guard "remote_turn_resolved_drained" { self.resolved_remote_turn_outcomes == EmptySet }
@@ -15762,6 +15812,13 @@ macro_rules! mob_catalog_machine_dsl {
                 self.owed_external_edge_repairs = EmptySet;
                 self.member_seat_session_unborn = EmptySet;
                 self.unborn_seat_sessions = EmptySet;
+                // The role hold of every entry ends with it (a first-boot
+                // preparation stays the host's).
+                for id in self.identity_entry_origins.keys() {
+                    if self.member_host_preparation_causes.get_cloned(id) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                        self.member_host_preparation_causes.remove(id);
+                    }
+                }
                 // A mob reset ends every identity entry and its standing (no
                 // member before it is a member after it): the next declared
                 // apply declares the roster afresh, on fresh sessions. A spawn
@@ -29904,6 +29961,11 @@ macro_rules! mob_catalog_machine_dsl {
                             if desired.contains(id) == false && self.spawn_exec_phase.contains_key(id) == false {
                                 self.identity_entry_origins.remove(id);
                                 self.identity_entry_unseated.remove(id);
+                                // Its role hold ends with it: a member later
+                                // seated under the name inherits none.
+                                if self.member_host_preparation_causes.get_cloned(id) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                                    self.member_host_preparation_causes.remove(id);
+                                }
                             }
                         }
                     }
@@ -30023,6 +30085,39 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.declared_apply_open = false;
             }
+            to Running
+        }
+
+        // The reset's preflight: the shell probes it before the retirement
+        // batch that empties the roster, which ResetToRunning then requires.
+        // Admitted exactly when every guard of ResetToRunning but the empty
+        // roster holds, in each phase a reset leaves; a pure verdict that
+        // changes nothing. No arm answers a destroyed mob or a reset that
+        // must wait (a resume attempt, adaptive work, remote or placed
+        // custody, no reset intent): the shell answers the reset an invalid
+        // transition. Appended after every published transition.
+        transition AdmitReset {
+            per_phase [Running, Stopped, Completed]
+            on input AdmitReset
+            guard "explicit_resume_settled" { self.explicit_resume_attempt == None }
+            guard "adaptive_lifecycle_drained" {
+                mob_machine_adaptive_lifecycle_drained(
+                    self.adaptive_active_run,
+                    self.adaptive_active_layer,
+                    self.adaptive_active_members,
+                    self.adaptive_layer_phase,
+                    self.adaptive_layer_disposition)
+            }
+            guard "remote_turn_pending_drained" { self.pending_remote_turn_outcomes == EmptySet }
+            guard "remote_turn_committed_drained" { self.committed_remote_turn_outcomes == EmptySet }
+            guard "remote_turn_resolved_drained" { self.resolved_remote_turn_outcomes == EmptySet }
+            guard "placed_completion_pending_drained" { self.pending_placed_completion_outcomes == EmptySet }
+            guard "placed_completion_cancel_requested_drained" { self.cancel_requested_placed_completion_outcomes == EmptySet }
+            guard "placed_completion_resolved_drained" { self.resolved_placed_completion_outcomes == EmptySet }
+            guard "placed_completion_reset_intent" { self.placed_completion_lifecycle_intent == Some(PlacedCompletionLifecycleIntentKind::Reset) }
+            guard "placed_kickoff_pending_drained" { self.pending_placed_kickoff_outcomes == EmptySet }
+            guard "placed_kickoff_resolved_drained" { self.resolved_placed_kickoff_outcomes == EmptySet }
+            update {}
             to Running
         }
 

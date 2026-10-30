@@ -4158,11 +4158,17 @@ mod tests {
         let tools: Arc<[Arc<ToolDef>]> = ["read_file", "shell", "shell_jobs"]
             .into_iter()
             .map(|name| {
-                Arc::new(ToolDef::new(
-                    name,
-                    format!("test tool {name}"),
-                    serde_json::json!({ "type": "object" }),
-                ))
+                Arc::new(ToolDef {
+                    audience: Default::default(),
+                    name: name.into(),
+                    description: format!("test tool {name}"),
+                    input_schema: serde_json::json!({ "type": "object" }),
+                    provenance: Some(crate::types::ToolProvenance {
+                        kind: crate::types::ToolSourceKind::Callback,
+                        source_id: "owner-a".into(),
+                        artifact: None,
+                    }),
+                })
             })
             .collect();
         let projection = crate::SessionToolVisibilityState {

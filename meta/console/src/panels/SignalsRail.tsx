@@ -4,6 +4,14 @@ import { describeFailure } from "../lib/failure-summary";
 import { memberKickoffNotice, memberKickoffPhaseLabel, type MemberKickoffNotice } from "@console-core";
 import type { ConsoleFrame, ConsoleRailFilterPresetConfig } from "../types";
 import { countRender } from "../lib/render-counts";
+// Pure kit helpers only: this rail's node test bundle cannot resolve React
+// from the kit package, so it uses the kit's CSS classes in its own markup.
+import {
+  EMPTY_AGENT_DIRECTORY,
+  stripAgentKeyPrefix,
+  type AgentDirectory,
+} from "../../../packages/console-components/src/panel-kit/agents";
+import { formatAbsoluteTime, formatRelativeTime, humanizeEnum } from "../../../packages/console-components/src/panel-kit/format";
 
 interface SignalsRailProps {
   frames: ConsoleFrame[];
@@ -12,6 +20,9 @@ interface SignalsRailProps {
   activePresetId?: string;
   emptyText?: string;
   watchedIdentities?: Set<string>;
+  /** Resolves agent keys to display names ("Support Triage replied"). Without
+   * it, or for agents it does not know, keys are prettified. */
+  agentDirectory?: AgentDirectory;
   onPresetChange?: (presetId: string) => void;
   onSelect?: (frame: ConsoleFrame) => void;
 }
@@ -25,6 +36,7 @@ interface Signal {
   detail: string;
   agent: string;
   at: string;
+  atMs: number;
   raw: ConsoleFrame;
 }
 
@@ -35,6 +47,7 @@ interface SignalGroup {
   detail: string;
   agent: string;
   at: string;
+  atMs: number;
   items: Signal[];
 }
 
@@ -94,13 +107,26 @@ function truncate(value: string, max = 110): string {
   return `${normalized.slice(0, Math.max(0, max - 1)).trimEnd()}...`;
 }
 
-function displayName(value: string): string {
-  if (!value || value === "_system") return "System";
+/** A key read as words: "support-triage" reads "Support Triage". */
+function prettifyKey(value: string): string {
   return value
     .split(/[-_\s]+/)
     .filter(Boolean)
     .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
     .join(" ");
+}
+
+type NameResolver = (value: string) => string;
+
+/** Names agents the way the rail shows them: the directory's display name
+ * when it knows the agent, else the key without its kind prefix, prettified,
+ * and "System" for console events. */
+export function signalNameResolver(directory: AgentDirectory = EMPTY_AGENT_DIRECTORY): NameResolver {
+  return (value) => {
+    if (!value || value === "_system") return "System";
+    const label = directory.lookup(value)?.label?.trim();
+    return label || prettifyKey(stripAgentKeyPrefix(value));
+  };
 }
 
 function isMeaningfulReply(value: string): boolean {
@@ -224,7 +250,7 @@ function severityOf(frame: ConsoleFrame): Severity {
   return "info";
 }
 
-function signalFromFrame(frame: ConsoleFrame): Signal | null {
+function signalFromFrame(frame: ConsoleFrame, displayName: NameResolver): Signal | null {
   const data = recordOf(frame.data);
   const severity = severityOf(frame);
   const base = {
@@ -232,13 +258,14 @@ function signalFromFrame(frame: ConsoleFrame): Signal | null {
     severity,
     agent: agentFor(frame),
     at: timeFor(frame.timestampMs),
+    atMs: frame.timestampMs || 0,
     raw: frame,
   };
 
   if (severity === "critical") {
     return {
       ...base,
-      label: frame.event === "interaction_failed" ? "Agent turn failed" : frame.event.replace(/_/g, " "),
+      label: frame.event === "interaction_failed" ? "Agent turn failed" : humanizeEnum(frame.event),
       detail: truncate(
         describeFailure(data, "")
           || textFromValue(data.error ?? data.reason ?? data.message)
@@ -322,13 +349,15 @@ function signalFromFrame(frame: ConsoleFrame): Signal | null {
     case "gating_decision":
       return {
         ...base,
-        label: `Gate ${String(data.decision || "decision")}`,
-        detail: truncate(textFromValue(data.reason) || "Gating decision recorded"),
+        label: approvalLabel(String(data.decision || "")),
+        detail: truncate(textFromValue(data.reason) || "Approval decision recorded"),
       };
     case "member_retired":
       return { ...base, label: "Member retired", detail: truncate(textFromValue(data.reason) || "Lifecycle change") };
-    case "state_changed":
-      return { ...base, label: `State -> ${String(data.state || data.new_state || "changed")}`, detail: base.agent };
+    case "state_changed": {
+      const state = String(data.state || data.new_state || "");
+      return { ...base, label: "State changed", detail: state ? `Now ${humanizeEnum(state).toLowerCase()}` : "Lifecycle change" };
+    }
     case "route_changed":
       return { ...base, label: "Route changed", detail: truncate(textFromValue(data.reason) || "Routing updated") };
     default:
@@ -428,6 +457,7 @@ function groupSignals(signals: Signal[]): SignalGroup[] {
       existing.detail = detailForGroup(existing.items);
       existing.agent = existing.items[0]?.agent || signal.agent;
       existing.at = existing.items[0]?.at || signal.at;
+      existing.atMs = existing.items[0]?.atMs || signal.atMs;
       continue;
     }
     const group = {
@@ -437,6 +467,7 @@ function groupSignals(signals: Signal[]): SignalGroup[] {
       detail: detailForGroup([signal]),
       agent: signal.agent,
       at: signal.at,
+      atMs: signal.atMs,
       items: [signal],
     };
     byId.set(key, group);
@@ -462,20 +493,29 @@ function detailForGroup(items: Signal[]): string {
   return newestReply?.detail || userRequest?.detail || items[0]?.detail || "";
 }
 
+/** Compact relative time, fixed when the groups are built: the rail does not
+ * tick, so typing elsewhere never re-renders it. */
 function timeFor(tsMs?: number): string {
-  if (!tsMs) return "--";
-  const diff = Date.now() - tsMs;
-  if (diff < 60_000) return `${Math.max(1, Math.floor(diff / 1000))}s`;
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`;
-  return `${Math.floor(diff / 3_600_000)}h`;
+  return formatRelativeTime(tsMs);
 }
 
-export function buildSignalGroupsForTest(frames: ConsoleFrame[]): SignalGroup[] {
+/** Approval decisions in words: "Approval requested", "Approved". */
+function approvalLabel(decision: string): string {
+  const word = decision.trim().toLowerCase();
+  if (word === "requested" || word === "pending") return "Approval requested";
+  if (word === "approve" || word === "approved" || word === "auto_approved") return "Approved";
+  if (word === "reject" || word === "rejected" || word === "denied") return "Approval refused";
+  if (word === "escalate" || word === "escalated") return "Approval escalated";
+  return word ? `Approval ${humanizeEnum(word).toLowerCase()}` : "Approval decision";
+}
+
+export function buildSignalGroupsForTest(frames: ConsoleFrame[], directory: AgentDirectory = EMPTY_AGENT_DIRECTORY): SignalGroup[] {
+  const displayName = signalNameResolver(directory);
   const seen = new Set<string>();
   const seenSemantic = new Set<string>();
   const next: Signal[] = [];
   for (const frame of frames.slice(0, 260)) {
-    const signal = signalFromFrame(frame);
+    const signal = signalFromFrame(frame, displayName);
     if (!signal) continue;
     if (seen.has(signal.id)) continue;
     seen.add(signal.id);
@@ -498,6 +538,7 @@ export const SignalsRail = React.memo(function SignalsRail({
   activePresetId,
   emptyText,
   watchedIdentities,
+  agentDirectory = EMPTY_AGENT_DIRECTORY,
   onPresetChange,
   onSelect,
 }: SignalsRailProps): React.JSX.Element {
@@ -516,8 +557,9 @@ export const SignalsRail = React.memo(function SignalsRail({
   }, [activePresetId, presets]);
 
   const groups: SignalGroup[] = React.useMemo(() => {
-    return buildSignalGroupsForTest(frames);
-  }, [frames]);
+    return buildSignalGroupsForTest(frames, agentDirectory);
+  }, [frames, agentDirectory]);
+  const nameOf = React.useMemo(() => signalNameResolver(agentDirectory), [agentDirectory]);
 
   function groupMatchesPreset(group: SignalGroup, preset: ConsoleRailFilterPresetConfig): boolean {
     if (preset.watchedOnly) {
@@ -600,6 +642,8 @@ export const SignalsRail = React.memo(function SignalsRail({
         )}
         {shown.map((s) => {
           const expanded = expandedGroups.has(s.id);
+          const grouped = s.items.length > 1;
+          const agentKey = s.agent && s.agent !== "_system" ? s.agent : "";
           return (
           <div
             key={s.id}
@@ -608,18 +652,29 @@ export const SignalsRail = React.memo(function SignalsRail({
             data-testid={`signal:${s.id}`}
             data-expanded={expanded ? "true" : "false"}
             onClick={() => toggleGroup(s)}
+            onKeyDown={(event) => {
+              // Keys on the controls inside the row belong to those controls.
+              if (event.target !== event.currentTarget) return;
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                toggleGroup(s);
+              }
+            }}
             role="button"
             tabIndex={0}
+            aria-expanded={grouped ? expanded : undefined}
           >
             <span className="signal__bar" />
             <span className="signal__body">
               <span className="signal__label">
-                {s.items.length > 1 && <span className="signal__chevron">{expanded ? "▾" : "▸"}</span>}
+                {grouped && <span className="signal__chevron" aria-hidden="true" />}
                 {s.title}
-                {s.items.length > 1 && <span className="signal__count">{s.items.length}</span>}
+                {grouped && <span className="signal__count">{s.items.length}</span>}
               </span>
               <span className="signal__detail">{s.detail}</span>
-              <span className="signal__agent">{s.agent}</span>
+              <span className="signal__agent cc-agent" title={agentKey || undefined}>
+                <span className="cc-agent__name">{nameOf(s.agent)}</span>
+              </span>
               {s.items.length === 1 &&
                 s.items[0].raw.event.startsWith("memory.") &&
                 onSelect ? (
@@ -632,7 +687,7 @@ export const SignalsRail = React.memo(function SignalsRail({
                     onSelect(s.items[0].raw);
                   }}
                 >
-                  state here
+                  State here
                 </button>
               ) : null}
               {s.items.length > 1 && expanded && (
@@ -655,7 +710,11 @@ export const SignalsRail = React.memo(function SignalsRail({
               )}
             </span>
             <span className="signal__meta">
-              <span className="signal__time">{s.at}</span>
+              {s.atMs ? (
+                <time className="signal__time" dateTime={new Date(s.atMs).toISOString()} title={formatAbsoluteTime(s.atMs)}>
+                  {s.at}
+                </time>
+              ) : null}
             </span>
           </div>
         );})}

@@ -2390,7 +2390,7 @@ svg[data-svg="fit"],
   margin-left: auto;
   font-family: var(--mono);
   font-size: 10px;
-  color: var(--ink-faint);
+  color: var(--ink-meta);
 }
 .rail__filters {
   display: flex; gap: 0;
@@ -2419,7 +2419,7 @@ svg[data-svg="fit"],
 .rail__filter-count {
   font-family: var(--mono);
   font-size: 10px;
-  color: var(--ink-faint);
+  color: var(--ink-meta);
   margin-left: 4px;
 }
 .rail__list {
@@ -2429,9 +2429,8 @@ svg[data-svg="fit"],
 }
 .rail__empty {
   padding: 20px 14px;
-  color: var(--ink-dim);
+  color: var(--ink-meta);
   font-size: 12px;
-  font-family: var(--mono);
 }
 
 .signal {
@@ -2443,6 +2442,10 @@ svg[data-svg="fit"],
   cursor: pointer;
 }
 .signal:hover { background: var(--bg-elev-1); }
+.signal:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
 .signal__bar { background: var(--ink-faint); border-radius: 1px; }
 .signal[data-sev="critical"] .signal__bar { background: var(--crit); }
 .signal[data-sev="warning"]  .signal__bar { background: var(--warn); }
@@ -2454,13 +2457,17 @@ svg[data-svg="fit"],
   display: flex; align-items: center; gap: 8px;
   letter-spacing: -0.003em;
 }
+/* A grouped row's disclosure mark, turned down while the group is open. */
 .signal__chevron {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--ink-faint);
-  width: 10px;
   flex: none;
+  width: 0;
+  height: 0;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  border-left: 5px solid var(--ink-meta);
+  transition: transform 120ms ease;
 }
+.signal[data-expanded="true"] .signal__chevron { transform: rotate(90deg); }
 .signal__count {
   font-family: var(--mono);
   font-size: 10px;
@@ -2480,9 +2487,10 @@ svg[data-svg="fit"],
   font-size: 11.5px; color: var(--ink-muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* The agent's display name (the raw key is in its tooltip). */
 .signal__agent {
-  font-family: var(--mono); font-size: 10.5px;
-  color: var(--ink-dim);
+  font-size: 11px;
+  color: var(--ink-meta);
 }
 .signal__events {
   display: flex;
@@ -2537,7 +2545,8 @@ svg[data-svg="fit"],
   display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
 }
 .signal__time {
-  font-family: var(--mono); font-size: 10px; color: var(--ink-faint);
+  font-family: var(--mono); font-size: 10px; color: var(--ink-meta);
+  white-space: nowrap;
 }
 
 /* ══════════════════════════════════════════════════════════════

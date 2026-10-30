@@ -5953,6 +5953,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
               }
               emptyText={railConfig?.empty_text}
               watchedIdentities={watchedIdentities}
+              agentDirectory={agentDirectory}
               onPresetChange={setActiveActivityPresetId}
               onSelect={experience?.memory?.can_read === true ? selectRailFrame : undefined}
             />

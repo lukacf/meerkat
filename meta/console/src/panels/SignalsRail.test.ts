@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSignalGroupsForTest } from "./SignalsRail";
+import { buildSignalGroupsForTest, signalNameResolver } from "./SignalsRail";
+import { createAgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
 import type { ConsoleFrame } from "../types";
 import { MEERKAT_1608_KICKOFF_NOTICES } from "../lib/fixtures/meerkat-1608-kickoff-notices";
 
@@ -275,4 +276,49 @@ test("signals rail shows a typed kickoff lifecycle notice by its phase, never it
       );
     }
   }
+});
+
+test("signals rail titles use display names when the directory knows the agent", () => {
+  const directory = createAgentDirectory([
+    { id: "identity:support-triage", label: "Support Desk", aliases: ["member-support"] },
+  ]);
+  const frames: ConsoleFrame[] = [
+    {
+      id: "support-reply",
+      event: "interaction_complete",
+      identity: "identity:support-triage",
+      interactionId: "turn-support",
+      timestampMs: Date.now(),
+      data: { result: "Drafted the reply and queued it for approval." },
+    },
+    {
+      id: "scribe-reply",
+      event: "interaction_complete",
+      identity: "scribe",
+      interactionId: "turn-scribe",
+      timestampMs: Date.now() - 1_000,
+      data: { result: "Logged the support draft." },
+    },
+  ];
+
+  const named = buildSignalGroupsForTest(frames, directory);
+  assert.ok(named.some((group) => group.title === "Support Desk replied"));
+  // An agent the directory does not know keeps the prettified key.
+  assert.ok(named.some((group) => group.title === "Scribe replied"));
+
+  // Without a directory the key is prettified, never shown with its prefix.
+  const prettified = buildSignalGroupsForTest(frames);
+  assert.ok(prettified.some((group) => group.title === "Support Triage replied"));
+  assert.ok(!prettified.some((group) => /identity:/i.test(group.title)));
+});
+
+test("signals rail names console events System and resolves aliases", () => {
+  const name = signalNameResolver(createAgentDirectory([
+    { id: "identity:coordinator", label: "Coordinator", aliases: ["member-7"] },
+  ]));
+  assert.equal(name("member-7"), "Coordinator");
+  assert.equal(name("identity:coordinator"), "Coordinator");
+  assert.equal(name("_system"), "System");
+  assert.equal(name(""), "System");
+  assert.equal(signalNameResolver()("agent:nightly-monitor"), "Nightly Monitor");
 });

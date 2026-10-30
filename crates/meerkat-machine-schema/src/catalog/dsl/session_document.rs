@@ -641,9 +641,11 @@ pub enum TranscriptEditKind {
 
 /// Who owns a session's recorded operator-instruction target. `Unowned` is
 /// the Rust `Default`: no owner holds a target (none was recorded, or a mob
-/// released it). A session-owned target is written slot by slot by the
-/// session's own host; a mob-owned one is a whole member snapshot its mob
-/// delivers by generation, and the machine records which mob.
+/// released it), and an unowned target is empty, so whatever is still in
+/// effect is revoked at the next fresh run start. A session-owned target is
+/// written slot by slot by the session's own host; a mob-owned one is a
+/// whole member snapshot its mob delivers by generation, and the machine
+/// records which mob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum InstructionTargetOwner {
     #[default]
@@ -5927,22 +5929,19 @@ machine! {
             }
         }
 
-        // The new owner starts from what is in effect: the target becomes
-        // the effective set and the generation restarts, so no pending
-        // write carries over and nothing becomes pending. An unowned target
-        // binds any owner, a session-owned one only a mob (an attach), and a
-        // mob-owned one none until its mob releases it.
+        // An attach: a mob takes a session-owned target and starts from what
+        // is in effect. The target becomes the slots in effect and the
+        // generation restarts, so no pending write of the session carries
+        // over and nothing becomes pending. A mob-owned target takes no
+        // rebind until its mob releases it.
         transition RebindInstructionOwner {
             on input RebindInstructionOwner { session_id, owner, mob_id }
             guard {
                 self.lifecycle_phase == Phase::Ready
-                && ((owner == InstructionTargetOwner::Session && mob_id == "")
-                    || (owner == InstructionTargetOwner::Mob && mob_id != ""))
-                && (self.session_instruction_owner.get_cloned(session_id).get("value")
-                        == InstructionTargetOwner::Unowned
-                    || (self.session_instruction_owner.get_cloned(session_id).get("value")
-                            == InstructionTargetOwner::Session
-                        && owner == InstructionTargetOwner::Mob))
+                && owner == InstructionTargetOwner::Mob
+                && mob_id != ""
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Session
                 && self.session_instruction_effective_revision.get_cloned(session_id).get("value")
                     .len() <= 64
             }
@@ -5967,9 +5966,31 @@ machine! {
             emit InstructionOwnerRebound { owner: owner }
         }
 
+        // A new owner of an unowned target (a host's standalone adoption, an
+        // attach of a released member) starts from that empty target: what
+        // is still in effect is revoked at the next fresh run start.
+        transition RebindInstructionOwnerUnowned {
+            on input RebindInstructionOwner { session_id, owner, mob_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && ((owner == InstructionTargetOwner::Session && mob_id == "")
+                    || (owner == InstructionTargetOwner::Mob && mob_id != ""))
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Unowned
+            }
+            update {
+                self.session_instruction_owner.insert(session_id, owner);
+                self.session_instruction_owner_mob.insert(session_id, mob_id);
+                self.session_instruction_target_generation.insert(session_id, 0);
+            }
+            to Ready
+            emit InstructionOwnerRebound { owner: owner }
+        }
+
         // The owning mob releases a member's target (a retire, a destroy):
-        // the target empties and is unowned, what is in effect stays, and
-        // nothing is pending until another owner binds it.
+        // the target empties and is unowned. The release applies nothing by
+        // itself; the next fresh run start revokes what the mob had in
+        // effect, and a later owner starts from the empty target.
         transition ReleaseInstructionTarget {
             on input ReleaseInstructionTarget { session_id, mob_id }
             guard {
@@ -6047,8 +6068,6 @@ machine! {
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
-                && self.session_instruction_owner.get_cloned(session_id).get("value")
-                    != InstructionTargetOwner::Unowned
                 && instruction_change_pending(
                     self.session_instruction_target_revision.get_cloned(session_id).get("value"),
                     self.session_instruction_target_effect.get_cloned(session_id).get("value"),
@@ -6100,9 +6119,7 @@ machine! {
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
-                && (self.session_instruction_owner.get_cloned(session_id).get("value")
-                        == InstructionTargetOwner::Unowned
-                    || run_start != InstructionRunStart::FreshRun
+                && (run_start != InstructionRunStart::FreshRun
                     || instruction_change_pending(
                         self.session_instruction_target_revision.get_cloned(session_id).get("value"),
                         self.session_instruction_target_effect.get_cloned(session_id).get("value"),
@@ -6129,8 +6146,6 @@ machine! {
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
-                && self.session_instruction_owner.get_cloned(session_id).get("value")
-                    != InstructionTargetOwner::Unowned
                 && run_start == InstructionRunStart::FreshRun
                 && instruction_change_pending(
                     self.session_instruction_target_revision.get_cloned(session_id).get("value"),
@@ -6160,8 +6175,6 @@ machine! {
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
-                && self.session_instruction_owner.get_cloned(session_id).get("value")
-                    != InstructionTargetOwner::Unowned
                 && run_start == InstructionRunStart::FreshRun
                 && instruction_change_pending(
                     self.session_instruction_target_revision.get_cloned(session_id).get("value"),
@@ -6186,8 +6199,6 @@ machine! {
             on input AuthorizeInstructionFold { session_id, at_run_start, lowering }
             guard {
                 self.lifecycle_phase == Phase::Ready
-                && self.session_instruction_owner.get_cloned(session_id).get("value")
-                    != InstructionTargetOwner::Unowned
                 && self.session_instruction_entry_sequence.contains_key(session_id)
             }
             guard "at_run_start" {
@@ -6231,9 +6242,7 @@ machine! {
                 self.lifecycle_phase == Phase::Ready
                 && self.session_instruction_entry_sequence.contains_key(session_id)
                 && (at_run_start == false
-                    || lowering == InstructionLowering::Unavailable
-                    || self.session_instruction_owner.get_cloned(session_id).get("value")
-                        == InstructionTargetOwner::Unowned)
+                    || lowering == InstructionLowering::Unavailable)
             }
             update {
                 self.session_instruction_entry_sequence.insert(

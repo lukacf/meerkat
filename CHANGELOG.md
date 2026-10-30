@@ -728,9 +728,12 @@ them.
   whole snapshot by generation (a repeated or older generation answers
   already recorded). Another mob's snapshot or release is refused
   `owned_by_other_mob` until the owning mob releases the target
-  (`Session::release_instruction_target`), and
-  `Session::rebind_instruction_owner` binds an unowned target to any owner
-  and a session-owned one to a mob. A stale or conflicting revision, a slot
+  (`Session::release_instruction_target`): a release empties the target, the
+  session's next fresh run start revokes what the mob had in effect, and a
+  later owner starts from the empty target.
+  `Session::rebind_instruction_owner` attaches a mob to a session-owned
+  target from the instructions in effect, or gives an unowned target a new
+  owner. A stale or conflicting revision, a slot
   that instruction activations manage, more than 64 slots, a body over
   256 KiB and more than 1 MiB of Active bodies are refused typed
   (`InstructionSetErrorCode`). A write or record changes only the recorded

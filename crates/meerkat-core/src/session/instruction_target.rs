@@ -53,9 +53,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InstructionTargetOwner {
     /// No owner holds a target: none was recorded, or the owning mob
-    /// released it. The state holds the entry-sequence high-water only.
-    /// Nothing of it is pending, and any owner can take the target. A rebind
-    /// never names it.
+    /// released it. The target is empty, so whatever is still in effect is
+    /// revoked at the next fresh run start; any owner can take it, starting
+    /// from the empty target. A rebind never names it.
     Unowned,
     /// The session's own host writes the target slot by slot.
     Session,
@@ -436,7 +436,8 @@ pub struct InstructionRecordReceipt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InstructionReleaseDisposition {
-    /// The mob's target is now empty and unowned; what is in effect stays.
+    /// The mob's target is now empty and unowned; the next fresh run start
+    /// revokes what the mob had in effect.
     Released,
     /// No owner held the target: a repeated release writes nothing.
     AlreadyUnowned,
@@ -1414,13 +1415,15 @@ impl Session {
     }
 
     /// Rebind the target to a new owner, on an explicit attach or a host's
-    /// standalone adoption. The new owner starts from what is in effect: the
-    /// target becomes the effective set, its generation restarts, and no
-    /// pending write of the previous owner carries over. The authority binds
-    /// an unowned target to any owner and a session-owned one to a mob (an
-    /// attach); it refuses a rebind to the owner the target already has, to
-    /// no owner, and of a mob-owned target, which only its mob's release
-    /// frees.
+    /// standalone adoption; the generation restarts. A mob that attaches to
+    /// a session-owned target starts from what is in effect: the target
+    /// becomes the slots in effect, and no pending write of the session
+    /// carries over. A new owner of an unowned target (a host adopting a
+    /// released member, a mob attaching to it) starts from that empty
+    /// target, so what is still in effect is revoked at the next fresh run
+    /// start. The authority refuses a rebind to the owner the target already
+    /// has, to no owner, and of a mob-owned target, which only its mob's
+    /// release frees.
     pub fn rebind_instruction_owner(
         &mut self,
         owner: InstructionTargetOwner,
@@ -1446,10 +1449,11 @@ impl Session {
 
     /// Release a member session's target on behalf of the mob that owns it
     /// (its member retires, the mob is destroyed): the target empties and
-    /// is unowned, so another owner may bind it. What is in effect stays,
-    /// and nothing is pending until a new owner records a target. Another
-    /// owner's target is refused; a target no owner holds answers "already
-    /// unowned" and writes nothing.
+    /// is unowned, so another owner may bind it, starting from the empty
+    /// target. The release applies nothing by itself: the session's next
+    /// fresh run start revokes what the mob had in effect. Another owner's
+    /// target is refused; a target no owner holds answers "already unowned"
+    /// and writes nothing.
     pub fn release_instruction_target(
         &mut self,
         mob_id: &str,

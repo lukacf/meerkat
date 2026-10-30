@@ -366,6 +366,15 @@ them.
   `instruction_entry: Option<WireInstructionEntryIdentity>`, so code that
   builds the variant literally or destructures it without `..` must name it.
 
+- `meerkat-core`, `meerkat`: a live model change carries the
+  operator-instruction lowering of its binding (see Added).
+  `SessionLlmRequestPolicy` gains the public field
+  `operator_instruction_lowering`, so code that builds the policy literally
+  must set it (it is not serialized). `SessionRuntimeLlmReconfigureService`
+  gains the required method
+  `live_session_has_own_operator_instruction_entries`, so an implementation
+  must answer it.
+
 - `meerkat-core`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
   `SessionDocumentMachine` holds each session's operator-instruction state
   (see Added). The generated session-document authority
@@ -746,7 +755,11 @@ them.
   and a backend whose wire carries only one leading System row (the ChatGPT
   backend, `OpenAiBackendKind::admits_additional_leading_system_messages`)
   keeps them pending (`lowering_unavailable`), whether the session was built
-  there, fell back there or was switched there live. A compaction folds every
+  there, fell back there or was switched there live. A live model change
+  installs the lowering the host resolves for the new binding, so a change
+  between other bindings keeps applying instructions, and a live change onto
+  such a backend is refused while the session's transcript holds its own
+  operator-instruction entries. A compaction folds every
   entry row into one snapshot of the instructions in effect after the
   leading System prefix, and no summary request, host curator window or
   compactor input carries an instruction body; the shrink rule does not

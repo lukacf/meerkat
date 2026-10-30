@@ -35,6 +35,46 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Behaviour-only (not measured by the gate): `meerkat-authorization`: the
+  native work owner's `WorkAuthorization::owner_change_in_progress`
+  (`LocalWorkAuthorization`) also names a reservation of its publication's
+  writer held now that has not published: an owner change still being
+  prepared (a grant issuance before its acknowledged append publishes), a
+  held exclusion (`LocalGrantAuthority::try_with_owner_changes_excluded`) or
+  another operation's final entry, named by the odd sequence it would
+  publish at. `LocalAuthorizationPublication::change_in_progress` is
+  unchanged and still names published changes only. Every owner-change wait
+  (`OwnerChangeChurn`, Core's own and a host's) now lasts until such a
+  holder releases the writer, within the same bounds, where it answered
+  `None` or settled while the holder still held. The operation-time steps
+  and the host-facing entries that never wait answer as before.
+
+### Added
+
+- `meerkat-core`: `OwnerChangeChurn::wait_after_stale_read`, the bounded
+  wait for a host's pure observation of a work's own authorization
+  publication (one that reads owners and runs no effect) that is still
+  stale after its one rebuild (`PublicationError::Changed`,
+  `LineageResolutionRefusal::Changed`). Such a read can end stale after a
+  change it never saw in progress: one that waited for an owner's own lock
+  while another actor's change held it (a grant issuance holds the grant
+  owner's mutex across its acknowledged append) ends stale only once that
+  change published, often after it completed, and
+  `wait_for_settled_change` then answers `None`. The new wait waits for any
+  change in progress, an unpublished reservation of the writer included,
+  and with none in progress as it starts it pauses 1 ms first. `Settled`
+  means make the same observation once more, afresh; `NotSettled` means
+  stop and answer the read as stale, never as unavailable. Every settled
+  wait is one of the churn's three free rebuilds, within its one deadline
+  (2 s, clamped to the budget passed, such as
+  `ToolDispatchContext::remaining_tool_time`), armed at its first wait. Take
+  a fresh churn for each decision point, hold nothing across the wait, and
+  never wait around an effect. Dropping the wait cancels it with nothing to
+  release. Shell synchronization only: no machine input, owner fact, wire
+  type or error variant changes.
+
 ## [0.9.7] - 2026-10-28
 
 ### Breaking

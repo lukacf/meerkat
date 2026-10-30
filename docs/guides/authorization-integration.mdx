@@ -259,11 +259,19 @@ and every current check.
 
 A custom `WorkAuthorization` reports a change in progress through
 `owner_change_in_progress` (provided; default `None`), a waiting hint that is
-never a permission. `LocalAuthorizationPublication::change_in_progress` answers
-it for the local owners, and the native run and audit wrappers forward it.
+never a permission. `LocalAuthorizationPublication::change_in_progress` names a
+published change of the local owners; the native work owner's
+`owner_change_in_progress` also names a reservation of the publication's
+writer held now, and the native run and audit wrappers forward it.
 `meerkat_core::authorization::OwnerChangeChurn` implements the bounded wait
 (`OWNER_CHANGE_WAIT_BOUND` 2 s, `OWNER_CHANGE_FREE_REBUILDS` 3); a tool that
 waits inside its body bounds it by `ToolDispatchContext::remaining_tool_time`.
+A host's own pure observation of the work's publication that is still stale
+after its one rebuild waits with `OwnerChangeChurn::wait_after_stale_read`,
+which pauses 1 ms first when no change is in progress as it starts (the change
+that made the read stale may have completed already). After a settled wait the
+host repeats only that observation, never an effect; see
+[Survive owner changes in progress](/rust/native-authorization#survive-owner-changes-in-progress).
 Each wait is one `debug` event of target `meerkat::authz::owner_change_wait`
 with `site`, `operation_id`, `waited_ms` and `settled`, and each refused attempt
 keeps its own audit record. A delegate operation of a tool call takes that call's

@@ -860,7 +860,9 @@ impl DurableDecisionService {
     /// counts; it is kept as that audience's latest. The decision's machine
     /// keeps, from the presentation's own time (`at_ms`), when a
     /// presentation first reached the approver: a human decision observed
-    /// before that is refused.
+    /// before that is refused. A presentation to the approver at 0 is no
+    /// reading of when it was shown, and is refused as
+    /// `PresentationIncomplete`.
     ///
     /// # Errors
     /// [`DecisionError::Refused`] with `SubjectChanged`,
@@ -901,7 +903,8 @@ impl DurableDecisionService {
     /// ([`AttestedDecision::observed_at_ms`]): observed before the
     /// decision's first presentation to the approver (recorded, or the one
     /// the decision carries), it is refused; observed in the same
-    /// millisecond or later, it may decide.
+    /// millisecond or later, it may decide. A decision carrying a
+    /// presentation at 0 is refused as `PresentationIncomplete`.
     ///
     /// # Errors
     /// [`DecisionError::Refused`] with `EvidenceRequired`, `SubjectChanged`,

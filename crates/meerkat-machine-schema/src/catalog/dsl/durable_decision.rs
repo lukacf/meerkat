@@ -51,10 +51,12 @@
 //! the one a decision event carried. A human decision observed before that
 //! first presentation is refused (`DecidedBeforePresentation`); one observed
 //! in the same millisecond is accepted. With no presentation at all, the
-//! decision stays `PresentationIncomplete`. The order is this machine's
-//! fact: neither the owner service nor a host compares the times again.
-//! It is separate from the deadline, which the owner's clock (`now_ms`)
-//! decides.
+//! decision stays `PresentationIncomplete`. A presentation time of 0 is no
+//! reading: a presentation to the approver at 0, recorded or carried by a
+//! decision, is refused `PresentationIncomplete`, so it never becomes the
+//! first presentation. The order is this machine's fact: neither the owner
+//! service nor a host compares the times again. It is separate from the
+//! deadline, which the owner's clock (`now_ms`) decides.
 //!
 //! # Latching
 //!
@@ -466,6 +468,12 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     !self.presented_to_reviewer || self.reviewer != None
                 }
 
+                // The approver's first presentation time is a reading: a
+                // time of 0 is never recorded.
+                invariant first_presentation_is_a_reading {
+                    self.first_presented_to_approver_at_ms != Some(0)
+                }
+
                 // An open decision has no outcome, no permit and owes no
                 // notice yet.
                 invariant open_has_no_outcome {
@@ -846,6 +854,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "complete" { complete }
                     guard "human_stage" { self.stage == DurableDecisionStage::Human }
                     guard "approver_audience" { audience == self.approver_id }
+                    guard "timed" { presented_at_ms != 0 }
                     update {
                         self.first_presented_to_approver_at_ms = earliest_presentation(
                             self.first_presented_to_approver_at_ms,
@@ -854,6 +863,25 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     }
                     to Open
                     emit Presented { decision_id: self.decision_id, audience: audience }
+                }
+
+                // A presentation to the approver at 0 is no reading of when
+                // it was shown: it never becomes the first presentation.
+                transition PresentRefusedUntimed {
+                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
+                    guard "open" { self.lifecycle_phase == Phase::Open }
+                    guard "before_deadline" { now_ms < self.deadline_at_ms }
+                    guard "subject_matches" { digest == self.subject_digest }
+                    guard "complete" { complete }
+                    guard "human_stage" { self.stage == DurableDecisionStage::Human }
+                    guard "approver_audience" { audience == self.approver_id }
+                    guard "untimed" { presented_at_ms == 0 }
+                    update {}
+                    to Open
+                    emit Refused {
+                        decision_id: self.decision_id,
+                        reason: DurableDecisionRefusal::PresentationIncomplete
+                    }
                 }
 
                 transition PresentRefusedWrongApproverAudience {
@@ -1090,9 +1118,15 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "sealed_approver" { approver_id == self.approver_id }
                     guard "eligible" { eligible }
                     guard "decider_is_not_requester" { decider != self.requester }
-                    guard "presentation_not_carried" { carried_presentation_at_ms == None }
-                    guard "not_presented_to_approver" {
-                        self.first_presented_to_approver_at_ms == None
+                    // No presentation reached the approver, recorded or
+                    // carried; or the decision event carries one at 0, which
+                    // is no reading of when it was shown.
+                    guard "no_timed_presentation" {
+                        (
+                            carried_presentation_at_ms == None
+                            && self.first_presented_to_approver_at_ms == None
+                        )
+                        || carried_presentation_at_ms == Some(0)
                     }
                     update {}
                     to Open
@@ -1125,6 +1159,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "sealed_approver" { approver_id == self.approver_id }
                     guard "eligible" { eligible }
                     guard "decider_is_not_requester" { decider != self.requester }
+                    guard "carried_presentation_timed" { carried_presentation_at_ms != Some(0) }
                     guard "presented_or_carried" {
                         carried_presentation_at_ms != None
                         || self.first_presented_to_approver_at_ms != None
@@ -1165,6 +1200,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "sealed_approver" { approver_id == self.approver_id }
                     guard "eligible" { eligible }
                     guard "decider_is_not_requester" { decider != self.requester }
+                    guard "carried_presentation_timed" { carried_presentation_at_ms != Some(0) }
                     // A presentation, recorded or carried, at or before the
                     // observed decision: it was observed at or after its
                     // first presentation, the same millisecond included.
@@ -1211,6 +1247,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "sealed_approver" { approver_id == self.approver_id }
                     guard "eligible" { eligible }
                     guard "decider_is_not_requester" { decider != self.requester }
+                    guard "carried_presentation_timed" { carried_presentation_at_ms != Some(0) }
                     guard "observed_at_or_after_a_presentation" {
                         (
                             self.first_presented_to_approver_at_ms != None

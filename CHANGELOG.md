@@ -736,7 +736,8 @@ them.
   `mob_operator_authority::admit_identity_creation_from_template` is the
   check a creation commit asks of the creator's live authority: the
   generated machine verdict, which admits a template only from the creation
-  scope of the mob at the incarnation the commit acts on, and refuses
+  scope of the mob at the incarnation the commit acts on (it takes the
+  mob's live incarnation witness, never a bare id), and refuses
   `IdentityCreationScopeRefusal::TemplateNotAllowed` otherwise, whatever
   manage, spawn-profile, create or profile-mutation authority the creator
   holds. `MobToolAuthorityContext` gains `identity_creation_scope` and
@@ -773,7 +774,21 @@ them.
   the member's scope for the mob as it runs, a creator restored at boot
   before the host holds the mob's handle included. The witness is never
   persisted, and a placed member built on a host that does not run its mob
-  carries none.
+  carries none. The mob runtime receives the live mob operator authority of
+  every member session it builds locally: each member build carries its
+  external tools inside the runtime's receiver for the session, which
+  forwards everything to them and records the authority the agent factory
+  binds, whatever the member's mob tools.
+  `MobHandle::admit_member_identity_creation` (an origin session and a
+  template) is the creator check an agent's commit asks: it reads only that
+  session's own live authority, takes no authority from its caller, and
+  refuses a session the runtime did not build. A member's own mob operator
+  tools are removed (hidden, every call denied) under an authority that
+  holds no manage and no spawn-profile scope in the mob, so a host hook that
+  disables a member's mob tools and binds its creation scope authority only
+  leaves it no mob operator tool. A host hook that edits a member build's
+  external tools wraps them; tools it replaces outright leave the session
+  with no recorded authority, and its creator check refuses.
 
 ### Changed
 

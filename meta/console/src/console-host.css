@@ -92,6 +92,13 @@ svg[data-svg="fit"],
   --crit:        var(--_cc-negative);
   --danger:      var(--_cc-negative);
   --focus:       var(--_cc-link);
+  /* Text-safe inks (tokens.css): small meta text and tone-coloured text. */
+  --ink-meta:    var(--_cc-foreground-meta);
+  --ok-ink:      var(--_cc-positive-ink);
+  --warn-ink:    var(--_cc-warning-ink);
+  --crit-ink:    var(--_cc-negative-ink);
+  --info-ink:    var(--_cc-link-ink);
+  --focus-ring:  var(--_cc-focus-ring);
   --motion-hover: 120ms ease;
   --sans:        var(--_cc-font-display);
   --mono:        var(--_cc-font-mono);
@@ -100,6 +107,8 @@ svg[data-svg="fit"],
   --r-sm: var(--_cc-radius-sm);
   --r-md: var(--_cc-radius-md);
   --r-lg: var(--_cc-radius-lg);
+  --r-pill: var(--_cc-radius-pill);
+  --r-round: var(--_cc-radius-round);
   font-family: var(--sans);
   letter-spacing: -0.003em;
 }

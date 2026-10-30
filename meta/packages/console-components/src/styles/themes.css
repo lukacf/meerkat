@@ -135,6 +135,8 @@
   --_cc-radius-sm: 0px;
   --_cc-radius-md: 2px;
   --_cc-radius-lg: 3px;
+  --_cc-radius-pill: 0px;
+  --_cc-radius-round: 0px;
 
   --_cc-shadow-sm-default: none;
   --_cc-shadow-md-default: none;
@@ -177,6 +179,8 @@
   --_cc-radius-sm: 0px;
   --_cc-radius-md: 2px;
   --_cc-radius-lg: 3px;
+  --_cc-radius-pill: 0px;
+  --_cc-radius-round: 0px;
 
   --_cc-shadow-sm-default: none;
   --_cc-shadow-md-default: none;

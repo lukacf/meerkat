@@ -75,6 +75,7 @@ export default defineConfig({
       "console/src/mcp-apps/stock-host.test.tsx",
       "packages/console-components/src/custom-panels.test.tsx",
       "packages/console-components/src/copy-button.test.tsx",
+      "packages/console-components/src/panel-kit/panel-kit.test.tsx",
       "packages/console-core/src/send-attempt.test.ts",
       "packages/console-core/src/context-record.test.ts",
       "console/src/lib/send-attempt-storage.test.ts",

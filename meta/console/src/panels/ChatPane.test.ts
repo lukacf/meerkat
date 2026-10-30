@@ -985,6 +985,16 @@ test("the composer footer names the agent and keeps its identity in the name's t
   assert.equal(footer.replace(/<[^>]*>/g, "").includes("router:main"), false, "the footer text names the agent, not its identity");
 });
 
+test("the composer reads the agent's role in words, in the UI font", () => {
+  const agent = { agent_id: "steward", member_id: "steward", label: "Data Steward", kind: "identity", role: "memory-steward", state: "active" };
+  const html = renderToStaticMarkup(React.createElement(ChatPane, { agent: agent as never, agentLabel: "Data Steward", identity: "steward", entries: [], phase: null, draft: "", sending: false, staged: [], onDraftChange: () => {}, onStagedChange: () => {}, onSend: () => true, onInspect: () => {}, headerVariant: "compact" }));
+  assert.match(html, /<span class="composer__chip" title="memory-steward">Memory steward<\/span>/);
+  assert.doesNotMatch(html, /composer__chip mono/);
+  const footer = /<div class="composer__footer">([\s\S]*?)<\/div>/.exec(html)?.[1] ?? "";
+  assert.equal(footer.replace(/<[^>]*>/g, "").includes("Memory steward"), true);
+  assert.equal(footer.replace(/<[^>]*>/g, "").includes("memory-steward"), false);
+});
+
 test("stock folds consecutive proven generic completion but keeps unknown visible", () => {
   const makeTool = (id: string, name: string, known: boolean): ConversationTimelineEntry => ({ id, kind: "message", variant: "rich", identity: AGENT, blocks: [{ type: "tool-call", toolCallId: id, name, arguments: "{}", status: known ? "success" : "pending", completionEvidence: { outcome: known ? "success" : "unknown", source: known ? "session-history" : "unknown", toolCallId: id } }] });
   const html = renderToStaticMarkup(React.createElement(ChatPane, { agent: null, agentLabel: "Agent", identity: "agent", entries: [makeTool("one", "read_file", true), makeTool("two", "list_files", true), makeTool("three", "read_file", false)], phase: null, draft: "", sending: false, staged: [], onDraftChange: () => {}, onStagedChange: () => {}, onSend: () => true }));

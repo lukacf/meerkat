@@ -52,6 +52,8 @@ export interface TopologyPanelProps {
   onRequestBulkAction?: (action: TopologyBoundedAction) => void | Promise<void>;
   /** Select an agent from the role view (the host opens its chat or details). */
   onSelectAgent?: (agentId: string) => void;
+  /** The team's display name for the role view's root ("Team" without one). */
+  teamName?: string;
 }
 
 type EdgeMode = "all" | "focus";
@@ -87,6 +89,7 @@ export function TopologyPanel({
   bulkActions,
   onRequestBulkAction,
   onSelectAgent,
+  teamName,
 }: TopologyPanelProps): React.JSX.Element {
   const hasConnectionView = Boolean(management && management.policy.mode !== "disabled");
   const [uncontrolledView, setUncontrolledView] = React.useState<TopologyPanelView>(() => {
@@ -246,6 +249,7 @@ export function TopologyPanel({
             agents={agents}
             activity={activity}
             onSelectAgent={onSelectAgent}
+            teamName={teamName}
           />
         ) : null}
         {view === "connections" && management ? (

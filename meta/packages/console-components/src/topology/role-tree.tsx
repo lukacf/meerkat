@@ -14,6 +14,7 @@ import {
   useTopologyActivity,
 } from "./data";
 import type { ConsoleAgent, ConsoleFrame, ConsoleTopologyNode } from "./types";
+import { humanizeEnum } from "../panel-kit/format";
 
 interface RoleTreeProps {
   nodes: ConsoleTopologyNode[];
@@ -21,6 +22,8 @@ interface RoleTreeProps {
   activity: ConsoleFrame[];
   /** When given, agent chips are buttons that select the agent. */
   onSelectAgent?: (agentId: string) => void;
+  /** The root's name: the team's display name when the host has one. */
+  teamName?: string;
 }
 
 const STATE_COLOUR: Record<string, string> = {
@@ -43,6 +46,7 @@ export function RoleTree({
   agents,
   activity,
   onSelectAgent,
+  teamName,
 }: RoleTreeProps): React.JSX.Element {
   const graph = React.useMemo(() => buildGraph(nodes, agents), [nodes, agents]);
   const roleIndex = React.useMemo(() => roleIndexFor(graph.roles), [graph.roles]);
@@ -89,7 +93,7 @@ export function RoleTree({
             ▸
           </span>
           <span className="topo-roletree__dot" style={{ background: "var(--ok)" }} />
-          <span className="topo-roletree__label">mob</span>
+          <span className="topo-roletree__label">{teamName?.trim() || "Team"}</span>
           <span className="topo-roletree__count">{graph.agents.length} agents · {graph.roles.length} roles</span>
           {rootBusy && <span className="topo-roletree__busy" aria-label="agents working" />}
         </button>
@@ -116,7 +120,7 @@ export function RoleTree({
                 ▸
               </span>
               <span className="topo-roletree__dot" style={{ background: colour }} />
-              <span className="topo-roletree__label">{role}</span>
+              <span className="topo-roletree__label" title={role}>{humanizeEnum(role) || role}</span>
               <span className="topo-roletree__count">{list.length}</span>
               {sectionBusy && (
                 <span className="topo-roletree__busy" aria-label={`${sectionBusyCount} working`}>

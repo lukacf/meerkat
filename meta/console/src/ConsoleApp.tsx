@@ -5648,6 +5648,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             const agent = topologyNodeAgent(agents, id);
             if (agent) openAgentBesideTopology(agent, panel.id);
           }}
+          teamName={experience?.console_config?.title || experience?.agent_sidebar?.title || undefined}
         />
       );
     if (target.kind === "health")

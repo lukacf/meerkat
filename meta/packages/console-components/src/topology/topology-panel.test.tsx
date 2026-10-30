@@ -103,6 +103,21 @@ describe("TopologyPanel", () => {
     expect(screen.getByRole("group", { name: "View" }).classList.contains("topo__viewbar")).toBe(true);
   });
 
+  test("names the roles view's root after the team and reads roles as words", () => {
+    const nodes: ConsoleTopologyNode[] = [
+      { identity: "router:main", role: "memory-steward", state: "active", wired_to: [], labels: {} },
+      { identity: "identity:queue-agent", role: "memory-steward", state: "active", wired_to: [], labels: {} },
+    ];
+    const { container, rerender } = render(<TopologyPanel activity={[]} agents={[]} nodes={nodes} view="roles" onSelectAgent={vi.fn()} />);
+    const labels = () => [...container.querySelectorAll(".topo-roletree__label")].map((label) => label.textContent);
+    expect(labels()).toEqual(["Team", "Memory steward"]);
+    expect(container.querySelector(".topo-roletree__role .topo-roletree__label")?.getAttribute("title")).toBe("memory-steward");
+    expect(screen.getByTestId("topology-node:router:main").textContent).toBe("Router main");
+    expect(screen.getByTestId("topology-node:identity:queue-agent").textContent).toBe("Queue agent");
+    rerender(<TopologyPanel activity={[]} agents={[]} nodes={nodes} view="roles" teamName="Operations team" />);
+    expect(labels()[0]).toBe("Operations team");
+  });
+
   test("does not treat a mutation callback as authority", () => {
     render(
       <TopologyPanel

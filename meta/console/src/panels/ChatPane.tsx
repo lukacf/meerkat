@@ -42,6 +42,7 @@ import {
 import type { ConsoleAgent } from "../types";
 import type { LiveSpeechItem } from "../lib/voice-session";
 import { VoiceButton } from "./VoiceBar";
+import { humanizeEnum } from "../../../packages/console-components/src/panel-kit/format";
 import {
   composerImageFileKey,
   consoleBlobReferencesFromText,
@@ -1760,7 +1761,7 @@ const ComposerTextarea = React.memo(function ComposerTextarea({
       />
       </div>
       <div className="composer__row">
-        <span className="composer__chip mono">{agentRole || "agent"}</span>
+        <span className="composer__chip" title={agentRole || undefined}>{humanizeEnum(agentRole || "agent")}</span>
         <span className="composer__spacer" />
         {onVoiceToggle && !readOnly && !sendWithheld && (
           <VoiceButton
@@ -2685,7 +2686,7 @@ export function ChatPane({
           {voiceActive && <span>· text to background agent</span>}
           {agent?.role && (<>
             <span>·</span>
-            <span>{agent.role}</span>
+            <span>{humanizeEnum(agent.role)}</span>
           </>)}
           <span>·</span>
           <span className="dot" style={{

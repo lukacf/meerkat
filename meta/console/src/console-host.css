@@ -2853,7 +2853,6 @@ svg[data-svg="fit"],
   cursor: pointer;
 }
 .composer__chip .k { color: var(--ink-dim); font-family: var(--mono); }
-.composer__chip.mono { font-family: var(--mono); font-size: 11px; }
 .composer__spacer { flex: 1; }
 .composer__send {
   padding: 5px 12px;

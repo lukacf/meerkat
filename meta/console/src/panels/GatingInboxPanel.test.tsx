@@ -213,3 +213,41 @@ describe("GatingInboxPanel frame and requests without the shared resource", () =
     expect(view.getByText("No pending items.")).toBeTruthy();
   });
 });
+
+describe("refresh and freshness follow the shown tab", () => {
+  it("refreshes and dates the audit list on Audit and Auto, the queue on Pending, and nothing on Policies", () => {
+    const now = Date.now();
+    const onRefresh = vi.fn();
+    const onRefreshAudit = vi.fn();
+    const audit = [{ audit_id: "audit-1", action_id: "tag-release", event_type: "approval_decided", outcome: "allowed", risk_tier: "r2", detail: { decision: "approve" } }];
+    const view = render(
+      <GatingInboxPanel
+        pending={[]}
+        audit={audit}
+        auditUpdatedAtMs={now - 5 * 60_000}
+        onDecide={vi.fn()}
+        resource={{ ...snapshot("ready"), updatedAtMs: now }}
+        onRefresh={onRefresh}
+        onRefreshAudit={onRefreshAudit}
+      />,
+    );
+    expect(view.getByText("Updated just now").tagName).toBe("TIME");
+    fireEvent.click(view.getByRole("button", { name: "Refresh approvals" }));
+    expect(onRefresh.mock.calls.length).toBe(1);
+
+    fireEvent.click(view.getByTestId("gating-tab:audit"));
+    expect(view.getByText("Updated 5m ago").tagName).toBe("TIME");
+    expect(view.queryByText("Updated just now") === null).toBe(true);
+    fireEvent.click(view.getByRole("button", { name: "Refresh approvals" }));
+    expect(onRefreshAudit.mock.calls.length).toBe(1);
+    expect(onRefresh.mock.calls.length).toBe(1);
+
+    fireEvent.click(view.getByTestId("gating-tab:auto"));
+    fireEvent.click(view.getByRole("button", { name: "Refresh approvals" }));
+    expect(onRefreshAudit.mock.calls.length).toBe(2);
+
+    fireEvent.click(view.getByTestId("gating-tab:policies"));
+    expect(view.queryByRole("button", { name: "Refresh approvals" }) === null).toBe(true);
+    expect(view.queryByText(/^Updated /) === null).toBe(true);
+  });
+});

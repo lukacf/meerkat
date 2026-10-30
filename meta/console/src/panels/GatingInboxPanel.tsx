@@ -37,7 +37,12 @@ interface GatingInboxPanelProps {
   onDecide: (pendingId: string, decision: "approve" | "reject" | "escalate") => void;
   readOnly?: boolean;
   resource?: PendingApprovalSnapshot;
+  /** Refreshes the pending queue (the Pending tab). */
   onRefresh?: () => void;
+  /** Refreshes the recorded approvals (the Audit and Auto tabs). */
+  onRefreshAudit?: () => void;
+  /** When the recorded approvals last loaded. */
+  auditUpdatedAtMs?: number | null;
   selectedPendingId?: string;
 }
 
@@ -229,6 +234,8 @@ export function GatingInboxPanel({
   readOnly = false,
   resource,
   onRefresh,
+  onRefreshAudit,
+  auditUpdatedAtMs,
   selectedPendingId,
 }: GatingInboxPanelProps): React.JSX.Element {
   const [tab, setTab] = React.useState<Tab>("pending");
@@ -356,6 +363,11 @@ export function GatingInboxPanel({
     );
   }
 
+  // Refresh and freshness belong to the list on screen: the pending queue on
+  // Pending, the recorded approvals on Audit and Auto, nothing on Policies.
+  const refreshShown = tab === "pending" ? onRefresh : tab === "policies" ? undefined : onRefreshAudit;
+  const updatedShown = tab === "pending" ? resource?.updatedAtMs : tab === "policies" ? undefined : auditUpdatedAtMs ?? undefined;
+
   return (
     <PanelShell className="gating-inbox" testId="gating-panel">
       <PanelHeader
@@ -365,8 +377,8 @@ export function GatingInboxPanel({
           ? `${pendingCount} pending · ${automaticCount} allowed automatically`
           : `${automaticCount} allowed automatically`}
         divider={false}
-        actions={onRefresh ? (
-          <Button icon={<KitGlyph name="refresh" />} onClick={onRefresh}>Refresh approvals</Button>
+        actions={refreshShown ? (
+          <Button icon={<KitGlyph name="refresh" />} onClick={refreshShown}>Refresh approvals</Button>
         ) : undefined}
       />
       <PanelTabs<Tab>
@@ -380,7 +392,7 @@ export function GatingInboxPanel({
           { id: "policies", label: "Policies", testId: "gating-tab:policies" },
         ]}
       />
-      <StatusRow updatedAt={resource?.updatedAtMs} />
+      <StatusRow updatedAt={updatedShown} />
       <PanelBody className="gating-inbox__body">
         <div className="gating-inbox__content" ref={listRef}>{content}</div>
       </PanelBody>

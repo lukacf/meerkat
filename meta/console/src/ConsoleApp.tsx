@@ -263,7 +263,7 @@ export interface ConsoleAppProps {
 }
 
 type RoutingPanelData = ReturnType<typeof buildRoutingSectionView>;
-type GatingPanelData = { pending: unknown[]; audit: unknown[] };
+type GatingPanelData = { pending: unknown[]; audit: unknown[]; updatedAtMs?: number };
 type AccessPanelData = {
   scope: string;
   loading: boolean;
@@ -3476,6 +3476,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // Access is read when its panel opens or its scope changes, on Refresh and
   // after a save, and when the owner signals a newer access revision
   // (access_changed); a refresh caused by activity leaves it out.
+  // The recorded approvals behind the Approvals panel's Audit and Auto tabs.
+  const refreshGatingAudit = React.useCallback(() => panelRefreshFlight("gating-audit", async () => {
+    const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listGatingAudit, controlWorkbenchTarget("gating"), { limit: 50 }) as { entries?: unknown[] };
+    setGatingData({ pending: [], audit: Array.isArray(audit?.entries) ? audit.entries : [], updatedAtMs: Date.now() });
+  }), [baseUrl, panelRefreshFlight]);
+
   const refreshPanelData = React.useCallback(async ({ access = true }: { access?: boolean } = {}) => {
     const openPanels = visiblePanelTargets;
     const inspects = openPanels.filter(
@@ -3512,13 +3518,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       hasMobControlSurface &&
       openPanels.some((t) => t.kind === "gating" || t.kind === "gates")
     ) {
-      refreshes.push(panelRefreshFlight("gating-audit", async () => {
-        const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listGatingAudit, controlWorkbenchTarget("gating"), { limit: 50 }) as { entries?: unknown[] };
-        setGatingData({ pending: [], audit: Array.isArray(audit?.entries) ? audit.entries : [] });
-      }));
+      refreshes.push(refreshGatingAudit());
     }
     await Promise.all(refreshes);
-  }, [baseUrl, visiblePanelTargets, hasMobControlSurface, panelRefreshFlight, refreshAccessData, refreshMemoryData, refreshTopologyData, refreshWorkGraphData]);
+  }, [baseUrl, visiblePanelTargets, hasMobControlSurface, panelRefreshFlight, refreshAccessData, refreshGatingAudit, refreshMemoryData, refreshTopologyData, refreshWorkGraphData]);
 
   const refreshPanelDataRef = React.useRef(refreshPanelData);
   refreshPanelDataRef.current = refreshPanelData;
@@ -5591,6 +5594,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           resource={activeApprovals}
           selectedPendingId={selectedApprovalId}
           onRefresh={() => void approvalResourceRef.current?.refresh()}
+          onRefreshAudit={() => void refreshGatingAudit().catch(() => {})}
+          auditUpdatedAtMs={gatingData.updatedAtMs}
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
@@ -5647,6 +5652,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           resource={activeApprovals}
           selectedPendingId={selectedApprovalId}
           onRefresh={() => void approvalResourceRef.current?.refresh()}
+          onRefreshAudit={() => void refreshGatingAudit().catch(() => {})}
+          auditUpdatedAtMs={gatingData.updatedAtMs}
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}

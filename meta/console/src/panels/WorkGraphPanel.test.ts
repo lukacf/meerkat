@@ -8,6 +8,9 @@ import { WorkGraphPanel, __workGraphPanelTest } from "./WorkGraphPanel";
 import { WorkGraphGraphView, __workGraphGraphViewTest } from "./WorkGraphGraphView";
 import type { WorkGraphPanelData } from "./WorkGraphPanel";
 import type { WorkGraphWireBinding, WorkGraphWireEdge, WorkGraphWireItem } from "../types";
+import { workGraphItemOwner, workGraphStatusWord } from "../lib/workgraph-layout";
+import { createAgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
+import { formatClockTime } from "../../../packages/console-components/src/panel-kit/format";
 
 function localDateTime(instant: string): string {
   return new Intl.DateTimeFormat("sv-SE", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(instant));
@@ -23,6 +26,13 @@ const {
   workGraphEventsParams,
   workGraphEventsNewestFirst,
   createWorkGraphRefreshSequencer,
+  workGraphModeWord,
+  workGraphBindingStateText,
+  workGraphBindingTarget,
+  workGraphSummary,
+  groupWorkGraphTree,
+  workGraphBlockersOf,
+  workGraphEventSentence,
 } = __workGraphPanelTest;
 
 function item(id: string, createdAt: string, extra: Partial<WorkGraphWireItem> = {}): WorkGraphWireItem {
@@ -377,4 +387,238 @@ test("workgraph local timestamps omit invalid event pause and snapshot times", (
   assert.equal(workGraphBindingStatusLabel({ status: { state: "paused", until: at } }), "paused");
   const html = renderToStaticMarkup(React.createElement(WorkGraphPanel, { data: panelData({ capturedAt: at }), canManage: false, onRefresh: () => {} }));
   assert.doesNotMatch(html, /as of|workgraph__captured|Invalid Date|not-a-valid-time/);
+});
+
+// ── Display: words, names and sentences instead of raw values ───────────
+
+test("workgraph statuses and binding modes read as words, never raw enums", () => {
+  assert.equal(workGraphStatusWord("in_progress"), "In progress");
+  assert.equal(workGraphStatusWord("completed"), "Completed");
+  assert.equal(workGraphStatusWord(undefined), "Open");
+  assert.equal(workGraphStatusWord("needs_review"), "Needs review");
+  assert.equal(workGraphModeWord("coordinate"), "Coordinating");
+  assert.equal(workGraphModeWord("falsify"), "Testing");
+  assert.equal(workGraphModeWord(undefined), "Pursuing");
+  assert.equal(workGraphModeWord("escalate_upward"), "Escalate upward");
+});
+
+test("workgraph binding states read as words with a nearby pause end", () => {
+  const now = Date.parse("2026-07-08T12:00:00Z");
+  assert.equal(workGraphBindingStateText({}, now), "Active");
+  assert.equal(workGraphBindingStateText({ status: { state: "active" } }, now), "Active");
+  assert.equal(workGraphBindingStateText({ status: { state: "superseded" } }, now), "Superseded");
+  assert.equal(workGraphBindingStateText({ status: { state: "paused" } }, now), "Paused");
+  assert.equal(workGraphBindingStateText({ status: { state: "paused", until: "not-a-valid-time" } }, now), "Paused");
+  // The same day reads as the clock alone.
+  const soon = "2026-07-08T12:30:00Z";
+  assert.equal(
+    workGraphBindingStateText({ status: { state: "paused", until: soon } }, now),
+    `Paused until ${formatClockTime(soon)}`,
+  );
+  const later = workGraphBindingStateText({ status: { state: "paused", until: "2026-07-10T12:00:00Z" } }, now);
+  assert.ok(later.startsWith("Paused until ") && later.endsWith(formatClockTime("2026-07-10T12:00:00Z")), later);
+  assert.doesNotMatch(later, /Invalid|2026-07-10T/);
+});
+
+test("workgraph names resolve through the agent directory and never show an unknown session id", () => {
+  const directory = createAgentDirectory([
+    { id: "identity:coordinator", label: "Coordinator", aliases: ["session-77"] },
+    { id: "identity:release-manager", label: "Release Manager" },
+  ]);
+  assert.deepEqual(
+    workGraphBindingTarget({ target: { kind: "session", session_id: "session-77" } }, directory),
+    { name: "Coordinator", key: "session-77" },
+  );
+  assert.deepEqual(
+    workGraphBindingTarget({ target: { kind: "session", session_id: "session-01JBX4N0Q3T9" } }, directory),
+    { name: "Agent session", key: "session-01JBX4N0Q3T9" },
+  );
+  assert.deepEqual(
+    workGraphBindingTarget({ target: { kind: "lowered_owner", owner_key: { kind: "agent", id: "coordinator" } } }, directory),
+    { name: "Coordinator", key: "agent:coordinator" },
+  );
+  assert.deepEqual(
+    workGraphBindingTarget({ target: { kind: "lowered_owner", owner_key: { kind: "agent", id: "planner" } } }),
+    { name: "planner", key: "agent:planner" },
+  );
+  assert.equal(workGraphBindingTarget({}), null);
+
+  // Owners: the roster name, then the stored name, then the bare key.
+  assert.deepEqual(
+    workGraphItemOwner({ owner: { key: { kind: "agent", id: "release-manager" }, display_name: "RM" } }, directory),
+    { name: "Release Manager", key: "agent:release-manager" },
+  );
+  assert.deepEqual(
+    workGraphItemOwner({ owner: { key: { kind: "agent", id: "planner" }, display_name: "Planner" } }, directory),
+    { name: "Planner", key: "agent:planner" },
+  );
+  assert.deepEqual(
+    workGraphItemOwner({ claim: { owner: { key: { kind: "principal", id: "admin@example.test" } } } }),
+    { name: "admin@example.test", key: "principal:admin@example.test" },
+  );
+  assert.deepEqual(
+    workGraphItemOwner({ claim: { owner: { key: { kind: "session", id: "sess-42" } } } }),
+    { name: "Agent session", key: "session:sess-42" },
+  );
+  assert.equal(workGraphItemOwner({}), null);
+});
+
+test("workgraph summary counts items with real plurals", () => {
+  assert.equal(workGraphSummary([]), "No work items");
+  assert.equal(workGraphSummary([item("only", "2026-07-08T08:00:00Z")]), "1 item");
+  assert.equal(workGraphSummary(graphFixture().items), "4 items · 1 in progress · 1 blocked");
+});
+
+test("workgraph tree groups follow their roots and count progress past the row cap", () => {
+  const fixture = graphFixture();
+  const rows = buildWorkGraphPanelTree(fixture.items, fixture.edges);
+  const [group] = groupWorkGraphTree(rows);
+  assert.equal(group.root.itemId, "root");
+  assert.deepEqual(group.children.map((row) => row.itemId), ["child-run", "child-done", "child-stuck"]);
+  assert.deepEqual(group.progress, { total: 3, completed: 1, inProgress: 1, blocked: 1, failed: 0 });
+  const capped = groupWorkGraphTree(rows, 2);
+  assert.deepEqual(capped[0].children.map((row) => row.itemId), ["child-run"]);
+  assert.equal(capped[0].progress.total, 3, "items past the cap still count toward their goal");
+});
+
+test("workgraph blockers name the unfinished items that block an item", () => {
+  const fixture = graphFixture();
+  assert.deepEqual([...workGraphBlockersOf(fixture.items, fixture.edges)], [["child-stuck", ["child-run"]]]);
+  const finished = fixture.items.map((entry) => (entry.id === "child-run" ? { ...entry, status: "completed" } : entry));
+  assert.equal(workGraphBlockersOf(finished, fixture.edges).size, 0, "a completed blocker no longer blocks");
+});
+
+test("workgraph activity reads as sentences about item titles, without item ids", () => {
+  const titles = new Map([["item-1", "Freeze the release branch"]]);
+  const context = { titleOf: (id: string) => titles.get(id) };
+  assert.equal(workGraphEventSentence({ kind: "created", item_id: "item-1" }, context), "Freeze the release branch was created");
+  assert.equal(workGraphEventSentence({ kind: "item_claimed", item_id: "item-1" }, context), "Freeze the release branch was claimed");
+  assert.equal(
+    workGraphEventSentence({ kind: "claimed", item_id: "item-1", payload: { item: { claim: { owner: { key: { kind: "agent", id: "builder" } } } } } }, context),
+    "builder claimed Freeze the release branch",
+  );
+  assert.equal(
+    workGraphEventSentence({ kind: "closed", item_id: "item-1", payload: { item: { status: "completed" } } }, context),
+    "Freeze the release branch was completed",
+  );
+  assert.equal(
+    workGraphEventSentence({ kind: "attention_updated", payload: { attention: { work_ref: { item_id: "item-1" }, status: { state: "paused" } } } }, context),
+    "Attention on Freeze the release branch was paused",
+  );
+  assert.equal(
+    workGraphEventSentence({ kind: "linked", payload: { edge: { kind: "blocks", from_id: "item-1", to_id: "gone" } } }, context),
+    "Freeze the release branch now blocks another work item",
+  );
+  assert.equal(workGraphEventSentence({ kind: "blocked", item_id: "unknown-id" }, context), "A work item became blocked");
+  assert.equal(workGraphEventSentence({}, context), "Activity on a work item");
+});
+
+// ── Panel rendering ──────────────────────────────────────────────────────
+
+function renderPanel(data: WorkGraphPanelData, canManage = false): string {
+  return renderToStaticMarkup(React.createElement(WorkGraphPanel, {
+    data,
+    canManage,
+    onRefresh: () => {},
+    onClaim: () => {},
+    onClose: () => {},
+    onGoalConfirm: () => {},
+    onGoalRequestClose: () => {},
+    onAttentionPause: () => {},
+    onAttentionResume: () => {},
+    onAttentionReassign: () => {},
+  }));
+}
+
+test("workgraph goals render as cards holding their attention and items; plain items stay rows", () => {
+  const fixture = graphFixture();
+  const html = renderPanel(panelData({
+    items: [...fixture.items, item("loose", "2026-07-08T10:00:00Z", { title: "Rotate the API keys" })],
+    attention: [{
+      binding_id: "b-1",
+      work_ref: { item_id: "root" },
+      mode: "coordinate",
+      status: { state: "active" },
+      target: { kind: "session", session_id: "session-01JBX4N0Q3T9K2W8Y6ZR5M7C1D" },
+    }],
+    events: [{ seq: 4, kind: "item_created", item_id: "loose", at: "2026-07-08T10:00:00Z" }],
+  }), true);
+  const card = html.slice(html.indexOf('<article class="workgraph-goal"'), html.indexOf("</article>"));
+  assert.ok(card.includes('data-testid="workgraph-panel-item:root"'));
+  assert.ok(card.includes("1 of 3 done"), "the goal shows progress over its items");
+  assert.ok(card.includes('data-testid="workgraph-panel-binding:b-1"'), "attention sits in its goal's card");
+  assert.ok(card.includes("Coordinating"));
+  assert.ok(card.includes('data-testid="workgraph-panel-item:child-run"'));
+  // An unknown session reads as words; its id stays in the technical details.
+  assert.ok(card.includes("Agent session"));
+  const technical = card.slice(card.indexOf('<details class="cc-tech'));
+  assert.ok(technical.includes("session-01JBX4N0Q3T9K2W8Y6ZR5M7C1D"));
+  assert.ok(!card.slice(0, card.indexOf('<details class="cc-tech')).includes(">session-01JBX4N0Q3T9K2W8Y6ZR5M7C1D<"));
+  // The plain item is a row outside any card, with its actions.
+  assert.ok(!card.includes("workgraph-panel-item:loose"));
+  assert.ok(html.includes('data-testid="workgraph-panel-item:loose"'));
+  assert.ok(html.includes('data-testid="workgraph-panel-action:loose:claim"'));
+  assert.ok(html.includes('data-testid="workgraph-panel-action:loose:close"'));
+  // Claim needs an open, unowned item; Done skips finished and blocked ones.
+  assert.ok(html.includes('data-testid="workgraph-panel-action:child-run:close"'));
+  assert.ok(!html.includes('data-testid="workgraph-panel-action:child-run:claim"'));
+  assert.ok(!html.includes('data-testid="workgraph-panel-action:child-done:close"'));
+  assert.ok(!html.includes('data-testid="workgraph-panel-action:child-stuck:close"'));
+  assert.ok(html.includes("Blocked by child-run"));
+  // In progress is the info tone, never the accent.
+  const running = html.slice(html.indexOf('data-testid="workgraph-panel-item:child-run"'));
+  assert.match(running, /^[^>]*>\s*<span class="cc-row__lead"><span class="cc-dot" data-tone="info"/);
+  // Activity is a sentence about the title, not a kind and an id.
+  assert.ok(html.includes("Rotate the API keys was created"));
+  assert.ok(!html.includes("item created · loose"));
+  // One header (pinned class), one heading for the panel, fresh-as-of in the tooltip.
+  assert.equal(count(html, "workgraph__head"), 1);
+  assert.match(html, /<h2 class="cc-panel-head__title">WorkGraph<\/h2>/);
+  assert.match(html, /Updated [^<]+<\/time>/);
+  assert.match(html, /title="Snapshot as of /);
+});
+
+test("workgraph denied, unavailable, loading and failed states are designed, with one alert at most", () => {
+  const denied = renderPanel(panelData({ denied: true, items: [], edges: [] }));
+  assert.ok(denied.includes('data-testid="workgraph-panel-denied"'));
+  assert.ok(denied.includes("have access to work items"));
+  assert.ok(!denied.includes('role="alert"'));
+
+  const unavailable = renderPanel(panelData({ unavailable: true }));
+  assert.ok(unavailable.includes("set up on this runtime"));
+  assert.ok(unavailable.includes('data-testid="workgraph-panel"'));
+
+  const loading = renderPanel(panelData({ capturedAt: null, items: [], edges: [] }));
+  assert.ok(loading.includes('role="status"'));
+  assert.ok(loading.includes("Loading work items"));
+  assert.ok(!loading.includes("No work items yet"));
+
+  const failed = renderPanel(panelData({ capturedAt: null, items: [], edges: [], error: "store unavailable" }));
+  assert.equal(count(failed, 'role="alert"'), 1);
+  assert.ok(failed.includes("could not be loaded"));
+
+  const empty = renderPanel(panelData({ items: [], edges: [] }));
+  assert.ok(empty.includes("No work items yet"));
+
+  // A failed refresh keeps the items and shows its single alert in the status row.
+  const stale = renderPanel(panelData({ error: "store unavailable" }));
+  assert.equal(count(stale, 'role="alert"'), 1);
+  assert.ok(stale.includes('data-testid="workgraph-panel-item:root"'));
+});
+
+test("workgraph graph nodes are keyboard reachable buttons named by title and status", () => {
+  const fixture = graphFixture();
+  const html = renderToStaticMarkup(React.createElement(WorkGraphGraphView, {
+    items: fixture.items,
+    edges: fixture.edges,
+    attention: [],
+    selectedId: "child-run",
+  }));
+  assert.equal(count(html, 'role="button"'), 4);
+  assert.equal(count(html, 'tabindex="0"'), 4);
+  assert.ok(html.includes('aria-label="Ship it, Open"'));
+  assert.ok(html.includes('aria-label="child-run, In progress"'));
+  assert.ok(html.includes('data-tone="info"'), "in progress nodes take the info tone");
+  assert.ok(html.includes("workgraph-graph__node-ring"), "the selected node carries the selection ring");
+  assert.ok(!html.includes('role="img"'), "the graph is a group people can enter, not an image");
 });

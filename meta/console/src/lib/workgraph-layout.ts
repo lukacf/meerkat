@@ -1,4 +1,6 @@
 import type { WorkGraphWireEdge, WorkGraphWireItem } from "../types";
+import { stripAgentKeyPrefix, type AgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
+import { humanizeEnum } from "../../../packages/console-components/src/panel-kit/format";
 
 /// Deterministic layered-DAG layout for the WorkGraph graph view.
 ///
@@ -66,6 +68,53 @@ export function workGraphItemOwnerLabel(item: WorkGraphWireItem): string {
     || item.claim?.owner?.display_name
     || item.claim?.owner?.key?.id
     || "";
+}
+
+/// An item's owner as people read it, with the raw key for a tooltip.
+export interface WorkGraphOwnerView {
+  name: string;
+  /// "agent:planner"; empty when the owner carries no key.
+  key: string;
+}
+
+/// The owner for display, in the same owner-then-claim order: the roster
+/// name when the agent directory knows the key, else the name the work graph
+/// stored, else the bare key. A session the roster does not know reads
+/// "Agent session", never its ID.
+export function workGraphItemOwner(
+  item: WorkGraphWireItem,
+  directory?: AgentDirectory,
+): WorkGraphOwnerView | null {
+  for (const owner of [item.owner, item.claim?.owner]) {
+    if (!owner) continue;
+    const id = owner.key?.id?.trim() || "";
+    const kind = owner.key?.kind?.trim() || "";
+    const key = id && kind ? `${kind}:${id}` : id;
+    const known = key
+      ? directory?.lookup(key) ?? (kind === "session" ? directory?.lookup(id) : undefined)
+      : undefined;
+    const name = known?.label.trim()
+      || owner.display_name?.trim()
+      || (kind === "session" && id ? "Agent session" : stripAgentKeyPrefix(id));
+    if (name) return { name, key };
+  }
+  return null;
+}
+
+const WORK_STATUS_WORDS: Record<string, string> = {
+  open: "Open",
+  in_progress: "In progress",
+  blocked: "Blocked",
+  completed: "Completed",
+  cancelled: "Cancelled",
+  failed: "Failed",
+};
+
+/// A work item status in words ("In progress"); unknown values are
+/// humanized, never shown raw. A missing status reads "Open".
+export function workGraphStatusWord(status: string | null | undefined): string {
+  const key = status || "open";
+  return WORK_STATUS_WORDS[key] || humanizeEnum(key);
 }
 
 /// created_at then id - the tree panel's comparator, so both views agree.

@@ -91139,6 +91139,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             format!("session_unavailable_for_resume:{reason:?}")
         }
         MobError::MemberAlreadyExists(_) => "meerkat_already_exists".to_string(),
+        MobError::IdentityMember { .. } => "identity_member".to_string(),
         MobError::SpawnCanceled { .. } => "spawn_canceled".to_string(),
         MobError::ResumeProviderParamsRequireResume { .. } => {
             "resume_provider_params_require_resume".to_string()

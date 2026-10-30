@@ -127,6 +127,8 @@ mod inline_image_externalization_tests;
 mod instruction_activation;
 pub mod model_routing_control;
 pub mod model_routing_handoff_staging;
+#[cfg(test)]
+mod operator_instructions_tests;
 mod system_prompt_update;
 mod transcript_history;
 

@@ -2907,6 +2907,101 @@ mod tests {
         }
     }
 
+    /// A wire history read carries an operator-instruction entry's typed
+    /// identity, as it carries the other System identities. Rewrite input
+    /// cannot express it.
+    #[test]
+    fn test_wire_session_history_exposes_operator_instruction_entry_identity() {
+        let origin = SessionId::new();
+        let message: Message = serde_json::from_value(serde_json::json!({
+            "role": "system",
+            "content": "[meerkat-operator-instructions-v1]\n",
+            "created_at": "2026-10-30T00:00:00Z",
+            "instruction_entry": {
+                "render_version": 1,
+                "origin_session_id": origin.to_string(),
+                "entry_sequence": 3,
+                "kind": "delta",
+                "target_generation": 7,
+                "active": [{
+                    "namespace": "app.example",
+                    "key": "tone",
+                    "revision": 2,
+                    "content_sha256": meerkat_core::InstructionContentDigest::for_body("casual"),
+                }],
+                "changes": [{
+                    "change": "activate",
+                    "namespace": "app.example",
+                    "key": "tone",
+                    "revision": 2,
+                    "supersedes": 1,
+                    "content_sha256": meerkat_core::InstructionContentDigest::for_body("casual"),
+                    "body_bytes": 6,
+                }],
+            },
+        }))
+        .expect("a System row with an entry identity decodes");
+        let page = SessionHistoryPage {
+            session_id: origin.clone(),
+            message_count: 1,
+            offset: 0,
+            limit: None,
+            has_more: false,
+            messages: vec![message],
+        };
+
+        let wire: WireSessionHistory = page.into();
+        match &wire.messages[0] {
+            WireSessionMessage::System {
+                instruction_entry: Some(identity),
+                instruction_activation: None,
+                prompt_version: None,
+                identity: None,
+                ..
+            } => {
+                assert_eq!(identity.entry_sequence(), 3);
+                assert_eq!(identity.origin_session_id(), &origin);
+                assert_eq!(identity.kind(), meerkat_core::InstructionEntryKind::Delta);
+            }
+            other => panic!("expected System entry identity, got {other:?}"),
+        }
+        let json = serde_json::to_value(&wire.messages[0]).unwrap();
+        assert_eq!(json["instruction_entry"]["entry_sequence"], 3);
+        assert_eq!(
+            json["instruction_entry"]["changes"][0]["change"],
+            "activate"
+        );
+
+        let rewrite: TranscriptRewriteMessage = serde_json::from_value(serde_json::json!({
+            "role": "system",
+            "content": "forged",
+        }))
+        .unwrap();
+        assert!(matches!(
+            rewrite.into_core().unwrap(),
+            Message::System(SystemMessage {
+                instruction_entry: None,
+                ..
+            })
+        ));
+        assert!(
+            serde_json::from_value::<TranscriptRewriteMessage>(serde_json::json!({
+                "role": "system",
+                "content": "forged",
+                "instruction_entry": json["instruction_entry"].clone(),
+            }))
+            .map(|rewrite| matches!(
+                rewrite.into_core(),
+                Ok(Message::System(SystemMessage {
+                    instruction_entry: None,
+                    ..
+                }))
+            ))
+            .unwrap_or(true),
+            "rewrite input never mints an entry identity"
+        );
+    }
+
     #[test]
     fn test_wire_session_history_from_page_maps_block_assistant_and_tool_results() {
         let page = SessionHistoryPage {

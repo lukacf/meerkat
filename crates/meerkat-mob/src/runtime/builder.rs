@@ -8062,9 +8062,11 @@ impl MobBuilder {
     /// too). A rotation whose start row predates the record is re-driven as
     /// a plain retirement, whose terminal waits for the host's call. Until
     /// the host acts, the member stays Retiring: its wakes are refused, any
-    /// other rotation of it is refused retryable, and a plain retire answers
-    /// [`MobError::MemberRetirementStuck`] with that cause; a caller other
-    /// than the host leaves the rotation held
+    /// other rotation of it is refused retryable, and a plain retire by any
+    /// caller answers [`MobError::MemberRetirementStuck`] with that cause.
+    /// Only [`MobHandle::rotate_member`] or [`MobHandle::redrive_retirement`]
+    /// finishes it; [`MobHandle::redrive_retirement_unless_held_for_host`],
+    /// the re-drive of a caller other than the host, leaves it held
     /// ([`MobHandle::rotation_held_for_host`] reads whether it is). A
     /// same-session rotation (a respawn) is the mob's own: the start finishes
     /// it whatever this set says, and the member keeps its mark. Its
@@ -11447,21 +11449,13 @@ impl MobBuilder {
             // start holds it for the host (recorded stuck with a typed cause)
             // instead of re-driving it; `redrive_retirement` re-drives it
             // too. A same-session rotation is the mob's own and is always
-            // re-driven here.
-            let held_for_host = {
-                let state = actor.dsl_authority.state();
-                recovered_retirements
-                    .iter()
-                    .filter(|identity| {
-                        let identity =
-                            crate::machines::mob_machine::AgentIdentity::from_domain(identity);
-                        state.member_host_preparation_pending.contains(&identity)
-                            && state.member_rotation_targets.get(&identity)
-                                == Some(&crate::machines::mob_machine::RotationTarget::FreshSession)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-            };
+            // re-driven here. The hold is the actor's one predicate
+            // (`rotation_held_for_host`).
+            let held_for_host = recovered_retirements
+                .iter()
+                .filter(|identity| actor.rotation_held_for_host(identity))
+                .cloned()
+                .collect::<Vec<_>>();
             for identity in held_for_host {
                 if actor.hold_rotation_for_host(&identity).await {
                     recovered_retirements.retain(|recovered| recovered != &identity);
@@ -19428,13 +19422,18 @@ mod member_endpoint_defect_tests {
 /// settlement, through the typed re-drive transition. The retirement is owned
 /// by the actor once re-driven; this task only reports how it settles. A
 /// re-drive still running when its caller budget elapses is awaited on its
-/// settlement watch, never re-issued on a timer.
+/// settlement watch, never re-issued on a timer. The start is not the host:
+/// it re-drives as any caller other than the host does, so a rotation held
+/// for its host stays held (the start holds those before it re-drives).
 async fn recover_durable_member_retirement(
     handle: &MobHandle,
     identity: crate::ids::AgentIdentity,
 ) {
     let result = loop {
-        match handle.redrive_retirement(identity.clone()).await {
+        match handle
+            .redrive_retirement_unless_held_for_host(identity.clone())
+            .await
+        {
             // Not yet admitted by the starting actor: the retry joins the same
             // single-flight retirement slot and waits on it.
             Err(MobError::MemberRetirementAdmissionPending { .. }) => {}

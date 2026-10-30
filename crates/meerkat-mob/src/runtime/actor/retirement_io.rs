@@ -4573,15 +4573,13 @@ impl MobActor {
                 return None;
             }
             RetirementReply::Retire(reply) if redriven => RotationReply::Redrive(reply),
-            // The actor's own re-drive leaves a host-pending member's
-            // FreshSession rotation to its host, which keeps its own record
-            // of it and re-issues it: the rotation then runs once, on that
-            // re-issue (`redrive_retirement` re-drives it too). A same-session
-            // rotation is the mob's own and is always re-driven.
-            RetirementReply::Owned
-                if standing_target == mob_dsl::RotationTarget::FreshSession
-                    && self.host_pending(identity) =>
-            {
+            // The actor's own re-drive leaves a rotation held for its host
+            // (a host-pending member's FreshSession rotation) to the host,
+            // which keeps its own record of it and re-issues it: the rotation
+            // then runs once, on that re-issue (`redrive_retirement`
+            // re-drives it too). A same-session rotation is the mob's own and
+            // is always re-driven.
+            RetirementReply::Owned if self.rotation_held_for_host(identity) => {
                 tracing::info!(
                     mob_id = %self.definition.id,
                     agent_identity = %identity,
@@ -4623,6 +4621,17 @@ impl MobActor {
                 None
             }
         }
+    }
+
+    /// Whether `identity`'s rotation is held for its host in the actor's
+    /// committed machine state: the one hold predicate
+    /// ([`super::super::rotation_held_for_host`]) the start, the actor's own
+    /// re-drive and the re-drive of a caller other than the host decide by.
+    pub(in crate::runtime) fn rotation_held_for_host(&self, identity: &AgentIdentity) -> bool {
+        super::super::rotation_held_for_host(
+            self.dsl_authority.state(),
+            &mob_dsl::AgentIdentity::from_domain(identity),
+        )
     }
 
     /// Whether the host marked `identity` host-pending: it keeps its own

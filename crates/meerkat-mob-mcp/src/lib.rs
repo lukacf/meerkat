@@ -5863,23 +5863,20 @@ impl MobMcpState {
         // retirement. A retirement an earlier attempt left stuck stays owned
         // by the mob and a plain retire only reports it (meerkat 0.8.51), so
         // the archive re-drives it once, then retires the rest of the tree if
-        // the stuck one was a descendant. A rotation held for its host (a
-        // host-pending member's FreshSession rotation, which the host's own
-        // rotate_member finishes) is not re-driven here: the archive is not
-        // the host, so it leaves the rotation held and answers the stuck
-        // retirement, as any other caller's retire does.
+        // the stuck one was a descendant. The archive is not the host, so it
+        // re-drives as a caller other than the host: a rotation held for its
+        // host (a host-pending member's FreshSession rotation, which the
+        // host's own rotate_member finishes) stays held, and the re-drive
+        // answers its stuck retirement, typed. The actor decides the hold in
+        // the re-drive's own step, under the Retire scope the archive holds.
         let retired = self.mob_retire(&mob_id, identity.clone()).await;
-        let member_id = match &retired {
-            Err(MobError::MemberRetirementStuck { member_id, .. }) => member_id.clone(),
-            _ => return retired,
-        };
-        let handle = self
-            .admitted_handle_for(&mob_id, ControlScope::Retire)
-            .await?;
-        if handle.rotation_held_for_host(&member_id)? {
+        let Err(MobError::MemberRetirementStuck { member_id, .. }) = retired else {
             return retired;
-        }
-        handle.redrive_retirement(member_id.clone()).await?;
+        };
+        self.admitted_handle_for(&mob_id, ControlScope::Retire)
+            .await?
+            .redrive_retirement_unless_held_for_host(member_id.clone())
+            .await?;
         if member_id == identity {
             Ok(())
         } else {
@@ -22419,6 +22416,111 @@ mod tests {
         );
         // The host's mob stays inserted in the state until here.
         drop(state);
+    }
+
+    /// A principal granted Retire but not List archives a member's session
+    /// whose retirement is stuck for an ordinary cause, and once the cause
+    /// clears its archive re-drives the retirement to completion. The
+    /// archive re-drives as a caller other than the host: the actor decides
+    /// a host's hold in the re-drive's own step, under the Retire scope the
+    /// archive holds, so the archive reads nothing that needs the List scope.
+    ///
+    /// RED: read the hold through `MobHandle::rotation_held_for_host` (the
+    /// List scope) before the re-drive: the archive fails `ScopeDenied`
+    /// (List), and the stuck retirement is never re-driven.
+    #[tokio::test]
+    async fn test_archive_by_a_retire_only_principal_redrives_an_ordinary_stuck_retirement() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let owner = Arc::new(
+            MobMcpState::new(svc.clone(), MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
+        let mob_id = owner
+            .mob_create_definition(explicit_definition("archive-retire-only"))
+            .await
+            .expect("create mob");
+        let worker = AgentIdentity::from("worker-1");
+        owner
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("worker"),
+                worker.clone(),
+                Some(MobRuntimeMode::TurnDriven),
+                None,
+                None,
+            )
+            .await
+            .expect("spawn worker");
+        let bridge_session_id = owner
+            .handle_for(&mob_id)
+            .await
+            .expect("mob handle")
+            .resolve_bridge_session_id(&worker)
+            .await
+            .expect("worker bridge session");
+        let principal =
+            meerkat_core::auth::PrincipalId::new("archive-retire-only").expect("principal");
+        owner
+            .mob_grant_scopes(
+                &mob_id,
+                principal.clone(),
+                BTreeSet::from([ControlScope::Retire]),
+                None,
+            )
+            .await
+            .expect("grant Retire only");
+        let retirer = Arc::new(
+            MobMcpState::new(svc.clone(), MobControlPrincipal::External(principal))
+                .expect("construct runtime authority"),
+        );
+        retirer
+            .mob_insert_handle(
+                mob_id.clone(),
+                owner.handle_for(&mob_id).await.expect("owner handle"),
+            )
+            .await;
+
+        // The first archive's retirement is stuck on the archive failure.
+        svc.fail_archive(bridge_session_id.clone(), "forced member archive failure")
+            .await;
+        let first = crate::agent_tools::archive_session_with_mob_cleanup(
+            svc.clone(),
+            Arc::clone(&retirer),
+            &bridge_session_id,
+        )
+        .await
+        .expect_err("the member archive fails");
+        assert!(
+            first.to_string().contains("forced member archive failure"),
+            "the first archive surfaces the failure: {first}"
+        );
+
+        // Once the cause clears, the Retire-only principal's archive
+        // re-drives the stuck retirement to completion.
+        svc.clear_archive_failure(&bridge_session_id).await;
+        crate::agent_tools::archive_session_with_mob_cleanup(
+            svc.clone(),
+            Arc::clone(&retirer),
+            &bridge_session_id,
+        )
+        .await
+        .expect("the archive re-drives the stuck retirement without the List scope");
+        assert!(
+            !svc.session_exists(&bridge_session_id).await,
+            "the re-driven retirement archives the member session"
+        );
+        assert!(
+            owner
+                .handle_for(&mob_id)
+                .await
+                .expect("mob handle")
+                .get_member(&worker)
+                .await
+                .expect("roster read")
+                .is_none(),
+            "the member is retired"
+        );
+        drop(retirer);
     }
 
     #[tokio::test]

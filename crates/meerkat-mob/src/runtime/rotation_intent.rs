@@ -70,6 +70,22 @@ impl RotationTarget {
     }
 }
 
+/// Whether `identity`'s rotation is held for its host, in `state`: the
+/// member is host-pending (`member_host_preparation_pending`) and the
+/// rotation that stands for it is a FreshSession one, which the host's own
+/// [`super::MobHandle::rotate_member`] finishes (as does
+/// [`super::MobHandle::redrive_retirement`]). The one predicate the start's
+/// hold, the actor's own re-drive, the re-drive of a caller other than the
+/// host and the handle's read decide by.
+pub(crate) fn rotation_held_for_host(
+    state: &mob_dsl::MobMachineState,
+    identity: &mob_dsl::AgentIdentity,
+) -> bool {
+    state.member_host_preparation_pending.contains(identity)
+        && state.member_rotation_targets.get(identity)
+            == Some(&mob_dsl::RotationTarget::FreshSession)
+}
+
 /// The rotation a member's retirement carries out, as its start row
 /// (`MemberRetirementStarted`) records it: the target, the next session and
 /// endpoint, and what the next incarnation is seated with.

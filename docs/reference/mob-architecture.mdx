@@ -277,8 +277,10 @@ a role migration) last role cannot be read. A member whose retirement is in
 flight is refused retryable (`LifecycleOperationPending`), unless that
 retirement is this rotation, which the call re-drives. MobMachine decides the
 route of an identity entry's member: its fresh-life respawn (`Respawn`) admits
-no entry and answers `RespawnRefused` for one. So `MobHandle::respawn`
-respawns an identity entry's member this way, and
+no entry and answers `RespawnRefused` for one, in every phase an entry lives
+in (Running, Stopped and Completed), and the archive of a fresh-life respawn
+refuses an entry too. So `MobHandle::respawn` respawns an identity entry's
+member this way, and
 `MobHandle::respawn_with_successor_spec` refuses an entry's member
 (`UnsupportedForMode`) before anything starts; a worker's respawn keeps its
 fresh-session successor.
@@ -295,9 +297,12 @@ that FreshSession rotation, logs that it holds it, and records its retirement
 stuck at admission with a cause that names the wait
 (`MobHandle::retirement_settlement`; `MobHandle::rotation_held_for_host`
 reads the hold), and the call finishes it once (`redrive_retirement`
-re-drives it too). A retire by any other caller, a session archive through
-`meerkat-mob-mcp` included, leaves the rotation held and answers
-`MemberRetirementStuck` with that cause. A same-session rotation is the mob's
+re-drives it too). A plain retire by any caller answers
+`MemberRetirementStuck` with that cause and leaves the rotation held, and so
+does `redrive_retirement_unless_held_for_host`, the re-drive of a caller
+other than the host, which a session archive through `meerkat-mob-mcp` uses:
+the actor decides the hold in the re-drive's own step, by the one predicate
+the start and its own re-drives use. A same-session rotation is the mob's
 own: the restart finishes it whatever the host-pending set says, and a
 host-pending member keeps its mark through it. Its successor is seated
 Dormant, and its wakes are refused `HostPreparationPending` until the host's

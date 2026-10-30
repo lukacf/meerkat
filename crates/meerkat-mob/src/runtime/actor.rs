@@ -29830,6 +29830,17 @@ impl MobActor {
                     match target {
                         super::state::RetireTarget::Exact(expected_incarnation) => {
                             let result = self.validate_retire_member_incarnation(&expected_incarnation).await;
+                            // A caller other than the host leaves a rotation
+                            // held for its host held: decided here, in this
+                            // command's own step, by the actor's one hold
+                            // predicate.
+                            let redrive = match redrive {
+                                super::state::RetirementRedrive::Plain => false,
+                                super::state::RetirementRedrive::Redrive => true,
+                                super::state::RetirementRedrive::RedriveUnlessHeldForHost => {
+                                    !self.rotation_held_for_host(&agent_identity)
+                                }
+                            };
                             if !self.respawn_topology_reply_withheld {
                                 match result {
                                     Ok(()) => self.start_retirement(
@@ -50599,9 +50610,10 @@ impl MobActor {
     /// MobMachine's verdict on a fresh-life respawn (`Respawn`) of
     /// `agent_identity`'s current incarnation, probed on a copy of the
     /// authority that is never committed: the reason it refuses one
-    /// (`RespawnRefused`), or `None` when it admits it or when no arm
-    /// answers (the identity holds no incarnation, or the mob is not
-    /// running), which the respawn's own steps then answer.
+    /// (`RespawnRefused`, for an identity entry in any phase an entry lives
+    /// in), or `None` when it admits it or when no arm answers (the identity
+    /// holds no incarnation, or a worker's mob is not running), which the
+    /// respawn's own steps then answer.
     fn fresh_life_respawn_refusal(
         &self,
         agent_identity: &AgentIdentity,
@@ -50699,13 +50711,20 @@ impl MobActor {
         // machine step that never leaves the identity unseated, finished by
         // the restarted mob itself after a crash. A worker's respawn keeps
         // its fresh session below. MobMachine decides which: it refuses a
-        // fresh-life respawn of an entry's member (`RespawnRefused`).
+        // fresh-life respawn of an entry's member (`RespawnRefused`, reason
+        // `IdentityEntryKeepsSession`), in every phase an entry lives in.
+        // Only that reason routes to the same-session rotation; any other
+        // refusal is answered typed below.
         let refusal = if same_session.is_none() {
             self.fresh_life_respawn_refusal(&agent_identity)
         } else {
             None
         };
-        if same_session.is_some() || (refusal.is_some() && successor_spec.is_none()) {
+        let entry_keeps_session = matches!(
+            refusal,
+            Some(mob_dsl::RespawnRefusalReason::IdentityEntryKeepsSession)
+        );
+        if same_session.is_some() || (entry_keeps_session && successor_spec.is_none()) {
             let request = match same_session {
                 Some(request) => *request,
                 None => super::MemberRespawn {

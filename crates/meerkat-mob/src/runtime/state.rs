@@ -838,9 +838,10 @@ pub(super) enum MobCommand {
         /// What this command may retire: the exact roster incarnation the
         /// handle observed, or one step of a scoped retire.
         target: RetireTarget,
-        /// Re-drive a stuck retirement instead of answering
-        /// `MemberRetirementStuck` (typed re-drive transition).
-        redrive: bool,
+        /// What the retire does with a stuck retirement: answer it
+        /// `MemberRetirementStuck`, or re-drive it (typed re-drive
+        /// transition), or re-drive it unless it is held for its host.
+        redrive: RetirementRedrive,
         deadline: meerkat_core::time_compat::Instant,
         admission_tx: tokio::sync::watch::Sender<bool>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
@@ -1988,6 +1989,20 @@ pub(super) struct RetireMemberIncarnation {
     pub generation: Generation,
     pub fence_token: FenceToken,
     pub member_ref: MemberRef,
+}
+
+/// What a [`MobCommand::Retire`] does with a retirement that is stuck.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RetirementRedrive {
+    /// Answer it `MemberRetirementStuck` (a plain retire).
+    Plain,
+    /// Re-drive it (the typed re-drive transition).
+    Redrive,
+    /// Re-drive it unless it is a rotation held for its host
+    /// (`rotation_held_for_host`, decided in the command's own actor step):
+    /// a caller other than the host leaves that one held and is answered as
+    /// a plain retire is.
+    RedriveUnlessHeldForHost,
 }
 
 /// What one [`MobCommand::Retire`] may retire.

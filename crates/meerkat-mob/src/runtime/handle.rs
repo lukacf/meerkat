@@ -8373,7 +8373,7 @@ impl MobHandle {
     async fn retire_exact_incarnation(
         &self,
         agent_identity: AgentIdentity,
-        redrive: bool,
+        redrive: super::state::RetirementRedrive,
     ) -> Result<(), MobError> {
         let operation_deadline = Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT;
         let Some((key, pending)) = self
@@ -8408,7 +8408,7 @@ impl MobHandle {
                     agent_identity.clone(),
                     operation_deadline,
                     false,
-                    false,
+                    super::state::RetirementRedrive::Plain,
                 )
                 .await?
             else {
@@ -8443,7 +8443,7 @@ impl MobHandle {
         agent_identity: AgentIdentity,
         operation_deadline: Instant,
         bound_admission: bool,
-        redrive: bool,
+        redrive: super::state::RetirementRedrive,
     ) -> Result<Option<(RetirementOperationKey, Arc<PendingRetirementOperation>)>, MobError> {
         self.join_or_start_retirement_step(
             agent_identity,
@@ -8466,7 +8466,7 @@ impl MobHandle {
         scoped: Option<(&super::MemberDeliveryScope, RetirementScopeStep)>,
         operation_deadline: Instant,
         bound_admission: bool,
-        redrive: bool,
+        redrive: super::state::RetirementRedrive,
     ) -> Result<Option<(RetirementOperationKey, Arc<PendingRetirementOperation>)>, MobError> {
         // Retire's absent-member convergence is still an operator action.
         // Enter the serialized scope gate before any roster observation so a
@@ -9698,7 +9698,10 @@ impl MobHandle {
     /// restarted mob holds that rotation for the call (recorded stuck at
     /// admission, with a cause that names the wait, see
     /// [`Self::retirement_settlement`] and [`Self::rotation_held_for_host`]),
-    /// which finishes it once; a retire by any other caller leaves it held.
+    /// which finishes it once. A plain retire by any caller answers it stuck
+    /// and leaves it held, as does
+    /// [`Self::redrive_retirement_unless_held_for_host`], the re-drive of a
+    /// caller other than the host; [`Self::redrive_retirement`] finishes it.
     /// Without the host-pending mark the restarted mob finishes the rotation
     /// itself, and a call made after the rotation finished rotates the
     /// member again. So a host that does not mark the member reads it once
@@ -10121,17 +10124,16 @@ impl MobHandle {
     /// Whether `identity`'s rotation is held for its host: the member is
     /// host-pending ([`super::MobBuilder::with_host_pending_members`]) and the
     /// rotation that stands for it is a FreshSession one (a `rotate_member`),
-    /// which only the host's own call finishes. A caller other than the host
-    /// leaves it held: its retire answers
-    /// [`MobError::MemberRetirementStuck`] with the hold's cause, and it does
-    /// not re-drive the retirement. Read as [`Self::identity_entry`] is: no
-    /// actor command, no wake, the [`crate::ControlScope::List`] scope.
+    /// which the host's own [`Self::rotate_member`] finishes (as does
+    /// [`Self::redrive_retirement`]). A plain retire by any caller answers
+    /// [`MobError::MemberRetirementStuck`] with the hold's cause, and
+    /// [`Self::redrive_retirement_unless_held_for_host`] leaves it held. The
+    /// actor decides by the same predicate. Read as [`Self::identity_entry`]
+    /// is: no actor command, no wake, the [`crate::ControlScope::List`]
+    /// scope.
     pub fn rotation_held_for_host(&self, identity: &AgentIdentity) -> Result<bool, MobError> {
         self.read_published_machine_state(crate::ControlScope::List, |state| {
-            let identity = mob_dsl::AgentIdentity::from_domain(identity);
-            state.member_host_preparation_pending.contains(&identity)
-                && state.member_rotation_targets.get(&identity)
-                    == Some(&mob_dsl::RotationTarget::FreshSession)
+            super::rotation_held_for_host(state, &mob_dsl::AgentIdentity::from_domain(identity))
         })
     }
 
@@ -14218,9 +14220,33 @@ impl MobHandle {
     /// Drive a stuck retirement again (typed re-drive): the member's durably
     /// started retirement resumes from its durable `Retiring` state. Bounded
     /// like [`Self::retire`]: a re-drive still running when the budget
-    /// elapses answers `MemberRetirementInProgress` and stays owned.
+    /// elapses answers `MemberRetirementInProgress` and stays owned. A
+    /// rotation held for its host ([`Self::rotation_held_for_host`]) is
+    /// re-driven too: this is the host's own escape hatch. A caller other
+    /// than the host uses [`Self::redrive_retirement_unless_held_for_host`].
     pub async fn redrive_retirement(&self, identity: AgentIdentity) -> Result<(), MobError> {
-        self.retire_exact_incarnation(identity, true).await
+        self.retire_exact_incarnation(identity, super::state::RetirementRedrive::Redrive)
+            .await
+    }
+
+    /// [`Self::redrive_retirement`] for a caller other than the host: a
+    /// rotation held for its host (a host-pending member's FreshSession
+    /// rotation, [`Self::rotation_held_for_host`]) is left held, and the call
+    /// is answered as a plain retire is, with
+    /// [`MobError::MemberRetirementStuck`] and the hold's cause. The actor
+    /// decides it in the re-drive's own step, by the predicate the start and
+    /// its own re-drives use, so the call needs no read of its own and only
+    /// the [`crate::ControlScope::Retire`] scope. Any other stuck retirement
+    /// is re-driven.
+    pub async fn redrive_retirement_unless_held_for_host(
+        &self,
+        identity: AgentIdentity,
+    ) -> Result<(), MobError> {
+        self.retire_exact_incarnation(
+            identity,
+            super::state::RetirementRedrive::RedriveUnlessHeldForHost,
+        )
+        .await
     }
 
     /// Retire a member, archiving its session and removing trust, together
@@ -20552,7 +20578,9 @@ impl MobHandle {
         let mut attempted = std::collections::BTreeSet::new();
         self.retire_descendants_until_stable(&identity, &mut attempted, &mut first_error)
             .await;
-        let own = self.retire_exact_incarnation(identity.clone(), false).await;
+        let own = self
+            .retire_exact_incarnation(identity.clone(), super::state::RetirementRedrive::Plain)
+            .await;
         if own.is_ok() {
             self.retire_descendants_until_stable(&identity, &mut attempted, &mut first_error)
                 .await;
@@ -20585,7 +20613,10 @@ impl MobHandle {
             for descendant in pending {
                 attempted.insert(descendant.clone());
                 if let Err(error) = self
-                    .retire_exact_incarnation(descendant.clone(), false)
+                    .retire_exact_incarnation(
+                        descendant.clone(),
+                        super::state::RetirementRedrive::Plain,
+                    )
                     .await
                 {
                     tracing::warn!(
@@ -20714,7 +20745,7 @@ impl MobHandle {
                 Some((scope, step)),
                 operation_deadline,
                 true,
-                false,
+                super::state::RetirementRedrive::Plain,
             )
             .await?
         else {

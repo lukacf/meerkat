@@ -128,8 +128,12 @@ passes through a window in which it is neither seated nor an entry. The
 machine owns the respawn's route: its fresh-life respawn arm (`RespawnRunning`,
 whose input `Respawn` names the identity) admits no entry
 (`not_an_identity_entry`), and its refusal twin
-(`RespawnIdentityEntryRefusedRunning`) answers `RespawnRefused` with the
-reason `IdentityEntryKeepsSession`. The actor previews that verdict: an
+(`RespawnIdentityEntryRefused`, in Running, Stopped and Completed) answers
+`RespawnRefused` with the reason `IdentityEntryKeepsSession`, so no
+fresh-life step runs for an entry in any phase an entry lives in. The
+fresh-life respawn's committed archive (the topology-preserving
+`ObserveMemberRetirementArchived` arms) refuses an entry too, whatever the
+shell previewed. The actor previews the verdict and routes on its reason: an
 entry's respawn is that rotation, a successor spec for one is answered typed,
 and the retire-then-spawn path previews it again before it retires anything
 (its successor never takes entry custody). One shell step still decides from
@@ -140,7 +144,7 @@ The ci profile has no identities, so the hand-written audit
 `specs/machines/mob_machine/identity_entry_audit.sh` drives the entry arms in
 two runs: one records, refuses and replays entries, the other takes an entry
 through the dormant seat, the live retirement, the rotation, the fresh-life
-respawn's refusal and the destroy.
+respawn's refusal (in Running and Stopped) and the destroy.
 
 Member rotations are `MobMachine` facts. A pending rotation records its
 identity's next session (`member_rotation_session_ids`), the endpoint it
@@ -163,7 +167,11 @@ rotation, and its replay records the rotation again
 with the rotation's own terminal and no host record, while the plain archive
 waits; an admitted destroy beats it. The start does not re-drive the
 FreshSession rotation of a member its host marked host-pending: the host's
-re-issue finishes it. A same-session terminal keeps a host's preparation mark
+re-issue finishes it. The start, the actor's own re-drive and the re-drive of
+a caller other than the host (`redrive_retirement_unless_held_for_host`)
+decide that hold by one shell predicate over the machine's facts, in the
+actor's own step: host-pending and a FreshSession target. A same-session
+terminal keeps a host's preparation mark
 (`member_host_preparation_pending`): only the host's seat step ends it, so the
 successor of a host-pending member is seated Dormant and every wake of it is
 refused until then. The same-session terminal keeps the member's wiring

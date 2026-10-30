@@ -1335,7 +1335,7 @@ mod tests {
         let (admission_tx, _admission_rx) = tokio::sync::watch::channel(false);
         let cmd = MobCommand::Retire {
             agent_identity: identity.clone(),
-            redrive: false,
+            redrive: super::super::state::RetirementRedrive::Plain,
             target: super::super::state::RetireTarget::Exact(
                 super::super::state::RetireMemberIncarnation {
                     agent_identity: identity.clone(),

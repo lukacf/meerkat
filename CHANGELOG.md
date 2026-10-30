@@ -125,9 +125,10 @@ them.
   `RecoverMemberRotationIntentDestroyingRunning`,
   `ClassifyMemberReleaseStaleRunning`, `ClassifyMemberReleaseStaleStopped`,
   `ClassifyMemberReleaseStaleCompleted`,
-  `ClassifyMemberReleaseStaleDestroyed` and
-  `RespawnIdentityEntryRefusedRunning`, so no existing variant's discriminant
-  moves. Exhaustive matches must add the new variants.
+  `ClassifyMemberReleaseStaleDestroyed`,
+  `RespawnIdentityEntryRefusedRunning`, `RespawnIdentityEntryRefusedStopped`
+  and `RespawnIdentityEntryRefusedCompleted`, so no existing variant's
+  discriminant moves. Exhaustive matches must add the new variants.
   `meerkat_mob::MobEventKind::MemberRetirementStarted` gains the public field
   `rotation` (the rotation the retirement carries out, which serde skips), so
   code that builds the variant literally must set it (`None`).
@@ -284,9 +285,11 @@ them.
   role cannot be read) is refused `MobError::UnsupportedForMode` before
   anything starts; MobMachine's start refuses a lost or archived session.
   MobMachine refuses a fresh-life respawn of an identity entry's member
-  (`RespawnRefused`), so `MobHandle::respawn` of an entry's member respawns
-  it this way, and the identity stays seated and an entry throughout and the
-  successor keeps the restrictions its session recorded, while
+  (`RespawnRefused`, in every phase an entry lives in; the archive of a
+  fresh-life respawn refuses an entry too), so `MobHandle::respawn` of an
+  entry's member respawns it this way, and the identity stays seated and an
+  entry throughout and the successor keeps the restrictions its session
+  recorded, while
   `MobHandle::respawn_with_successor_spec` refuses an entry's member
   (`UnsupportedForMode`) before anything starts: an entry's successor keeps
   its session, which a successor spec cannot. A worker's respawn is
@@ -397,11 +400,15 @@ them.
   retirement stuck at admission with a cause that names the wait
   (`MobHandle::retirement_settlement`), and the call finishes it once, as it
   did for a start row that predates the record (`redrive_retirement`
-  re-drives it too). A retire by any other caller leaves the rotation held
-  and answers `MobError::MemberRetirementStuck` with that cause, a session
-  archive through `meerkat-mob-mcp` included, which no longer re-drives it;
-  the new `MobHandle::rotation_held_for_host` reads whether a member's
-  rotation is held. A same-session rotation (a respawn) is the mob's own: a
+  re-drives it too). A plain retire by any caller answers
+  `MobError::MemberRetirementStuck` with that cause and leaves the rotation
+  held, and so does the new
+  `MobHandle::redrive_retirement_unless_held_for_host`, the re-drive of a
+  caller other than the host (the actor decides the hold in the re-drive's
+  own step, under the `Retire` scope), which a session archive through
+  `meerkat-mob-mcp` now uses instead of `redrive_retirement`; the new
+  `MobHandle::rotation_held_for_host` reads whether a member's rotation is
+  held. A same-session rotation (a respawn) is the mob's own: a
   restart finishes it whatever the host-pending set says, and a host-pending
   member keeps its mark through it. Its successor is seated Dormant, and its
   wakes are refused (`MemberWakeRefusal::HostPreparationPending`) until the

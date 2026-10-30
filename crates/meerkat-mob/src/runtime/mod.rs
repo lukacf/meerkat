@@ -569,8 +569,8 @@ pub use retirement_settlement::{
     RetirementStage, ShutdownOptions, ShutdownOptionsError,
 };
 use roster_authority::{RosterAuthority, RosterMutator};
-pub(crate) use rotation_intent::RotationSuccessor;
 pub use rotation_intent::{MemberRespawn, MemberRotationRecord, ReleaseOutcome, RotationTarget};
+pub(crate) use rotation_intent::{RotationSuccessor, rotation_held_for_host};
 #[cfg(not(target_arch = "wasm32"))]
 pub use session_service::ControllerRouteObservation;
 pub use session_service::LiveDurableSourceObservation;

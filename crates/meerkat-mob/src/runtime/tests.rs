@@ -74952,7 +74952,7 @@ async fn test_member_reads_bypass_saturated_actor_command_queue() {
         .try_send(super::scope_gate::RoutedMobCommand::internal(
             super::state::MobCommand::Retire {
                 agent_identity: queued_identity.clone(),
-                redrive: false,
+                redrive: super::state::RetirementRedrive::Plain,
                 target: super::state::RetireTarget::Exact(super::state::RetireMemberIncarnation {
                     agent_identity: queued_identity.clone(),
                     agent_runtime_id: AgentRuntimeId::new(queued_identity, queued_generation),
@@ -75072,7 +75072,7 @@ async fn test_retire_saturated_actor_queue_reports_not_admitted_without_authorit
         .try_send(super::scope_gate::RoutedMobCommand::internal(
             super::state::MobCommand::Retire {
                 agent_identity: queued_identity.clone(),
-                redrive: false,
+                redrive: super::state::RetirementRedrive::Plain,
                 target: super::state::RetireTarget::Exact(super::state::RetireMemberIncarnation {
                     agent_identity: queued_identity.clone(),
                     agent_runtime_id: AgentRuntimeId::new(queued_identity, queued_generation),

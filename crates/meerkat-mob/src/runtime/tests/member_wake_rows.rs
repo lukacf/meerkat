@@ -3643,3 +3643,155 @@ async fn a_relisted_identity_under_a_new_role_wakes_under_it_with_its_declared_m
     );
     fixture.finish().await;
 }
+
+/// A Live member whose role move the declared apply holds finishes the run it
+/// has in flight, never preempted, while its run starts are held for its host
+/// preparation (`HostPreparation`), and the mob releases it once that run
+/// settled: it is Dormant, and every wake of it is refused. An apply that
+/// restores the role ends the hold and its run-start hold, and the member
+/// wakes again.
+///
+/// RED: drop the realization of the run-start hold (the hold a release tried
+/// once, at the apply, left a busy member Live): the member is never listed
+/// holding its run starts, and it stays Live, serving under its previous
+/// role, after its run settled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_live_member_finishes_its_run_and_is_released_when_idle() {
+    use crate::HostRunStartHoldReason;
+    use crate::runtime::{DeclaredEntry, DeclaredEntryOutcome, DeclaredRoster};
+
+    let fixture = WakeFixture::build(
+        "wake-role-hold-live",
+        |_| {},
+        |definition| {
+            let lead = definition
+                .profiles
+                .get_mut(&ProfileName::from("lead"))
+                .and_then(ProfileBinding::as_inline_mut)
+                .expect("inline lead");
+            lead.model = "gpt-5.5".to_string();
+            lead.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+            lead.tools = ToolConfig {
+                comms: true,
+                ..ToolConfig::default()
+            };
+        },
+        true,
+    )
+    .await;
+    let identity = AgentIdentity::from(format!("role-hold-live-{}", Uuid::new_v4().simple()));
+    let roster = |role: &str| {
+        DeclaredRoster::complete([DeclaredEntry::new(SpawnMemberSpec::new(
+            role,
+            identity.clone(),
+        ))])
+    };
+    let handle = &fixture.handle;
+    let apply = |roster: DeclaredRoster| async move {
+        tokio::time::timeout(WAIT, handle.apply_declared_roster(roster))
+            .await
+            .expect("the apply answers")
+            .expect("the apply runs")
+    };
+    let holding = || {
+        fixture
+            .handle
+            .members_holding_run_starts(HostRunStartHoldReason::HostPreparation)
+            .expect("the hold read")
+            .contains(&identity)
+    };
+    async fn wait_until(what: &str, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + WAIT;
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    let seated = apply(roster("worker")).await;
+    assert!(
+        matches!(
+            seated.entries.get(&identity),
+            Some(DeclaredEntryOutcome::Seated { .. })
+        ),
+        "{seated:?}"
+    );
+    fixture
+        .ensure_live(&identity)
+        .await
+        .expect("the first wake builds the member");
+
+    // A run in flight, its model reply held.
+    fixture.client.block();
+    let entry = fixture.entry(&identity).await;
+    let in_flight = token("role-hold-in-flight");
+    let turn = tokio::time::timeout(
+        WAIT,
+        fixture.handle.start_work_with_mode(
+            entry.agent_runtime_id,
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new(in_flight.as_str(), WorkOrigin::Internal),
+            HandlingMode::Queue,
+        ),
+    )
+    .await
+    .expect("the delivery is admitted in time")
+    .expect("the delivery is admitted");
+    fixture.client.wait_started(1).await;
+
+    let held = apply(roster("lead")).await;
+    assert!(
+        matches!(
+            held.entries.get(&identity),
+            Some(DeclaredEntryOutcome::RoleMigrationHeld { from, to })
+                if from.as_str() == "worker" && to.as_str() == "lead"
+        ),
+        "{held:?}"
+    );
+    wait_until("the held member's run starts are held", &holding).await;
+    assert_eq!(
+        fixture.residency(&identity),
+        Some(mob_dsl::MemberMaterializationPhase::Live),
+        "the run in flight is never preempted"
+    );
+
+    fixture.client.release();
+    tokio::time::timeout(WAIT, turn.wait())
+        .await
+        .expect("the run in flight finishes")
+        .expect("the run in flight succeeds");
+    wait_until("the mob releases the held member once it is idle", || {
+        fixture.residency(&identity) == Some(mob_dsl::MemberMaterializationPhase::Dormant)
+    })
+    .await;
+    assert_eq!(fixture.client.started_count(), 1, "no other run started");
+    assert!(
+        matches!(
+            fixture.ensure_live(&identity).await,
+            Err(MobError::MemberWakeRefused {
+                refusal: crate::MemberWakeRefusal::HostPreparationPending,
+                ..
+            })
+        ),
+        "every wake of the held member is refused"
+    );
+
+    let restored = apply(roster("worker")).await;
+    assert!(
+        matches!(
+            restored.entries.get(&identity),
+            Some(DeclaredEntryOutcome::Kept)
+        ),
+        "{restored:?}"
+    );
+    wait_until("the restored role releases the run-start hold", || {
+        !holding()
+    })
+    .await;
+    fixture
+        .ensure_live(&identity)
+        .await
+        .expect("the member wakes once its role is restored");
+    fixture.finish().await;
+}

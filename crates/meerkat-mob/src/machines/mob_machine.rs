@@ -14090,6 +14090,175 @@ mod tests {
         );
     }
 
+    /// A role hold ends in the step that commits the declared role, never at
+    /// the verdict that declares the move: an apply that declares the
+    /// migration keeps the member held, and the same-session terminal of its
+    /// restamp, which seats the next incarnation under the new role, ends the
+    /// hold in that step. A rotation that keeps the role keeps the hold. A
+    /// memory-only rotation verdict ends the hold only when the declared role
+    /// is the member's own (its runtime mode alone moves).
+    #[test]
+    fn a_role_hold_ends_in_the_step_that_commits_the_new_role() {
+        fn held(authority: &MobMachineAuthority, identity: &AgentIdentity) -> bool {
+            authority
+                .state()
+                .member_host_preparation_causes
+                .get(identity)
+                == Some(&HostPreparationCause::RoleMigrationUndeclared)
+        }
+        fn rotate_same_session(
+            authority: &mut MobMachineAuthority,
+            member: &SeatedMember,
+            profile: &str,
+        ) {
+            MobMachineMutator::apply(
+                authority,
+                MobMachineInput::BeginMemberRotation {
+                    agent_identity: member.identity.clone(),
+                    agent_runtime_id: member.runtime_id.clone(),
+                    fence_token: member.fence_token,
+                    generation: Generation(0),
+                    session_id: member.session_id.clone(),
+                    peer_endpoint: None,
+                    session_archived: false,
+                    target: RotationTarget::SameSession,
+                },
+            )
+            .expect("the restamp starts its same-session rotation");
+            MobMachineMutator::apply(
+                authority,
+                MobMachineInput::AuthorizeSpawnProfile {
+                    agent_identity: member.identity.clone(),
+                    profile_name: profile.to_string(),
+                    model: "test-model".to_string(),
+                    profile_material_digest: "role-commit-profile-digest".to_string(),
+                    tool_config_digest: "test-tool-config-digest".to_string(),
+                    skills_digest: "test-skills-digest".to_string(),
+                    provider_params_digest: None,
+                    output_schema_digest: None,
+                    external_addressable: false,
+                    resolved_spec_digest: None,
+                },
+            )
+            .expect("the rotation authorizes its next incarnation's profile");
+            MobMachineMutator::apply(
+                authority,
+                same_session_commit(
+                    member,
+                    &AgentRuntimeId(format!("{}:1", member.identity.0)),
+                    MemberSessionDisposal::KeptForSuccessor,
+                ),
+            )
+            .expect("the terminal seats the next incarnation on the kept session");
+        }
+
+        let mut authority = MobMachineAuthority::new();
+        let member = seat_live_entry_member(&mut authority, "role-commit-entry", 37);
+        let moved = |migration_from: Option<&'static str>| Declaration {
+            profile: "lead",
+            migration_from,
+            ..Declaration::default()
+        };
+        assert_eq!(
+            declare(&mut authority, &member.identity, moved(None)),
+            IdentityEntryVerdict::RoleMigrationHeld
+        );
+        assert!(held(&authority, &member.identity));
+        assert_eq!(
+            declare(&mut authority, &member.identity, moved(Some("test"))),
+            IdentityEntryVerdict::RoleMigrate
+        );
+        assert!(
+            held(&authority, &member.identity),
+            "declaring the move keeps the hold until its restamp commits"
+        );
+
+        for (declaration, still_held, label) in [
+            (
+                Declaration {
+                    profile: "lead",
+                    session_memory_only: true,
+                    ..Declaration::default()
+                },
+                true,
+                "a memory-only role move keeps the hold until its rotation commits",
+            ),
+            (
+                Declaration {
+                    runtime_mode: SpawnPolicyRuntimeMode::TurnDriven,
+                    session_memory_only: true,
+                    ..Declaration::default()
+                },
+                false,
+                "a memory-only move of the runtime mode alone restores the role",
+            ),
+        ] {
+            let mut rotated = authority.fork();
+            assert_eq!(
+                declare(&mut rotated, &member.identity, declaration),
+                IdentityEntryVerdict::RoleRotate
+            );
+            assert_eq!(held(&rotated, &member.identity), still_held, "{label}");
+        }
+
+        let mut kept_role = authority.fork();
+        rotate_same_session(&mut kept_role, &member, "test");
+        assert!(
+            held(&kept_role, &member.identity),
+            "a rotation that keeps the role keeps the hold"
+        );
+        rotate_same_session(&mut authority, &member, "lead");
+        assert!(
+            !held(&authority, &member.identity),
+            "the step that commits the new role ends the hold"
+        );
+        assert_eq!(
+            authority
+                .state()
+                .member_profile_names
+                .get(&member.identity)
+                .map(String::as_str),
+            Some("lead")
+        );
+    }
+
+    /// The explicit resume never rebuilds a member whose host preparation is
+    /// owed: its member authorization answers it held, typed, with the cause,
+    /// and reserves nothing (no wake attempt, no resume work).
+    #[test]
+    fn the_explicit_resume_answers_a_member_whose_host_preparation_is_owed_held() {
+        let (authority, attempt, identity, binding) = explicit_resume_fixture();
+        let mut state = authority.state().clone();
+        state
+            .member_host_preparation_causes
+            .insert(identity.clone(), HostPreparationCause::FirstBootRow);
+        let mut authority = MobMachineAuthority::recover_from_state(state)
+            .expect("a member owing its host preparation recovers");
+        commit_explicit_resume(&mut authority, &attempt);
+        let before = authority.state().clone();
+        let held = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::AuthorizeExplicitResumeMember {
+                attempt,
+                agent_identity: identity.clone(),
+                binding,
+            },
+        )
+        .expect("the authorization answers a held member");
+        assert!(held.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::ExplicitResumeMemberHeld {
+                agent_identity,
+                cause: HostPreparationCause::FirstBootRow,
+            } if agent_identity == &identity
+        )));
+        assert_eq!(
+            authority.state(),
+            &before,
+            "nothing is reserved for a held member"
+        );
+    }
+
     /// The replay of an unlisted retirement's start row marks the Declared
     /// entry on its seated incarnation only, before the boot plan is sealed.
     #[test]

@@ -2436,6 +2436,9 @@ pub enum RunStartHoldReason {
     MobStop,
     /// A restored member waits until its host has published its tools.
     ToolsNotPublished,
+    /// A mob member whose host preparation is owed (a role move its mob
+    /// holds) starts no run until its mob releases it.
+    HostPreparation,
 }
 
 impl RunStartHoldReason {
@@ -2443,6 +2446,7 @@ impl RunStartHoldReason {
         match self {
             Self::MobStop => dsl::RunStartHoldReason::MobStop,
             Self::ToolsNotPublished => dsl::RunStartHoldReason::ToolsNotPublished,
+            Self::HostPreparation => dsl::RunStartHoldReason::HostPreparation,
         }
     }
 }

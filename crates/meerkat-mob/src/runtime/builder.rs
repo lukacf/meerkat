@@ -11374,6 +11374,8 @@ impl MobBuilder {
                 #[cfg(feature = "runtime-adapter")]
                 startup_member_recoveries: BTreeMap::new(),
                 member_wakes,
+                #[cfg(feature = "runtime-adapter")]
+                host_preparation_holds: BTreeMap::new(),
                 identity_reconcile_parked: BTreeMap::new(),
                 spawn_panic_log_ledger: Arc::new(
                     super::panic_capture::SpawnPanicLogLedger::default(),

@@ -238,6 +238,8 @@ impl MobCommand {
             | Self::RetryOwedMemberWake { .. }
             // An owed edge repair is the actor's own timer.
             | Self::RepairOwedEdge { .. }
+            // The release of a held member is the actor's own self-send.
+            | Self::ReleaseHeldMember { .. }
             | Self::StartupMemberRecovered { .. }
             | Self::ResumeLifecycleReadinessResolved { .. }
             | Self::ResumeLifecyclePreparationResolved { .. }
@@ -528,6 +530,7 @@ impl MobCommand {
             | Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
             | Self::RepairOwedEdge { .. }
+            | Self::ReleaseHeldMember { .. }
             | Self::StartupMemberRecovered { .. }
             | Self::ResumeLifecycleReadinessResolved { .. }
             | Self::ResumeLifecyclePreparationResolved { .. }
@@ -667,7 +670,8 @@ impl MobCommand {
             }
             Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
-            | Self::RepairOwedEdge { .. } => {}
+            | Self::RepairOwedEdge { .. }
+            | Self::ReleaseHeldMember { .. } => {}
             Self::ReloadMemberRegistration { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }

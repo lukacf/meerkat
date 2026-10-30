@@ -17,6 +17,8 @@ mod dormant_kickoff;
 mod dormant_seat;
 mod dormant_wiring;
 pub(super) mod explicit_resume;
+#[cfg(feature = "runtime-adapter")]
+mod host_preparation_hold;
 mod identity_entry_admission;
 #[cfg(feature = "openai-live")]
 pub(super) mod live_durable_source_loads;
@@ -9372,6 +9374,12 @@ pub(super) struct MobActor {
     /// racing a second materialization), and the materializations MobMachine
     /// handed off. MobMachine owns every residency fact; this holds none.
     pub(super) member_wakes: member_wake::MemberWakes,
+    /// The sessions whose run starts the actor holds for a member's role
+    /// hold (`HostPreparation`), by identity: realized from MobMachine's
+    /// host preparation causes at every loop boundary (see
+    /// `host_preparation_hold`). Holds none of the facts; volatile.
+    #[cfg(feature = "runtime-adapter")]
+    pub(super) host_preparation_holds: BTreeMap<AgentIdentity, SessionId>,
     pub(super) next_retirement_ticket: u64,
     pub(super) retirement_batch: Option<retirement_io::RetirementBatch>,
     pub(super) wiring_io_tasks: tokio::task::JoinSet<wiring_io::WiringIoCompletion>,
@@ -15900,6 +15908,14 @@ impl MobActor {
         agent_identity: &AgentIdentity,
         reason: super::stop_report::HostRunStartHoldReason,
     ) -> Result<(), MobError> {
+        // The role hold's run-start hold is the mob's: MobMachine ends it.
+        if reason == super::stop_report::HostRunStartHoldReason::HostPreparation {
+            return Err(MobError::WiringError(format!(
+                "the run starts of '{agent_identity}' are held for its host preparation (a role \
+                 move the declared apply holds): an apply that declares the move or restores the \
+                 role releases them, never a host's release"
+            )));
+        }
         let member_ref = self
             .roster
             .read()
@@ -22443,6 +22459,14 @@ impl MobActor {
                     if machine.member_placement.contains_key(&identity) {
                         return None;
                     }
+                    // A member whose host preparation is owed is left as it
+                    // is: MobMachine's member authorization answers it held
+                    // (`AuthorizeExplicitResumeMemberHeldRunning`), so
+                    // nothing of the resume takes its session over, retires
+                    // its materialization or rebuilds it.
+                    if machine.member_host_preparation_causes.contains_key(&identity) {
+                        return None;
+                    }
                     let dormant = super::boot_plan::member_is_dormant(machine, &identity);
                     let binding = machine.member_session_bindings.get(&identity)?;
                     Some(
@@ -22698,7 +22722,7 @@ impl MobActor {
                 session_id: mob_dsl::SessionId::from_domain(&bridge_session_id),
                 definition_epoch: self.dsl_authority.state().definition_epoch,
             };
-            if let Err(error) = self.apply_dsl_input(
+            match self.apply_dsl_input_collect_effects(
                 mob_dsl::MobMachineInput::AuthorizeExplicitResumeMember {
                     attempt: attempt.clone(),
                     agent_identity: dsl_identity.clone(),
@@ -22706,8 +22730,22 @@ impl MobActor {
                 },
                 "authorize_explicit_resume_member",
             ) {
-                failed.push((entry.agent_identity.clone(), error));
-                continue;
+                Err(error) => {
+                    failed.push((entry.agent_identity.clone(), error));
+                    continue;
+                }
+                // A member whose host preparation is owed is not rebuilt.
+                Ok(effects)
+                    if effects.iter().any(|effect| {
+                        matches!(
+                            effect,
+                            mob_dsl::MobMachineEffect::ExplicitResumeMemberHeld { .. }
+                        )
+                    }) =>
+                {
+                    continue;
+                }
+                Ok(_) => {}
             }
             // The reservation left the member Waking under one wake attempt
             // (its own, or the in-flight wake it joined): a peer or host wake
@@ -29450,6 +29488,16 @@ impl MobActor {
                     self.inline_step_watchdog.set_step("repair_owed_edge");
                     boxed_arm_future(|| self.repair_owed_edge(edge)).await;
                 }
+                MobCommand::ReleaseHeldMember {
+                    agent_identity,
+                    session_id,
+                } => {
+                    self.inline_step_watchdog.set_step("release_held_member");
+                    #[cfg(feature = "runtime-adapter")]
+                    Box::pin(self.release_held_member(agent_identity, session_id)).await;
+                    #[cfg(not(feature = "runtime-adapter"))]
+                    let _ = (agent_identity, session_id);
+                }
                 MobCommand::ReleaseMember {
                     agent_identity,
                     scope,
@@ -32662,6 +32710,8 @@ impl MobActor {
             boxed_arm_future(|| self.answer_closed_member_wakes()).await;
             boxed_arm_future(|| self.realize_member_peer_ingress_changes()).await;
             boxed_arm_future(|| self.start_pending_member_materializations()).await;
+            #[cfg(feature = "runtime-adapter")]
+            boxed_arm_future(|| self.realize_host_preparation_run_start_holds()).await;
         }
         if self.durable_uncertainty_fail_stop.is_set() {
             return ActorLoopWakeSelection::Continue;
@@ -33362,6 +33412,8 @@ impl MobActor {
             boxed_arm_future(|| self.answer_closed_member_wakes()).await;
             boxed_arm_future(|| self.realize_member_peer_ingress_changes()).await;
             boxed_arm_future(|| self.start_pending_member_materializations()).await;
+            #[cfg(feature = "runtime-adapter")]
+            boxed_arm_future(|| self.realize_host_preparation_run_start_holds()).await;
             loop {
                 let result = boxed_arm_future(|| self.flush_routed_effects()).await;
                 #[cfg(test)]

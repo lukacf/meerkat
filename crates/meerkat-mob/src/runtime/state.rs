@@ -993,6 +993,13 @@ pub(super) enum MobCommand {
     RepairOwedEdge {
         edge: super::actor::member_wake::MemberWiringEdge,
     },
+    /// Internal: the run a member whose role move MobMachine holds had when
+    /// its run starts were held on `session_id` settled (or it had none):
+    /// release the member while the hold still stands there.
+    ReleaseHeldMember {
+        agent_identity: AgentIdentity,
+        session_id: SessionId,
+    },
     /// Release a live member's materialization, keeping it seated
     /// ([`super::handle::MobHandle::release_member`]). With a scope
     /// ([`super::handle::MobHandle::release_member_at_scope`]) only the
@@ -2229,7 +2236,8 @@ impl MobCommand {
             Self::ReleaseMember { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
-            | Self::RepairOwedEdge { .. } => ShutdownAnswerClass::ActorCompletion,
+            | Self::RepairOwedEdge { .. }
+            | Self::ReleaseHeldMember { .. } => ShutdownAnswerClass::ActorCompletion,
             Self::ReloadMemberRegistration { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(feature = "openai-live")]
             Self::StartLiveBridgeOperation { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2425,6 +2433,7 @@ impl MobCommand {
             Self::MemberWakeTimedOut { .. } => "MemberWakeTimedOut",
             Self::RetryOwedMemberWake { .. } => "RetryOwedMemberWake",
             Self::RepairOwedEdge { .. } => "RepairOwedEdge",
+            Self::ReleaseHeldMember { .. } => "ReleaseHeldMember",
             Self::ReleaseMember { .. } => "ReleaseMember",
             Self::StartupMemberRecovered { .. } => "StartupMemberRecovered",
             Self::ReloadMemberRegistration { .. } => "ReloadMemberRegistration",

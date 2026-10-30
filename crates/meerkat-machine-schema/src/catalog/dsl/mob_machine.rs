@@ -2563,6 +2563,11 @@ macro_rules! mob_catalog_machine_dsl {
             // An unseated identity's archived session record was let go
             // (ForgetArchivedSession).
             ArchivedSessionForgotten { agent_identity: AgentIdentity, session_id: SessionId, reason: Enum<ArchivedSessionForgetReason> },
+            // The explicit resume's member authorization for a member whose
+            // host preparation is owed (AuthorizeExplicitResumeMemberHeldRunning):
+            // the resume does not rebuild it, and answers it held with the
+            // cause.
+            ExplicitResumeMemberHeld { agent_identity: AgentIdentity, cause: Enum<HostPreparationCause> },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -3586,6 +3591,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition IdentityEntryDeclared => local seam SurfaceResultAlignment,
         disposition DeclaredRosterSealed => local seam SurfaceResultAlignment,
         disposition ArchivedSessionForgotten => local seam SurfaceResultAlignment,
+        disposition ExplicitResumeMemberHeld => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -23040,6 +23046,7 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.explicit_resume_readiness_settled == false
             }
             guard "member_work_not_pending" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            guard "host_preparation_settled" { self.member_host_preparation_causes.contains_key(agent_identity) == false }
             guard "current_definition" { self.definition_epoch == binding.definition_epoch }
             guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
             guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
@@ -26497,6 +26504,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.unborn_seat_sessions.insert(self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                // A successor seated under another role than the incarnation
+                // it replaces (the declared apply's role move, or a first-boot
+                // fresh life under the declared role) no longer runs under the
+                // role a role hold held the member from: the hold ends in this
+                // step, which commits the new role. A rotation that keeps the
+                // role keeps the hold.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) && self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
                 // The incarnation this step seats is exempt from the
                 // definition's wiring rules exactly when its spec says so,
@@ -26689,6 +26705,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.unborn_seat_sessions.insert(self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                // A successor seated under another role than the incarnation
+                // it replaces (the declared apply's role move, or a first-boot
+                // fresh life under the declared role) no longer runs under the
+                // role a role hold held the member from: the hold ends in this
+                // step, which commits the new role. A rotation that keeps the
+                // role keeps the hold.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) && self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
                 // The incarnation this step seats is exempt from the
                 // definition's wiring rules exactly when its spec says so,
@@ -27087,6 +27112,7 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.explicit_resume_readiness_settled == false
             }
             guard "member_work_not_pending" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            guard "host_preparation_settled" { self.member_host_preparation_causes.contains_key(agent_identity) == false }
             guard "current_definition" { self.definition_epoch == binding.definition_epoch }
             guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
             guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
@@ -27127,6 +27153,7 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.explicit_resume_topology_settled == false
             }
             guard "member_work_not_pending" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            guard "host_preparation_settled" { self.member_host_preparation_causes.contains_key(agent_identity) == false }
             guard "current_definition" { self.definition_epoch == binding.definition_epoch }
             guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
             guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
@@ -27134,6 +27161,24 @@ macro_rules! mob_catalog_machine_dsl {
             guard "member_waking" { self.member_materialization.get_cloned(agent_identity) == Some(MemberMaterializationPhase::Waking) }
             update { self.explicit_resume_member_work.insert(agent_identity, binding); }
             to Running
+        }
+
+        // A member whose host preparation is owed (a first-boot request not
+        // carried out, a role hold) is never rebuilt by the explicit resume:
+        // every wake of it is refused, and the resume answers it held,
+        // typed, and goes on with the other members. A Live member keeps its
+        // materialization, whose run starts the role hold holds until it is
+        // released when idle; a Dormant one stays Dormant.
+        transition AuthorizeExplicitResumeMemberHeldRunning {
+            on input AuthorizeExplicitResumeMember { attempt, agent_identity, binding }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "resume_not_cancelled" { self.explicit_resume_cancel_requested == false }
+            guard "member_work_not_pending" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            guard "host_preparation_owed" { self.member_host_preparation_causes.contains_key(agent_identity) == true }
+            update {}
+            to Running
+            emit ExplicitResumeMemberHeld { agent_identity: agent_identity, cause: self.member_host_preparation_causes.get_cloned(agent_identity).get("value") }
         }
 
         // The release verdict for one member (the shell's release_member
@@ -27301,6 +27346,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.unborn_seat_sessions.insert(self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                // A successor seated under another role than the incarnation
+                // it replaces (the declared apply's role move, or a first-boot
+                // fresh life under the declared role) no longer runs under the
+                // role a role hold held the member from: the hold ends in this
+                // step, which commits the new role. A rotation that keeps the
+                // role keeps the hold.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) && self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
                 // The incarnation this step seats is exempt from the
                 // definition's wiring rules exactly when its spec says so,
@@ -27504,6 +27558,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.unborn_seat_sessions.insert(self.member_rotation_session_ids.get_cloned(agent_identity).get("value"));
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                // A successor seated under another role than the incarnation
+                // it replaces (the declared apply's role move, or a first-boot
+                // fresh life under the declared role) no longer runs under the
+                // role a role hold held the member from: the hold ends in this
+                // step, which commits the new role. A rotation that keeps the
+                // role keeps the hold.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) && self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
                 // The incarnation this step seats is exempt from the
                 // definition's wiring rules exactly when its spec says so,
@@ -27697,6 +27760,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
                 // A changed profile (a declared role migration) or runtime
                 // mode (a restamp) is the next incarnation's own.
+                // A successor seated under another role than the incarnation
+                // it replaces (the declared apply's role move, or a first-boot
+                // fresh life under the declared role) no longer runs under the
+                // role a role hold held the member from: the hold ends in this
+                // step, which commits the new role. A rotation that keeps the
+                // role keeps the hold.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) && self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
                 // The incarnation this step seats is exempt from the
                 // definition's wiring rules exactly when its spec says so,
@@ -27860,6 +27932,15 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
                 // A changed profile (a declared role migration) or runtime
                 // mode (a restamp) is the next incarnation's own.
+                // A successor seated under another role than the incarnation
+                // it replaces (the declared apply's role move, or a first-boot
+                // fresh life under the declared role) no longer runs under the
+                // role a role hold held the member from: the hold ends in this
+                // step, which commits the new role. A rotation that keeps the
+                // role keeps the hold.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) && self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
                 // The incarnation this step seats is exempt from the
                 // definition's wiring rules exactly when its spec says so,
@@ -28970,7 +29051,9 @@ macro_rules! mob_catalog_machine_dsl {
         // A seated entry declared under another role, with the migration
         // declared from its current role, is restamped on its own session
         // under the new role (a same-session rotation, when the member is
-        // idle); a role hold ends.
+        // idle). A role hold an earlier apply wrote stays until the restamp's
+        // terminal commits the new role: a deferred or refused restamp keeps
+        // the member held.
         transition DeclareIdentityEntryRoleMigrate {
             on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role }
             guard { self.lifecycle_phase == Phase::Running }
@@ -29002,11 +29085,7 @@ macro_rules! mob_catalog_machine_dsl {
                     declared_migration_from != None && declared_migration_from == resume_session_role
                 ) == IdentityEntryVerdict::RoleMigrate
             }
-            update {
-                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
-                    self.member_host_preparation_causes.remove(agent_identity);
-                }
-            }
+            update {}
             to Running
             emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::RoleMigrate, archived_session: self.identity_entry_archived_sessions.get_cloned(agent_identity) }
         }
@@ -29014,7 +29093,9 @@ macro_rules! mob_catalog_machine_dsl {
         // A seated entry whose role or runtime mode changes on a session that
         // lives in memory only moves to a fresh session (a rotation, when the
         // member is idle): there is no session to carry over. A role hold
-        // ends.
+        // ends here when the declared role is the member's own (only its
+        // runtime mode moves); a role move keeps it until the rotation's
+        // terminal commits the new role.
         transition DeclareIdentityEntryRoleRotate {
             on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role }
             guard { self.lifecycle_phase == Phase::Running }
@@ -29047,7 +29128,7 @@ macro_rules! mob_catalog_machine_dsl {
                 ) == IdentityEntryVerdict::RoleRotate
             }
             update {
-                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) && self.member_profile_names.get_cloned(agent_identity) == Some(profile_name) {
                     self.member_host_preparation_causes.remove(agent_identity);
                 }
             }

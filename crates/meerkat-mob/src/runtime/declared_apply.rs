@@ -212,10 +212,15 @@ pub enum DeclaredEntryOutcome {
     /// `session_id`.
     FreshLife { session_id: SessionId },
     /// The roster moves the member from role `from` to role `to` without a
-    /// declared migration: the member is held (released when idle, and its
-    /// wakes refused) until an apply declares the move or restores the role.
-    /// An identity no member holds whose seat would resume a session last
-    /// built under `from` is not seated until then.
+    /// declared migration: the member is held until an apply declares the
+    /// move or restores the role. Every wake of it is refused, and a Live
+    /// member starts no new run (its run starts are held,
+    /// [`crate::HostRunStartHoldReason::HostPreparation`]): its run in
+    /// flight finishes, and it is released when idle. The hold ends in the
+    /// step that commits the declared role (the restamp or rotation of a
+    /// later apply), not at that apply's verdict. An identity no member holds
+    /// whose seat would resume a session last built under `from` is not
+    /// seated until then.
     RoleMigrationHeld { from: ProfileName, to: ProfileName },
     /// The identity awaits its held creation.
     AwaitingHeldCreation,
@@ -409,10 +414,15 @@ impl super::MobHandle {
     ///   role is a restamp under the new role; on a session that lives in
     ///   memory only either moves the member to a fresh session. Each waits
     ///   for the member to be idle: a busy member is deferred.
-    /// - A role change with no migration declared is held: the member is
-    ///   released when idle and every wake of it is refused
-    ///   ([`crate::HostPreparationCause::RoleMigrationUndeclared`]) until an
-    ///   apply declares the move or restores the role.
+    /// - A role change with no migration declared is held
+    ///   ([`crate::HostPreparationCause::RoleMigrationUndeclared`]): every
+    ///   wake of the member is refused, and a Live member's run starts are
+    ///   held ([`crate::HostRunStartHoldReason::HostPreparation`]), so its
+    ///   run in flight finishes, never preempted, no new run starts under its
+    ///   previous role, and the mob releases it when idle. The explicit
+    ///   resume leaves it alone. An apply that restores the role ends the
+    ///   hold at its verdict; one that declares the move ends it in the step
+    ///   that commits the new role, so a deferred or refused restamp keeps it.
     /// - A legacy member listed under its own name is adopted as an entry
     ///   first ([`Self::adopt_legacy_identity_entry`]); a worker holding a
     ///   listed name refuses that identity alone.

@@ -1915,7 +1915,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum("InputLane", &["Queue", "Steer"]),
-            NamedTypeBinding::string_enum("RunStartHoldReason", &["MobStop", "ToolsNotPublished"]),
+            NamedTypeBinding::string_enum(
+                "RunStartHoldReason",
+                &["MobStop", "ToolsNotPublished", "HostPreparation"],
+            ),
             NamedTypeBinding::string_enum("SessionResidencyOwner", &["Session", "Composition"]),
             NamedTypeBinding::string_enum(
                 "EmptyResumeRetirementVerdict",

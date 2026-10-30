@@ -4074,6 +4074,37 @@ fn unlisted_retirement_starts(events: &[crate::event::MobEvent]) -> BTreeSet<(St
         .collect()
 }
 
+/// The incarnations, by identity and generation, whose member was hosted
+/// elsewhere, as their `MemberSpawned` rows record: a placed spawn's member
+/// (on its member host) or an externally bound member. The generic replay of
+/// a retired incarnation restores no placement, so the replay of its
+/// retirement passes this record (`hosted_incarnation`): MobMachine keeps its
+/// identity entry hosted on its first use with no archived session, as the
+/// live end of the retirement did.
+fn hosted_incarnations(events: &[crate::event::MobEvent]) -> BTreeSet<(String, u64)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            MobEventKind::MemberSpawned(spawned)
+                if spawned.placed_spawn_id().is_some()
+                    || matches!(
+                        spawned.bridge_member_ref(),
+                        Some(crate::event::MemberRef::BackendPeer {
+                            session_id: None,
+                            ..
+                        })
+                    ) =>
+            {
+                Some((
+                    spawned.agent_identity.as_str().to_string(),
+                    spawned.generation.get(),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Mark again, at replay, the Declared entry whose member's retirement the
 /// declared apply's seal started (`RecoverIdentityEntryRetiring`): the end of
 /// the retirement then ends the entry, as it did live. Every unlisted start
@@ -4108,6 +4139,7 @@ fn seed_mob_authority_sync_from_events(
 
     let respawn_topology_ledger = respawn_topology_ledger(events)?;
     let unlisted_starts = unlisted_retirement_starts(events);
+    let hosted_incarnations = hosted_incarnations(events);
 
     for event in events {
         match &event.kind {
@@ -4525,6 +4557,7 @@ fn seed_mob_authority_sync_from_events(
                         preserve_machine_topology,
                         preservation_started,
                         session_archived: *session_archived,
+                        hosted_incarnation: hosted_incarnations.contains(&key),
                     },
                     "recover_member_retired",
                 )?;

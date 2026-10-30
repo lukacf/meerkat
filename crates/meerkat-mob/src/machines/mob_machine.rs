@@ -6528,6 +6528,7 @@ mod tests {
                 preserve_machine_topology: false,
                 preservation_started: false,
                 session_archived: true,
+                hosted_incarnation: false,
             })
             .expect("pre-activation retirement final must settle spawn execution");
         assert!(
@@ -6562,6 +6563,7 @@ mod tests {
                 preserve_machine_topology: false,
                 preservation_started: false,
                 session_archived: true,
+                hosted_incarnation: false,
             })
             .expect("absent-runtime retirement final must settle spawn execution");
         assert!(
@@ -6604,6 +6606,7 @@ mod tests {
                 preserve_machine_topology: false,
                 preservation_started: false,
                 session_archived: true,
+                hosted_incarnation: false,
             })
             .expect("recover exact generation-zero final");
 
@@ -6634,6 +6637,7 @@ mod tests {
                 preserve_machine_topology: false,
                 preservation_started: false,
                 session_archived: true,
+                hosted_incarnation: false,
             })
             .expect("duplicate retirement final should converge idempotently");
         assert!(
@@ -6746,6 +6750,7 @@ mod tests {
                 preserve_machine_topology: false,
                 preservation_started: false,
                 session_archived: true,
+                hosted_incarnation: false,
             })
             .expect("duplicate retired-generation final should remain idempotent");
         assert_eq!(
@@ -6885,6 +6890,7 @@ mod tests {
                     preserve_machine_topology: false,
                     preservation_started: false,
                     session_archived: true,
+                    hosted_incarnation: false,
                 })
                 .is_err(),
             "a Retired record with another generation must not settle the current runtime"
@@ -6925,6 +6931,7 @@ mod tests {
                 preserve_machine_topology: false,
                 preservation_started: false,
                 session_archived: true,
+                hosted_incarnation: false,
             })
             .expect("a delayed final of an older generation prunes its runtime");
         assert!(!authority.state().live_runtime_ids.contains(&runtime));
@@ -12959,6 +12966,50 @@ mod tests {
             agent_identity: identity.clone(),
             agent_runtime_id: runtime_id.clone(),
             origin: IdentityEntryOrigin::Declared,
+        }
+    }
+
+    /// The replay of an identity entry's retirement whose incarnation was
+    /// hosted elsewhere (its row's `hosted_incarnation`: a placed or
+    /// externally bound member, which the generic replay seats with no
+    /// placement) keeps the entry hosted on its first use and records no
+    /// archived session, as the live end did; a local incarnation's replay
+    /// leaves the entry owed its seat, with the session the retirement
+    /// archived.
+    #[test]
+    fn the_replay_of_a_hosted_incarnations_retirement_keeps_its_entry_hosted() {
+        for hosted_incarnation in [true, false] {
+            let (mut authority, member) = dormant_member_authority("hosted-replay");
+            authority
+                .apply_signal(recover_entry_signal(&member.identity, &member.runtime_id))
+                .expect("the replay records the entry");
+            authority
+                .apply_signal(MobMachineSignal::RecoverRosterMemberRetired {
+                    agent_identity: member.identity.clone(),
+                    agent_runtime_id: member.runtime_id.clone(),
+                    generation: Generation(0),
+                    preserve_machine_topology: false,
+                    preservation_started: false,
+                    session_archived: true,
+                    hosted_incarnation,
+                })
+                .expect("the retirement replays");
+            let state = authority.state();
+            let (cause, record) = if hosted_incarnation {
+                (UnseatedEntryCause::HostedOnFirstUse, None)
+            } else {
+                (UnseatedEntryCause::SeatOwed, Some(&member.session_id))
+            };
+            assert_eq!(
+                state.identity_entry_unseated.get(&member.identity),
+                Some(&cause),
+                "hosted: {hosted_incarnation}"
+            );
+            assert_eq!(
+                state.identity_entry_archived_sessions.get(&member.identity),
+                record,
+                "hosted: {hosted_incarnation}"
+            );
         }
     }
 

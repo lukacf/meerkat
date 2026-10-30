@@ -6771,6 +6771,13 @@ impl MobActor {
                             preserve_machine_topology: false,
                             preservation_started: false,
                             session_archived: false,
+                            // An externally bound member's rollback keeps its
+                            // entry hosted on its first use, as the replay of
+                            // its row does.
+                            hosted_incarnation: Self::runtime_binding_for_entry(
+                                &continuation.entry,
+                            )
+                            .is_some(),
                         },
                         "rollback_resumed_spawn_membership",
                     )

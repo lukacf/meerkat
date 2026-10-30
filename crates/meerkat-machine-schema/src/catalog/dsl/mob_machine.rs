@@ -2051,8 +2051,13 @@ macro_rules! mob_catalog_machine_dsl {
             // session_archived is the row's record that the retirement
             // archived the member's session (its disposal was Archived), as
             // the live end read it: only then does the replay record an
-            // identity entry's archived session.
-            RecoverRosterMemberRetired { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, generation: Generation, preserve_machine_topology: bool, preservation_started: bool, session_archived: bool },
+            // identity entry's archived session. hosted_incarnation is the
+            // journal's record that the retired incarnation was hosted
+            // elsewhere (its spawn row is a placed spawn's or an externally
+            // bound member's): the generic replay of a retired incarnation
+            // restores no placement, and the live end kept such an entry
+            // hosted on its first use, with no archived session.
+            RecoverRosterMemberRetired { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, generation: Generation, preserve_machine_topology: bool, preservation_started: bool, session_archived: bool, hosted_incarnation: bool },
             ConvergeRecoveredRosterTopology { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
             ConvergeRecoveredRespawnTopology { agent_identity: AgentIdentity },
             RecoverMemberKickoff { member_id: AgentIdentity, phase: KickoffPhase, error: Option<String> },
@@ -9802,21 +9807,22 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition RecoverRosterMemberRetiredRunning {
-            on signal RecoverRosterMemberRetired { agent_identity, agent_runtime_id, generation, preserve_machine_topology, preservation_started, session_archived }
+            on signal RecoverRosterMemberRetired { agent_identity, agent_runtime_id, generation, preserve_machine_topology, preservation_started, session_archived, hosted_incarnation }
             guard { self.lifecycle_phase == Phase::Running }
             guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             update {
                 // The replay of an identity entry's retirement: as its live end,
                 // the entry outlives a retirement the seal did not start
-                // (unseated: owed a seat, or hosted on its first use when
-                // placed) and the session it was bound to is recorded when the
-                // retirement archived it (the row's session_archived, the
-                // live end's own condition); the end of an unlisted
-                // retirement removes the entry. Read before this step unseats
-                // the member.
+                // (unseated: owed a seat, or hosted on its first use when its
+                // incarnation was hosted elsewhere, by its placement or by the
+                // row's hosted_incarnation) and the session it was bound to is
+                // recorded when the retirement archived a local member's
+                // session (the row's session_archived, the live end's own
+                // condition); the end of an unlisted retirement removes the
+                // entry. Read before this step unseats the member.
                 if self.identity_entry_origins.contains_key(agent_identity) == true && self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) {
-                    if session_archived == true && self.member_placement.contains_key(agent_identity) == false {
+                    if session_archived == true && self.member_placement.contains_key(agent_identity) == false && hosted_incarnation == false {
                         if self.member_session_bindings.contains_key(agent_identity) == true {
                             self.identity_entry_archived_sessions.insert(agent_identity, self.member_session_bindings.get_cloned(agent_identity).get("value"));
                         } else {
@@ -9829,7 +9835,7 @@ macro_rules! mob_catalog_machine_dsl {
                         self.identity_entry_origins.remove(agent_identity);
                         self.identity_entry_retiring.remove(agent_identity);
                     } else {
-                        if self.member_placement.contains_key(agent_identity) == true {
+                        if self.member_placement.contains_key(agent_identity) == true || hosted_incarnation == true {
                             self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
                         } else {
                             self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
@@ -9941,7 +9947,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition RecoverRosterMemberRetiredCurrentAlreadyAbsent {
-            on signal RecoverRosterMemberRetired { agent_identity, agent_runtime_id, generation, preserve_machine_topology, preservation_started, session_archived }
+            on signal RecoverRosterMemberRetired { agent_identity, agent_runtime_id, generation, preserve_machine_topology, preservation_started, session_archived, hosted_incarnation }
             guard { self.lifecycle_phase == Phase::Running }
             guard "runtime_not_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "generation_matches_retired_runtime" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
@@ -9952,14 +9958,15 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 // The replay of an identity entry's retirement: as its live end,
                 // the entry outlives a retirement the seal did not start
-                // (unseated: owed a seat, or hosted on its first use when
-                // placed) and the session it was bound to is recorded when the
-                // retirement archived it (the row's session_archived, the
-                // live end's own condition); the end of an unlisted
-                // retirement removes the entry. Read before this step unseats
-                // the member.
+                // (unseated: owed a seat, or hosted on its first use when its
+                // incarnation was hosted elsewhere, by its placement or by the
+                // row's hosted_incarnation) and the session it was bound to is
+                // recorded when the retirement archived a local member's
+                // session (the row's session_archived, the live end's own
+                // condition); the end of an unlisted retirement removes the
+                // entry. Read before this step unseats the member.
                 if self.identity_entry_origins.contains_key(agent_identity) == true && self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) {
-                    if session_archived == true && self.member_placement.contains_key(agent_identity) == false {
+                    if session_archived == true && self.member_placement.contains_key(agent_identity) == false && hosted_incarnation == false {
                         if self.member_session_bindings.contains_key(agent_identity) == true {
                             self.identity_entry_archived_sessions.insert(agent_identity, self.member_session_bindings.get_cloned(agent_identity).get("value"));
                         } else {
@@ -9972,7 +9979,7 @@ macro_rules! mob_catalog_machine_dsl {
                         self.identity_entry_origins.remove(agent_identity);
                         self.identity_entry_retiring.remove(agent_identity);
                     } else {
-                        if self.member_placement.contains_key(agent_identity) == true {
+                        if self.member_placement.contains_key(agent_identity) == true || hosted_incarnation == true {
                             self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
                         } else {
                             self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);

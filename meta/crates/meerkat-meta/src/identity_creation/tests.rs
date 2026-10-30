@@ -331,6 +331,13 @@ fn created_spec_mut<'a>(request: &'a mut IdentityRequest, identity: &str) -> &'a
     }
 }
 
+fn updated_mut(request: &mut IdentityRequest) -> &mut UpdatedSpec {
+    match &mut request.action {
+        RequestAction::Update(updated) => updated,
+        RequestAction::Create { .. } | RequestAction::Remove { .. } => panic!("an update request"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Policy validation rows
 // ---------------------------------------------------------------------------
@@ -2998,6 +3005,83 @@ fn a_changed_semantic_field_cannot_be_approved_by_an_old_tap() {
             changed.request_digest().expect("a digest"),
             base.request_digest().expect("a digest")
         );
+    }
+}
+
+#[test]
+fn a_changed_update_or_remove_field_cannot_be_approved_by_an_old_tap() {
+    type Change = fn(&mut IdentityRequest);
+    fn change(change: Change) -> Change {
+        change
+    }
+    let updates = [
+        change(|request| updated_mut(request).identity = "team:other".to_owned()),
+        change(|request| updated_mut(request).expected_revision = 4),
+        change(|request| updated_mut(request).template = "open".to_owned()),
+        change(|request| {
+            updated_mut(request).binding_digest = Sha256Digest::of(b"another binding");
+        }),
+        change(|request| {
+            updated_mut(request).rebind = Some(Sha256Digest::of(b"a new binding"));
+        }),
+        change(|request| updated_mut(request).display_name = Some(String::new())),
+        change(|request| updated_mut(request).display_name = Some("Helper".to_owned())),
+        change(|request| updated_mut(request).purpose = None),
+        change(|request| updated_mut(request).instructions = Some("Read.".to_owned())),
+        change(|request| updated_mut(request).supplied_context = Some(BTreeMap::new())),
+        change(|request| updated_mut(request).descriptive_labels = Some(BTreeMap::new())),
+        change(|request| updated_mut(request).authority_fields = Some(BTreeMap::new())),
+        change(|request| updated_mut(request).tools = None),
+        change(|request| updated_mut(request).tools = Some(BTreeSet::new())),
+        change(|request| updated_mut(request).peers_add.clear()),
+        change(|request| {
+            updated_mut(request)
+                .peers_add
+                .insert("analyst-1".to_owned(), EdgeBasis::SameBatch);
+        }),
+        change(|request| updated_mut(request).peers_remove.clear()),
+        change(|request| {
+            updated_mut(request)
+                .peers_remove
+                .insert("stranger".to_owned());
+        }),
+    ];
+    let removes = [
+        change(|request| {
+            request.action = RequestAction::Remove {
+                identity: "team:other".to_owned(),
+                expected_revision: 3,
+            };
+        }),
+        change(|request| {
+            request.action = RequestAction::Remove {
+                identity: "team:helper".to_owned(),
+                expected_revision: 4,
+            };
+        }),
+    ];
+    for (base, changes) in [
+        (golden_update(), updates.as_slice()),
+        (golden_remove(), removes.as_slice()),
+    ] {
+        let old_tap = render(&base).subject_digest();
+        let mut digests = BTreeSet::from([old_tap.clone()]);
+        for (index, apply) in changes.iter().enumerate() {
+            let mut changed = base.clone();
+            apply(&mut changed);
+            assert_ne!(changed, base, "change {index} changes the request");
+            let rendering = render(&changed);
+            let parts = rendering.canonical_parts(None);
+            assert_eq!(
+                decide(&rendering, &old_tap, None, &parts),
+                Err(IdentityRefusalKind::SubjectChanged),
+                "change {index}"
+            );
+            assert!(
+                digests.insert(rendering.subject_digest()),
+                "change {index} renders a subject of its own"
+            );
+        }
     }
 }
 

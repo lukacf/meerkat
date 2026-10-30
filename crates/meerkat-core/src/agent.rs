@@ -24,6 +24,8 @@ mod hook_impl;
 mod hooks_behavior_tests;
 #[cfg(test)]
 mod observation_barrier_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
+mod operator_instruction_turn_tests;
 pub(crate) mod reasoning_preference;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod round_commit_tests;

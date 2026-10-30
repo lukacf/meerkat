@@ -26529,6 +26529,50 @@ mod tests {
             Ok(mutation)
         }
 
+        fn set_session_instruction_control(
+            &mut self,
+            write: meerkat_core::SessionInstructionWrite,
+        ) -> Result<
+            meerkat_core::SessionInstructionReceipt,
+            meerkat_core::service::SessionInstructionError,
+        > {
+            self.session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .set_session_instruction(write)
+                .map_err(meerkat_core::service::SessionInstructionError::from)
+        }
+
+        fn record_instruction_target_control(
+            &mut self,
+            record: meerkat_core::InstructionTargetRecord,
+        ) -> Result<
+            meerkat_core::InstructionRecordReceipt,
+            meerkat_core::service::SessionInstructionError,
+        > {
+            self.session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record_instruction_target(record)
+                .map_err(meerkat_core::service::SessionInstructionError::from)
+        }
+
+        fn apply_run_start_operator_instructions(
+            &mut self,
+            run_start: meerkat_core::InstructionRunStart,
+            run_id: Option<RunId>,
+        ) -> Result<meerkat_core::RunStartInstructionOutcome, AgentError> {
+            self.session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .apply_run_start_instructions(
+                    run_start,
+                    meerkat_core::InstructionLowering::MidConversation,
+                    run_id,
+                )
+                .map_err(|error| AgentError::InternalError(error.to_string()))
+        }
+
         async fn prepare_head_canonical_runtime_boundary(
             &mut self,
             request: HeadCanonicalRuntimeBoundaryPrepareRequest,
@@ -56562,6 +56606,314 @@ mod tests {
             )
             .await
             .expect("stop the fixture actor");
+        }
+    }
+
+    /// S4 rows: operator instructions through the persistent session service.
+    /// A write or a record of a live session goes through its actor and the
+    /// actor boundary commit; a dormant session's is a store-only write under
+    /// the session's hosting claim, which wakes nothing and registers nothing.
+    mod operator_instruction_service {
+        use super::*;
+        use meerkat_core::service::{SessionInstructionError, SessionServiceInstructionExt};
+        use meerkat_core::{
+            InstructionRecordDisposition, InstructionRevision, InstructionSetErrorCode,
+            InstructionSlot, InstructionTargetRecord, InstructionTargetRecordSlot,
+            InstructionWriteDisposition, SessionInstructionChange, SessionInstructionWrite,
+        };
+
+        fn slot(key: &str) -> InstructionSlot {
+            InstructionSlot {
+                namespace: InstructionNamespace::new("app.example").unwrap(),
+                key: InstructionKey::new(key).unwrap(),
+            }
+        }
+
+        fn write(key: &str, revision: u64, body: &str) -> SessionInstructionWrite {
+            SessionInstructionWrite {
+                slot: slot(key),
+                revision: InstructionRevision::new(revision).unwrap(),
+                change: SessionInstructionChange::Activate {
+                    body: body.to_string(),
+                    content_sha256: None,
+                },
+            }
+        }
+
+        fn record(generation: u64) -> InstructionTargetRecord {
+            InstructionTargetRecord {
+                mob_id: "mob-1".to_string(),
+                agent_identity: "worker".to_string(),
+                generation,
+                slots: vec![InstructionTargetRecordSlot {
+                    slot: slot("tone"),
+                    revision: InstructionRevision::new(1).unwrap(),
+                    body: Some("Be brief.".to_string()),
+                }],
+            }
+        }
+
+        /// Counts every agent the service builds: a build is a wake.
+        #[derive(Clone, Default)]
+        struct CountingBuilder {
+            builds: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl SessionAgentBuilder for CountingBuilder {
+            type Agent = DummyAgent;
+
+            fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+                meerkat_core::SessionCommsIdentityRoot::NotKept
+            }
+
+            async fn build_agent(
+                &self,
+                req: &CreateSessionRequest,
+                event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+            ) -> Result<Self::Agent, SessionError> {
+                self.builds.fetch_add(1, Ordering::SeqCst);
+                DummyBuilder.build_agent(req, event_tx).await
+            }
+        }
+
+        fn counting_service(
+            runtime_store: Arc<dyn RuntimeStore>,
+        ) -> (PersistentSessionService<CountingBuilder>, Arc<AtomicUsize>) {
+            let builder = CountingBuilder::default();
+            let builds = Arc::clone(&builder.builds);
+            let service = PersistentSessionService::new(
+                builder,
+                4,
+                Arc::new(MemoryStore::new()),
+                runtime_store,
+                memory_blob_store(),
+            );
+            (service, builds)
+        }
+
+        /// A session created by `service` and then left dormant: its document
+        /// is durable and no actor serves it.
+        async fn dormant_session<B: SessionAgentBuilder + 'static>(
+            service: &PersistentSessionService<B>,
+        ) -> SessionId {
+            let created = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed");
+            let id = created.session_id;
+            service
+                .discard_live_session_unfenced(&id)
+                .await
+                .expect("the live actor is discarded");
+            assert!(
+                !service.has_live_session(&id).await.unwrap(),
+                "the session is dormant"
+            );
+            id
+        }
+
+        #[tokio::test]
+        async fn a_live_session_write_persists_in_the_session_document() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, _builds) = counting_service(runtime_store);
+            let created = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed");
+            let id = created.session_id;
+            let receipt = service
+                .set_session_instruction(&id, write("tone", 1, "Answer formally."))
+                .await
+                .expect("a live session records the write");
+            assert_eq!(receipt.disposition, InstructionWriteDisposition::Recorded);
+            assert_eq!(receipt.target_generation, 1);
+            assert!(service.has_live_session(&id).await.unwrap());
+
+            let stored = service
+                .load_authoritative_session(&id)
+                .await
+                .expect("authoritative load")
+                .expect("the session document");
+            let state = stored
+                .instruction_target_state()
+                .expect("the target reads typed")
+                .expect("the committed document holds the target");
+            assert_eq!(state.target_generation(), 1);
+            assert_eq!(state.slots().len(), 1);
+            let read = service
+                .read_session_instructions(&id)
+                .await
+                .expect("the committed read");
+            assert_eq!(read.target, Some(state));
+            assert!(read.effective.is_empty(), "a write applies nothing");
+        }
+
+        #[tokio::test]
+        async fn mob_owned_session_refuses_session_writes() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, _builds) = counting_service(runtime_store);
+            let created = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed");
+            let id = created.session_id;
+            let receipt = service
+                .record_instruction_target(&id, record(1))
+                .await
+                .expect("a mob records the member's target");
+            assert_eq!(receipt.disposition, InstructionRecordDisposition::Recorded);
+            let error = service
+                .set_session_instruction(&id, write("tone", 5, "Answer formally."))
+                .await
+                .expect_err("a mob-owned target takes no session write");
+            assert_eq!(error.code(), Some(InstructionSetErrorCode::OwnedByMob));
+        }
+
+        #[tokio::test]
+        async fn dormant_session_target_record_registers_nothing_and_wakes_nothing() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, builds) = counting_service(Arc::clone(&runtime_store));
+            let id = dormant_session(&service).await;
+            let builds_before = builds.load(Ordering::SeqCst);
+            let runtime_id =
+                PersistentSessionService::<CountingBuilder>::runtime_id_for_session(&id);
+            let runtime_state_before =
+                meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                    .await
+                    .expect("runtime state load");
+
+            let receipt = service
+                .record_instruction_target(&id, record(1))
+                .await
+                .expect("a dormant session records the target store-only");
+            assert_eq!(receipt.disposition, InstructionRecordDisposition::Recorded);
+            assert_eq!(receipt.target_generation, 1);
+
+            assert_eq!(
+                builds.load(Ordering::SeqCst),
+                builds_before,
+                "recording builds no agent: it wakes nothing"
+            );
+            assert!(
+                !service.has_live_session(&id).await.unwrap(),
+                "the session stays dormant"
+            );
+            assert_eq!(
+                meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                    .await
+                    .expect("runtime state load"),
+                runtime_state_before,
+                "recording registers nothing with the runtime"
+            );
+            let read = service
+                .read_session_instructions(&id)
+                .await
+                .expect("the committed read");
+            let target = read.target.expect("the store holds the recorded target");
+            assert_eq!(target.target_generation(), 1);
+            assert!(read.effective.is_empty(), "recording applies nothing");
+            assert!(!service.has_live_session(&id).await.unwrap());
+        }
+
+        #[tokio::test]
+        async fn a_repeated_record_of_the_same_slot_revision_is_a_noop() {
+            let gated = Arc::new(GatedSnapshotRuntimeStore::new());
+            let (service, _builds) = counting_service(gated.clone());
+            let id = dormant_session(&service).await;
+            let first = service
+                .record_instruction_target(&id, record(1))
+                .await
+                .expect("the first delivery records");
+            assert_eq!(first.disposition, InstructionRecordDisposition::Recorded);
+
+            // From here on every session snapshot commit fails: a repeated
+            // delivery that tried to write would fail with it.
+            gated.set_fail_snapshot_commits(true);
+            let repeated = service
+                .record_instruction_target(&id, record(1))
+                .await
+                .expect("a repeated delivery of the same (slot, revision) writes nothing");
+            assert_eq!(
+                repeated.disposition,
+                InstructionRecordDisposition::AlreadyRecorded
+            );
+            assert_eq!(repeated.target_generation, 1);
+            assert!(
+                service
+                    .record_instruction_target(&id, record(2))
+                    .await
+                    .is_err(),
+                "a new generation does write, and the failing store refuses it"
+            );
+        }
+
+        #[tokio::test]
+        async fn concurrent_dormant_records_for_different_sessions_do_not_serialize_on_a_realm_lock()
+         {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, _builds) = counting_service(runtime_store);
+            let service = Arc::new(service);
+            let held = dormant_session(service.as_ref()).await;
+            let free = dormant_session(service.as_ref()).await;
+
+            // Hold everything a slow write of `held` holds: its turn boundary
+            // and its recovery gate.
+            let turn_boundary = service.acquire_runtime_turn_finalization_guard(&held).await;
+            let recovery_gate = service
+                .recovery_gate_for_session(&held)
+                .await
+                .lock_owned()
+                .await;
+            let blocked = tokio::spawn({
+                let service = Arc::clone(&service);
+                let held = held.clone();
+                async move { service.record_instruction_target(&held, record(1)).await }
+            });
+
+            let other = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                service.record_instruction_target(&free, record(1)),
+            )
+            .await
+            .expect("another session's record does not wait for the held one")
+            .expect("the other session records");
+            assert_eq!(other.disposition, InstructionRecordDisposition::Recorded);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(
+                !blocked.is_finished(),
+                "the held session's own record waits for its own boundary only"
+            );
+
+            drop(recovery_gate);
+            drop(turn_boundary);
+            let held_receipt = tokio::time::timeout(std::time::Duration::from_secs(5), blocked)
+                .await
+                .expect("the held record proceeds once its boundary is free")
+                .expect("join")
+                .expect("the held session records");
+            assert_eq!(
+                held_receipt.disposition,
+                InstructionRecordDisposition::Recorded
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unknown_session_is_not_found() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, builds) = counting_service(runtime_store);
+            let error = service
+                .record_instruction_target(&SessionId::new(), record(1))
+                .await
+                .expect_err("no session to record in");
+            assert!(
+                matches!(
+                    error,
+                    SessionInstructionError::Session(SessionError::NotFound { .. })
+                ),
+                "{error:?}"
+            );
+            assert_eq!(builds.load(Ordering::SeqCst), 0);
         }
     }
 }

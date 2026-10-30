@@ -99069,6 +99069,10 @@ mod member_history;
 /// stores (restored member, keyed duplicate, mid-turn refusal).
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod member_instruction_gates;
+/// Operator-instruction target records on a dormant member's session over a
+/// host-store realm: recorded store-only, without a wake.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod operator_instruction_host_store;
 /// #1390: stop and shutdown await interrupted members' end of turn as typed
 /// signals, concurrently and off the actor loop.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]

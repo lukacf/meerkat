@@ -16903,3 +16903,6 @@ mod tool_application_custody_tests;
 
 #[cfg(test)]
 mod staged_prompt_lowering_tests;
+
+#[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
+mod operator_instruction_tests;

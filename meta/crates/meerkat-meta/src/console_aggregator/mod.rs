@@ -257,8 +257,9 @@ struct AggregatorInner {
     /// over the console log's durable rows, holding no lifecycle.
     streamed_blocks: Arc<tokio::sync::Mutex<delta_compaction::StreamedBlocks>>,
     /// Each identity's newest activity time for `/console/experience`,
-    /// shared with every policy view: read from the log once per identity
-    /// and kept current by [`append_frame`] (see [`last_activity`]).
+    /// shared with every policy view: read from the log on an identity's
+    /// first read, and again only after its entry is dropped, and kept
+    /// current by [`append_frame`] (see [`last_activity`]).
     last_activity: Arc<last_activity::LastActivityCache>,
     /// Test seam: replaces the runtime's admission evidence for sends.
     #[cfg(test)]
@@ -929,6 +930,10 @@ impl MetaConsoleAggregator {
         let _ = activity.wait_for(|in_flight| *in_flight == 0).await;
     }
 
+    /// An aggregator over `store`. Its in-memory last activity follows the
+    /// frames this aggregator appends: a second aggregator over the same
+    /// store keeps its own and sees only its own appends, so a store should
+    /// have one aggregator, with policy views for other readers.
     pub fn new(store: Arc<dyn ConsoleLogStore>) -> Self {
         Self::new_with_options(store, ConsoleAggregatorOptions::default())
     }
@@ -1625,11 +1630,13 @@ impl MetaConsoleAggregator {
     }
 
     /// The last console activity of each named identity, in milliseconds
-    /// since the epoch. An identity is read from the console log once, on its
-    /// first read here ([`ConsoleLogStore::latest_activity_times`]), and is
-    /// then kept current in memory from the frames this aggregator appends
-    /// (see [`last_activity`]): a later read touches no store. It enters no
-    /// member actor and wakes no member.
+    /// since the epoch. An identity is read from the console log on its first
+    /// read here ([`ConsoleLogStore::latest_activity_times`], a chunk of
+    /// identities per call), and again only after an operator's retire or
+    /// delete, an eviction or a clear drops its entry; in between it is kept
+    /// current in memory from the frames this aggregator appends (see
+    /// [`last_activity`]), and a read touches no store. It enters no member
+    /// actor and wakes no member.
     pub(crate) async fn last_activity_for_identities(
         &self,
         identities: &[String],

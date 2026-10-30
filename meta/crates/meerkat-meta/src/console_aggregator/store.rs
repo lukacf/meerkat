@@ -190,12 +190,15 @@ pub trait ConsoleLogStore: Send + Sync {
     /// member memory events, which record something done to the identity. An
     /// identity without such a frame is absent. The read walks each named
     /// identity's frames newest first and stops at its first acting frame.
-    /// The console aggregator reads an identity here once, on its first read,
-    /// and then keeps its time in memory from the frames it appends. Stores
-    /// that cannot answer keep the default and report none, so an identity's
-    /// activity reads as unknown until the aggregator appends a frame of it
-    /// acting. A store that wraps another must forward this method, or the
-    /// console silently reads every agent's earlier activity as unknown.
+    /// The console aggregator reads an identity here on its first read, a
+    /// chunk of identities per call, and again only after an operator's
+    /// retire or delete, its capacity's eviction or a clear drops the
+    /// identity's entry; in between it keeps the time in memory from the
+    /// frames it appends. Stores that cannot answer keep the default and
+    /// report none, so an identity's activity reads as unknown until the
+    /// aggregator appends a frame of it acting. A store that wraps another
+    /// must forward this method, or the console silently reads every agent's
+    /// earlier activity as unknown.
     async fn latest_activity_times(
         &self,
         _identities: &[String],

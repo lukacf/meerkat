@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicUsize;
 
 use tokio::sync::oneshot;
 
+use super::last_activity::{CAPACITY, LastActivityCache, SEED_CHUNK};
 use super::*;
 
 const RUNTIME: &str = "runtime-a";
@@ -105,13 +106,13 @@ fn hold() -> (Hold, HoldHandle) {
     )
 }
 
-/// A console store that counts its activity walks and can hold the next
-/// walk after it has read the log, or the next append after it has written
-/// the frame.
+/// A console store that counts its activity walks and can hold a walk (by
+/// its number) after it has read the log, or the next append after it has
+/// written the frame.
 struct ObservedStore {
     inner: Arc<dyn ConsoleLogStore>,
     walks: AtomicUsize,
-    walk_hold: std::sync::Mutex<Option<Hold>>,
+    walk_holds: std::sync::Mutex<Vec<(usize, Hold)>>,
     append_hold: std::sync::Mutex<Option<Hold>>,
 }
 
@@ -120,7 +121,7 @@ impl ObservedStore {
         Arc::new(Self {
             inner,
             walks: AtomicUsize::new(0),
-            walk_hold: std::sync::Mutex::new(None),
+            walk_holds: std::sync::Mutex::new(Vec::new()),
             append_hold: std::sync::Mutex::new(None),
         })
     }
@@ -130,9 +131,23 @@ impl ObservedStore {
     }
 
     fn hold_next_walk(&self) -> HoldHandle {
+        self.hold_walk(self.walks() + 1)
+    }
+
+    /// Hold the walk with this number, counting every walk from the first.
+    fn hold_walk(&self, number: usize) -> HoldHandle {
         let (held, handle) = hold();
-        *self.walk_hold.lock().expect("walk hold") = Some(held);
+        self.walk_holds
+            .lock()
+            .expect("walk holds")
+            .push((number, held));
         handle
+    }
+
+    fn take_walk_hold(&self, number: usize) -> Option<Hold> {
+        let mut holds = self.walk_holds.lock().expect("walk holds");
+        let index = holds.iter().position(|(held, _)| *held == number)?;
+        Some(holds.remove(index).1)
     }
 
     fn hold_next_append(&self) -> HoldHandle {
@@ -141,12 +156,8 @@ impl ObservedStore {
         handle
     }
 
-    fn take(slot: &std::sync::Mutex<Option<Hold>>) -> Option<Hold> {
-        slot.lock().expect("hold slot").take()
-    }
-
-    async fn pass(slot: &std::sync::Mutex<Option<Hold>>) {
-        if let Some(held) = Self::take(slot) {
+    async fn pass(held: Option<Hold>) {
+        if let Some(held) = held {
             let _ = held.reached.send(());
             let _ = held.resume.await;
         }
@@ -157,7 +168,8 @@ impl ObservedStore {
 impl ConsoleLogStore for ObservedStore {
     async fn append_if_absent(&self, frame: NewConsoleFrame) -> ConsoleLogResult<AppendOutcome> {
         let outcome = self.inner.append_if_absent(frame).await?;
-        Self::pass(&self.append_hold).await;
+        let held = self.append_hold.lock().expect("append hold").take();
+        Self::pass(held).await;
         Ok(outcome)
     }
 
@@ -202,9 +214,9 @@ impl ConsoleLogStore for ObservedStore {
         &self,
         identities: &[String],
     ) -> ConsoleLogResult<HashMap<String, u64>> {
-        self.walks.fetch_add(1, Ordering::SeqCst);
+        let number = self.walks.fetch_add(1, Ordering::SeqCst) + 1;
         let times = self.inner.latest_activity_times(identities).await?;
-        Self::pass(&self.walk_hold).await;
+        Self::pass(self.take_walk_hold(number)).await;
         Ok(times)
     }
 
@@ -277,6 +289,28 @@ async fn read(aggregator: &MetaConsoleAggregator, identities: &[&str]) -> HashMa
         .last_activity_for_identities(&identities)
         .await
         .expect("last activity")
+}
+
+/// A read through a cache built for the test, as the aggregator reads.
+async fn read_cache(
+    cache: &LastActivityCache,
+    store: &ObservedStore,
+    identities: &[&str],
+) -> HashMap<String, u64> {
+    let identities = identities
+        .iter()
+        .map(|identity| (*identity).to_string())
+        .collect::<Vec<_>>();
+    cache.read(store, &identities).await.expect("last activity")
+}
+
+/// An append through a cache built for the test, as the aggregator appends.
+async fn append_cache(
+    cache: &LastActivityCache,
+    store: &ObservedStore,
+    frame: NewConsoleFrame,
+) -> AppendOutcome {
+    cache.append(store, frame).await.expect("cache append")
 }
 
 fn times(entries: &[(&str, u64)]) -> HashMap<String, u64> {
@@ -697,5 +731,246 @@ async fn a_departure_waits_for_a_seed_in_flight_before_dropping() {
             "{name}"
         );
         assert_eq!(observed.walks(), 2, "{name}");
+    }
+}
+
+/// A first read seeds a chunk of identities per store call, each under its
+/// own shared hold, so a departure waits for one chunk, not the whole seed.
+/// With a chunk of one identity, a departure for the first identity, made
+/// while the first chunk's walk is held, has finished by the time the second
+/// chunk walks.
+#[tokio::test]
+async fn a_first_read_seeds_in_chunks_so_a_departure_waits_for_one_chunk_only() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        stored_before(&observed, acting("first-acted", "first", 100)).await;
+        stored_before(&observed, acting("second-acted", "second", 200)).await;
+        let cache = LastActivityCache::with_limits(1, CAPACITY);
+        let (cache, store) = (&cache, observed.as_ref());
+        let HoldHandle {
+            reached: first_walked,
+            resume: resume_first,
+        } = observed.hold_walk(1);
+        let HoldHandle {
+            reached: second_walked,
+            resume: resume_second,
+        } = observed.hold_walk(2);
+        let departed = std::cell::Cell::new(false);
+        let departed = &departed;
+        let (seeded, ((), ())) =
+            tokio::join!(read_cache(cache, store, &["first", "second"]), async move {
+                first_walked.await.expect("the first chunk walked");
+                tokio::join!(
+                    async move {
+                        append_cache(
+                            cache,
+                            store,
+                            frame(
+                                "first-left",
+                                "first",
+                                300,
+                                ConsoleFrameSourceKind::ConsoleEvent,
+                                "identity_retired",
+                            ),
+                        )
+                        .await;
+                        departed.set(true);
+                    },
+                    async move {
+                        tokio::task::yield_now().await;
+                        resume_first.send(()).expect("resume the first chunk");
+                        tokio::time::timeout(Duration::from_secs(5), second_walked)
+                            .await
+                            .expect("the seed walks a second chunk")
+                            .expect("the second chunk walked");
+                        assert!(
+                            departed.get(),
+                            "{name}: the departure finished between the chunks"
+                        );
+                        resume_second.send(()).expect("resume the second chunk");
+                    },
+                )
+            });
+        // The departure dropped the first identity's entry between the chunks.
+        assert_eq!(seeded, times(&[("second", 200)]), "{name}");
+        assert_eq!(observed.walks(), 2, "{name}");
+        assert_eq!(
+            read_cache(cache, store, &["first", "second"]).await,
+            times(&[("first", 100), ("second", 200)]),
+            "{name}"
+        );
+        assert_eq!(observed.walks(), 3, "{name}");
+    }
+}
+
+/// The map keeps at most its capacity of entries. Past it, the least
+/// recently used are evicted, and an evicted identity's next read walks the
+/// log again; the identities a read returns are used, so they stay.
+#[tokio::test]
+async fn past_its_capacity_the_least_recently_used_entries_are_evicted() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        let cache = LastActivityCache::with_limits(SEED_CHUNK, 4);
+        let store = observed.as_ref();
+        for (identity, time) in [("a", 100), ("b", 200), ("c", 300), ("d", 400)] {
+            append_cache(
+                &cache,
+                store,
+                acting(&format!("{identity}-acted"), identity, time),
+            )
+            .await;
+        }
+        // A read uses "a", so "b" and "c" are now the least recently used.
+        assert_eq!(
+            read_cache(&cache, store, &["a"]).await,
+            times(&[("a", 100)]),
+            "{name}"
+        );
+        // A fifth entry: evicted down to three quarters of four, the two
+        // least recently used, "b" and "c", go.
+        append_cache(&cache, store, acting("e-acted", "e", 500)).await;
+        assert_eq!(
+            read_cache(&cache, store, &["a", "d", "e"]).await,
+            times(&[("a", 100), ("d", 400), ("e", 500)]),
+            "{name}"
+        );
+        assert_eq!(
+            observed.walks(),
+            0,
+            "{name}: kept entries answer from memory"
+        );
+        assert_eq!(
+            read_cache(&cache, store, &["b"]).await,
+            times(&[("b", 200)]),
+            "{name}"
+        );
+        assert_eq!(
+            observed.walks(),
+            1,
+            "{name}: an evicted identity walks the log again"
+        );
+    }
+}
+
+/// A replayed departure (a dedupe key the log already holds) keeps the
+/// entry: the departure dropped it when it was first stored.
+#[tokio::test]
+async fn a_replayed_departure_keeps_the_entry() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        let aggregator = MetaConsoleAggregator::new(observed.clone());
+        append(&aggregator, acting("worker-acted", "worker", 100)).await;
+        let departure = || {
+            frame(
+                "worker-left",
+                "worker",
+                200,
+                ConsoleFrameSourceKind::ConsoleEvent,
+                "identity_retired",
+            )
+        };
+        append(&aggregator, departure()).await;
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            times(&[("worker", 100)]),
+            "{name}"
+        );
+        assert_eq!(
+            observed.walks(),
+            1,
+            "{name}: the departure dropped the entry"
+        );
+        let replay = append(&aggregator, departure()).await;
+        assert_eq!(replay.disposition, AppendDisposition::Existing, "{name}");
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            times(&[("worker", 100)]),
+            "{name}"
+        );
+        assert_eq!(
+            observed.walks(),
+            1,
+            "{name}: a replayed departure keeps the entry"
+        );
+    }
+}
+
+/// A clear waits for a first read's walk in flight, then clears what it
+/// merged with the log: the next read walks the cleared log.
+#[tokio::test]
+async fn a_clear_waits_for_a_first_read_in_flight() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        stored_before(&observed, acting("worker-acted", "worker", 100)).await;
+        let aggregator = MetaConsoleAggregator::new(observed.clone());
+        let shared = &aggregator;
+        let HoldHandle { reached, resume } = observed.hold_next_walk();
+        let (_seeded, ()) = tokio::join!(read(shared, &["worker"]), async move {
+            reached.await.expect("the first read's walk read the log");
+            let mut clear = std::pin::pin!(shared.clear_timeline_frames());
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), clear.as_mut())
+                    .await
+                    .is_err(),
+                "{name}: the clear waits for the walk in flight"
+            );
+            resume.send(()).expect("resume the walk");
+            clear.await.expect("clear");
+        });
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            HashMap::new(),
+            "{name}: the next read walks the cleared log"
+        );
+        assert_eq!(observed.walks(), 2, "{name}");
+    }
+}
+
+/// An acting append that lands between a departure's store write and its
+/// drop is not lost: the drop removes the entry, and the next read walks the
+/// log and finds the append. The store holds the departure after its write.
+#[tokio::test]
+async fn an_append_between_a_departures_write_and_its_drop_is_found_by_the_next_read() {
+    for (name, store) in stores() {
+        let observed = ObservedStore::new(store);
+        let aggregator = MetaConsoleAggregator::new(observed.clone());
+        append(&aggregator, acting("worker-acted", "worker", 100)).await;
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            times(&[("worker", 100)]),
+            "{name}"
+        );
+        let shared = &aggregator;
+        let HoldHandle { reached, resume } = observed.hold_next_append();
+        tokio::join!(
+            async move {
+                append(
+                    shared,
+                    frame(
+                        "worker-left",
+                        "worker",
+                        200,
+                        ConsoleFrameSourceKind::ConsoleEvent,
+                        "identity_retired",
+                    ),
+                )
+                .await;
+            },
+            async move {
+                reached.await.expect("the departure wrote its frame");
+                append(shared, acting("worker-after", "worker", 300)).await;
+                resume.send(()).expect("resume the departure");
+            }
+        );
+        assert_eq!(
+            read(&aggregator, &["worker"]).await,
+            times(&[("worker", 300)]),
+            "{name}"
+        );
+        assert_eq!(
+            observed.walks(),
+            1,
+            "{name}: the drop made the next read walk the log"
+        );
     }
 }

@@ -1660,7 +1660,7 @@ svg[data-svg="fit"],
   white-space: nowrap;
 }
 .agent__detail-kind { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.agent__detail-separator { white-space: pre; }
+.agent__detail-separator { flex: none; white-space: pre; }
 .agent__detail-status { flex: none; }
 /* Manual order: a grip on hover or focus, and a line where the row lands. */
 .agent__grip {

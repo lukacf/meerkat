@@ -1746,12 +1746,9 @@ function renderAgentRow({
         {detail.kind || detail.status ? (
           // The kind gives way first, so the status always shows in a narrow roster.
           <span className="agent__detail" data-testid={`sidebar-agent-detail:${agent.member_id}`}>
-            {detail.kind ? (
-              <span className="agent__detail-kind">
-                {detail.kind}
-                {detail.status ? <span className="agent__detail-separator"> · </span> : null}
-              </span>
-            ) : null}
+            {detail.kind ? <span className="agent__detail-kind" title={detail.kind}>{detail.kind}</span> : null}
+            {/* Outside the kind, so truncating the kind never hides it. */}
+            {detail.kind && detail.status ? <span className="agent__detail-separator"> · </span> : null}
             {detail.status ? <span className="agent__detail-status">{detail.status}</span> : null}
           </span>
         ) : null}

@@ -96,7 +96,13 @@ describe("Roster manual order", () => {
     const onSelect = vi.fn();
     const view = render(<Sidebar {...props} onSelect={onSelect}
       agents={[agent("a", "Alpha", { role: "router", response_phase: "generating" })]} />);
-    expect(view.getByTestId("sidebar-agent-detail:a").textContent).toBe("Router · working");
+    const detail = view.getByTestId("sidebar-agent-detail:a");
+    expect(detail.textContent).toBe("Router · working");
+    // The kind truncates on its own; the separator and the activity are its
+    // siblings, so a narrow roster never swallows them.
+    expect(detail.querySelector(".agent__detail-kind")?.textContent).toBe("Router");
+    expect(detail.querySelector(".agent__detail-separator")?.parentElement?.classList.contains("agent__detail")).toBe(true);
+    expect(detail.querySelector(".agent__detail-status")?.textContent).toBe("working");
     const row = view.getByTestId("sidebar-agent:a");
     expect(row.getAttribute("title")).toBe("Identity: agent:a");
     expect((row.textContent || "").includes("agent:a")).toBe(false);

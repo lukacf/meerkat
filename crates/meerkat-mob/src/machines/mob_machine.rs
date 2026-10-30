@@ -40,9 +40,9 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     AgentLaneMemberAdmissionKind, IdentityEntryOrigin, LegacyIdentityEntryAdoptionKind,
 };
-// Rotation targets: the schema's own type, one definition for both
-// instantiations of the machine.
-pub use meerkat_machine_schema::catalog::dsl::mob_machine::RotationTarget;
+// Rotation targets and the refusal reason of a fresh-life respawn: the
+// schema's own types, one definition for both instantiations of the machine.
+pub use meerkat_machine_schema::catalog::dsl::mob_machine::{RespawnRefusalReason, RotationTarget};
 
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
 pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;

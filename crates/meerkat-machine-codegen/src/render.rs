@@ -599,6 +599,8 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "ClassifyMemberReleaseStaleStopped",
             "ClassifyMemberReleaseStaleCompleted",
             "ClassifyMemberReleaseStaleDestroyed",
+            // The legacy respawn's refusal of an identity entry (0.9.8).
+            "RespawnIdentityEntryRefusedRunning",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

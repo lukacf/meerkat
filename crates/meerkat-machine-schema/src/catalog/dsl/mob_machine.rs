@@ -1321,7 +1321,7 @@ macro_rules! mob_catalog_machine_dsl {
             Retire { mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId> },
             RetireAbsent { agent_identity: AgentIdentity },
             RequestPendingSessionIngressDetachForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
-            Respawn { agent_runtime_id: AgentRuntimeId },
+            Respawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
             RetireAll,
             BindOwnerBridgeSession { bridge_session_id: SessionId, destroy_on_owner_archive: bool, implicit_delegation_mob: bool },
             // Track-B (R5): explicit identity-level wiring and session-binding
@@ -2472,6 +2472,9 @@ macro_rules! mob_catalog_machine_dsl {
             LegacyIdentityEntryAdoptionResolved { agent_identity: AgentIdentity, verdict: Enum<LegacyIdentityEntryAdoptionKind> },
             // The agent lane's admission of a member command.
             AgentLaneMemberAdmissionResolved { agent_identity: AgentIdentity, admission: Enum<AgentLaneMemberAdmissionKind> },
+            // A fresh-life respawn the machine refuses (`Respawn`): the shell
+            // answers it typed, and nothing changed.
+            RespawnRefused { agent_identity: AgentIdentity, reason: Enum<RespawnRefusalReason> },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -3413,6 +3416,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition PersistMemberSeatSessionBorn => local seam OwnerRealizationOnly,
         disposition LegacyIdentityEntryAdoptionResolved => local seam SurfaceResultAlignment,
         disposition AgentLaneMemberAdmissionResolved => local seam SurfaceResultAlignment,
+        disposition RespawnRefused => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -22014,15 +22018,35 @@ macro_rules! mob_catalog_machine_dsl {
         // Respawn (input, Running self-loop)
         // =====================================================================
 
+        // A fresh-life respawn (retire, then spawn a successor on a new
+        // session) of the identity's current incarnation. An identity entry's
+        // successor keeps its session and its entry (a same-session rotation),
+        // so an entry is never respawned as a fresh life: the twin below
+        // refuses it, typed.
         transition RespawnRunning {
-            on input Respawn { agent_runtime_id }
+            on input Respawn { agent_identity, agent_runtime_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "identity_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "not_an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
             guard "coordinator_bound" { self.coordinator_bound == true }
             update {}
             to Running
             emit ExposePendingSpawn
+        }
+
+        // The fresh-life respawn of an identity entry's member, refused:
+        // nothing changes, and the shell answers the refusal typed (the
+        // entry's member is respawned on its own session instead).
+        transition RespawnIdentityEntryRefusedRunning {
+            on input Respawn { agent_identity, agent_runtime_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == true }
+            update {}
+            to Running
+            emit RespawnRefused { agent_identity: agent_identity, reason: RespawnRefusalReason::IdentityEntryKeepsSession }
         }
 
         // =====================================================================
@@ -27079,7 +27103,9 @@ macro_rules! mob_catalog_machine_dsl {
         // it the member's comms identity, is the same. Its MemberRetired and
         // MemberSpawned rows (both naming the session) are appended in one
         // batch before the commit. The next incarnation's profile (its
-        // grant) and runtime mode may differ from the retiring one's.
+        // grant) and runtime mode may differ from the retiring one's. A
+        // host-pending member keeps its mark: only the host's seat step ends
+        // it, so the next incarnation never wakes before the host's step.
         transition CommitMemberRotationSameSession {
             per_phase [Running, Stopped]
             on input CommitMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, disposal, next_agent_runtime_id, next_fence_token, next_generation, runtime_mode, external_addressable, kickoff_owed, kickoff_objective_id, definition_wiring_exempt }
@@ -27189,7 +27215,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_wake_attempts.remove(agent_identity);
                 self.member_wake_bound.remove(agent_identity);
                 self.member_materialization_epoch.remove(agent_identity);
-                self.member_host_preparation_pending.remove(agent_identity);
+                // A host's preparation mark stays: the mob's own terminal is
+                // not the host's seat step, so a host-pending successor is
+                // seated Dormant and waits for that step (the host wakes
+                // first).
                 self.member_kickoff_pending.remove(agent_identity);
                 self.member_kickoff_starting.remove(agent_identity);
                 self.member_kickoff_callback_pending.remove(agent_identity);
@@ -27349,7 +27378,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_wake_attempts.remove(agent_identity);
                 self.member_wake_bound.remove(agent_identity);
                 self.member_materialization_epoch.remove(agent_identity);
-                self.member_host_preparation_pending.remove(agent_identity);
+                // A host's preparation mark stays: the mob's own terminal is
+                // not the host's seat step, so a host-pending successor is
+                // seated Dormant and waits for that step (the host wakes
+                // first).
                 // The owed kickoff (the respawn's initial message), recorded
                 // pending on the next incarnation in the same step: its boot
                 // verdict wakes it, and the kickoff runs once on the kept
@@ -31279,6 +31311,15 @@ pub enum IdentityEntryOrigin {
     /// custody, or the adoption of a legacy member.
     #[default]
     Declared,
+}
+
+/// Why the machine refuses a fresh-life respawn (`RespawnRefused`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RespawnRefusalReason {
+    /// The identity is an identity entry: its successor keeps its session
+    /// and its entry (a same-session rotation), never a fresh life.
+    #[default]
+    IdentityEntryKeepsSession,
 }
 
 /// Where a rotation seats its next incarnation (`member_rotation_targets`).

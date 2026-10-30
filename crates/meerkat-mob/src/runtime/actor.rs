@@ -50390,15 +50390,7 @@ impl MobActor {
             .await
             .map_err(MobRespawnError::from)?;
         if !snapshot.cleanup_retry {
-            self.preview_dsl_input(
-                mob_dsl::MobMachineInput::Respawn {
-                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
-                        &snapshot.old_runtime_id,
-                    ),
-                },
-                "handle_respawn_admission",
-            )
-            .map_err(|_| MobRespawnError::from(self.invalid_transition_to(MobState::Running)))?;
+            self.admit_fresh_life_respawn(&agent_identity, &snapshot)?;
         }
 
         Ok(self
@@ -50604,6 +50596,89 @@ impl MobActor {
             }))
     }
 
+    /// MobMachine's verdict on a fresh-life respawn (`Respawn`) of
+    /// `agent_identity`'s current incarnation, probed on a copy of the
+    /// authority that is never committed: the reason it refuses one
+    /// (`RespawnRefused`), or `None` when it admits it or when no arm
+    /// answers (the identity holds no incarnation, or the mob is not
+    /// running), which the respawn's own steps then answer.
+    fn fresh_life_respawn_refusal(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Option<mob_dsl::RespawnRefusalReason> {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let agent_runtime_id = self
+            .dsl_authority
+            .state()
+            .identity_to_runtime
+            .get(&dsl_identity)
+            .cloned()?;
+        let prepared = self
+            .prepare_dsl_input(
+                mob_dsl::MobMachineInput::Respawn {
+                    agent_identity: dsl_identity,
+                    agent_runtime_id,
+                },
+                "respawn_routing",
+            )
+            .ok()?;
+        Self::respawn_refusal_from_effects(&prepared.effects)
+    }
+
+    /// The refusal a `Respawn` step's effects carry, if any.
+    fn respawn_refusal_from_effects(
+        effects: &[mob_dsl::MobMachineEffect],
+    ) -> Option<mob_dsl::RespawnRefusalReason> {
+        effects.iter().find_map(|effect| match effect {
+            mob_dsl::MobMachineEffect::RespawnRefused { reason, .. } => Some(*reason),
+            _ => None,
+        })
+    }
+
+    /// The typed answer to a fresh-life respawn MobMachine refused.
+    fn respawn_refusal(
+        mode: crate::MobRuntimeMode,
+        reason: mob_dsl::RespawnRefusalReason,
+    ) -> MobError {
+        match reason {
+            mob_dsl::RespawnRefusalReason::IdentityEntryKeepsSession => MobError::UnsupportedForMode {
+                mode,
+                reason: "an identity entry's successor keeps its session: it is not respawned with a fresh life".to_string(),
+            },
+        }
+    }
+
+    /// MobMachine's admission of a fresh-life respawn of `agent_identity`'s
+    /// incarnation `snapshot` names, previewed before anything is retired:
+    /// a refused one (an identity entry's member) is answered typed, and a
+    /// respawn no arm admits is an invalid transition.
+    fn admit_fresh_life_respawn(
+        &self,
+        agent_identity: &AgentIdentity,
+        snapshot: &RespawnSnapshot,
+    ) -> Result<(), super::handle::MobRespawnError> {
+        let prepared = self
+            .prepare_dsl_input(
+                mob_dsl::MobMachineInput::Respawn {
+                    agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                        &snapshot.old_runtime_id,
+                    ),
+                },
+                "handle_respawn_admission",
+            )
+            .map_err(|_| {
+                super::handle::MobRespawnError::from(self.invalid_transition_to(MobState::Running))
+            })?;
+        match Self::respawn_refusal_from_effects(&prepared.effects) {
+            Some(reason) => Err(super::handle::MobRespawnError::from(Self::respawn_refusal(
+                snapshot.runtime_mode,
+                reason,
+            ))),
+            None => Ok(()),
+        }
+    }
+
     async fn handle_respawn(
         &mut self,
         agent_identity: AgentIdentity,
@@ -50623,13 +50698,14 @@ impl MobActor {
         // identity entry's member, whose successor keeps its session): one
         // machine step that never leaves the identity unseated, finished by
         // the restarted mob itself after a crash. A worker's respawn keeps
-        // its fresh session below.
-        let entry_member = self
-            .dsl_authority
-            .state()
-            .identity_entry_origins
-            .contains_key(&mob_dsl::AgentIdentity::from_domain(&agent_identity));
-        if same_session.is_some() || (entry_member && successor_spec.is_none()) {
+        // its fresh session below. MobMachine decides which: it refuses a
+        // fresh-life respawn of an entry's member (`RespawnRefused`).
+        let refusal = if same_session.is_none() {
+            self.fresh_life_respawn_refusal(&agent_identity)
+        } else {
+            None
+        };
+        if same_session.is_some() || (refusal.is_some() && successor_spec.is_none()) {
             let request = match same_session {
                 Some(request) => *request,
                 None => super::MemberRespawn {
@@ -50644,9 +50720,10 @@ impl MobActor {
             Box::pin(self.start_member_respawn(rotation, reply)).await;
             return Ok(RespawnProgress::DeferredRetirement { result });
         }
-        if entry_member {
+        if let Some(reason) = refusal {
             // An entry's successor keeps its session, which a successor spec
-            // (a fresh life) cannot: refused before anything is retired.
+            // (a fresh life) cannot: MobMachine refused it, and nothing is
+            // retired.
             let mode = self
                 .roster
                 .read()
@@ -50654,10 +50731,7 @@ impl MobActor {
                 .get(&agent_identity)
                 .map(|entry| entry.runtime_mode)
                 .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
-            return Err(MobRespawnError::from(MobError::UnsupportedForMode {
-                mode,
-                reason: "an identity entry's successor keeps its session: a successor spec, which seats a fresh life, cannot respawn it".to_string(),
-            }));
+            return Err(MobRespawnError::from(Self::respawn_refusal(mode, reason)));
         }
         let explicit_successor = successor_spec.is_some();
         let (placed_host, snapshot, replacement_spec, original_identity) =
@@ -50727,21 +50801,6 @@ impl MobActor {
             // The successor keeps the creation of the incarnation it
             // replaces, read from that incarnation's own session record.
             let creation_witness = roster.successor_creation_witness(&entry);
-            // MobMachine's fact, read in the snapshot's own actor step: an
-            // identity entry's member is respawned on its own session
-            // (above), never here. This path seats a worker's successor,
-            // which never takes an entry's custody.
-            if self
-                .dsl_authority
-                .state()
-                .identity_entry_origins
-                .contains_key(&mob_dsl::AgentIdentity::from_domain(&agent_identity))
-            {
-                return Err(MobRespawnError::from(MobError::UnsupportedForMode {
-                    mode: entry.runtime_mode,
-                    reason: "an identity entry's successor keeps its session: it is not respawned with a fresh life".to_string(),
-                }));
-            }
             RespawnSnapshot {
                 profile_name: entry.role.clone(),
                 runtime_mode: entry.runtime_mode,
@@ -50837,9 +50896,9 @@ impl MobActor {
         )
         .map_err(MobRespawnError::from)?;
         // The member's standing belongs to the identity: this path respawns
-        // only a worker (an identity entry's member was refused with the
-        // snapshot), and a worker's successor is a worker, whatever the
-        // successor spec or a customizer says.
+        // only a worker (MobMachine's admission below refuses an identity
+        // entry's member), and a worker's successor is a worker, whatever
+        // the successor spec or a customizer says.
         replacement_spec.entry_custody = false;
         if replacement_spec.identity != original_identity {
             return Err(MobRespawnError::from(MobError::Internal(format!(
@@ -50963,15 +51022,7 @@ impl MobActor {
         }
 
         if !snapshot.cleanup_retry {
-            self.preview_dsl_input(
-                mob_dsl::MobMachineInput::Respawn {
-                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
-                        &snapshot.old_runtime_id,
-                    ),
-                },
-                "handle_respawn_admission",
-            )
-            .map_err(|_| MobRespawnError::from(self.invalid_transition_to(MobState::Running)))?;
+            self.admit_fresh_life_respawn(&original_identity, &snapshot)?;
         }
         Ok(self
             .start_respawn_retirement(original_identity, replacement_spec, snapshot)

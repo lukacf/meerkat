@@ -853,6 +853,15 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         ]),
                 ),
                 machine_anchor(
+                    "mob_identity_entry_respawn_authority",
+                    "MobMachine",
+                    "crates/meerkat-mob/src/runtime/actor.rs",
+                    "MobMachine refuses a fresh-life respawn of an identity entry's member, realized by the actor: the respawn routes on that verdict, respawning an entry's member on its own session, and the retire-then-spawn admission answers the refusal typed, emitting the respawn refused effect",
+                    CoverageClaims::none()
+                        .transitions(&["RespawnIdentityEntryRefusedRunning"])
+                        .effects(&["RespawnRefused"]),
+                ),
+                machine_anchor(
                     "mob_rotation_target_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/actor/dormant_seat.rs",
@@ -938,6 +947,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "StopRunning",
                         "ResumeStopped",
                         "RespawnRunning",
+                        "RespawnIdentityEntryRefusedRunning",
                     ]),
                 ),
                 scenario(

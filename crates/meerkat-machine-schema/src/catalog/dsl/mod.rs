@@ -4179,6 +4179,8 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("IdentityEntryOrigin", &["Declared"]),
             // Rotation targets (0.9.8): a new session, or the member's own.
             NamedTypeBinding::string_enum("RotationTarget", &["FreshSession", "SameSession"]),
+            // Why the machine refuses a fresh-life respawn (0.9.8).
+            NamedTypeBinding::string_enum("RespawnRefusalReason", &["IdentityEntryKeepsSession"]),
             NamedTypeBinding::string_enum(
                 "LegacyIdentityEntryAdoptionKind",
                 &[

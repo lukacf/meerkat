@@ -66,10 +66,12 @@
 \*     the sender is Waking, and a retirement of one member while the other is
 \*     Waking.
 \*   rotate-same (AuditRotateSameSpec): one identity, made an identity entry
-\*     by the replay of its row or not, with or without an endpoint, rotated
-\*     onto its own session (a respawn) from any residency: the rotation's
-\*     start, its profile grant, its terminal owing a kickoff or not in
-\*     Running and Stopped, the archive-only retirement starts and re-drives
+\*     by the replay of its row or not, with or without an endpoint, marked
+\*     host-pending at build or not, rotated onto its own session (a
+\*     respawn) from any residency: the rotation's start, its profile grant,
+\*     its terminal owing a kickoff or not in Running and Stopped, the host's
+\*     seat step that ends the mark, the archive-only retirement starts and
+\*     re-drives
 \*     beside it (releasing and preserving the binding), the plain archives
 \*     with the session archived or kept, either incarnation's wake, ready
 \*     observation and release, the release verdict for every scope (none,
@@ -156,7 +158,10 @@
 \*     unbound), AuditDestroyFencesSameSessionRotation (no same-session
 \*     rotation begins or commits under an admitted destroy),
 \*     AuditSameSessionKeepsEntry (neither its start nor its terminal
-\*     records or ends an identity entry) and AuditScopedReleaseFenced
+\*     records or ends an identity entry), AuditSameSessionTerminalKeepsHostMark
+\*     (its terminal neither ends nor records a host's preparation mark: only
+\*     the host's seat step ends it, so the successor never wakes first) and
+\*     AuditScopedReleaseFenced
 \*     (invariant, ENABLED form: in Running and Stopped the release verdict
 \*     answers every scope by exactly one arm, Stale exactly when the scope
 \*     is not the current incarnation on its current session);
@@ -1007,11 +1012,18 @@ QReleaseVerdict ==
 \* is a same-session rotation.
 QEntry == RecoverIdentityEntrySeatedRunning(Id1, Rid1, "Declared")
 
+\* The host marks member 1's preparation pending at build, and its seat
+\* step for the member ends the mark.
+QHostPending == SeedMemberResidencyRunning("OnDemand", "Authoritative", {Id1})
+QHostPrepared == ResolveMemberHostPreparationRunning(Id1)
+
 AuditRotateSameNext ==
     \/ WRecover
     \/ WBind
     \/ WEndpoint
     \/ QEntry
+    \/ QHostPending
+    \/ QHostPrepared
     \/ AuditOperatorWake(Id1)
     \/ AuditWakePath(Id1)
     \/ QReady
@@ -1176,6 +1188,12 @@ AuditView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0]
 (***************************************************************************)
 (* Properties.                                                             *)
 (***************************************************************************)
+
+\* The same-session terminal neither ends nor records a host's preparation
+\* mark: only the host's seat step ends it, so a host-pending member's
+\* successor never wakes before that step.
+AuditSameSessionTerminalKeepsHostMark ==
+    [][QCommit => (Id1 \in member_host_preparation_pending' <=> Id1 \in member_host_preparation_pending)]_vars
 
 \* A recovery or seat step leaves every existing phase as it was (a
 \* phase may only be added, by the one seating arm, or removed, by an unseat).
@@ -1780,6 +1798,18 @@ AuditWitnessEntryRotatedSameSessionStep ==
     /\ Id1 \in DOMAIN identity_entry_origins
     /\ QCommit
     /\ Id1 \in DOMAIN identity_entry_origins'
+\* Rotate-same run: a host-pending member's same-session terminal keeps the
+\* mark.
+AuditWitnessHostMarkKeptStep ==
+    /\ Id1 \in member_host_preparation_pending
+    /\ QCommit
+\* Rotate-same run: the successor's wake is refused while the host's mark
+\* stands.
+AuditWitnessHeldSuccessorRefusedStep ==
+    /\ Id1 \in DOMAIN identity_to_runtime
+    /\ identity_to_runtime[Id1] = Rid3
+    /\ Id1 \in member_host_preparation_pending
+    /\ WakeMemberRefusedRunning(Id1, "Operator", FALSE, "Content", FALSE)
 \* Recover-rotation run: a FreshSession rotation whose intent the replay
 \* recorded is finished by its own terminal (the run begins no rotation).
 AuditWitnessRecoveredFreshRotatedStep ==
@@ -1851,5 +1881,7 @@ NotAuditWitnessEntryRotatedSameSession == [][~AuditWitnessEntryRotatedSameSessio
 NotAuditWitnessRecoveredFreshRotated == [][~AuditWitnessRecoveredFreshRotatedStep]_vars
 NotAuditWitnessRecoveredSameRotated == [][~AuditWitnessRecoveredSameRotatedStep]_vars
 NotAuditWitnessReplayedKeptTopology == ~AuditWitnessReplayedKeptTopology
+NotAuditWitnessHostMarkKept == [][~AuditWitnessHostMarkKeptStep]_vars
+NotAuditWitnessHeldSuccessorRefused == [][~AuditWitnessHeldSuccessorRefusedStep]_vars
 NotAuditWitnessReplayedSuccessorWokeLive == [][~AuditWitnessReplayedSuccessorWokeLiveStep]_vars
 ====

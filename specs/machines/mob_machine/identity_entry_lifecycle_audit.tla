@@ -17,10 +17,12 @@
 \*
 \* With an entry present the run reaches the dormant seat, the live and the
 \* archive-only retirement to every local archive terminal it drives, the
-\* rotation's terminals in Running and Stopped, and the mob's destroy: its
-\* admission, its member retirement and archive, DestroyMob and the forced
-\* DestroyFromAny (with an open ladder's entry custody too). The run leaves
-\* out the retire run's replay of the exempt row, which entries do not read.
+\* rotation's terminals in Running and Stopped, the legacy fresh-life
+\* respawn's admission and its refusal of an entry, and the mob's destroy:
+\* its admission, its member retirement and archive, DestroyMob and the
+\* forced DestroyFromAny (with an open ladder's entry custody too). The run
+\* leaves out the retire run's replay of the exempt row, which entries do not
+\* read.
 \*
 \* Properties: every generated invariant of ci.cfg (kept), among them
 \* entry_is_seated_or_has_an_unseated_cause (every entry is seated, so every
@@ -39,11 +41,14 @@
 \*     entry);
 \*   AuditLifecycleEntryOnlyWithCause (action property): an identity becomes
 \*     an entry only by a seat that consumes its entry custody or the replay
-\*     of its row.
+\*     of its row;
+\*   AuditFreshLifeRespawnNeverAnEntry (action property): the legacy
+\*     fresh-life respawn is admitted only for a member that is no identity
+\*     entry (an entry's successor keeps its session and its entry).
 \*
 \* AuditWitness* operators are reachability goals the runner checks as
 \* expected violations, so the properties are not vacuous. With --mutants the
-\* runner also seeds six defects into a copy of the generated model and
+\* runner also seeds seven defects into a copy of the generated model and
 \* requires TLC to refuse each (see identity_entry_audit.sh).
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
@@ -78,6 +83,15 @@ LDestroyArchives ==
     \/ ObserveDestroyMemberRetirementArchivedLiveRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal)
     \/ ObserveDestroyMemberRetirementArchivedRetiredRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal)
 
+\* The legacy fresh-life respawn (retire, then spawn on a new session) of
+\* member 1's incarnation, its first, its reseat's or its rotation's next:
+\* admitted for a worker, refused for an identity entry. Neither changes
+\* anything.
+LRespawn ==
+    \E rid \in {Rid1, Rid2, Rid3} :
+        \/ RespawnRunning(Id1, rid)
+        \/ RespawnIdentityEntryRefusedRunning(Id1, rid)
+
 LifecycleNext ==
     \/ WRecover
     \/ WBind
@@ -100,6 +114,7 @@ LifecycleNext ==
     \/ RotationArms
     \/ LReseatOpen
     \/ RReseat
+    \/ LRespawn
     \/ AuditQuiesceStop
     \/ StopRunning
     \/ ResumeStopped
@@ -141,6 +156,11 @@ AuditLifecycleEntryOnlyWithCause ==
                 \/ RecoverIdentityEntrySeatedStopped(id, rid, AuditEntryOrigin)
       ]_vars
 
+\* The legacy fresh-life respawn is admitted only for a member that is no
+\* identity entry: an entry's successor keeps its session and its entry.
+AuditFreshLifeRespawnNeverAnEntry ==
+    [][\A rid \in {Rid1, Rid2, Rid3} : RespawnRunning(Id1, rid) => Id1 \notin LEntries]_vars
+
 (***************************************************************************)
 (* Reachability goals, each checked as an expected violation of its        *)
 (* negation: a state goal joins the invariants, a step goal the properties.*)
@@ -164,6 +184,15 @@ AuditWitnessEntryDestroyedMob == LEntries # {} /\ DestroyMob(Sess1)
 AuditWitnessEntryDestroyedForced == LEntries # {} /\ DestroyFromAny
 \* The forced destroy while a ladder holds entry custody.
 AuditWitnessCustodyDestroyed == spawn_exec_entry_custody # {} /\ DestroyFromAny
+\* The fresh-life respawn of an entry's member is refused.
+AuditWitnessEntryRespawnRefused ==
+    /\ Id1 \in LEntries
+    /\ \E rid \in {Rid1, Rid2, Rid3} : RespawnIdentityEntryRefusedRunning(Id1, rid)
+\* A worker's fresh-life respawn is admitted.
+AuditWitnessWorkerRespawnAdmitted ==
+    /\ Id1 \in DOMAIN identity_to_runtime
+    /\ Id1 \notin LEntries
+    /\ \E rid \in {Rid1, Rid2, Rid3} : RespawnRunning(Id1, rid)
 
 NotAuditWitnessEntrySeated == [][~AuditWitnessEntrySeated]_vars
 NotAuditWitnessEntryLive == ~AuditWitnessEntryLive
@@ -174,4 +203,6 @@ NotAuditWitnessEntryDestroyArchived == [][~AuditWitnessEntryDestroyArchived]_var
 NotAuditWitnessEntryDestroyedMob == [][~AuditWitnessEntryDestroyedMob]_vars
 NotAuditWitnessEntryDestroyedForced == [][~AuditWitnessEntryDestroyedForced]_vars
 NotAuditWitnessCustodyDestroyed == [][~AuditWitnessCustodyDestroyed]_vars
+NotAuditWitnessEntryRespawnRefused == [][~AuditWitnessEntryRespawnRefused]_vars
+NotAuditWitnessWorkerRespawnAdmitted == [][~AuditWitnessWorkerRespawnAdmitted]_vars
 ====
